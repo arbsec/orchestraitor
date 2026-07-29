@@ -4,6 +4,7 @@ disable = [
     "MD033",
     "MD041",
     "MD024",
+    "MD025",
     "MD040",
 ]
 exclude = [

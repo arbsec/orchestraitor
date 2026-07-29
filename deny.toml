@@ -23,6 +23,8 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = []
