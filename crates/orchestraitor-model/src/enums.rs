@@ -224,6 +224,8 @@ mod tests {
         let mode = WorkspaceMode::BrokeredWorktree;
         let json = serde_json::to_string(&mode).unwrap();
         assert_eq!(json, "\"brokered_worktree\"");
+        let back: WorkspaceMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, back);
     }
 
     #[test]

@@ -109,7 +109,6 @@ mod tests {
         };
         let json = serde_json::to_string(&receipt).unwrap();
         let back: ContextReceipt = serde_json::from_str(&json).unwrap();
-        assert_eq!(receipt.request_id, back.request_id);
-        assert_eq!(receipt.task_class, back.task_class);
+        assert_eq!(receipt, back);
     }
 }

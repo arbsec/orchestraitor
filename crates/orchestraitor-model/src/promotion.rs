@@ -171,8 +171,7 @@ mod tests {
         };
         let json = serde_json::to_string(&receipt).unwrap();
         let back: PromotionReceipt = serde_json::from_str(&json).unwrap();
-        assert_eq!(receipt.workspace_id, back.workspace_id);
-        assert_eq!(receipt.paths.len(), back.paths.len());
+        assert_eq!(receipt, back);
     }
 
     #[test]

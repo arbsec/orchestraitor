@@ -49,8 +49,6 @@ mod tests {
         };
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
-        assert_eq!(session.id, back.id);
-        assert_eq!(session.security_mode, back.security_mode);
-        assert_eq!(session.state, back.state);
+        assert_eq!(session, back);
     }
 }
