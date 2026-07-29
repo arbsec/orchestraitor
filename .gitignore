@@ -65,3 +65,4 @@ book/src/adr/
 *.age
 secrets*.toml
 secrets*.json
+.rumdl_cache/
