@@ -30,4 +30,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
   `github-pr-lifecycle` (draft PR, CI inspection, adversarial review convergence, merge
   eligibility, post-merge reconciliation), each with `references/` and composable `scripts/`.
 
+### Fixed
+
+- `orchestraitor-core` now merges dynamic configuration table entries field-by-field, includes
+  structured error causes and source chains, and omits sensitive tracing fields entirely.
+
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD

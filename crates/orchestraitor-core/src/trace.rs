@@ -9,8 +9,6 @@ use tracing_subscriber::{EnvFilter, Layer, Registry, layer::Context, layer::Subs
 
 use crate::error::{OrchestraitorError, TracingError};
 
-const REDACTED: &str = "[REDACTED]";
-
 /// Output format for tracing events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TracingFormat {
@@ -58,7 +56,7 @@ impl TracingInit {
     }
 }
 
-/// Redacting tracing layer that omits sensitive field values by field name.
+/// Tracing layer that omits sensitive fields by field name.
 #[derive(Debug)]
 pub struct RedactingLayer<W> {
     writer: Arc<Mutex<W>>,
@@ -139,13 +137,10 @@ struct RedactingVisitor {
 
 impl Visit for RedactingVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let name = field.name().to_string();
-        let rendered = if is_redacted_field(&name) {
-            REDACTED.to_string()
-        } else {
-            format!("{value:?}")
-        };
-        self.fields.push((name, rendered));
+        let name = field.name();
+        if !is_redacted_field(name) {
+            self.fields.push((name.to_string(), format!("{value:?}")));
+        }
     }
 }
 
@@ -196,11 +191,12 @@ mod tests {
             );
         });
         let output = String::from_utf8(captured.bytes())?;
-        assert!(output.contains("api_key=[REDACTED]"));
-        assert!(output.contains("authorization=[REDACTED]"));
         assert!(output.contains("user=\"alice\""));
+        assert!(!output.contains("api_key"));
+        assert!(!output.contains("authorization"));
         assert!(!output.contains("super-secret"));
         assert!(!output.contains("Bearer token"));
+        assert!(!output.contains("[REDACTED]"));
         Ok(())
     }
 

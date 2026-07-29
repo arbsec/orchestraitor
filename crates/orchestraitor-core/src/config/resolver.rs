@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::parse::flatten_config;
 use crate::config::{
-    AgentsConfig, ConfigLayer, ConfigResult, ConfigSource, NormalizationConfig,
-    OrchestraitorConfig, ResolvedValue, RetryConfig, parse_toml_config,
+    AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
+    DataGovernanceConfig, DomainConfig, NormalizationConfig, OrchestraitorConfig, ProviderConfig,
+    ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig, SubscriptionConfig,
+    parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -113,14 +115,30 @@ impl OrchestraitorConfig {
             next.normalization,
             NormalizationConfig::merge,
         );
-        merge_map(&mut self.providers, next.providers);
+        merge_map(&mut self.providers, next.providers, ProviderConfig::merge);
         merge_option(&mut self.agents, next.agents, AgentsConfig::merge);
-        merge_map(&mut self.subscriptions, next.subscriptions);
-        merge_map(&mut self.budgets, next.budgets);
-        merge_map(&mut self.resource_limits, next.resource_limits);
+        merge_map(
+            &mut self.subscriptions,
+            next.subscriptions,
+            SubscriptionConfig::merge,
+        );
+        merge_map(&mut self.budgets, next.budgets, BudgetConfig::merge);
+        merge_map(
+            &mut self.resource_limits,
+            next.resource_limits,
+            ResourceLimitConfig::merge,
+        );
         merge_option(&mut self.retry, next.retry, RetryConfig::merge);
-        merge_map(&mut self.data_governance, next.data_governance);
-        merge_map(&mut self.data_classification, next.data_classification);
+        merge_map(
+            &mut self.data_governance,
+            next.data_governance,
+            DataGovernanceConfig::merge,
+        );
+        merge_map(
+            &mut self.data_classification,
+            next.data_classification,
+            DataClassificationConfig::merge,
+        );
     }
 }
 
@@ -137,7 +155,55 @@ impl NormalizationConfig {
 
 impl AgentsConfig {
     fn merge(&mut self, next: Self) {
-        merge_map(&mut self.domains, next.domains);
+        merge_map(&mut self.domains, next.domains, DomainConfig::merge);
+    }
+}
+
+impl ProviderConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.protocol, next.protocol);
+        merge_scalar(&mut self.endpoint, next.endpoint);
+        merge_scalar(&mut self.models, next.models);
+        merge_scalar(&mut self.env, next.env);
+        merge_scalar(&mut self.api_key, next.api_key);
+    }
+}
+
+impl DomainConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.description, next.description);
+        merge_scalar(&mut self.roles, next.roles);
+        merge_option(&mut self.routing, next.routing, RoutingConfig::merge);
+    }
+}
+
+impl RoutingConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.provider, next.provider);
+        merge_scalar(&mut self.model, next.model);
+        merge_scalar(&mut self.profile, next.profile);
+    }
+}
+
+impl SubscriptionConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.provider, next.provider);
+        merge_scalar(&mut self.budget, next.budget);
+    }
+}
+
+impl BudgetConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.token_cap, next.token_cap);
+        merge_scalar(&mut self.cost_cap, next.cost_cap);
+    }
+}
+
+impl ResourceLimitConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.memory_bytes, next.memory_bytes);
+        merge_scalar(&mut self.cpu_ms, next.cpu_ms);
+        merge_scalar(&mut self.output_bytes, next.output_bytes);
     }
 }
 
@@ -145,6 +211,20 @@ impl RetryConfig {
     fn merge(&mut self, next: Self) {
         merge_scalar(&mut self.max_attempts, next.max_attempts);
         merge_scalar(&mut self.backoff_ms, next.backoff_ms);
+    }
+}
+
+impl DataGovernanceConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.retention, next.retention);
+        merge_scalar(&mut self.provenance, next.provenance);
+    }
+}
+
+impl DataClassificationConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.label, next.label);
+        merge_scalar(&mut self.exportable, next.exportable);
     }
 }
 
@@ -165,11 +245,23 @@ where
     }
 }
 
-fn merge_map<T>(current: &mut Option<BTreeMap<String, T>>, next: Option<BTreeMap<String, T>>) {
-    match (current.as_mut(), next) {
-        (Some(current_map), Some(next_map)) => current_map.extend(next_map),
-        (None, Some(next_map)) => *current = Some(next_map),
-        (Some(_) | None, None) => {}
+fn merge_map<T, F>(
+    current: &mut Option<BTreeMap<String, T>>,
+    next: Option<BTreeMap<String, T>>,
+    merge: F,
+) where
+    F: Fn(&mut T, T),
+{
+    let Some(next_map) = next else {
+        return;
+    };
+    let current_map = current.get_or_insert_with(BTreeMap::new);
+    for (key, next_value) in next_map {
+        if let Some(current_value) = current_map.get_mut(&key) {
+            merge(current_value, next_value);
+        } else {
+            current_map.insert(key, next_value);
+        }
     }
 }
 
@@ -206,67 +298,4 @@ fn reject_ambiguous_conflicts(key: &str, inputs: &[ConfigInput]) -> ConfigResult
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::OrchestraitorError;
-
-    fn source(layer: ConfigLayer, name: &str) -> ConfigSource {
-        ConfigSource {
-            layer,
-            name: name.to_string(),
-        }
-    }
-
-    #[test]
-    fn layer_merge_is_monotonic_by_precedence() -> Result<(), OrchestraitorError> {
-        let defaults = OrchestraitorConfig {
-            retry: Some(RetryConfig {
-                max_attempts: Some(2),
-                backoff_ms: Some(100),
-            }),
-            ..OrchestraitorConfig::default()
-        };
-        let cli = OrchestraitorConfig {
-            retry: Some(RetryConfig {
-                max_attempts: Some(4),
-                backoff_ms: None,
-            }),
-            ..OrchestraitorConfig::default()
-        };
-        let resolver = ConfigResolver::new()
-            .with_config(source(ConfigLayer::CliFlag, "cli"), cli)
-            .with_config(source(ConfigLayer::BuiltInDefaults, "built-in"), defaults);
-        let value = resolver.resolve_value("retry.max_attempts", |config| {
-            config.retry.as_ref()?.max_attempts
-        })?;
-        let config = resolver.resolve_config()?;
-        assert_eq!(value.map(|value| value.value), Some(4));
-        assert_eq!(config.retry.and_then(|retry| retry.backoff_ms), Some(100));
-        Ok(())
-    }
-
-    #[test]
-    fn ambiguous_conflicts_are_rejected() {
-        let first = OrchestraitorConfig {
-            retry: Some(RetryConfig {
-                max_attempts: Some(2),
-                backoff_ms: None,
-            }),
-            ..OrchestraitorConfig::default()
-        };
-        let second = OrchestraitorConfig {
-            retry: Some(RetryConfig {
-                max_attempts: Some(3),
-                backoff_ms: None,
-            }),
-            ..OrchestraitorConfig::default()
-        };
-        let resolver = ConfigResolver::new()
-            .with_config(source(ConfigLayer::Project, "a"), first)
-            .with_config(source(ConfigLayer::Project, "b"), second);
-        assert!(matches!(
-            resolver.resolve_config(),
-            Err(OrchestraitorError::Config(_))
-        ));
-    }
-}
+mod tests;

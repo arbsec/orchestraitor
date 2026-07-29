@@ -95,7 +95,7 @@ pub struct SubscriptionConfig {
 }
 
 /// Token and cost budget configuration block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BudgetConfig {
     /// Optional token cap.
     pub token_cap: Option<u64>,
@@ -104,7 +104,7 @@ pub struct BudgetConfig {
 }
 
 /// Resource limit configuration block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceLimitConfig {
     /// Maximum memory bytes for the named resource class.
     pub memory_bytes: Option<u64>,

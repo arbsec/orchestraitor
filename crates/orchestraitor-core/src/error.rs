@@ -1,5 +1,7 @@
 //! Structured error taxonomy for Orchestraitor core.
 
+use std::error::Error as StdError;
+
 use orchestraitor_model::error_codes::ErrorComponent;
 use thiserror::Error;
 
@@ -19,6 +21,10 @@ pub enum Retryability {
 pub struct StructuredError {
     /// Stable error code.
     pub code: String,
+    /// Human-readable top-level cause.
+    pub cause: String,
+    /// Underlying source chain, from nearest source outward.
+    pub source_chain: Vec<String>,
     /// Component that produced the error.
     pub component: ErrorComponent,
     /// Retry classification.
@@ -75,7 +81,7 @@ pub enum TracingError {
 pub enum OrchestraitorError {
     /// Configuration parsing, validation, or resolution failed.
     #[error("configuration error: {0}")]
-    Config(Box<ConfigError>),
+    Config(#[source] Box<ConfigError>),
     /// Authentication setup failed before any credential value was exposed.
     #[error("authentication configuration error")]
     Auth,
@@ -87,7 +93,7 @@ pub enum OrchestraitorError {
     Provider,
     /// Tracing initialization failed.
     #[error("tracing initialization error: {0}")]
-    Tracing(Box<TracingError>),
+    Tracing(#[source] Box<TracingError>),
     /// Internal invariant failed without exposing sensitive data.
     #[error("internal orchestraitor error")]
     Internal,
@@ -109,10 +115,12 @@ impl OrchestraitorError {
     /// Returns stable structured metadata for this error.
     #[must_use]
     pub fn structured(&self) -> StructuredError {
-        match self {
+        let mut structured = match self {
             Self::Config(error) => config_structured(error),
             Self::Auth => StructuredError {
                 code: ErrorComponent::Provider.code(1),
+                cause: String::new(),
+                source_chain: Vec::new(),
                 component: ErrorComponent::Provider,
                 retryability: Retryability::NeedsUserAction,
                 suggested_action: "Review provider authentication references".to_string(),
@@ -121,6 +129,8 @@ impl OrchestraitorError {
             },
             Self::Policy => StructuredError {
                 code: ErrorComponent::Daemon.code(1),
+                cause: String::new(),
+                source_chain: Vec::new(),
                 component: ErrorComponent::Daemon,
                 retryability: Retryability::NeedsUserAction,
                 suggested_action: "Check Arbitraitor capability reports".to_string(),
@@ -129,6 +139,8 @@ impl OrchestraitorError {
             },
             Self::Provider => StructuredError {
                 code: ErrorComponent::Provider.code(2),
+                cause: String::new(),
+                source_chain: Vec::new(),
                 component: ErrorComponent::Provider,
                 retryability: Retryability::NotRetriable,
                 suggested_action: "Inspect resolved provider configuration".to_string(),
@@ -137,6 +149,8 @@ impl OrchestraitorError {
             },
             Self::Tracing(_) => StructuredError {
                 code: ErrorComponent::Daemon.code(2),
+                cause: String::new(),
+                source_chain: Vec::new(),
                 component: ErrorComponent::Daemon,
                 retryability: Retryability::NeedsUserAction,
                 suggested_action: "Review tracing filter configuration".to_string(),
@@ -145,14 +159,29 @@ impl OrchestraitorError {
             },
             Self::Internal => StructuredError {
                 code: ErrorComponent::Daemon.code(500),
+                cause: String::new(),
+                source_chain: Vec::new(),
                 component: ErrorComponent::Daemon,
                 retryability: Retryability::NotRetriable,
                 suggested_action: "Run `orc bug-report` with the correlation id".to_string(),
                 relevant_config: None,
                 trace_reference: None,
             },
-        }
+        };
+        structured.cause = self.to_string();
+        structured.source_chain = source_chain(self);
+        structured
     }
+}
+
+fn source_chain(error: &(dyn StdError + 'static)) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = error.source();
+    while let Some(source) = current {
+        chain.push(source.to_string());
+        current = source.source();
+    }
+    chain
 }
 
 fn config_structured(error: &ConfigError) -> StructuredError {
@@ -166,6 +195,8 @@ fn config_structured(error: &ConfigError) -> StructuredError {
     };
     StructuredError {
         code: ErrorComponent::Config.code(1),
+        cause: String::new(),
+        source_chain: Vec::new(),
         component: ErrorComponent::Config,
         retryability: Retryability::NeedsUserAction,
         suggested_action: "Run `orc config validate` and edit the reported key".to_string(),
@@ -185,5 +216,26 @@ mod tests {
         assert!(!rendered.contains("token"));
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("authorization"));
+    }
+
+    #[test]
+    fn structured_error_includes_cause_and_source_chain() {
+        let error = OrchestraitorError::from(ConfigError::AmbiguousConflict {
+            key: String::from("providers.zai.protocol"),
+            sources: vec![String::from("project"), String::from("cli")],
+        });
+
+        let structured = error.structured();
+
+        assert_eq!(
+            structured.cause,
+            "configuration error: ambiguous configuration conflict for key `providers.zai.protocol` from sources [\"project\", \"cli\"]"
+        );
+        assert_eq!(
+            structured.source_chain,
+            vec![
+                "ambiguous configuration conflict for key `providers.zai.protocol` from sources [\"project\", \"cli\"]"
+            ]
+        );
     }
 }
