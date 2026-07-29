@@ -1,0 +1,23 @@
+[package]
+name = "orchestraitor-arbitraitor-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+arbitraitor-core = { workspace = true }
+arbitraitor-exec = { workspace = true }
+arbitraitor-mcp = { workspace = true }
+arbitraitor-model = { workspace = true }
+arbitraitor-plugin-api = { workspace = true }
+arbitraitor-policy = { workspace = true }
+arbitraitor-receipt = { workspace = true }
+arbitraitor-sandbox = { workspace = true }
+orchestraitor-model = { path = "../orchestraitor-model" }
+
+[lints]
+workspace = true
