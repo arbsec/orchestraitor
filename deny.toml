@@ -14,10 +14,17 @@ version = 2
 # other licenses are denied. Add per-crate exceptions here ONLY with justification.
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = []

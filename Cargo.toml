@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/orchestraitor-arb-client",
+    "crates/orchestraitor-core",
     "crates/orchestraitor-model",
     "crates/orchestraitor-workspace-hack",
     "xtask",
