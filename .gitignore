@@ -1,0 +1,67 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# agents
+.omo
+.codegraph
+
+# mise
+.mise.local.toml
+
+# lefthook
+.lefthook-local.yml
+
+# cocogitto
+# COGNOME_* vars are in shell env, not files
+
+# editor
+*.sublime-workspace
+.cache/
+
+# mdBook output
+book/book/
+
+# mdBook ADR build artifacts (copied from docs/adr/ by docs.yml)
+book/src/adr/
+
+# Spec files now live in docs/spec/ and are part of the public repo.
+.spec/
+.serena/
+
+# Local Cargo override for Arbitraitor git/path patches — NOT checked in
+# (see docs/spec/tech-stack.md §2.1). Keep the workspace-level Cargo.toml
+# and deny.toml checked in; ignore per-developer path overrides.
+/.cargo/config.toml
+
+# Sibling repo runtime artifacts (arbsec/arbitraitor checked out adjacent)
+.arbitraitor/
+.orchestraitor/sessions/
+.orchestraitor/cache/
+.orchestraitor/*.bak.*
+
+# Local GitHub Project config (contains real org/project number once the Project exists) — NOT checked in.
+# Copy the example: cp .agents/project/github-project.example.toml .agents/project/github-project.local.toml
+.agents/project/github-project.local.toml
+
+# Per-developer cache (e.g. resolved Projects field/option node IDs per graphql.md) — outside repo by default
+
+# Secrets — prevent common accidental commits (spec §9.23: never committed plaintext)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.age
+secrets*.toml
+secrets*.json

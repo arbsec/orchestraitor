@@ -1,0 +1,53 @@
+name: Spike
+description: A time-boxed investigation that produces a decision, not shipped code
+title: "spike: <short summary>"
+labels: ["spike"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A spike's output is a finding, ADR, or decision — typically no mergeable product code.
+        If the investigation concludes with implementation work, open Tasks separately.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question to answer
+      description: The concrete decision the spike must produce.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What is already known? What is uncertain? Which spec section is in question?
+  - type: input
+    id: spec-ref
+    attributes:
+      label: Specification reference
+      placeholder: "spec.md §16"
+    validations:
+      required: false
+  - type: input
+    id: timebox
+    attributes:
+      label: Time-box
+      description: The investigation budget (e.g. "1 day", "half a session").
+      placeholder: "1 day"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: An ADR, a doc update, a decision comment, or a set of follow-up Task issues.
+  - type: dropdown
+    id: arbitraitor-boundary
+    attributes:
+      label: Might this touch Arbitraitor?
+      description: If the answer is about a missing security capability, the finding routes to
+        arbsec/arbitraitor (spec §16.2).
+      options:
+        - "No"
+        - "Possibly — note it in the finding"
+    validations:
+      required: true

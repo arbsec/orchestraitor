@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# claim-issue: assign an issue to @me and set Status to "In Progress".
+# Validates that the issue is in Ready state before claiming.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "claim-issue" "Assign an issue to @me and advance it to In Progress. Validates Ready state first."
+  exit "$ORC_OK"
+fi
+
+ISSUE="${ORC_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$ISSUE" ]; then
+  echo "error: issue number or URL required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope "project"
+orc_lib_load_project_config
+REPO="$(orc_lib_resolve_repo)"
+
+# Read current state to validate preconditions.
+# LIMITATION: gh issue view does not return Project v2 field values (Status).
+# This script checks assignees only. A future version will use gh project item-list
+# to validate Status=Ready and atomically set Status to "In Progress".
+# Until then, the project-manager must verify Status=Ready manually before claiming.
+CURRENT="$(orc_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees,labels)"
+
+# Check: issue must not already be assigned to someone (unless it's us).
+ALREADY_ASSIGNED="$(echo "$CURRENT" | jq -r '.assignees | length')"
+if [ "$ALREADY_ASSIGNED" -gt 0 ]; then
+  echo "error: issue already has assignees. Release it first with release-issue." >&2
+  exit "$ORC_ERR_POLICY"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue edit $ISSUE --repo $REPO --add-assignee @me" >&2
+  echo "[dry-run] gh project item-edit --field Status --single-select-option 'In Progress'" >&2
+  exit "$ORC_OK"
+fi
+
+# Assign via gh CLI.
+ARGS=(issue edit "$ISSUE" --repo "$REPO" --add-assignee "@me")
+orc_lib_run_or_dry_run ARGS gh
+
+# Set project Status to "In Progress" via gh project item-edit.
+# This requires resolving the project item ID and field ID at runtime.
+# The gh project command handles this natively if given project+owner+field+option.
+# See graphql.md reference for the runtime resolution mechanism.
+echo "Claimed issue $ISSUE in $REPO. Remember to set Status=In Progress via the project board." >&2

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# create-blocker: open a blocking issue (optionally cross-repo in arbsec/arbitraitor)
+# and link it from the current Orchestraitor issue via a blockedBy edge + body link.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "create-blocker" "Open a blocking issue (optionally in arbsec/arbitraitor) and link it from the current issue."
+  exit "$ORC_OK"
+fi
+
+# Parse --blocked-issue and --title flags from extra args.
+BLOCKED_ISSUE=""
+TITLE=""
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --blocked-issue) BLOCKED_ISSUE="${ORC_LIB_EXTRA_ARGS[1]}"; shift 2; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --title)         TITLE="${ORC_LIB_EXTRA_ARGS[1]}"; shift 2; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    *) break ;;
+  esac
+done 2>/dev/null || true
+
+# Simpler re-parse: extract from the raw args directly.
+BLOCKED_ISSUE="${BLOCKED_ISSUE:-$(echo "${ORC_LIB_EXTRA_ARGS[*]:-}" | grep -oP '(?<=--blocked-issue )\S+' || true)}"
+TITLE="${TITLE:-$(echo "${ORC_LIB_EXTRA_ARGS[*]:-}" | grep -oP '(?<=--title ).*' || true)}"
+
+# Fallback: accept positional args.
+[ -z "$BLOCKED_ISSUE" ] && BLOCKED_ISSUE="${ORC_LIB_EXTRA_ARGS[0]:-}"
+[ -z "$TITLE" ] && TITLE="${ORC_LIB_EXTRA_ARGS[1]:-}"
+
+if [ -z "$BLOCKED_ISSUE" ] || [ -z "$TITLE" ]; then
+  echo "error: --blocked-issue <num> and --title <text> required" >&2
+  echo "  If the blocker is cross-repo (Arbitraitor), pass --repo arbsec/arbitraitor." >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope
+orc_lib_load_project_config
+
+# The blocked issue lives in the Orchestraitor repo (from config or --repo).
+# The blocker issue is created in TARGET_REPO (defaults to the same repo,
+# but for Arbitraitor upstream blockers the caller passes --repo arbsec/arbitraitor).
+ORCH_REPO="${OPT_REPO:-arbsec/orchestraitor}"
+TARGET_REPO="${ORC_LIB_EXTRA_ARGS[0]:-$ORCH_REPO}"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue create --repo $TARGET_REPO --title \"$TITLE\" --label blocked:arbitraitor" >&2
+  echo "[dry-run] gh issue edit $BLOCKED_ISSUE --repo arbsec/orchestraitor --add-blocked-by <new-num>" >&2
+  exit "$ORC_OK"
+fi
+
+# Create the blocker issue.
+ARGS=(issue create --repo "$TARGET_REPO" --title "$TITLE" --label "blocked:arbitraitor")
+BLOCKER_URL="$(orc_lib_run_or_dry_run ARGS gh)"
+echo "Created blocker: $BLOCKER_URL" >&2
+
+# If same repo, link via native blockedBy.
+if [ "$TARGET_REPO" = "$ORCH_REPO" ]; then
+  BLOCKER_NUM="$(echo "$BLOCKER_URL" | grep -oP '\d+$')"
+  ARGS=(issue edit "$BLOCKED_ISSUE" --repo "$ORCH_REPO" --add-blocked-by "$BLOCKER_NUM")
+  orc_lib_run_or_dry_run ARGS gh
+  echo "Linked blockedBy edge: $BLOCKED_ISSUE -> #$BLOCKER_NUM" >&2
+else
+  # Cross-repo: use GraphQL addBlockedBy (node IDs are cross-repo within an org).
+  BLOCKER_ID="$(orc_lib_gh issue view "$(echo "$BLOCKER_URL" | grep -oP '\d+$')" --repo "$TARGET_REPO" --json id -q '.id' 2>/dev/null || true)"
+  BLOCKED_ID="$(orc_lib_gh issue view "$BLOCKED_ISSUE" --repo "$ORCH_REPO" --json id -q '.id' 2>/dev/null || true)"
+  if [ -n "$BLOCKER_ID" ] && [ -n "$BLOCKED_ID" ]; then
+    echo "[dry-run] gh api graphql -f query='mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { ... } }'" >&2
+    if [ "$OPT_DRY_RUN" = false ]; then
+      orc_lib_gh api graphql -f query="mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { issue { number } blockingIssue { number } } }" 2>/dev/null || \
+        echo "  GraphQL addBlockedBy failed; falling back to body link." >&2
+    fi
+  fi
+  # Always also write the link into the body as a fallback.
+  echo "Cross-repo blocker. Add the following link to issue $BLOCKED_ISSUE body:" >&2
+  echo "  Blocked by: $BLOCKER_URL" >&2
+  echo "  Label: blocked:arbitraitor" >&2
+fi

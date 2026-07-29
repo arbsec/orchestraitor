@@ -1,0 +1,29 @@
+# CODEOWNERS for arbsec/orchestraitor
+#
+# Orchestraitor delegates ALL security enforcement to Arbitraitor (arbsec/arbitraitor).
+# No Orchestraitor crate may own security-decision logic (spec §2.2, §16.6), so CODEOWNERS
+# routes by integration surface and governance concern, not by a separate security crate.
+
+# Repo governance + workflow automation belong to the project-manager agent and maintainers.
+/.github/                     @arbsec/maintainers
+/.agents/                     @arbsec/maintainers
+/AGENTS.md                    @arbsec/maintainers
+/CONTRIBUTING.md              @arbsec/maintainers
+/SECURITY.md                  @arbsec/maintainers
+/GOVERNANCE.md                @arbsec/maintainers
+/docs/spec/                   @arbsec/maintainers
+
+# Dependency + license policy is security-sensitive regardless of where the lockfile lives.
+/Cargo.lock                   @arbsec/security
+/deny.toml                    @arbsec/security
+
+# The Arbitraitor integration boundary is the most security-sensitive path in Orchestraitor.
+# Every change here MUST be reviewed as security-sensitive (AGENTS.md).
+/crates/orchestraitor-arbitraitor-client/  @arbsec/security
+
+# Provider transports + the provider proxy handle secrets and untrusted protocol input.
+/crates/orchestraitor-provider-api/        @arbsec/security
+/crates/orchestraitor-provider-proxy/      @arbsec/security
+
+# Normalization runs untrusted tool output through formatters/fixers; review carefully.
+/crates/orchestraitor-workspace/           @arbsec/maintainers

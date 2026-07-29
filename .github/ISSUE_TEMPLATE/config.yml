@@ -1,0 +1,13 @@
+# Prevents the "blank issue" option. Use one of the templates below.
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/arbsec/orchestraitor/discussions
+    about: Ask questions and discuss ideas here.
+  - name: Security vulnerability
+    url: https://github.com/arbsec/orchestraitor/security/advisories/new
+    about: Report security issues privately — do NOT use public issues for security reports.
+  - name: Arbitraitor (security subsystem)
+    url: https://github.com/arbsec/arbitraitor
+    about: Security primitives and enforcement live in Arbitraitor. File security-capability
+      gaps there before opening an Orchestraitor integration issue.

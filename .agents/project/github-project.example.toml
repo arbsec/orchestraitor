@@ -1,0 +1,119 @@
+# GitHub Project configuration for Orchestraitor.
+#
+# This file mirrors the existing "Arbsec Development" project shared with Arbitraitor
+# (github.com/orgs/arbsec/projects/1). Field names and option names below match the
+# live project exactly — verified 2026-07-23 via the Projects v2 GraphQL API.
+#
+# **Never commit mutable GitHub node IDs.** The github-project-workflow skill's scripts
+# resolve organization/project/field/option IDs at runtime via `gh api graphql` and cache
+# them outside the repo (see the skill's `graphql.md` reference). This file holds only
+# human-readable names, which are stable across project renames.
+
+# --- Identity (human-readable; the skill resolves node IDs at runtime) -----------
+[project]
+organization = "arbsec"
+number       = 1                               # github.com/orgs/arbsec/projects/1
+title        = "Arbsec Development"            # shared with arbsec/arbitraitor
+repos        = ["arbsec/orchestraitor"]
+sibling      = "arbsec/arbitraitor"             # cross-repo blockers link canonical issues here
+
+# --- Issue types ----------------------------------------------------------------
+# GitHub native issue types are configured at the organization level (GA Apr 2025).
+# Configure the org-level types below in the `arbsec` org (follow-up issue).
+[issue_types]
+leaf_implementable = ["Task", "Bug"]
+decomposable       = ["Epic", "Feature", "Spike"]
+
+# --- Project fields (single-select options are the human-readable names) ---------
+# Verified against the live project on 2026-07-23.
+
+[fields.Repository]
+# Built-in field, not single-select. Auto-populated from the issue's source repo.
+# Distinguishes arbsec/orchestraitor items from arbsec/arbitraitor items on the shared board.
+type = "repository"
+
+[fields.Status]
+# No "Blocked" Status exists on the live project. Blocking is tracked via the native
+# `blockedBy` edge (GA Aug 2025), which the ready-queue script filters on directly.
+# Optionally add a "Blocked" Status option for visual workflow state (follow-up).
+options = ["Triage", "Backlog", "Ready", "In Progress", "In Review", "Done"]
+# `Ready` is the only schedulable state; ready-queue lists Status=Ready issues.
+
+[fields.Target]
+# During MVP delivery, only Target=MVP work may be scheduled (workflow policy).
+# Spec §998 MVP requirements and §999 post-MVP work map to these options:
+#   MVP    -> spec §998
+#   Next   -> spec §999 high-value differentiators
+#   Later  -> spec §999 lower-priority post-MVP
+#   Icebox -> unscheduled
+options = ["MVP", "Next", "Later", "Icebox"]
+
+[fields.Risk]
+# `Critical` forces human review before release (spec §21.1) and routes to
+# `@arbsec/security` via CODEOWNERS.
+options = ["Low", "Medium", "High", "Critical"]
+
+[fields.Priority]
+options = ["P0", "P1", "P2", "P3"]
+
+[fields.Size]
+options = ["XS", "S", "M", "L", "XL"]
+
+[fields.Estimate]
+type = "number"                              # story points / effort estimate
+
+[fields.Start]
+type  = "date"
+field = "Start date"
+
+[fields.Target_date]
+type  = "date"
+field = "Target date"
+
+# --- Labels (advisory; the project fields above are authoritative) ---------------
+[labels]
+blocked_arbitraitor = "blocked:arbitraitor"   # cross-repo Arbitraitor upstream blocker
+spec_section        = "spec"                  # carries the spec § reference
+needs_human_review  = "needs-human-review"    # security-sensitive; requires human sign-off
+stale_claim         = "stale-claim"            # claim released by release-issue
+mvp                 = "MVP"                    # proxy for Target=MVP until ready-queue uses the Projects API directly
+
+# --- Required checks (parity gate) ---------------------------------------------
+# Must match .github/workflows/README.md and the ruleset's required-status-checks.
+# Check NAMES (GitHub status check context names), not node IDs.
+# Empty until CI workflows land with Cargo.toml; see .github/workflows/README.md.
+[checks]
+required = []   # populated when application code + CI land (see .github/workflows/README.md)
+optional = []
+
+# --- Merge + review policy -----------------------------------------------------
+[merge]
+strategy               = "squash"
+delete_branch_on_merge = true
+require_codeowners     = true
+require_linear_history = true
+require_signed_commits = true   # DCO
+
+[review]
+# Adversarial review convergence (spec §9.33.4 + pr-lifecycle skill).
+max_review_loops             = 3       # default; overridable per-issue
+max_reviewers                = 5
+minimum_severity_to_block    = "medium"   # CRITICAL/HIGH/MEDIUM all block merge (spec §9.33.4)
+required_reviewer_domains    = ["security"]
+allow_same_model             = false
+require_provider_diversity   = false
+require_human_review         = false         # true for Risk=Critical changes
+stop_when_no_blocking_findings = true
+# Hard ceiling: hitting it produces blocked/needs-human, never silent approval.
+hard_loop_ceiling            = 5
+escalation_reviewers         = ["@mekwall"]
+
+[docs]
+public_behavior_doc_required  = true
+changelog_unreleased_required = true
+
+[mvp]
+target_field = "Target"
+target_value = "MVP"
+ready_field  = "Status"
+ready_value  = "Ready"

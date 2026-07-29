@@ -1,0 +1,77 @@
+name: Task
+description: A bounded, independently testable and revertible unit of implementation work
+title: "<area>: <short summary>"
+labels: ["task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A Task must be decomposable into a leaf (no further sub-issues needed) and traceable to
+        a spec requirement. Epics and Features require decomposition first (workflow policy).
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: The single, bounded outcome this task delivers.
+    validations:
+      required: true
+  - type: input
+    id: spec-ref
+    attributes:
+      label: Specification references
+      description: "`docs/spec/spec.md` §N and/or `docs/spec/tech-stack.md` §N this implements. Required for all implementable work."
+      placeholder: "spec.md §9.19.2; tech-stack.md §3.2"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable, testable conditions that prove the task is done (spec §9.33.2).
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Explicit non-goals
+      description: What this task deliberately does NOT do (open follow-ups separately).
+  - type: textarea
+    id: affected-domains
+    attributes:
+      label: Affected areas
+      description: Crates, domains (spec §9.19.1), or integrations touched.
+  - type: dropdown
+    id: security-impact
+    attributes:
+      label: Security impact
+      options:
+        - "None"
+        - "Arbitraitor integration boundary (requires security-owner review)"
+        - "Security-sensitive path (requires human review before release)"
+        - "Blocked on arbsec/arbitraitor"
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing requirements
+      description: Unit/property/integration; negative/adversarial tests for security-sensitive
+        behavior (spec §21.4).
+  - type: textarea
+    id: docs-impact
+    attributes:
+      label: Documentation impact
+      description: Which public-behavior docs must update in the same PR (spec §9.33)?
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocking issues/PRs (Arbitraitor or Orchestraitor) that must land first.
+      placeholder: "Blocked by #N; requires arbsec/arbitraitor#N"
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback implications
+      description: How is this reverted or recovered if it goes wrong (spec §9.14, §9.24.2)?

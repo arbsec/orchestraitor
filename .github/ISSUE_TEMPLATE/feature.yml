@@ -1,0 +1,57 @@
+name: Feature
+description: Propose new product behavior or an enhancement
+title: "feat: <short summary>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Orchestraitor is spec-driven. A feature proposal is strongest when it can be traced to a
+        spec requirement or cites a genuine spec gap.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this feature solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to see happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: spec-ref
+    attributes:
+      label: Specification reference
+      description: "`docs/spec/spec.md` §N this implements, OR describes the spec gap. Required for triage."
+      placeholder: "spec.md §9.15"
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Explicit non-goals
+      description: What is explicitly out of scope for this proposal?
+  - type: dropdown
+    id: security-boundary
+    attributes:
+      label: Does this need new Arbitraitor security behavior?
+      description: Orchestraitor implements no security primitive (spec §2.2, §16).
+      options:
+        - "No"
+        - "Yes — blocked on arbsec/arbitraitor"
+    validations:
+      required: true
+  - type: input
+    id: arbitraitor-link
+    attributes:
+      label: Arbitraitor issue/PR link (if applicable)
+    validations:
+      required: false

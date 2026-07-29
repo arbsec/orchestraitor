@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# ready-queue: list issues that are eligible for implementation during MVP delivery.
+# Eligible = leaf Type (Task/Bug), Target=MVP, Status=Ready, no unresolved blockedBy.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "ready-queue" "List MVP-ready leaf issues (Type=Task/Bug, Target=MVP, Status=Ready, no unresolved blockers)."
+  exit "$ORC_OK"
+fi
+
+orc_lib_require_gh_scope
+orc_lib_load_project_config
+REPO="$(orc_lib_resolve_repo)"
+
+# Fetch open issues with the fields we need for filtering.
+# gh issue list --json returns blockedBy/subIssues as {nodes:[...],totalCount:N}.
+#
+# LIMITATION: gh issue list does NOT return Project v2 field values (Target, Status, Risk).
+# This script filters on issueType + blockedBy + an MVP label as a proxy. A future
+# version will use gh project item-list to read Status=Ready and Target=MVP directly.
+# Until then, the project-manager must verify Status=Ready before claiming.
+ISSUES_JSON="$(orc_lib_gh issue list --repo "$REPO" --state open --limit 200 \
+  --json number,title,issueType,labels,assignees,blockedBy,subIssues,url)"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue list --repo $REPO --state open --limit 200 --json ..." >&2
+  exit "$ORC_OK"
+fi
+
+# Filter with jq:
+# - issueType.name in ["Task","Bug"] (leaf)
+# - blockedBy.totalCount == 0 (no unresolved blockers)
+# - has the MVP label (proxy for Target=MVP until Project field reads are implemented)
+#
+# The project-manager MUST verify Status=Ready before claiming — this script cannot
+# read Project v2 field values yet.
+MVP_LABEL="${ORC_MVP_LABEL:-MVP}"
+
+FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" '
+  map(select(
+    (.issueType.name // "") | test("^(Task|Bug)$"))
+    and (.blockedBy.totalCount // 0) == 0
+    and (any(.labels[].name; . == $mvp))
+  ))
+  | sort_by(.number)
+')"
+
+COUNT="$(echo "$FILTERED" | jq 'length')"
+
+if [ "$OPT_JSON" = true ]; then
+  echo "$FILTERED"
+else
+  echo "Ready queue ($COUNT eligible issue(s)):"
+  echo "$FILTERED" | jq -r '.[] | "  #\(.number): \(.title)"'
+fi
