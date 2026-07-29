@@ -1,0 +1,17 @@
+[global]
+disable = [
+    "MD013",
+    "MD033",
+    "MD041",
+    "MD024",
+    "MD040",
+]
+
+[MD003]
+style = "atx"
+
+[MD007]
+indent = 2
+
+[MD012]
+maximum = 1
