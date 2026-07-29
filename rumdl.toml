@@ -6,6 +6,11 @@ disable = [
     "MD024",
     "MD040",
 ]
+exclude = [
+    "docs/spec/**",
+    "target/**",
+    ".rumdl_cache/**",
+]
 
 [MD003]
 style = "atx"
