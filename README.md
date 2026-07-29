@@ -2,8 +2,8 @@
 
 > Orchestraitor - An agent harness with trust issues.
 
-[![Spec](https://img.shields.io/badge/spec-rev%200.14-blue)](docs/spec/spec.md)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](LICENSE-MIT)
+[![Code](https://github.com/arbsec/orchestraitor/actions/workflows/code.yml/badge.svg)](https://github.com/arbsec/orchestraitor/actions/workflows/code.yml)
+[![Security](https://github.com/arbsec/orchestraitor/actions/workflows/security.yml/badge.svg)](https://github.com/arbsec/orchestraitor/actions/workflows/security.yml)
 
 Orchestraitor is a **local-first, security-first coding-agent harness and control plane** that
 combines orchestration, provider/harness adapters, contextual token optimization, and a native
