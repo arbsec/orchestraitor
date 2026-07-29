@@ -1,0 +1,160 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/orchestraitor-workspace-hack",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arbsec/orchestraitor"
+homepage = "https://github.com/arbsec/orchestraitor"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+unexpected_cfgs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+multiple_crate_versions = "allow"
+
+[workspace.dependencies]
+# Arbitraitor crates — pinned to commit 4ebebb3 (2026-07-29 main HEAD).
+# Update weekly; CI "Arbitraitor bump" job catches API drift.
+# When Arbitraitor publishes a semver tag, switch to tag = "v0.x.y".
+arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-model      = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-policy     = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-receipt    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-mcp        = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+
+# Core async + serialization (tech-stack.md §1)
+tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net", "process", "io-util", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+bytes = "1.11"
+
+# Error handling and diagnostics (tech-stack.md §12)
+thiserror = "2"
+miette = { version = "7.6", features = ["fancy"] }
+
+# Logging / telemetry (tech-stack.md §1)
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt", "registry"] }
+
+# CLI (tech-stack.md §1)
+clap = { version = "4.6.4", features = ["derive", "env", "string", "wrap_help"] }
+
+# Cryptography and identity (tech-stack.md §1, §8)
+sha2 = "0.11"
+hex = "0.4"
+uuid = { version = "1.23", features = ["v4", "serde"] }
+ed25519-dalek = "3.0.0"
+
+# Receipt canonicalization (tech-stack.md §1)
+serde_json_canonicalizer = "0.3.2"
+
+# Secrets (tech-stack.md §1, §3.2)
+secrecy = "0.10.3"
+zeroize = { version = "1.9.0", features = ["derive"] }
+keyring = "4.1.5"
+
+# Provenance (tech-stack.md §1, §8 — opt-in feature)
+sigstore = "0.14.0"
+
+# HTTP and networking (tech-stack.md §1, §5)
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls-tls"] }
+url = "2.5"
+
+# Server / proxy (tech-stack.md §1)
+hyper = { version = "1.11", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server"] }
+tower = "0.5"
+
+# TLS (tech-stack.md §1, §5.2)
+rustls = "0.23.42"
+aws-lc-rs = "1.17.3"
+
+# Configuration (tech-stack.md §1, §13)
+toml = "1.1.3"
+toml_edit = "0.22"
+figment = { version = "0.10.19", features = ["toml", "env", "json"] }
+
+# Storage (tech-stack.md §1, §11)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Git (tech-stack.md §1, §6)
+gix = { version = "0.85.0", default-features = false, features = ["worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
+
+# Tree-sitter (tech-stack.md §1, §9.1)
+tree-sitter = "0.26.11"
+
+# MCP + ACP (tech-stack.md §1, §4)
+rmcp = { version = "2.2.0", features = ["server", "client", "macros", "schemars", "auth", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "reqwest"] }
+agent-client-protocol = "1.3.0"
+agent-client-protocol-schema = "1.3.0"
+agent-client-protocol-rmcp = "1.3.0"
+
+# PTY (tech-stack.md §1)
+portable-pty = "0.9.0"
+
+# Sandbox (tech-stack.md §1, §7 — consumed via Arbitraitor; listed for workspace-hack dedup)
+landlock = "0.4.5"
+nix = "0.31.3"
+
+# TUI (tech-stack.md §1)
+ratatui = "0.30.2"
+ratatui-image = "11.0.6"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# JSON-RPC (tech-stack.md §1)
+jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
+
+# Schemas — MUST match Arbitraitor's version (tech-stack.md §1, §2.1)
+schemars = { version = "1.0", features = ["uuid1", "url2"] }
+
+# Provider transport (tech-stack.md §1, §4.4)
+genai = "0.6.5"
+lsp-types = "0.97.0"
+
+# Filesystem (tech-stack.md §1)
+cap-std = "4.0"
+cap-tempfile = "4.0"
+tempfile = "3"
+
+# OS (tech-stack.md §1, §7)
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
+# Testing (tech-stack.md §1)
+proptest = "1.11"
+insta = "1.48"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = 1
+strip = "none"
+
+[profile.test]
+debug = 1

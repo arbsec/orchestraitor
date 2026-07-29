@@ -1,0 +1,8 @@
+[tools]
+rust = "1.96.0"
+lefthook = "1.13.0"
+cocogitto = "7.0.0"
+rumdl = "latest"
+
+[env]
+RUST_BACKTRACE = "1"

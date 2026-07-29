@@ -38,10 +38,10 @@ book/src/adr/
 .spec/
 .serena/
 
-# Local Cargo override for Arbitraitor git/path patches — NOT checked in
-# (see docs/spec/tech-stack.md §2.1). Keep the workspace-level Cargo.toml
-# and deny.toml checked in; ignore per-developer path overrides.
-/.cargo/config.toml
+# Local Cargo [patch] override for Arbitraitor local dev — NOT checked in
+# (see docs/spec/tech-stack.md §2.1). The base .cargo/config.toml (aliases, net) IS committed;
+# only the per-developer [patch."https://github.com/arbsec/arbitraitor.git"] block is ignored.
+/.cargo/config.local.toml
 
 # Sibling repo runtime artifacts (arbsec/arbitraitor checked out adjacent)
 .arbitraitor/
