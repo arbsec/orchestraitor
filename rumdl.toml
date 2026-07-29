@@ -8,6 +8,7 @@ disable = [
 ]
 exclude = [
     "docs/spec/**",
+    ".agents/**",
     "target/**",
     ".rumdl_cache/**",
 ]
