@@ -1,0 +1,36 @@
+[package]
+name = "orchestraitor-promotion"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Output quarantine, promotion pipeline, and versioned transaction graph for Orchestraitor (spec §9.14, §9.4.3)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates (spec §9.14 — Orchestraitor owns the developer workflow;
+# classification is descriptive input to Arbitraitor, never an enforcement decision).
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+
+# Serialization + errors (tech-stack.md §1, §12).
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Content-addressed storage keys for changed-file digests (spec §9.4.3, §9.5).
+# The model Digest type explicitly allows computing digests for storage keys.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Timestamps for transaction graph nodes (spec §9.4.3 — each node is a timeline entry).
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# Test-only JSON helpers.
+serde_json = { workspace = true }

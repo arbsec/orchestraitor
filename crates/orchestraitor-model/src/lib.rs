@@ -20,7 +20,9 @@ pub use context::ContextReceipt;
 pub use digest::Digest;
 pub use enums::*;
 pub use ids::*;
-pub use promotion::PromotionReceipt;
+pub use promotion::{
+    ApprovalRef, Finding, FindingSeverity, OutputClass, PromotedPath, PromotionReceipt,
+};
 pub use repository::Repository;
 pub use session::Session;
 pub use workspace::Workspace;

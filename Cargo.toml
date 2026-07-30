@@ -11,6 +11,7 @@ members = [
     "crates/orchestraitor-events",
     "crates/orchestraitor-lifecycle",
     "crates/orchestraitor-model",
+    "crates/orchestraitor-promotion",
     "crates/orchestraitor-provider-api",
     "crates/orchestraitor-provider-meta",
     "crates/orchestraitor-provider-proxy",

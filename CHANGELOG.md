@@ -8,6 +8,19 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-promotion` crate implementing the output quarantine, promotion
+  pipeline, and versioned transaction graph (spec §9.14, §9.4.3). Descriptive
+  classification of all 17 worker output classes (ordinary source, tests,
+  generated, executable, package archive, lockfile, IDE config, shell config,
+  Git config, Git hook, agent config, CI workflow, build plugin, env file,
+  credential-shaped, symlink, device). Trust-sensitive destination detection.
+  Semantic and textual (LCS-based unified) diff generation. Promotion pipeline
+  orchestrating classify → detect → diff → policy gate (Arbitraitor-owned) →
+  prompt (trusted UI) → atomic copy/apply (trusted controller) → promotion
+  receipt. Versioned transaction graph with `history`, `checkpoint`,
+  `restore`, `branch`, `compare`, `undo`, and `redo` operations. No security
+  enforcement logic — classification is descriptive input to Arbitraitor,
+  never an allow/deny decision (spec §2.2, §9.14).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
