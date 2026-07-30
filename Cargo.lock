@@ -1799,6 +1799,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "orchestraitor-agent-catalog"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "serde",
+ "thiserror",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "orchestraitor-arbitraitor-client"
 version = "0.1.0"
 dependencies = [
