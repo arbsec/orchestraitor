@@ -1,4 +1,4 @@
-//! SQLite WAL metadata store plus filesystem SHA-256 CAS.
+//! `SQLite` WAL metadata store plus filesystem SHA-256 CAS.
 //!
 //! The store implements spec §9.17 and tech-stack §11 for the daemon: session
 //! metadata, cost rows, event records, backlog state, Arbitraitor receipts,

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Durable Orchestraitor daemon: JSON-RPC server, capability probing, store, and supervision"
+description = "Durable Orchestraitor daemon: JSON-RPC server, capability probing, supervision, governance, and store"
 
 [lints]
 workspace = true
@@ -27,6 +27,7 @@ orchestraitor-events = { path = "../orchestraitor-events" }
 orchestraitor-lifecycle = { path = "../orchestraitor-lifecycle" }
 orchestraitor-mcp = { path = "../orchestraitor-mcp" }
 orchestraitor-model = { path = "../orchestraitor-model" }
+orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 rusqlite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

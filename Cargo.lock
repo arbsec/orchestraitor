@@ -3294,6 +3294,7 @@ dependencies = [
  "orchestraitor-lifecycle",
  "orchestraitor-mcp",
  "orchestraitor-model",
+ "orchestraitor-provider-api",
  "rusqlite",
  "serde",
  "serde_json",
