@@ -4,7 +4,7 @@ use jsonrpsee::{RpcModule, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::DaemonError;
+use crate::{CapabilityReport, DaemonError};
 
 /// Current daemon JSON-RPC protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -35,6 +35,8 @@ pub struct HealthResponse {
     pub status: &'static str,
     /// Whether this daemon crate implements security enforcement itself.
     pub security_authority: &'static str,
+    /// Capability report from the startup probe (spec §6.7, §16.7).
+    pub capability: CapabilityReport,
 }
 
 /// Response returned by `shutdown`.
@@ -46,10 +48,16 @@ pub struct ShutdownResponse {
 
 /// Builds the daemon JSON-RPC method table.
 ///
+/// The `health` method returns the startup [`CapabilityReport`] so clients can
+/// inspect the active security posture (spec §6.7, §16.7).
+///
 /// # Errors
 ///
 /// Returns [`DaemonError::RegisterMethod`] if jsonrpsee rejects a method name.
-pub fn build_rpc_module(shutdown_tx: watch::Sender<bool>) -> Result<RpcModule<()>, DaemonError> {
+pub fn build_rpc_module(
+    shutdown_tx: watch::Sender<bool>,
+    capability: CapabilityReport,
+) -> Result<RpcModule<()>, DaemonError> {
     let mut module = RpcModule::new(());
 
     module
@@ -65,10 +73,11 @@ pub fn build_rpc_module(shutdown_tx: watch::Sender<bool>) -> Result<RpcModule<()
         .map_err(|error| DaemonError::RegisterMethod(error.to_string()))?;
 
     module
-        .register_method("health", |_, (), _| {
+        .register_method("health", move |_, (), _| {
             Ok::<HealthResponse, ErrorObjectOwned>(HealthResponse {
-                status: "ok",
+                status: capability.status_str(),
                 security_authority: "arbitraitor",
+                capability: capability.clone(),
             })
         })
         .map_err(|error| DaemonError::RegisterMethod(error.to_string()))?;

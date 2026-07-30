@@ -3,6 +3,7 @@
 use std::{future::Future, path::PathBuf, time::Duration};
 
 use jsonrpsee::server::{Server, serve_with_graceful_shutdown};
+use orchestraitor_arbitraitor_client::ArbitraitorClient;
 use tokio::{
     net::UnixListener,
     signal::unix::{SignalKind, signal},
@@ -10,9 +11,9 @@ use tokio::{
     task::JoinSet,
     time::timeout,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::{DaemonError, build_rpc_module};
+use crate::{CapabilityReport, DaemonError, build_rpc_module, probe_capabilities};
 
 /// Maximum time allowed for daemon graceful shutdown.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +49,12 @@ pub async fn run_until_signal(config: DaemonConfig) -> Result<(), DaemonError> {
 
 /// Serves the daemon until an external shutdown future completes or RPC shutdown is requested.
 ///
+/// At startup, probes Arbitraitor effective controls for the current platform
+/// (spec §6.7, §9.6, §16.7). When any required control is unavailable, the
+/// daemon logs the missing controls and refuses to start protected services
+/// (fail-closed per §6.7) but continues serving so the health RPC can report
+/// the degraded posture.
+///
 /// # Errors
 ///
 /// Returns [`DaemonError`] when socket setup, method registration, or serving fails.
@@ -55,10 +62,12 @@ pub async fn serve_until<F>(config: DaemonConfig, external_shutdown: F) -> Resul
 where
     F: Future<Output = Result<(), DaemonError>>,
 {
+    let capability = probe_startup_capabilities();
+
     let listener = bind_socket(config.socket_path.clone())?;
     let _socket_file = SocketFile::new(config.socket_path.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let module = build_rpc_module(shutdown_tx)?;
+    let module = build_rpc_module(shutdown_tx, capability)?;
     let service_builder = Server::builder().to_service_builder();
     let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
     let service = service_builder.build(module, stop_handle);
@@ -98,6 +107,39 @@ where
         .map_err(|error| DaemonError::ServeConnection(error.to_string()))?;
     drain_connections(connections, config.shutdown_timeout).await;
     Ok(())
+}
+
+/// Probes Arbitraitor capabilities for the current platform at startup.
+///
+/// Logs the result so operators can see which controls are effective and which
+/// are missing. The returned [`CapabilityReport`] drives the fail-closed
+/// decision (spec §6.7) and is forwarded to the health RPC.
+fn probe_startup_capabilities() -> CapabilityReport {
+    let platform = std::env::consts::OS;
+    let client = ArbitraitorClient::default();
+    let report = probe_capabilities(&client, platform);
+
+    if !report.protected_services_allowed {
+        warn!(
+            platform = %report.platform,
+            missing_controls = ?report.missing_controls,
+            "fail-closed: required Arbitraitor controls unavailable; \
+             protected services refused (spec §6.7)"
+        );
+    } else if report.degraded_mode {
+        warn!(
+            platform = %report.platform,
+            "Arbitraitor capability probe reports degraded controls; \
+             protected services allowed with reduced assurance (spec §6.7)"
+        );
+    } else {
+        info!(
+            platform = %report.platform,
+            "Arbitraitor capability probe passed; all required controls available"
+        );
+    }
+
+    report
 }
 
 fn bind_socket(socket_path: PathBuf) -> Result<UnixListener, DaemonError> {

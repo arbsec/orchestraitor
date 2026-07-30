@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Durable Orchestraitor daemon: JSON-RPC server and persistence"
+description = "Durable Orchestraitor daemon: JSON-RPC server, capability probing, and SQLite WAL store"
 
 [lints]
 workspace = true
@@ -19,6 +19,7 @@ path = "src/main.rs"
 hex = { workspace = true }
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 miette = { workspace = true }
+orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-events = { path = "../orchestraitor-events" }
 orchestraitor-lifecycle = { path = "../orchestraitor-lifecycle" }
