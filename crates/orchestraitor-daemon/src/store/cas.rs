@@ -59,12 +59,23 @@ impl CasDirectory {
         }
     }
 
-    /// Retrieves bytes for a digest.
+    /// Retrieves bytes for a digest and verifies their SHA-256 matches the address.
     ///
     /// # Errors
-    /// Returns [`StoreError`] when the digest path is invalid or the blob is absent.
+    /// Returns [`StoreError::InvalidDigest`] when the digest text is malformed,
+    /// [`StoreError::Io`] when the blob cannot be read, and
+    /// [`StoreError::DigestMismatch`] when the bytes on disk do not hash to the
+    /// requested digest.
     pub fn load_bytes(&self, digest: &Digest) -> StoreResult<Vec<u8>> {
-        Ok(fs::read(self.path_for_digest(digest)?)?)
+        let bytes = fs::read(self.path_for_digest(digest)?)?;
+        let actual = Digest::new(hex::encode(Sha256::digest(&bytes)));
+        if actual != *digest {
+            return Err(StoreError::DigestMismatch {
+                expected: digest.clone(),
+                actual,
+            });
+        }
+        Ok(bytes)
     }
 
     /// Returns the canonical path for a digest in the CAS layout.

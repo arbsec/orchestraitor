@@ -236,6 +236,17 @@ impl DaemonStore {
             .map(|value| value.map(HashDigest))
             .map_err(Into::into)
     }
+
+    /// Executes a raw `SQL` statement against the metadata database.
+    ///
+    /// Only available to crate-internal tests; production code must go through
+    /// the typed CRUD helpers on `DaemonStore` so that invariants (hash-chain
+    /// continuity, JSON validation, parameter binding) are preserved.
+    #[cfg(test)]
+    pub(crate) fn execute_raw(&self, sql: &str) -> StoreResult<()> {
+        self.conn.execute(sql, [])?;
+        Ok(())
+    }
 }
 
 const SESSION_SQL: &str = "INSERT OR REPLACE INTO session_metadata (session_id, repository_id, adapter_id, workspace_id, security_mode, policy_digest, state, created_at, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";

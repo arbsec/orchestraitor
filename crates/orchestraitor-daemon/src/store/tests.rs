@@ -9,7 +9,7 @@ use orchestraitor_events::{
 use orchestraitor_model::OperationId;
 use serde_json::json;
 
-use crate::store::{DaemonStore, StorePaths, StoreResult};
+use crate::store::{DaemonStore, StoreError, StorePaths, StoreResult};
 
 #[test]
 fn store_initializes_sqlite_wal_schema() {
@@ -77,6 +77,102 @@ fn cas_stores_and_retrieves_by_digest() {
 
     assert_eq!(loaded, bytes);
     assert!(store.cas().path_for_digest(&digest).unwrap().is_file());
+}
+
+#[test]
+fn cas_load_bytes_rejects_corrupted_blob() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = DaemonStore::open_in_memory(temp.path()).unwrap();
+    let bytes = b"orchestraitor daemon blob";
+    let digest = store.cas().store_bytes(bytes).unwrap();
+
+    // Simulate disk corruption or an out-of-band write that left the blob
+    // under its address but with a different payload. `load_bytes` must
+    // refuse to return bytes whose SHA-256 does not match the address.
+    let path = store.cas().path_for_digest(&digest).unwrap();
+    std::fs::write(&path, b"corrupted contents").unwrap();
+
+    let result = store.cas().load_bytes(&digest);
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::DigestMismatch {
+                expected: _,
+                actual: _
+            })
+        ),
+        "expected DigestMismatch, got {result:?}"
+    );
+}
+
+#[test]
+fn load_event_records_rejects_tampered_record_json() -> StoreResult<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let store = DaemonStore::open_in_memory(temp.path()).unwrap();
+    store.append_event(event(
+        1,
+        EventCategory::SessionLifecycle,
+        json!({"state":"started"}),
+        None,
+    )?)?;
+
+    // Out-of-band write to the persisted JSON column mutates the envelope
+    // payload while keeping the original claimed hash. Recanonicalizing the
+    // envelope must no longer match the stored hash.
+    let tampered = r#"{"envelope":{"schema_version":1,"monotonic_seq":1,"wall_clock_ts":"2026-07-30T00:00:00Z","correlation_id":"op_daemon_store_test","parent_op_id":null,"category":"session_lifecycle","payload":{"state":"tampered"},"prev_hash":null},"hash":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    store.execute_raw(&format!(
+        "UPDATE event_records SET record_json = '{tampered}' WHERE monotonic_seq = 1"
+    ))?;
+
+    let result = store.load_event_records();
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::Event(EventError::RecordHashMismatch {
+                sequence: 1
+            }))
+        ),
+        "expected RecordHashMismatch at sequence 1, got {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn load_event_records_rejects_record_json_payload_drift() -> StoreResult<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let store = DaemonStore::open_in_memory(temp.path()).unwrap();
+    let first = store.append_event(event(
+        1,
+        EventCategory::SessionLifecycle,
+        json!({"state":"started"}),
+        None,
+    )?)?;
+    store.append_event(event(
+        2,
+        EventCategory::ToolRequest,
+        json!({"tool":"read"}),
+        Some(first.hash.clone()),
+    )?)?;
+
+    let original = first.hash.as_str().to_owned();
+    let drift = format!(
+        r#"{{"envelope":{{"schema_version":1,"monotonic_seq":1,"wall_clock_ts":"2026-07-30T00:00:00Z","correlation_id":"op_daemon_store_test","parent_op_id":null,"category":"session_lifecycle","payload":{{"state":"hijacked"}},"prev_hash":null}},"hash":"{original}"}}"#
+    );
+    store.execute_raw(&format!(
+        "UPDATE event_records SET record_json = '{drift}' WHERE monotonic_seq = 1"
+    ))?;
+
+    let result = store.load_event_records();
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::Event(EventError::RecordHashMismatch {
+                sequence: 1
+            }))
+        ),
+        "expected RecordHashMismatch at sequence 1, got {result:?}"
+    );
+    Ok(())
 }
 
 #[test]

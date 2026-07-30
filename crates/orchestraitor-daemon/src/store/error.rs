@@ -1,6 +1,7 @@
 //! Error taxonomy for daemon persistence.
 
 use orchestraitor_core::Retryability;
+use orchestraitor_model::Digest;
 use thiserror::Error;
 
 /// Result alias for daemon store operations.
@@ -24,6 +25,15 @@ pub enum StoreError {
     /// Digest text was not a lowercase SHA-256 hex digest.
     #[error("daemon store digest is invalid: {0}")]
     InvalidDigest(String),
+    /// CAS blob contents did not match the digest used to address them; the
+    /// object is either corrupted or was written under a different identity.
+    #[error("daemon store CAS digest mismatch: expected {expected}, computed {actual}")]
+    DigestMismatch {
+        /// Digest used to address the blob on read.
+        expected: Digest,
+        /// SHA-256 of the bytes actually read from disk.
+        actual: Digest,
+    },
     /// Integer conversion would overflow `SQLite`'s signed integer storage.
     #[error("daemon store integer value is outside the supported SQLite range")]
     IntegerRange,
@@ -39,6 +49,7 @@ impl StoreError {
             | Self::Json(_)
             | Self::Event(_)
             | Self::InvalidDigest(_)
+            | Self::DigestMismatch { .. }
             | Self::IntegerRange => Retryability::NotRetriable,
         }
     }
