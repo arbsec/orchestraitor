@@ -8,6 +8,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-daemon` crate with the `orcd` JSON-RPC daemon server on Unix-domain
+  sockets, current-thread Tokio runtime, `initialize` / `health` / `shutdown` method stubs,
+  and bounded graceful shutdown for spec §8.4, §9.1, §17, and tech-stack §10.
 - `orchestraitor-context` crate with a content-addressed tree-sitter baseline indexer,
   Appendix E context query API, and spec §9.15.1 provenance envelopes on every emitted item.
 - Initial repository governance, contribution guidance, security policy, code of conduct, and
