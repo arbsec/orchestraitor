@@ -14,6 +14,7 @@ members = [
     "crates/orchestraitor-provider-api",
     "crates/orchestraitor-provider-meta",
     "crates/orchestraitor-provider-proxy",
+    "crates/orchestraitor-tui",
     "crates/orchestraitor-workspace-hack",
     "xtask",
 ]

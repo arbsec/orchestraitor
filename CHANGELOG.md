@@ -47,6 +47,16 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
+- Integration tests for the cost ledger and TUI cost panel (spec §9.19.4-§9.19.7):
+  `orchestraitor-cost-ledger/tests/integration.rs` exercises a stub `ProviderTransport`
+  returning controlled token counts, recording per-call entries, per-domain rollups,
+  subscription utilization with `measured` / `estimated` / `user-configured` labels,
+  soft-cap warnings, hard-cap blocks with fallback routing, and separate API-spend /
+  subscription-utilization tables. `orchestraitor-tui/tests/cost_panel.rs` renders the
+  cost panel through the full public TUI pipeline and asserts all three labels, cap
+  warnings, routing events, utilization percentages, and empty-state placeholders are
+  visible. The `orchestraitor-tui` crate is now a workspace member so parity gates
+  cover it.
 
 ### Fixed
 
