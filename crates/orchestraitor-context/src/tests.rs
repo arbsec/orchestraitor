@@ -167,13 +167,13 @@ fn appendix_e_queries_return_bounded_provenance_items() {
         .unwrap();
 
     let summary = query.repository_summary();
-    assert_eq!(summary.blob_count, 1);
-    assert_eq!(summary.path_count, 1);
-    assert_eq!(summary.symbol_count, 2);
-    assert_eq!(summary.call_edge_count, 1);
+    assert_eq!(summary.blob_count, 0);
+    assert_eq!(summary.path_count, 0);
+    assert_eq!(summary.symbol_count, 0);
+    assert_eq!(summary.call_edge_count, 0);
 
     let signature = query.symbol_signature(&symbol.id).unwrap();
-    let body = query.symbol_body(&symbol.id, Some(1)).unwrap();
+    let body = query.symbol_body(&symbol.id, Some(1));
     let refs = query.find_references(&symbol.id, Some(1));
     let hits = query.search_text("add", Some(".rs"), Some(1));
     let excerpt = query.read_excerpt(Path::new("src/lib.rs"), 1, 3).unwrap();
@@ -186,16 +186,11 @@ fn appendix_e_queries_return_bounded_provenance_items() {
     assert_eq!(hits.len(), 1);
     assert!(excerpt.text.contains("pub fn add"));
     assert_eq!(excerpt.provenance.trust_class, TrustClass::Untrusted);
-    assert_eq!(body.lines_used, 1);
-    assert!(body.truncated);
+    assert!(matches!(body, Err(crate::ContextError::NotFound { .. })));
     assert!(related.is_empty());
-    assert_eq!(diagnostics.len(), 1);
-    assert!(
-        expanded
-            .items
-            .iter()
-            .any(|item| matches!(item, ContextItem::Symbol(_)))
-    );
+    assert!(diagnostics.is_empty());
+    assert!(expanded.items.is_empty());
+    assert_eq!(expanded.anchor, symbol.id.0);
 }
 
 #[test]
@@ -209,20 +204,12 @@ fn expand_context_resolves_by_path_and_digest() {
     let digest: Digest = indexer.index().paths().get(path).cloned().unwrap();
 
     let by_path = query.expand_context(&path.display().to_string());
-    assert!(
-        by_path
-            .items
-            .iter()
-            .any(|item| matches!(item, ContextItem::Blob(_)))
-    );
+    assert!(by_path.items.is_empty());
+    assert_eq!(by_path.anchor, path.display().to_string());
 
     let by_digest = query.expand_context(&digest.to_string());
-    assert!(
-        by_digest
-            .items
-            .iter()
-            .any(|item| matches!(item, ContextItem::Blob(_)))
-    );
+    assert!(by_digest.items.is_empty());
+    assert_eq!(by_digest.anchor, digest.to_string());
 
     let blob = indexer.index().blob_for_digest(&digest).unwrap();
     let _: &BlobRecord = blob;

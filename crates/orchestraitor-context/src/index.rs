@@ -168,10 +168,12 @@ impl ContextIndex {
             let Some(bytes) = self.bytes.get(&symbol.blob_digest) else {
                 continue;
             };
-            let path = symbol.path.clone();
+            let Some(occurrence) = self.blobs.get(&symbol.blob_digest) else {
+                continue;
+            };
             let source = String::from_utf8_lossy(bytes);
             self.references
-                .extend(references_for_symbol(symbol, &path, &source));
+                .extend(references_for_symbol(symbol, occurrence, &source));
         }
         for caller in &symbols {
             let Some(bytes) = self.bytes.get(&caller.blob_digest) else {
@@ -315,7 +317,11 @@ fn digest_bytes(bytes: &[u8]) -> Digest {
     Digest::new(hex)
 }
 
-fn references_for_symbol(symbol: &SymbolRecord, path: &Path, source: &str) -> Vec<ReferenceRecord> {
+fn references_for_symbol(
+    symbol: &SymbolRecord,
+    occurrence: &BlobRecord,
+    source: &str,
+) -> Vec<ReferenceRecord> {
     let mut refs = Vec::new();
     let definition_line = symbol.range.start_line.saturating_sub(1);
     for (line_index, line) in source.lines().enumerate() {
@@ -323,7 +329,7 @@ fn references_for_symbol(symbol: &SymbolRecord, path: &Path, source: &str) -> Ve
             continue;
         }
         for (column, _) in line.match_indices(&symbol.name) {
-            refs.push(reference_record(symbol, path, line_index, column));
+            refs.push(reference_record(symbol, occurrence, line_index, column));
         }
     }
     refs
@@ -331,25 +337,28 @@ fn references_for_symbol(symbol: &SymbolRecord, path: &Path, source: &str) -> Ve
 
 fn reference_record(
     symbol: &SymbolRecord,
-    path: &Path,
+    occurrence: &BlobRecord,
     line_index: usize,
     column: usize,
 ) -> ReferenceRecord {
     let start_line = u32::try_from(line_index.saturating_add(1)).unwrap_or(u32::MAX);
     let start_column = u32::try_from(column).unwrap_or(u32::MAX);
     let end_column = u32::try_from(column.saturating_add(symbol.name.len())).unwrap_or(u32::MAX);
-    // Provenance belongs to the BLOB containing the reference, not the target symbol.
-    let source_ref = SourceRef(format!("{}:{}", path.display(), start_line));
+    // TODO(spec §9.15): future revisions should key references by the
+    // occurrence's content digest rather than via the symbol record, so a
+    // reference's provenance stays anchored to the blob where it appears even
+    // when the target symbol lives in a different blob.
+    let source_ref = SourceRef(format!("{}:{}", occurrence.path.display(), start_line));
     let provenance = ProvenanceEnvelope::repository_blob(
-        symbol.blob_digest.clone(),
-        symbol.provenance.age,
+        occurrence.digest.clone(),
+        occurrence.provenance.age,
         source_ref,
     );
     ReferenceRecord {
         target: Some(symbol.id.clone()),
         name: symbol.name.clone(),
-        path: path.to_path_buf(),
-        blob_digest: symbol.blob_digest.clone(),
+        path: occurrence.path.clone(),
+        blob_digest: occurrence.digest.clone(),
         range: LocationRange {
             start_line,
             start_column,

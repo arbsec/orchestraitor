@@ -90,12 +90,13 @@ keyring = "4.1.5"
 sigstore = "0.14.0"
 
 # HTTP and networking (tech-stack.md §1, §5)
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 url = "2.5"
 
 # Server / proxy (tech-stack.md §1)
 hyper = { version = "1.11", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server"] }
+http-body-util = "0.1"
 tower = "0.5"
 
 # TLS (tech-stack.md §1, §5.2)
