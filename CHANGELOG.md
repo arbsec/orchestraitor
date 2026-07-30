@@ -44,5 +44,18 @@ All notable changes to Orchestraitor are recorded here. The format follows
   real per-org / per-user attribution columns. Project, Session, Domain, and Agent
   scopes continue to filter on their own columns and gain explicit regression tests
   pinning scope isolation.
+- `orchestraitor-mcp` `ProjectScope::from_root` now derives `ProjectId` from a SHA-256
+  digest of the canonical root path (with an optional explicit
+  `.orchestraitor/project-id` override) instead of the root basename, so two same-named
+  roots in different parents no longer share a project id and `require_server_project`
+  cannot accept a server registered for a different project. The basename is preserved
+  as a human-readable display label via the new `ProjectScope::display_label`.
+- `orchestraitor-mcp` `DriftFingerprint::build` now sorts tool schemas by
+  `(name, description, canonical input_schema)` before hashing, so equivalent tool sets
+  declared in different orders produce the same schema digest.
+- `orchestraitor-mcp` gains the §9.18.1 renewed-trust comparison primitive
+  `DriftFingerprint::compare`, returning the `FingerprintChange` enum
+  (`NoChange`, `ExecutableChanged`, `SchemaChanged`, `CapabilityExpanded`,
+  `CapabilityReduced`) in security-severity order.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD

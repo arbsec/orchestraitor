@@ -20,8 +20,8 @@ pub use config::{
     ResolvedMcpServers, load_canonical_mcp_config, resolve_mcp_servers,
 };
 pub use drift::{
-    CapabilityCrossCheck, CapabilitySnapshot, DriftFingerprint, FingerprintDigest, ServerIdentity,
-    ToolSchemaIdentity, executable_sha256,
+    CapabilityCrossCheck, CapabilitySnapshot, DriftFingerprint, FingerprintChange,
+    FingerprintDigest, ServerIdentity, ToolSchemaIdentity, executable_sha256,
 };
 pub use error::{McpGatewayError, McpGatewayResult};
 pub use fs::FileSystemTools;
