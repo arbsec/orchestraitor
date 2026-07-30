@@ -1,16 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/orchestraitor-adapter-api",
-    "crates/orchestraitor-adapter-host",
-    "crates/orchestraitor-adapter-api",
-    "crates/orchestraitor-adapter-host",
+    "crates/orchestraitor-lifecycle",
+    "crates/orchestraitor-lifecycle",
+    "crates/orchestraitor-cost-ledger",
+    "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-core",
     "crates/orchestraitor-cost-ledger",
-    "crates/orchestraitor-events",
     "crates/orchestraitor-model",
-    "crates/orchestraitor-provider-api",
     "crates/orchestraitor-workspace-hack",
     "xtask",
 ]

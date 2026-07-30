@@ -8,6 +8,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-lifecycle` crate with the spec §9.24 task/session lifecycle state machine,
+  restart/orphan recovery, cancellation cleanup accounting, checkpoint replay planning, lease
+  expiry handling, partial-result event preservation, and transition idempotency controls.
 - Initial repository governance, contribution guidance, security policy, code of conduct, and
   support documents, adapted from the sibling Arbitraitor repository for Orchestraitor's
   spec-driven, security-first workflow.

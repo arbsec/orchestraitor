@@ -1852,37 +1852,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "orchestraitor-adapter-api"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "orchestraitor-events",
- "orchestraitor-model",
- "orchestraitor-provider-api",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "orchestraitor-adapter-host"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "orchestraitor-adapter-api",
- "orchestraitor-arbitraitor-client",
- "orchestraitor-events",
- "orchestraitor-model",
- "orchestraitor-provider-api",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "orchestraitor-arbitraitor-client"
 version = "0.1.0"
 dependencies = [
@@ -1942,6 +1911,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-lifecycle"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-core",
+ "orchestraitor-events",
+ "orchestraitor-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "orchestraitor-model"
 version = "0.0.0"
 dependencies = [
@@ -1951,22 +1933,6 @@ dependencies = [
  "strum",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "orchestraitor-provider-api"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "orchestraitor-core",
- "orchestraitor-model",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
