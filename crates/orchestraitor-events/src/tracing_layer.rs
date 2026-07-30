@@ -1,10 +1,7 @@
 //! `tracing_subscriber` layer that emits canonical JSON Lines audit records.
 
 use std::io::Write;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use orchestraitor_core::is_redacted_field;
@@ -18,20 +15,45 @@ use crate::{
     HashDigest,
 };
 
+/// Hash-chain state protected by a single mutex.
+///
+/// Keeping sequence allocation, previous-hash read/update, and writer emission
+/// under one lock prevents two concurrent events from advancing the sequence
+/// while reading the same `previous_hash`, which would otherwise produce a
+/// broken or duplicate chain.
+#[derive(Debug)]
+struct ChainState {
+    /// Next sequence number to assign to an incoming event.
+    next_sequence: u64,
+    /// Hash of the most recently emitted record, used as the next `prev_hash`.
+    previous_hash: Option<HashDigest>,
+}
+
+impl Default for ChainState {
+    fn default() -> Self {
+        Self {
+            next_sequence: 1,
+            previous_hash: None,
+        }
+    }
+}
+
 /// Tracing layer that writes canonical JSON Lines audit records without unbounded buffering.
 #[derive(Debug)]
 pub struct TracingAuditLayer<W> {
-    writer: Arc<Mutex<W>>,
-    next_sequence: Arc<AtomicU64>,
-    previous_hash: Arc<Mutex<Option<HashDigest>>>,
+    chain: Arc<Mutex<ChainStateWriter<W>>>,
+}
+
+#[derive(Debug)]
+struct ChainStateWriter<W> {
+    state: ChainState,
+    writer: W,
 }
 
 impl<W> Clone for TracingAuditLayer<W> {
     fn clone(&self) -> Self {
         Self {
-            writer: Arc::clone(&self.writer),
-            next_sequence: Arc::clone(&self.next_sequence),
-            previous_hash: Arc::clone(&self.previous_hash),
+            chain: Arc::clone(&self.chain),
         }
     }
 }
@@ -44,9 +66,10 @@ where
     #[must_use]
     pub fn new(writer: W) -> Self {
         Self {
-            writer: Arc::new(Mutex::new(writer)),
-            next_sequence: Arc::new(AtomicU64::new(1)),
-            previous_hash: Arc::new(Mutex::new(None)),
+            chain: Arc::new(Mutex::new(ChainStateWriter {
+                state: ChainState::default(),
+                writer,
+            })),
         }
     }
 }
@@ -55,8 +78,8 @@ impl TracingAuditLayer<Vec<u8>> {
     /// Returns captured bytes for test sinks.
     #[must_use]
     pub fn bytes(&self) -> Vec<u8> {
-        match self.writer.lock() {
-            Ok(writer) => writer.clone(),
+        match self.chain.lock() {
+            Ok(guard) => guard.writer.clone(),
             Err(_) => Vec::new(),
         }
     }
@@ -70,11 +93,15 @@ where
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        let previous_hash = match self.previous_hash.lock() {
-            Ok(guard) => guard.clone(),
-            Err(_) => None,
+
+        // Hold the chain lock through sequence allocation, hashing, and write
+        // emission so concurrent events cannot observe a stale `previous_hash`
+        // and so records land on the sink in sequence order.
+        let Ok(mut guard) = self.chain.lock() else {
+            return;
         };
+        let sequence = guard.state.next_sequence;
+        let previous_hash = guard.state.previous_hash.clone();
         let input = EventEnvelopeInput {
             schema_version: CURRENT_SCHEMA_VERSION,
             monotonic_seq: sequence,
@@ -91,13 +118,11 @@ where
         let Ok(record) = AuditRecord::try_from_envelope(envelope) else {
             return;
         };
-        if let Ok(mut previous_hash_guard) = self.previous_hash.lock() {
-            *previous_hash_guard = Some(record.hash.clone());
-        }
-        if let Ok(mut writer) = self.writer.lock() {
-            let _write_result = serde_json_canonicalizer::to_writer(&record, &mut *writer);
-            let _newline_result = writer.write_all(b"\n");
-        }
+        guard.state.next_sequence = guard.state.next_sequence.saturating_add(1);
+        guard.state.previous_hash = Some(record.hash.clone());
+
+        let _write_result = serde_json_canonicalizer::to_writer(&record, &mut guard.writer);
+        let _newline_result = guard.writer.write_all(b"\n");
     }
 }
 

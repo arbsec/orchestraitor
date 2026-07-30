@@ -7,15 +7,17 @@ use crate::{
     hash_envelope, redact_event, validate_hash_chain,
 };
 
-/// Stored audit record containing an envelope, its canonical hash, and replay status.
+/// Stored audit record containing an envelope and its canonical hash.
+///
+/// Interpretation status is *not* stored as a separate field — it is always
+/// derived from [`Self::envelope`]`.schema_version`, so any tampering with the
+/// interpretation flips the envelope bytes and therefore the hash chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// Event envelope stored in append-only order.
     pub envelope: EventEnvelope,
     /// SHA-256 hash of canonical envelope bytes.
     pub hash: HashDigest,
-    /// Interpretation status derived from `schema_version`.
-    pub schema_interpretation: SchemaInterpretation,
 }
 
 impl AuditRecord {
@@ -26,12 +28,15 @@ impl AuditRecord {
     /// Returns [`EventError::CanonicalJson`] when canonical hashing fails.
     pub fn try_from_envelope(envelope: EventEnvelope) -> Result<Self, EventError> {
         let hash = hash_envelope(&envelope)?;
-        let schema_interpretation = envelope.schema_interpretation();
-        Ok(Self {
-            envelope,
-            hash,
-            schema_interpretation,
-        })
+        Ok(Self { envelope, hash })
+    }
+
+    /// Returns the replay interpretation status derived from the envelope's
+    /// `schema_version`. Recomputed on demand so the value cannot be tampered
+    /// with independently of the hash-protected envelope.
+    #[must_use]
+    pub const fn schema_interpretation(&self) -> SchemaInterpretation {
+        self.envelope.schema_interpretation()
     }
 }
 
@@ -190,5 +195,6 @@ fn upper_bound_matches(record: &AuditRecord, query: &EventQuery) -> bool {
 }
 
 fn schema_matches(record: &AuditRecord, query: &EventQuery) -> bool {
-    query.include_uninterpreted || record.schema_interpretation == SchemaInterpretation::Interpreted
+    query.include_uninterpreted
+        || record.schema_interpretation() == SchemaInterpretation::Interpreted
 }
