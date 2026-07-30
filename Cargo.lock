@@ -3209,7 +3209,9 @@ dependencies = [
  "arbitraitor-policy",
  "arbitraitor-receipt",
  "arbitraitor-sandbox",
+ "hex",
  "orchestraitor-model",
+ "serde_json",
 ]
 
 [[package]]

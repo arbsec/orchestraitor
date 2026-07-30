@@ -19,5 +19,9 @@ arbitraitor-receipt = { workspace = true }
 arbitraitor-sandbox = { workspace = true }
 orchestraitor-model = { path = "../orchestraitor-model" }
 
+[dev-dependencies]
+hex = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
