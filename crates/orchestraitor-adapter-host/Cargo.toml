@@ -1,0 +1,26 @@
+[package]
+name = "orchestraitor-adapter-host"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Adapter supervisor and audit multiplexing host for Orchestraitor"
+
+[lints]
+workspace = true
+
+[dependencies]
+orchestraitor-adapter-api = { path = "../orchestraitor-adapter-api" }
+orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-workspace = { path = "../orchestraitor-model", package = "orchestraitor-model" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
