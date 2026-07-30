@@ -34,5 +34,7 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 - `orchestraitor-core` now merges dynamic configuration table entries field-by-field, includes
   structured error causes and source chains, and omits sensitive tracing fields entirely.
+- `orchestraitor-provider-meta` now falls through corrupt or unreadable cache snapshots to the
+  bundled `models.dev` catalog when the live endpoint is unavailable.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD

@@ -150,7 +150,7 @@ impl ModelsDevClient {
         &self,
         live_error: ModelsDevError,
     ) -> Result<ModelsDevCatalog, ModelsDevError> {
-        if let Some(catalog) = self.read_latest_cached()? {
+        if let Ok(Some(catalog)) = self.read_latest_cached() {
             self.store_memory(catalog.clone(), None).await;
             return Ok(catalog);
         }
@@ -242,4 +242,37 @@ fn header_to_string(value: Option<&reqwest::header::HeaderValue>) -> Option<Stri
     value
         .and_then(|header| header.to_str().ok())
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::net::TcpListener;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn corrupt_newest_cache_falls_back_to_bundled_when_live_fetch_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "orchestraitor-provider-meta-corrupt-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir(&cache_dir)?;
+        fs::write(cache_dir.join("newest.json"), b"{invalid json")?;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let endpoint = format!("http://{}/catalog.json", listener.local_addr()?);
+        drop(listener);
+
+        let client = ModelsDevClient::with_endpoint(endpoint, Some(cache_dir.clone()))?;
+        let catalog = client.catalog_after_daemon_ready().await?;
+        let source = catalog.source;
+        fs::remove_dir_all(cache_dir)?;
+
+        assert_eq!(source, CatalogSource::BundledFallback);
+        Ok(())
+    }
 }
