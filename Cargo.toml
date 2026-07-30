@@ -1,12 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/orchestraitor-mcp",
     "crates/orchestraitor-workspace",
-    "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-core",
-    "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-model",
     "crates/orchestraitor-workspace-hack",
     "xtask",
