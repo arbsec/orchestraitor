@@ -29,6 +29,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
   `github-project-workflow` (triage, decomposition, ready-queue, claims, reconciliation) and
   `github-pr-lifecycle` (draft PR, CI inspection, adversarial review convergence, merge
   eligibility, post-merge reconciliation), each with `references/` and composable `scripts/`.
+- `orchestraitor-mcp` crate with an `rmcp` gateway skeleton, built-in filesystem/workflow tool
+  surface, canonical `.agent/mcp.toml` schema loader, and per-session MCP drift fingerprinting
+  data model for spec §9.5, §9.18.1, and §17.2.
 
 ### Fixed
 

@@ -218,7 +218,10 @@ fn sensitive_field_names_reject_exact_matches() {
         ("token", "exact `token`"),
         ("password", "exact `password`"),
         ("cookie", "exact `cookie`"),
-        ("Session-Token", "case/hyphen normalization to `session_token`"),
+        (
+            "Session-Token",
+            "case/hyphen normalization to `session_token`",
+        ),
         ("Auth-Token", "case/hyphen normalization to `auth_token`"),
     ] {
         let result = event(1, EventCategory::ToolRequest, json!({field: "value"}), None);
