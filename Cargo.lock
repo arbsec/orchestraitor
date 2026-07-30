@@ -1869,6 +1869,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-provider-api"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "orchestraitor-provider-meta"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+]
+
+[[package]]
 name = "orchestraitor-workspace-hack"
 version = "0.0.0"
 
