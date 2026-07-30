@@ -3111,6 +3111,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-cli"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "miette",
+ "orchestraitor-agent-catalog",
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "tempfile",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "orchestraitor-context"
 version = "0.0.0"
 dependencies = [

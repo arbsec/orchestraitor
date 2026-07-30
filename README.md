@@ -34,6 +34,7 @@ Orchestraitor   Coding-agent harness and control plane that delegates all securi
 
 ## Status
 
+<<<<<<< HEAD
 **MVP implementation in progress.** The repository now contains early Rust crates for selected
 MVP subsystems, including the `orcd` daemon JSON-RPC server. There is no tagged release or
 installer yet. The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration
@@ -51,6 +52,16 @@ current-thread runtime. It currently exposes protocol stubs for:
 By default, `orcd` listens at the first positional path argument, then
 `ORCHESTRAITOR_DAEMON_SOCKET`, then a temporary default path. `SIGTERM` triggers graceful
 shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §10.
+||||||| parent of 239fb0a (feat(cli): add orc init command with project detection + --dry-run (without provider))
+**Pre-implementation.** The repository currently contains only its specification and governance
+scaffolding. There is **no runnable software**, binary, installer, or implemented feature yet.
+The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration schema will change.
+=======
+**Early MVP implementation.** The repository now contains initial Rust crates and an `orc` CLI
+entry point. The first implemented command is `orc init`, which proposes project configuration
+without a provider or API key. The API, CLI (`orc` / `orchestraitor`), daemon protocol, and
+configuration schema will change.
+>>>>>>> 239fb0a (feat(cli): add orc init command with project detection + --dry-run (without provider))
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
@@ -78,6 +89,11 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 - [`docs/spec/spec.md`](docs/spec/spec.md) — product and architecture source of truth.
 - [`docs/spec/tech-stack.md`](docs/spec/tech-stack.md) — concrete crates, versions, license
   compatibility, runtime dependencies, platform support, and rejected alternatives.
+
+## CLI
+
+- [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
+  proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
 
 ## Contributing and security
 
