@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/orchestraitor-daemon",
     "crates/orchestraitor-cli",
     "crates/orchestraitor-context",
     "crates/orchestraitor-provider-proxy",

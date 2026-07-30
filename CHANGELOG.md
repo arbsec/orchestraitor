@@ -8,10 +8,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
-- `orchestraitor-cli` crate with the `orc` binary and provider-free `orc init` project
-  detection flow. `orc init --dry-run` prints the proposed `.orchestraitor/orchestraitor.toml`
-  without writing files, and normal init marks proposed TOML entries with
-  `# Proposed by orc init` comments.
+- `orchestraitor-daemon` crate with a SQLite WAL metadata store, schema migrations,
+  hash-chained event persistence, Arbitraitor receipt/backlog/delegation tables, and an
+  Arbitraitor-compatible SHA-256 filesystem CAS for spec §9.17 and tech-stack §11.
 - `orchestraitor-context` crate with a content-addressed tree-sitter baseline indexer,
   Appendix E context query API, and spec §9.15.1 provenance envelopes on every emitted item.
 - Initial repository governance, contribution guidance, security policy, code of conduct, and
@@ -39,10 +38,6 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
-- `orchestraitor-cli` crate with the initial `orc config` suite for resolved-value
-  inspection, schema validation, diffs, comment-preserving migration, and `orc models`
-  refresh/rollback against the models.dev catalog per spec §9.22.3, §9.22.8, and
-  tech-stack §13.
 
 ### Fixed
 
@@ -64,9 +59,17 @@ All notable changes to Orchestraitor are recorded here. The format follows
   real per-org / per-user attribution columns. Project, Session, Domain, and Agent
   scopes continue to filter on their own columns and gain explicit regression tests
   pinning scope isolation.
-- `orc config validate` now rejects ambiguous same-layer conflicts (e.g. two shards under
-  the same layer both defining the same key). Previously the rejection only happened when
-  surfacing a single value via `orc config get` or `orc config explain`, so `validate`
-  silently accepted configs that no other subcommand could resolve.
+- `orchestraitor-daemon` `CasDirectory::load_bytes` now recomputes SHA-256 over the bytes it
+  reads and refuses to return them if the digest does not match the address; previously a
+  corrupted or out-of-band-written blob would be returned as-is, undermining the
+  content-addressed guarantee. A new `StoreError::DigestMismatch { expected, actual }`
+  variant reports both digests; an adversarial test (`cas_load_bytes_rejects_corrupted_blob`)
+  pins the behaviour against on-disk corruption.
+- `orchestraitor-daemon` `DaemonStore::load_event_records` is now exercised by adversarial
+  tests (`load_event_records_rejects_tampered_record_json`,
+  `load_event_records_rejects_record_json_payload_drift`) that mutate `event_records.record_json`
+  via raw `SQL` to confirm the hash-chain validator rejects the drift with
+  `EventError::RecordHashMismatch`. A `pub(crate)` `execute_raw` test hook is the only path
+  that can bypass the typed CRUD helpers; it is `#[cfg(test)]` and documented as such.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD
