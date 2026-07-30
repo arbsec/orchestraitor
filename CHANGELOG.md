@@ -64,5 +64,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
   real per-org / per-user attribution columns. Project, Session, Domain, and Agent
   scopes continue to filter on their own columns and gain explicit regression tests
   pinning scope isolation.
+- `orc config validate` now rejects ambiguous same-layer conflicts (e.g. two shards under
+  the same layer both defining the same key). Previously the rejection only happened when
+  surfacing a single value via `orc config get` or `orc config explain`, so `validate`
+  silently accepted configs that no other subcommand could resolve.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD

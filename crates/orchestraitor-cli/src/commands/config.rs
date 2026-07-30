@@ -80,6 +80,7 @@ fn validate<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
             writeln!(writer, "- {} ({})", unknown.key, unknown.source).into_diagnostic()?;
         }
     }
+    layers.resolved_map()?;
     layers.resolver.resolve_config().map_err(|error| {
         miette!(
             "configuration validation failed: {}",
