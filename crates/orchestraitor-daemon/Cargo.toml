@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Durable Orchestraitor daemon: JSON-RPC server, capability probing, and SQLite WAL store"
+description = "Durable Orchestraitor daemon: JSON-RPC server, capability probing, store, and supervision"
 
 [lints]
 workspace = true
@@ -19,17 +19,20 @@ path = "src/main.rs"
 hex = { workspace = true }
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 miette = { workspace = true }
+orchestraitor-adapter-api = { path = "../orchestraitor-adapter-api" }
+orchestraitor-adapter-host = { path = "../orchestraitor-adapter-host" }
 orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-events = { path = "../orchestraitor-events" }
 orchestraitor-lifecycle = { path = "../orchestraitor-lifecycle" }
+orchestraitor-mcp = { path = "../orchestraitor-mcp" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 rusqlite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

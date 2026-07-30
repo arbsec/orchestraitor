@@ -14,6 +14,9 @@ mod server;
 /// Startup capability probing and Arbitraitor version negotiation (spec §6.7, §9.6, §16.7).
 pub mod capability;
 
+/// Process supervision for worker processes and the MCP gateway (spec §17.2).
+pub mod supervision;
+
 /// SQLite WAL store and filesystem content-addressed storage.
 pub mod store;
 
@@ -21,3 +24,7 @@ pub use capability::{CapabilityReport, ControlStatus, probe_capabilities};
 pub use error::DaemonError;
 pub use rpc::{HealthResponse, InitializeResponse, ShutdownResponse, build_rpc_module};
 pub use server::{DEFAULT_SHUTDOWN_TIMEOUT, DaemonConfig, run_until_signal, serve_until};
+pub use supervision::{
+    CommandSpec, GatewaySpec, ProcessStatus, SupervisionError, SupervisionEvent, Supervisor,
+    WorkerSpec,
+};
