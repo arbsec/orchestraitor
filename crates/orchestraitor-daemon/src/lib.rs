@@ -10,7 +10,6 @@
 mod error;
 mod rpc;
 mod server;
-
 /// SQLite WAL store and filesystem content-addressed storage.
 pub mod store;
 

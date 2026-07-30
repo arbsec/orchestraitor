@@ -1,0 +1,26 @@
+[package]
+name = "orchestraitor-tui"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Ratatui reference TUI client for Orchestraitor (spec §9.2)"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+crossterm = { workspace = true }
+orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-cost-ledger = { path = "../orchestraitor-cost-ledger" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+ratatui = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
