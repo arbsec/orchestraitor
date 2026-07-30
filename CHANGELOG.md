@@ -8,6 +8,16 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-tui` crate with a ratatui 0.30 + crossterm 0.29 reference TUI client
+  implementing spec §9.2: multi-pane layout, keyboard-first navigation across all 13 required
+  views (sessions, agents, cost-ledger, tool-calls, approvals, changed-files, diffs, test/build,
+  security findings, receipts, session logs, policy trace, context trace), cost/routing/subscription
+  panels with `measured`/`estimated`/`user-configured` labels per §9.19.7, startup progress banner
+  for ≥200 ms operations per §13.3.1, event-driven subscriptions (no polling per §13.3), and
+  approval rendering per §9.9 (operation, executable, args, paths, network, secret-use-without-value,
+  sandbox controls, policy rule, scope+expiry, host-trusted-state indicator, untrusted agent prose).
+  Side-by-side and unified diff views. 19 TestBackend tests covering keyboard navigation, startup
+  banner timing, cost panel labels, approval fields, and diff rendering.
 - `orchestraitor-daemon` crate with a SQLite WAL metadata store, schema migrations,
   hash-chained event persistence, Arbitraitor receipt/backlog/delegation tables, and an
   Arbitraitor-compatible SHA-256 filesystem CAS for spec §9.17 and tech-stack §11.
