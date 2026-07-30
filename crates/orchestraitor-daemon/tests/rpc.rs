@@ -49,6 +49,61 @@ async fn initialize_responds_when_daemon_serves_test_socket()
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn health_rpc_reports_capability_status_from_startup_probe()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given: a daemon that probed Arbitraitor capabilities at startup.
+    let temp = TempDir::new()?;
+    let socket = temp.path().join("orcd.sock");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let config = DaemonConfig::new(socket.clone());
+    let server = tokio::spawn(async move {
+        serve_until(config, async move {
+            let mut shutdown_rx = shutdown_rx;
+            let _changed = shutdown_rx.changed().await;
+            Ok(())
+        })
+        .await
+    });
+
+    wait_for_socket(&socket).await?;
+
+    // When: a JSON-RPC health request is sent over that socket.
+    let response = rpc_call(
+        &socket,
+        json!({"jsonrpc":"2.0","id":1,"method":"health","params":{}}),
+    )
+    .await?;
+    shutdown_tx.send(true)?;
+    server.await??;
+
+    // Then: the response includes the capability report from the startup probe.
+    let capability = &response["result"]["capability"];
+    assert_eq!(response["result"]["security_authority"], "arbitraitor");
+    assert!(capability["required_capabilities"].is_array());
+    assert!(capability["missing_controls"].is_array());
+    assert!(capability["arbitraitor_api_compatible"].is_boolean());
+    assert!(capability["receipt_schema_compatible"].is_boolean());
+    assert!(capability["degraded_mode"].is_boolean());
+
+    // On the Linux reference platform, all required controls are available.
+    let platform = capability["platform"].as_str().unwrap_or("");
+    if platform == "linux" {
+        assert_eq!(response["result"]["status"], "ok");
+        assert_eq!(capability["protected_services_allowed"], true);
+        assert!(
+            capability["missing_controls"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty)
+        );
+    } else {
+        // Non-Linux platforms fail closed (spec §6.7, §16.8).
+        assert_eq!(response["result"]["status"], "fail_closed");
+        assert_eq!(capability["protected_services_allowed"], false);
+    }
+    Ok(())
+}
+
 #[test]
 fn sigterm_stops_orcd_within_five_seconds() -> Result<(), Box<dyn std::error::Error>> {
     // Given: an `orcd` process started with a test-scoped Unix-domain socket.

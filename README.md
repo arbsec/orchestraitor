@@ -42,11 +42,13 @@ schema will change.
 ### Early daemon surface
 
 The `orcd` binary runs a JSON-RPC server over a Unix-domain socket using Tokio's
-current-thread runtime. It currently exposes protocol stubs for:
+current-thread runtime. It currently exposes:
 
-- `initialize`
-- `health`
-- `shutdown`
+- `initialize` — protocol version negotiation
+- `health` — daemon status plus the Arbitraitor capability report from the
+  startup probe (spec §6.7, §16.7); reports `fail_closed` when any required
+  sandbox control is unavailable on the current platform
+- `shutdown` — graceful shutdown within the five-second budget
 
 By default, `orcd` listens at the first positional path argument, then
 `ORCHESTRAITOR_DAEMON_SOCKET`, then a temporary default path. `SIGTERM` triggers graceful

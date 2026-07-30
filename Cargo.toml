@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/orchestraitor-provider-neuralwatt",
+    "crates/orchestraitor-adapter-api",
+    "crates/orchestraitor-adapter-host",
     "crates/orchestraitor-agent-catalog",
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-cli",
@@ -11,12 +12,11 @@ members = [
     "crates/orchestraitor-daemon",
     "crates/orchestraitor-events",
     "crates/orchestraitor-lifecycle",
+    "crates/orchestraitor-mcp",
     "crates/orchestraitor-model",
     "crates/orchestraitor-provider-api",
     "crates/orchestraitor-provider-meta",
-    "crates/orchestraitor-provider-neuralwatt",
     "crates/orchestraitor-provider-proxy",
-    "crates/orchestraitor-tui",
     "crates/orchestraitor-workspace-hack",
     "xtask",
 ]
