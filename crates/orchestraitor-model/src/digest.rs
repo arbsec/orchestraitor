@@ -9,7 +9,7 @@ use std::str::FromStr;
 /// Created by trusted components (the workspace controller, the event store,
 /// Arbitraitor). Never computed inside Orchestraitor itself for security
 /// purposes — only for content-addressed storage keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Digest(String);
 

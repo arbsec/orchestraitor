@@ -38,6 +38,12 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Fixed
 
+- `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
+  new path with unchanged content is recognised as reuse, not reparse. Paths present in the
+  previous index but absent from the new traversal are also evicted on reindex, so deleted
+  files no longer remain queryable. Reference records now carry the provenance of the blob
+  that owns them, not the target symbol's provenance. The Appendix E query API gains
+  `repository_summary`, `symbol_body`, `related_tests`, `diagnostics`, and `expand_context`.
 - `orchestraitor-core` now merges dynamic configuration table entries field-by-field, includes
   structured error causes and source chains, and omits sensitive tracing fields entirely.
 - `orchestraitor-cost-ledger` no longer exposes `BudgetScope::Organization` or

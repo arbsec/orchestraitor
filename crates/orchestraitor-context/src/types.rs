@@ -112,6 +112,8 @@ pub struct ReferenceRecord {
     pub name: String,
     /// Source path containing the reference.
     pub path: PathBuf,
+    /// Content digest of the blob containing the reference.
+    pub blob_digest: Digest,
     /// Reference location.
     pub range: LocationRange,
     /// Provenance envelope for this context item.

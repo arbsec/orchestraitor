@@ -19,7 +19,10 @@ mod walker;
 pub use error::ContextError;
 pub use index::{ContextIndex, IndexReport, Indexer};
 pub use provenance::{ContextAge, ProvenanceEnvelope};
-pub use query::{ContextQuery, SearchHit};
+pub use query::{
+    ContextDiagnostic, ContextQuery, ExpandedContext, RelatedTest, RepositorySummary, SearchHit,
+    SymbolBody,
+};
 pub use types::{
     BlobRecord, CallEdge, ContextItem, Excerpt, LanguageKind, LocationRange, ReferenceRecord,
     SourceRef, SymbolId, SymbolKind, SymbolRecord,
