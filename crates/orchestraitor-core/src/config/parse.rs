@@ -102,6 +102,21 @@ fn is_known_key(key: &str) -> bool {
         )
         || matches_dynamic_key(key, "data_governance", &["retention", "provenance"])
         || matches_dynamic_key(key, "data_classification", &["label", "exportable"])
+        || matches_verification_key(key)
+}
+
+fn matches_verification_key(key: &str) -> bool {
+    let Some(rest) = key
+        .strip_prefix("verification.commands")
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let mut segments = rest.rsplitn(2, '.');
+    let Some(field) = segments.next() else {
+        return false;
+    };
+    segments.next().is_some() && matches!(field, "name" | "command" | "trigger_files")
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {

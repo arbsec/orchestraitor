@@ -65,6 +65,16 @@ pub enum Commands {
     /// Manage the cached models.dev catalog.
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// Run project-configured verification commands (spec MVP-8, §9.5).
+    Verify(VerifyArgs),
+    /// Evaluate Arbitraitor policy against a plan or session (spec MVP-8).
+    #[command(subcommand)]
+    Policy(PolicyCommand),
+    /// Execute a task, optionally without TUI interaction (spec MVP-8).
+    Run(RunArgs),
+    /// Export session evidence in a privacy-preserving archive (spec MVP-8).
+    #[command(subcommand)]
+    Evidence(EvidenceCommand),
 }
 
 /// Arguments for `orc init`.
@@ -158,4 +168,97 @@ pub enum ModelsCommand {
     Refresh,
     /// Roll back to the previous cached models.dev catalog.
     Rollback,
+}
+
+/// Arguments for `orc verify` (spec MVP-8, §9.5).
+#[derive(Debug, Clone, Args)]
+pub struct VerifyArgs {
+    /// Emit stable JSON for CI automation.
+    #[arg(long)]
+    pub json: bool,
+    /// Suppress non-essential output.
+    #[arg(long, short = 'q')]
+    pub quiet: bool,
+}
+
+/// `orc policy` subcommands (spec MVP-8).
+#[derive(Debug, Clone, Subcommand)]
+pub enum PolicyCommand {
+    /// Evaluate policy against a plan or recorded session.
+    Check(PolicyCheckArgs),
+}
+
+/// Arguments for `orc policy check` (spec MVP-8).
+#[derive(Debug, Clone, Args)]
+pub struct PolicyCheckArgs {
+    /// Path to an Arbitraitor policy TOML file.
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
+    /// Session id to evaluate against (for shadow evaluation).
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Evaluate in shadow mode — report what would have happened without enforcement.
+    #[arg(long)]
+    pub shadow: bool,
+    /// Emit stable JSON for CI automation.
+    #[arg(long)]
+    pub json: bool,
+    /// Suppress non-essential output.
+    #[arg(long, short = 'q')]
+    pub quiet: bool,
+}
+
+/// Non-interactive approval policy (spec MVP-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NonInteractiveApprovalMode {
+    /// Block all operations requiring approval (default).
+    Block,
+    /// Allow operations that would prompt in interactive mode.
+    Allow,
+}
+
+/// Arguments for `orc run` (spec MVP-8).
+#[derive(Debug, Clone, Args)]
+pub struct RunArgs {
+    /// Task description or prompt to execute.
+    pub task: Option<String>,
+    /// Run without TUI interaction. Approvals follow the non-interactive policy.
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Approval policy when running non-interactively (default: block).
+    #[arg(long, value_enum, default_value_t = NonInteractiveApprovalMode::Block)]
+    pub approval: NonInteractiveApprovalMode,
+    /// Emit stable JSON for CI automation.
+    #[arg(long)]
+    pub json: bool,
+    /// Suppress non-essential output.
+    #[arg(long, short = 'q')]
+    pub quiet: bool,
+}
+
+/// `orc evidence` subcommands (spec MVP-8).
+#[derive(Debug, Clone, Subcommand)]
+pub enum EvidenceCommand {
+    /// Export session evidence in a privacy-preserving archive.
+    Export(EvidenceExportArgs),
+}
+
+/// Arguments for `orc evidence export` (spec MVP-8).
+#[derive(Debug, Clone, Args)]
+pub struct EvidenceExportArgs {
+    /// Session id whose evidence should be exported.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Output file path. Defaults to stdout.
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+    /// Emit full (non-redacted) payloads. Default is redacted.
+    #[arg(long)]
+    pub full: bool,
+    /// Emit stable JSON for CI automation.
+    #[arg(long)]
+    pub json: bool,
+    /// Suppress non-essential output.
+    #[arg(long, short = 'q')]
+    pub quiet: bool,
 }

@@ -56,10 +56,8 @@ fn validate_rejects_ambiguous_conflicts() -> miette::Result<()> {
         "validate",
     ]);
     let result = orchestraitor_cli::run_with_writer(cli, &mut output);
-    assert!(result.is_err());
-    let error = match result {
-        Ok(()) => return Err(miette::miette!("ambiguous conflict passed validation")),
-        Err(error) => error,
+    let Err(error) = result else {
+        return Err(miette::miette!("ambiguous conflict passed validation"));
     };
 
     assert!(

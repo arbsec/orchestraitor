@@ -7,7 +7,7 @@ use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, NormalizationConfig, OrchestraitorConfig, ProviderConfig,
     ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig, SubscriptionConfig,
-    parse_toml_config,
+    VerificationCommand, VerificationConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -139,6 +139,11 @@ impl OrchestraitorConfig {
             next.data_classification,
             DataClassificationConfig::merge,
         );
+        merge_option(
+            &mut self.verification,
+            next.verification,
+            VerificationConfig::merge,
+        );
     }
 }
 
@@ -225,6 +230,29 @@ impl DataClassificationConfig {
     fn merge(&mut self, next: Self) {
         merge_scalar(&mut self.label, next.label);
         merge_scalar(&mut self.exportable, next.exportable);
+    }
+}
+
+impl VerificationConfig {
+    fn merge(&mut self, next: Self) {
+        for command in next.commands {
+            if let Some(existing) = self.commands.iter_mut().find(|c| c.name == command.name) {
+                existing.merge(command);
+            } else {
+                self.commands.push(command);
+            }
+        }
+    }
+}
+
+impl VerificationCommand {
+    fn merge(&mut self, next: Self) {
+        if !next.command.is_empty() {
+            self.command = next.command;
+        }
+        if !next.trigger_files.is_empty() {
+            self.trigger_files = next.trigger_files;
+        }
     }
 }
 

@@ -85,6 +85,9 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 
 - [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
   proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
+- [Headless and CI commands](docs/cli/headless.md) — `orc verify`, `orc policy check`,
+  `orc run --non-interactive`, and `orc evidence export` with stable JSON output and
+  documented exit codes (spec MVP-8).
 
 ## CLI configuration surface
 

@@ -8,6 +8,26 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orc verify`, `orc policy check`, `orc run --non-interactive`, and
+  `orc evidence export` subcommands implementing headless and CI support
+  per spec MVP-8 (§998). All machine-oriented commands support `--json`,
+  `--quiet`, and stable exit codes (0 success, 2 config error, 3 verification
+  failure, 4 security block, 5 infrastructure failure). `orc verify` detects
+  the project-configured verification registry from `orchestraitor.toml`
+  `[[verification.commands]]` entries and recognized configuration files
+  (Cargo.toml, package.json, pyproject.toml, go.mod, pom.xml); the same
+  registry works locally and in CI. Verification command execution requires
+  an Arbitraitor sandbox (spec §6.7, §16.2) and fails closed until available.
+  `orc policy check` delegates evaluation to Arbitraitor via
+  `ArbitraitorClient::evaluate_policy` and reports the verdict in JSON;
+  `--shadow` mode reports what would have happened without enforcement.
+  `orc run --non-interactive` sets up the non-interactive execution context
+  with approvals defaulting to block. `orc evidence export` produces a
+  privacy-preserving archive using the tamper-evident hash-chained event
+  store; secrets, prompts, completions, tool arguments, and MCP payloads are
+  always redacted (spec §9.17.1). New `VerificationConfig` and
+  `VerificationCommand` config schema types in `orchestraitor-core` for the
+  project-configured verification registry.
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key

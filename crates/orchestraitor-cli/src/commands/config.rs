@@ -15,8 +15,10 @@ use crate::cli::{
 };
 
 use edit::{parse_cli_value, read_document, remove_key, schema_version, set_key, write_document};
-use layers::{BUILT_IN_DEFAULTS, layer_name, layer_path, load_layers};
+use layers::{BUILT_IN_DEFAULTS, layer_name, layer_path};
 use values::{diff_entries, read_value_map, read_value_map_from_str, render_json_value};
+
+pub(crate) use layers::load_layers;
 const CURRENT_SCHEMA_VERSION: &str = "0.14";
 
 /// Runs an `orc config` subcommand.

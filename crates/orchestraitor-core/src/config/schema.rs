@@ -28,6 +28,8 @@ pub struct OrchestraitorConfig {
     pub data_governance: Option<BTreeMap<String, DataGovernanceConfig>>,
     /// Data classification rules keyed by rule id.
     pub data_classification: Option<BTreeMap<String, DataClassificationConfig>>,
+    /// Project-configured verification registry (spec MVP-8, §9.5).
+    pub verification: Option<VerificationConfig>,
 }
 
 /// Normalization configuration block.
@@ -139,6 +141,30 @@ pub struct DataClassificationConfig {
     pub label: Option<String>,
     /// Whether this class may leave the local machine.
     pub exportable: Option<bool>,
+}
+
+/// Verification registry configuration (spec MVP-8, §9.5).
+///
+/// Maps recognized configuration files and lockfile-resolved tools to
+/// verification commands. The same registry runs in local interactive
+/// sessions and in CI non-interactive sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VerificationConfig {
+    /// User-configured verification commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<VerificationCommand>,
+}
+
+/// A single project-configured verification command (spec MVP-8, §9.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VerificationCommand {
+    /// Human-readable name for this verification entry.
+    pub name: String,
+    /// Command string to execute inside the sandbox.
+    pub command: String,
+    /// Configuration files that trigger this verification entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_files: Vec<String>,
 }
 
 /// Configuration precedence layer.

@@ -10,6 +10,7 @@ pub use schema::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, NormalizationConfig, OrchestraitorConfig, ProviderConfig,
     ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig, SubscriptionConfig,
+    VerificationCommand, VerificationConfig,
 };
 
 use crate::error::OrchestraitorError;
