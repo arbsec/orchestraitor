@@ -8,16 +8,15 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
-- `orchestraitor-tui` crate with a ratatui 0.30 + crossterm 0.29 reference TUI client
-  implementing spec §9.2: multi-pane layout, keyboard-first navigation across all 13 required
-  views (sessions, agents, cost-ledger, tool-calls, approvals, changed-files, diffs, test/build,
-  security findings, receipts, session logs, policy trace, context trace), cost/routing/subscription
-  panels with `measured`/`estimated`/`user-configured` labels per §9.19.7, startup progress banner
-  for ≥200 ms operations per §13.3.1, event-driven subscriptions (no polling per §13.3), and
-  approval rendering per §9.9 (operation, executable, args, paths, network, secret-use-without-value,
-  sandbox controls, policy rule, scope+expiry, host-trusted-state indicator, untrusted agent prose).
-  Side-by-side and unified diff views. 19 TestBackend tests covering keyboard navigation, startup
-  banner timing, cost panel labels, approval fields, and diff rendering.
+- `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
+  the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
+  Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
+  resolved from `secret://keyring/neuralwatt` or `NEURALWATT_API_KEY` env var
+  (tech-stack §3.2). Streaming via `reqwest::Response::bytes_stream()` with SSE parsing
+  into `ModelEvent` values. Per-call cost entries emitted per spec §9.19.4 through a
+  `CostSink` trait. Wire-level cassette tests for `/v1/models` and
+  `/v1/chat/completions` (streaming, non-streaming, and tool calls). The legacy Zhipu
+  endpoint `open.bigmodel.cn` is rejected at configuration time (spec §10.3).
 - `orchestraitor-daemon` crate with a SQLite WAL metadata store, schema migrations,
   hash-chained event persistence, Arbitraitor receipt/backlog/delegation tables, and an
   Arbitraitor-compatible SHA-256 filesystem CAS for spec §9.17 and tech-stack §11.

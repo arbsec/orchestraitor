@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-neuralwatt-stream-001","object":"chat.completion.chunk","created":1722374400,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-neuralwatt-stream-001","object":"chat.completion.chunk","created":1722374400,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":" from"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-neuralwatt-stream-001","object":"chat.completion.chunk","created":1722374400,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":" Neuralwatt"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-neuralwatt-stream-001","object":"chat.completion.chunk","created":1722374400,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":" GLM-5.2!"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-neuralwatt-stream-001","object":"chat.completion.chunk","created":1722374400,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":7,"total_tokens":15}}
+
+data: [DONE]

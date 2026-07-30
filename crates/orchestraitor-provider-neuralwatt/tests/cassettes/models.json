@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "created": 1722374400,
+      "owned_by": "neuralwatt"
+    },
+    {
+      "id": "glm-5.2-flash",
+      "object": "model",
+      "created": 1722374400,
+      "owned_by": "neuralwatt"
+    }
+  ]
+}
