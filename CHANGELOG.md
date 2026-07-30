@@ -39,6 +39,10 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
+- `orchestraitor-cli` crate with the initial `orc config` suite for resolved-value
+  inspection, schema validation, diffs, comment-preserving migration, and `orc models`
+  refresh/rollback against the models.dev catalog per spec §9.22.3, §9.22.8, and
+  tech-stack §13.
 
 ### Fixed
 

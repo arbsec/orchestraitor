@@ -21,6 +21,11 @@ miette = { workspace = true }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
+orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+toml = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
