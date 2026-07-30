@@ -1,0 +1,40 @@
+[package]
+name = "orchestraitor-context"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Tree-sitter baseline context indexer and Appendix E context query API for Orchestraitor"
+
+[features]
+default = ["grammar-rust"]
+grammar-rust = ["dep:tree-sitter-rust"]
+grammar-typescript = ["dep:tree-sitter-typescript"]
+grammar-python = ["dep:tree-sitter-python"]
+grammar-javascript = ["dep:tree-sitter-javascript"]
+grammar-go = ["dep:tree-sitter-go"]
+grammar-bash = ["dep:tree-sitter-bash"]
+
+[lints]
+workspace = true
+
+[dependencies]
+gix = { workspace = true }
+orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

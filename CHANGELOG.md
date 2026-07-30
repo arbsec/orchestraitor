@@ -8,6 +8,8 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-context` crate with a content-addressed tree-sitter baseline indexer,
+  Appendix E context query API, and spec §9.15.1 provenance envelopes on every emitted item.
 - Initial repository governance, contribution guidance, security policy, code of conduct, and
   support documents, adapted from the sibling Arbitraitor repository for Orchestraitor's
   spec-driven, security-first workflow.
@@ -36,6 +38,15 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Fixed
 
+- `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
+  new path with unchanged content is recognised as reuse, not reparse. Paths present in the
+  previous index but absent from the new traversal are also evicted on reindex, so deleted
+  files no longer remain queryable. Reference records now carry the provenance of the blob
+  that owns them (the reference-occurrence blob, not the target symbol's provenance).
+  The Appendix E query API exposes `repository_summary`, `symbol_body`, `related_tests`,
+  `diagnostics`, and `expand_context` as MVP stubs pending §9.16 LSP-backed wiring.
+  Cross-blob reference keying is deferred; a TODO in `index.rs` flags the digest-keyed
+  follow-up for a future iteration.
 - `orchestraitor-core` now merges dynamic configuration table entries field-by-field, includes
   structured error causes and source chains, and omits sensitive tracing fields entirely.
 - `orchestraitor-cost-ledger` no longer exposes `BudgetScope::Organization` or
