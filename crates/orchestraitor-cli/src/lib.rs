@@ -13,7 +13,7 @@ use std::io::{self, Write};
 
 use clap::Parser;
 
-pub use cli::{Cli, Commands};
+pub use cli::{Cli, Commands, ObserveArgs};
 
 /// Runs the CLI against process arguments and standard streams.
 ///
@@ -35,5 +35,6 @@ pub fn run_with_writer<W: Write>(cli: Cli, writer: &mut W) -> miette::Result<()>
         Commands::Init(args) => init::run(&args, writer),
         Commands::Config(command) => commands::config::run(&cli.paths, command, writer),
         Commands::Models(command) => commands::models::run(&cli.paths, command, writer),
+        Commands::Observe(args) => commands::observe::run(&args, writer),
     }
 }

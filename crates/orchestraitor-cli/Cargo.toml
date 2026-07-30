@@ -19,7 +19,9 @@ workspace = true
 clap = { workspace = true }
 miette = { workspace = true }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
+orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
 orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-events = { path = "../orchestraitor-events" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }
 serde = { workspace = true, features = ["derive"] }

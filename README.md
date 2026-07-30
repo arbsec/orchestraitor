@@ -85,6 +85,9 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 
 - [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
   proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
+- [`orc observe`](docs/cli/orc-observe.md) — observation-only event recording for a target
+  harness (spec §998 MVP-2). Records a normalized event stream and evaluates
+  shadow policy decisions without claiming enforcement.
 
 ## CLI configuration surface
 

@@ -8,6 +8,16 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orc observe -- <harness>` subcommand (spec §998 MVP-2). Records a normalized
+  event stream — filesystem mutations, process executions, network requests,
+  MCP tool calls — and evaluates shadow policy decisions per operation. Shadow
+  decisions record what Arbitraitor's policy engine *would* have decided
+  (`pass`, `pass_with_constraints`, `prompt`, `block`, `unsupported`,
+  `defer_to_stronger_sandbox`) without affecting execution. The output always
+  displays a persistent "observation mode: non-protective" indicator. No
+  enforcement is claimed or implied. Event stream exported as canonical JSONL
+  with hash-chain validation (spec §9.17.1). `--json` flag emits
+  machine-readable output. See [`docs/cli/orc-observe.md`](docs/cli/orc-observe.md).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key

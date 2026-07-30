@@ -65,6 +65,8 @@ pub enum Commands {
     /// Manage the cached models.dev catalog.
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// Observe a harness without enforcement (spec §998 MVP-2).
+    Observe(ObserveArgs),
 }
 
 /// Arguments for `orc init`.
@@ -158,4 +160,21 @@ pub enum ModelsCommand {
     Refresh,
     /// Roll back to the previous cached models.dev catalog.
     Rollback,
+}
+
+/// Arguments for `orc observe` (spec §998 MVP-2).
+///
+/// Records a normalized event stream for the target harness without claiming
+/// enforcement. The output always identifies as non-protective.
+#[derive(Debug, Clone, Args)]
+pub struct ObserveArgs {
+    /// Harness command and arguments (after `--`).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+    pub harness: Vec<String>,
+    /// Output directory for the recorded event stream.
+    #[arg(long, default_value = ".orchestraitor/observe")]
+    pub output: PathBuf,
+    /// Emit machine-readable JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
 }
