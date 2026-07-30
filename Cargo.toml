@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/orchestraitor-context",
     "crates/orchestraitor-provider-proxy",
     "crates/orchestraitor-agent-catalog",
     "crates/orchestraitor-arb-client",
@@ -89,13 +90,12 @@ keyring = "4.1.5"
 sigstore = "0.14.0"
 
 # HTTP and networking (tech-stack.md §1, §5)
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls-tls"] }
 url = "2.5"
 
 # Server / proxy (tech-stack.md §1)
 hyper = { version = "1.11", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server"] }
-http-body-util = "0.1"
 tower = "0.5"
 
 # TLS (tech-stack.md §1, §5.2)
@@ -111,10 +111,16 @@ figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Git (tech-stack.md §1, §6)
-gix = { version = "0.85.0", default-features = false, features = ["worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
+gix = { version = "0.85.0", default-features = false, features = ["sha1", "worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
 
 # Tree-sitter (tech-stack.md §1, §9.1)
 tree-sitter = "0.26.11"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-bash = "0.23"
 
 # MCP + ACP (tech-stack.md §1, §4)
 rmcp = { version = "2.2.0", features = ["server", "client", "macros", "schemars", "auth", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "reqwest"] }
