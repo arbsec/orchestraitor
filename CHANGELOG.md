@@ -47,6 +47,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
+- Performance CI gates per spec Appendix F: `.github/workflows/perf.yml` runs
+  `scripts/perf-check.sh` on release builds (Ubuntu + macOS) to assert daemon idle RSS
+  (≤ 60 MiB), TUI idle RSS (≤ 35 MiB), daemon/TUI startup warm p95, no unbounded
+  channels, and no unbounded log files. Smoke thresholds on shared runners per §21.9;
+  strict budgets via `PERF_MODE=strict`. Posts a pass/fail matrix comment on PRs.
 
 ### Fixed
 

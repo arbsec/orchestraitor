@@ -1,0 +1,96 @@
+name: Performance
+
+on:
+  push:
+    branches: [main]
+    paths: &perf_paths
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".mise.toml"
+      - "scripts/perf-check.sh"
+      - "scripts/perf-daemon-cycle.sh"
+      - ".github/workflows/perf.yml"
+  pull_request:
+    paths: *perf_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    name: Perf (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14  # v4.2.3
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2.85.2
+        with:
+          tool: hyperfine
+      - name: Run Appendix F perf gates
+        run: |
+          scripts/perf-check.sh \
+            --json "perf-${{ matrix.os }}.json" \
+            --markdown "perf-${{ matrix.os }}.md"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: perf-${{ matrix.os }}
+          path: perf-${{ matrix.os }}.*
+
+  report:
+    name: Report
+    needs: perf
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: perf-results
+          merge-multiple: true
+      - name: Build comment body
+        run: |
+          {
+            echo '<!-- perf-gate-report -->'
+            echo '## Performance Gates (Appendix F)'
+            echo ''
+            echo 'Per spec §21.9: smoke thresholds on shared runners; strict regression gates run on pinned hardware.'
+            echo ''
+            for md in perf-results/*.md; do
+              [ -f "$md" ] || continue
+              cat "$md"
+              echo ''
+            done
+          } > comment-body.md
+      - name: Post or update PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr="${{ github.event.pull_request.number }}"
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" \
+            --jq '.[] | select(.body | contains("<!-- perf-gate-report -->")) | .id' | head -1)"
+          if [ -n "$existing" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments/$existing" \
+              -X PATCH -F body=@comment-body.md
+          else
+            gh pr comment "$pr" --body-file comment-body.md
+          fi
