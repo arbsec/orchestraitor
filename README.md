@@ -34,7 +34,6 @@ Orchestraitor   Coding-agent harness and control plane that delegates all securi
 
 ## Status
 
-<<<<<<< HEAD
 **MVP implementation in progress.** The repository now contains early Rust crates for selected
 MVP subsystems, including the `orcd` daemon JSON-RPC server. There is no tagged release or
 installer yet. The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration
@@ -52,16 +51,6 @@ current-thread runtime. It currently exposes protocol stubs for:
 By default, `orcd` listens at the first positional path argument, then
 `ORCHESTRAITOR_DAEMON_SOCKET`, then a temporary default path. `SIGTERM` triggers graceful
 shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §10.
-||||||| parent of 239fb0a (feat(cli): add orc init command with project detection + --dry-run (without provider))
-**Pre-implementation.** The repository currently contains only its specification and governance
-scaffolding. There is **no runnable software**, binary, installer, or implemented feature yet.
-The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration schema will change.
-=======
-**Early MVP implementation.** The repository now contains initial Rust crates and an `orc` CLI
-entry point. The first implemented command is `orc init`, which proposes project configuration
-without a provider or API key. The API, CLI (`orc` / `orchestraitor`), daemon protocol, and
-configuration schema will change.
->>>>>>> 239fb0a (feat(cli): add orc init command with project detection + --dry-run (without provider))
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
@@ -94,6 +83,31 @@ configuration schema will change.
 
 - [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
   proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
+
+## CLI configuration surface
+
+The `orc` binary also exposes the configuration inspection and migration commands required by
+spec §9.22.3 and §9.22.8:
+
+```sh
+orc config get <key>
+orc config explain <key>
+orc config set <key> <value> [--layer=project|user|org|dir]
+orc config unset <key> [--layer=project|user|org|dir]
+orc config validate
+orc config diff [--layer=project|user|org|dir] [--json]
+orc config migrate
+orc models refresh
+orc models rollback
+```
+
+`orc config explain` reports the resolved value, source layer, source file, inherited state,
+and profile contribution placeholder. `orc config validate` rejects ambiguous same-layer
+conflicts (two shards under the same layer both defining the same key) and reports unknown
+keys. `orc config migrate` is forward-only, writes a `.bak.*` backup, and uses `toml_edit` so
+existing comments survive migration. `orc models refresh` forces an immediate models.dev
+catalog fetch into the local cache; `orc models rollback` returns to the previous cached
+snapshot without deleting manually configured models.
 
 ## Contributing and security
 

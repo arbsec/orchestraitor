@@ -3119,7 +3119,12 @@ dependencies = [
  "orchestraitor-agent-catalog",
  "orchestraitor-core",
  "orchestraitor-model",
+ "orchestraitor-provider-meta",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.22.27",
 ]
 
