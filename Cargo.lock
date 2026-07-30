@@ -3653,6 +3653,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-provider-neuralwatt"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "orchestraitor-core",
+ "orchestraitor-cost-ledger",
+ "orchestraitor-events",
+ "orchestraitor-model",
+ "orchestraitor-provider-api",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "orchestraitor-provider-proxy"
 version = "0.0.0"
 dependencies = [

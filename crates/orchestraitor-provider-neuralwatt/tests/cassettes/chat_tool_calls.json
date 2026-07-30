@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-neuralwatt-tool-001",
+  "object": "chat.completion",
+  "created": 1722374400,
+  "model": "glm-5.2",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_neuralwatt_001",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"San Francisco\",\"unit\":\"celsius\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 45,
+    "completion_tokens": 22,
+    "total_tokens": 67
+  }
+}
