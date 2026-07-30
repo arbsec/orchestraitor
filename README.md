@@ -34,9 +34,23 @@ Orchestraitor   Coding-agent harness and control plane that delegates all securi
 
 ## Status
 
-**Pre-implementation.** The repository currently contains only its specification and governance
-scaffolding. There is **no runnable software**, binary, installer, or implemented feature yet.
-The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration schema will change.
+**MVP implementation in progress.** The repository now contains early Rust crates for selected
+MVP subsystems, including the `orcd` daemon JSON-RPC server. There is no tagged release or
+installer yet. The API, CLI (`orc` / `orchestraitor`), daemon protocol, and configuration
+schema will change.
+
+### Early daemon surface
+
+The `orcd` binary runs a JSON-RPC server over a Unix-domain socket using Tokio's
+current-thread runtime. It currently exposes protocol stubs for:
+
+- `initialize`
+- `health`
+- `shutdown`
+
+By default, `orcd` listens at the first positional path argument, then
+`ORCHESTRAITOR_DAEMON_SOCKET`, then a temporary default path. `SIGTERM` triggers graceful
+shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §10.
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a

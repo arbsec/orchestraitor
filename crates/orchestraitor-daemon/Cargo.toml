@@ -1,0 +1,32 @@
+[package]
+name = "orchestraitor-daemon"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Durable Orchestraitor daemon JSON-RPC server"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "orcd"
+path = "src/main.rs"
+
+[dependencies]
+jsonrpsee = { workspace = true, features = ["server", "macros"] }
+miette = { workspace = true }
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-lifecycle = { path = "../orchestraitor-lifecycle" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
