@@ -154,8 +154,19 @@ async fn cassette_non_streaming_chat_records_cost_entry() {
     let entry = &cost_sink.entries()[0];
     assert_eq!(entry.input_tokens, 12);
     assert_eq!(entry.output_tokens, 18);
-    assert_eq!(entry.model.as_str(), "neuralwatt");
+    assert_eq!(entry.model.as_str(), "glm-5.2");
     assert_eq!(entry.provider.as_str(), "neuralwatt");
+    // Regression: wall_ms must be captured from elapsed time, not hard-coded 0.
+    assert!(
+        entry.completed_at >= entry.started_at,
+        "completed_at must be at or after started_at"
+    );
+    let elapsed = entry
+        .completed_at
+        .signed_duration_since(entry.started_at)
+        .num_milliseconds()
+        .max(0);
+    assert_eq!(entry.wall_ms, elapsed.max(0).try_into().unwrap_or(0));
 }
 
 #[tokio::test]

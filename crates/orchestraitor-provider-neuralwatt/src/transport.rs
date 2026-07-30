@@ -226,17 +226,30 @@ impl NeuralwattTransport {
     }
 
     /// Records a cost entry for a completed call if a sink is attached.
-    fn record_cost(&self, request_id: &str, usage: TokenCount) {
+    fn record_cost(
+        &self,
+        request_id: &str,
+        model_id: &str,
+        usage: TokenCount,
+        started_at: chrono::DateTime<chrono::Utc>,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) {
         if let Some(sink) = &self.cost_sink {
             let input = CompletionCostInput {
                 request_id,
                 usage,
                 routing_decision: "openai-chat-completions:neuralwatt",
             };
-            let model = self.descriptor.id.as_str();
             let provider = self.descriptor.id.as_str();
             let attribution = &self.cost_attribution;
-            let entry = build_cost_entry(attribution, &input, model, provider);
+            let entry = build_cost_entry(
+                attribution,
+                &input,
+                model_id,
+                provider,
+                started_at,
+                completed_at,
+            );
             if let Err(e) = sink.record(&entry) {
                 warn!(error = %e, "failed to record cost entry");
             }
@@ -278,6 +291,8 @@ impl ProviderTransport for NeuralwattTransport {
 
     async fn stream(&self, request: ModelRequest) -> ProviderResult<ModelEventStream> {
         let request_id = format!("neuralwatt-{}", uuid::Uuid::new_v4());
+        let started_at = chrono::Utc::now();
+        let model_id = request.model_id.as_str();
 
         // Check if streaming is requested via extensions.
         let want_stream = request
@@ -296,7 +311,11 @@ impl ProviderTransport for NeuralwattTransport {
                     },
                 )?;
 
-            // Consume bytes_stream() and parse SSE events.
+            // TODO(spec §9.19.4): true incremental streaming — events are buffered
+            // into a Vec before returning. For MVP this is acceptable; converting
+            // this to a channel-based bridge (e.g. `futures::channel::mpsc`) would
+            // let callers observe tokens as they arrive without buffering the full
+            // completion. Defer until cost attribution semantics are finalised.
             let mut parser = SseParser::new();
             let mut all_events = vec![ModelEvent::Started];
             let mut stream = response.bytes_stream();
@@ -318,9 +337,16 @@ impl ProviderTransport for NeuralwattTransport {
             all_events.extend(remaining);
 
             // Extract usage for cost recording.
+            let completed_at = chrono::Utc::now();
             for event in &all_events {
                 if let ModelEvent::Usage { token_count } = event {
-                    self.record_cost(&request_id, *token_count);
+                    self.record_cost(
+                        &request_id,
+                        model_id,
+                        *token_count,
+                        started_at,
+                        completed_at,
+                    );
                 }
             }
 
@@ -339,8 +365,9 @@ impl ProviderTransport for NeuralwattTransport {
                 cached_tokens: 0,
                 reasoning_tokens: 0,
             });
+            let completed_at = chrono::Utc::now();
             if let Some(usage) = usage {
-                self.record_cost(&request_id, usage);
+                self.record_cost(&request_id, model_id, usage, started_at, completed_at);
             }
 
             let events = response_to_events(&response);
@@ -379,9 +406,13 @@ fn build_cost_entry(
     input: &CompletionCostInput<'_>,
     model: &str,
     provider: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    completed_at: chrono::DateTime<chrono::Utc>,
 ) -> orchestraitor_cost_ledger::CostEntry {
-    use chrono::Utc;
-    let now = Utc::now();
+    let wall_ms = completed_at
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0);
     orchestraitor_cost_ledger::CostEntry {
         model: ModelId::from_string(model.to_owned()),
         provider: ProviderId::from_string(provider.to_owned()),
@@ -398,9 +429,9 @@ fn build_cost_entry(
         request_count: 1,
         request_id: input.request_id.to_owned(),
         parent_request_id: None,
-        started_at: now,
-        completed_at: now,
-        wall_ms: 0,
+        started_at,
+        completed_at,
+        wall_ms: wall_ms.try_into().unwrap_or(0),
         monetary_cost_measured: None,
         monetary_cost_estimated: None,
         monetary_cost_basis: orchestraitor_cost_ledger::MonetaryCostBasis::UtilizationOnly,
