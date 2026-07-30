@@ -4,6 +4,7 @@ members = [
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-agent-catalog",
     "crates/orchestraitor-core",
+    "crates/orchestraitor-events",
     "crates/orchestraitor-model",
     "crates/orchestraitor-workspace-hack",
     "xtask",

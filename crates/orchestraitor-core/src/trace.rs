@@ -123,6 +123,10 @@ pub fn is_redacted_field(field: &str) -> bool {
     normalized == "api_key"
         || normalized == "authorization"
         || normalized == "bearer"
+        || normalized == "cookie"
+        || normalized == "password"
+        || normalized == "secret"
+        || normalized == "token"
         || normalized == "x_api_key"
         || normalized == "x_goog_api_key"
         || normalized.ends_with("_key")
@@ -209,6 +213,10 @@ mod tests {
             "authorization",
             "session_token",
             "bearer",
+            "cookie",
+            "password",
+            "secret",
+            "token",
             "x-api-key",
             "x-goog-api-key",
         ] {
