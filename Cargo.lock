@@ -1204,6 +1204,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1313,6 +1332,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1331,9 +1356,11 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1852,6 +1879,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "orchestraitor-agent-catalog"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "serde",
+ "thiserror",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "orchestraitor-arbitraitor-client"
 version = "0.1.0"
 dependencies = [
@@ -1911,19 +1949,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orchestraitor-lifecycle"
-version = "0.0.0"
-dependencies = [
- "orchestraitor-core",
- "orchestraitor-events",
- "orchestraitor-model",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "orchestraitor-model"
 version = "0.0.0"
 dependencies = [
@@ -1932,6 +1957,60 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "orchestraitor-provider-api"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "orchestraitor-provider-meta"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-core",
+ "orchestraitor-model",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+]
+
+[[package]]
+name = "orchestraitor-provider-proxy"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "orchestraitor-arbitraitor-client",
+ "orchestraitor-cost-ledger",
+ "orchestraitor-events",
+ "orchestraitor-model",
+ "orchestraitor-provider-api",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
  "uuid",
 ]
 
@@ -3063,6 +3142,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
