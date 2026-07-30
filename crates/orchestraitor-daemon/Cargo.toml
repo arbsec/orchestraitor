@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+<<<<<<< HEAD
 description = "Durable Orchestraitor daemon JSON-RPC server"
 
 [lints]
@@ -27,6 +28,24 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tracing = { workspace = true }
+||||||| parent of 13d059b (feat(daemon): add SQLite WAL store + CAS directory + hash-chained event persistence)
+=======
+description = "Durable daemon store for Orchestraitor sessions, events, receipts, and CAS blobs"
+
+[lints]
+workspace = true
+
+[dependencies]
+hex = { workspace = true }
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+>>>>>>> 13d059b (feat(daemon): add SQLite WAL store + CAS directory + hash-chained event persistence)
 
 [dev-dependencies]
 tempfile = { workspace = true }

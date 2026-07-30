@@ -8,10 +8,9 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
-- `orchestraitor-cli` crate with the `orc` binary and provider-free `orc init` project
-  detection flow. `orc init --dry-run` prints the proposed `.orchestraitor/orchestraitor.toml`
-  without writing files, and normal init marks proposed TOML entries with
-  `# Proposed by orc init` comments.
+- `orchestraitor-daemon` crate with a SQLite WAL metadata store, schema migrations,
+  hash-chained event persistence, Arbitraitor receipt/backlog/delegation tables, and an
+  Arbitraitor-compatible SHA-256 filesystem CAS for spec §9.17 and tech-stack §11.
 - `orchestraitor-context` crate with a content-addressed tree-sitter baseline indexer,
   Appendix E context query API, and spec §9.15.1 provenance envelopes on every emitted item.
 - Initial repository governance, contribution guidance, security policy, code of conduct, and
@@ -39,10 +38,6 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
-- `orchestraitor-cli` crate with the initial `orc config` suite for resolved-value
-  inspection, schema validation, diffs, comment-preserving migration, and `orc models`
-  refresh/rollback against the models.dev catalog per spec §9.22.3, §9.22.8, and
-  tech-stack §13.
 
 ### Fixed
 
@@ -64,9 +59,5 @@ All notable changes to Orchestraitor are recorded here. The format follows
   real per-org / per-user attribution columns. Project, Session, Domain, and Agent
   scopes continue to filter on their own columns and gain explicit regression tests
   pinning scope isolation.
-- `orc config validate` now rejects ambiguous same-layer conflicts (e.g. two shards under
-  the same layer both defining the same key). Previously the rejection only happened when
-  surfacing a single value via `orc config get` or `orc config explain`, so `validate`
-  silently accepted configs that no other subcommand could resolve.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD
