@@ -127,7 +127,7 @@ fn all_views_reachable_via_shift_tab_navigation() {
 fn number_keys_jump_to_views() {
     let mut app = App::new();
     let mut input = TestInput::new(vec![TuiEvent::Key(
-        crossterm::event::KeyCode::Char('3'),
+        crossterm::event::KeyCode::Char('7'),
         crossterm::event::KeyModifiers::NONE,
     )]);
     while let Some(event) = input.next_event().unwrap() {

@@ -21,14 +21,24 @@ use crate::app::AppSnapshot;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::enum_variant_names)]
 pub enum ViewId {
+    /// Configured repositories (spec §9.2).
+    Repositories,
     /// Active and historical sessions (spec §9.2).
     Sessions,
     /// Agent/harness selection and active agents per session (spec §9.2, §9.19.7).
     Agents,
+    /// Model/provider selection (spec §9.2).
+    ModelProvider,
+    /// Sandbox strength display (spec §9.2).
+    SandboxStrength,
+    /// Active capabilities display (spec §9.2).
+    ActiveCapabilities,
     /// Token and cost ledger (spec §9.2, §9.19.7).
     CostLedger,
     /// Tool calls issued by agents (spec §9.2).
     ToolCalls,
+    /// Command plan display (spec §9.2).
+    CommandPlans,
     /// Arbitraitor approval requests rendered per §9.9.
     Approvals,
     /// Changed files in the active session workspace (spec §9.2).
@@ -52,10 +62,15 @@ pub enum ViewId {
 impl ViewId {
     /// Returns all view variants in navigation order.
     pub const ALL: &'static [ViewId] = &[
+        ViewId::Repositories,
         ViewId::Sessions,
         ViewId::Agents,
+        ViewId::ModelProvider,
+        ViewId::SandboxStrength,
+        ViewId::ActiveCapabilities,
         ViewId::CostLedger,
         ViewId::ToolCalls,
+        ViewId::CommandPlans,
         ViewId::Approvals,
         ViewId::ChangedFiles,
         ViewId::Diffs,
@@ -71,10 +86,15 @@ impl ViewId {
     #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
+            Self::Repositories => "Repositories",
             Self::Sessions => "Sessions",
             Self::Agents => "Agents",
+            Self::ModelProvider => "Model / Provider",
+            Self::SandboxStrength => "Sandbox Strength",
+            Self::ActiveCapabilities => "Active Capabilities",
             Self::CostLedger => "Cost Ledger",
             Self::ToolCalls => "Tool Calls",
+            Self::CommandPlans => "Command Plans",
             Self::Approvals => "Approvals",
             Self::ChangedFiles => "Changed Files",
             Self::Diffs => "Diffs",
@@ -118,10 +138,15 @@ impl ViewId {
 /// `snapshot.current_view`.
 pub fn render_view(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
     match snapshot.current_view {
+        ViewId::Repositories => render_repositories(frame, area, snapshot),
         ViewId::Sessions => render_sessions(frame, area, snapshot),
         ViewId::Agents => render_agents(frame, area, snapshot),
+        ViewId::ModelProvider => render_model_provider(frame, area, snapshot),
+        ViewId::SandboxStrength => render_sandbox_strength(frame, area, snapshot),
+        ViewId::ActiveCapabilities => render_active_capabilities(frame, area, snapshot),
         ViewId::CostLedger => render_cost_ledger(frame, area, snapshot),
         ViewId::ToolCalls => render_tool_calls(frame, area, snapshot),
+        ViewId::CommandPlans => render_command_plans(frame, area, snapshot),
         ViewId::Approvals => render_approvals(frame, area, snapshot),
         ViewId::ChangedFiles => render_changed_files(frame, area, snapshot),
         ViewId::Diffs => render_diffs(frame, area, snapshot),
@@ -150,6 +175,11 @@ fn render_text_list(frame: &mut Frame<'_>, area: Rect, items: &[String], empty_m
         .style(Style::default().fg(Color::White))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(list, area);
+}
+
+/// Renders the repositories view (spec §9.2).
+fn render_repositories(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(frame, area, &snapshot.repositories, "repositories");
 }
 
 /// Renders the sessions view.
@@ -185,6 +215,36 @@ fn render_agents(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
     render_text_list(frame, area, &items, "active agents");
 }
 
+/// Renders the model/provider selection view (spec §9.2).
+fn render_model_provider(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(
+        frame,
+        area,
+        &snapshot.model_provider,
+        "model/provider selections",
+    );
+}
+
+/// Renders the sandbox strength view (spec §9.2).
+fn render_sandbox_strength(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(
+        frame,
+        area,
+        &snapshot.sandbox_strength,
+        "sandbox strength entries",
+    );
+}
+
+/// Renders the active capabilities view (spec §9.2).
+fn render_active_capabilities(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(
+        frame,
+        area,
+        &snapshot.active_capabilities,
+        "active capabilities",
+    );
+}
+
 /// Renders the cost ledger view (spec §9.19.7).
 fn render_cost_ledger(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
     crate::cost_panel_view::render_cost_panel(frame, area, &snapshot.cost_panel);
@@ -193,6 +253,11 @@ fn render_cost_ledger(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot)
 /// Renders the tool calls view.
 fn render_tool_calls(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
     render_text_list(frame, area, &snapshot.tool_calls, "tool calls");
+}
+
+/// Renders the command plans view (spec §9.2).
+fn render_command_plans(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(frame, area, &snapshot.command_plans, "command plans");
 }
 
 /// Renders the approvals view (spec §9.9).

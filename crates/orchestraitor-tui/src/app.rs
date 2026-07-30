@@ -23,6 +23,8 @@ pub enum NavigationDirection {
 pub struct AppSnapshot {
     /// Currently active view.
     pub current_view: ViewId,
+    /// Configured repositories (spec §9.2).
+    pub repositories: Vec<String>,
     /// Cost panel data for rendering.
     pub cost_panel: CostPanelData,
     /// Pending approval requests.
@@ -41,12 +43,20 @@ pub struct AppSnapshot {
     pub context_trace: Vec<String>,
     /// Tool call summaries.
     pub tool_calls: Vec<String>,
+    /// Command plan summaries (spec §9.2).
+    pub command_plans: Vec<String>,
     /// Test/build result summaries.
     pub test_build_results: Vec<String>,
     /// Diff lines (unified format).
     pub diff_lines: Vec<String>,
     /// Active agents per session.
     pub active_agents: Vec<AgentSummary>,
+    /// Model/provider selections (spec §9.2).
+    pub model_provider: Vec<String>,
+    /// Sandbox strength entries (spec §9.2).
+    pub sandbox_strength: Vec<String>,
+    /// Active capabilities (spec §9.2).
+    pub active_capabilities: Vec<String>,
 }
 
 /// Summary of an active agent for the Agents view (spec §9.19.7).
@@ -73,6 +83,8 @@ pub struct App {
     startup: StartupState,
     /// Cost panel data.
     cost_panel: CostPanelData,
+    /// Configured repositories (spec §9.2).
+    repositories: Vec<String>,
     /// Pending approval requests.
     approvals: Vec<ApprovalData>,
     /// Session log lines.
@@ -89,12 +101,20 @@ pub struct App {
     context_trace: Vec<String>,
     /// Tool call summaries.
     tool_calls: Vec<String>,
+    /// Command plan summaries (spec §9.2).
+    command_plans: Vec<String>,
     /// Test/build result summaries.
     test_build_results: Vec<String>,
     /// Diff lines (unified format).
     diff_lines: Vec<String>,
     /// Active agents per session.
     active_agents: Vec<AgentSummary>,
+    /// Model/provider selections (spec §9.2).
+    model_provider: Vec<String>,
+    /// Sandbox strength entries (spec §9.2).
+    sandbox_strength: Vec<String>,
+    /// Active capabilities (spec §9.2).
+    active_capabilities: Vec<String>,
     /// Whether the user requested to quit.
     should_quit: bool,
     /// Scroll offset for the current view's list.
@@ -107,6 +127,7 @@ impl Default for App {
             current_view: ViewId::Sessions,
             startup: StartupState::default(),
             cost_panel: CostPanelData::default(),
+            repositories: Vec::new(),
             approvals: Vec::new(),
             session_logs: Vec::new(),
             changed_files: Vec::new(),
@@ -115,9 +136,13 @@ impl Default for App {
             policy_trace: Vec::new(),
             context_trace: Vec::new(),
             tool_calls: Vec::new(),
+            command_plans: Vec::new(),
             test_build_results: Vec::new(),
             diff_lines: Vec::new(),
             active_agents: Vec::new(),
+            model_provider: Vec::new(),
+            sandbox_strength: Vec::new(),
+            active_capabilities: Vec::new(),
             should_quit: false,
             scroll_offset: 0,
         }
@@ -154,6 +179,7 @@ impl App {
     pub fn snapshot(&self) -> AppSnapshot {
         AppSnapshot {
             current_view: self.current_view,
+            repositories: self.repositories.clone(),
             cost_panel: self.cost_panel.clone(),
             approvals: self.approvals.clone(),
             session_logs: self.session_logs.clone(),
@@ -163,9 +189,13 @@ impl App {
             policy_trace: self.policy_trace.clone(),
             context_trace: self.context_trace.clone(),
             tool_calls: self.tool_calls.clone(),
+            command_plans: self.command_plans.clone(),
             test_build_results: self.test_build_results.clone(),
             diff_lines: self.diff_lines.clone(),
             active_agents: self.active_agents.clone(),
+            model_provider: self.model_provider.clone(),
+            sandbox_strength: self.sandbox_strength.clone(),
+            active_capabilities: self.active_capabilities.clone(),
         }
     }
 
