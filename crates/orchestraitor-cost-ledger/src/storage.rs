@@ -314,7 +314,6 @@ fn parse_kind_sql(value: &str) -> Result<CapKind, rusqlite::Error> {
 
 fn scope_filter(scope: BudgetScope, scope_id: &str) -> (&'static str, &str) {
     match scope {
-        BudgetScope::Organization | BudgetScope::User => ("?1 = ?1", scope_id),
         BudgetScope::Project => ("project = ?1", scope_id),
         BudgetScope::Session => ("session = ?1", scope_id),
         BudgetScope::Domain | BudgetScope::Agent => ("agent_domain_id = ?1", scope_id),

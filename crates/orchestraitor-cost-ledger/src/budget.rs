@@ -5,13 +5,16 @@ use crate::storage::CostLedger;
 use serde::{Deserialize, Serialize};
 
 /// Configurable budget scope from spec §9.19.6.
+///
+/// `Organization` and `User` scopes are intentionally **not** part of this enum: the
+/// `cost_entries` schema (spec §9.19.4) does not yet carry per-org or per-user
+/// attribution columns. Including them now would require a no-op filter that counts
+/// every ledger row against every org/user budget, which silently violates isolation.
+/// They will be added back once the corresponding attribution columns ship (tracked
+/// as a follow-up to this MEDIUM finding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BudgetScope {
-    /// Organization-wide budget scope.
-    Organization,
-    /// User budget scope.
-    User,
     /// Project budget scope.
     Project,
     /// Session budget scope.
@@ -27,8 +30,6 @@ impl BudgetScope {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Organization => "organization",
-            Self::User => "user",
             Self::Project => "project",
             Self::Session => "session",
             Self::Domain => "domain",

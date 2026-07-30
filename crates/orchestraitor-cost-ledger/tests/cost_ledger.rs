@@ -188,3 +188,150 @@ fn sample_cost_entry(
         routing_decision: String::from("project-default"),
     }
 }
+
+#[test]
+fn project_budget_does_not_count_other_projects_cost() {
+    // Regression guard for the MEDIUM finding where `scope_filter` mapped
+    // Organization/User to a no-op (`?1 = ?1`) that counted every ledger row
+    // against every org/user budget. After the fix, every scope must isolate
+    // by its column; this test pins the contract for `Project`.
+    let ledger = CostLedger::open_in_memory().unwrap();
+    let decoy = cost_entry_with_project("project-decoy", "req-decoy", 10_000, 0);
+    ledger.api_spend().insert_cost_entry(&decoy).unwrap();
+    let real = cost_entry_with_project("project-a", "req-real", 100, 0);
+    ledger.api_spend().insert_cost_entry(&real).unwrap();
+
+    let budget_id = ledger
+        .insert_budget(BudgetScope::Project, "project-a")
+        .unwrap();
+    ledger
+        .insert_cap(budget_id, CapMetric::Tokens, CapKind::Hard, 500.0)
+        .unwrap();
+    let request = BudgetRequest {
+        scope: BudgetScope::Project,
+        scope_id: String::from("project-a"),
+        token_estimate: 1,
+        cost_estimate: None,
+        fallback_route: None,
+    };
+
+    let decision = BudgetEnforcer::new(&ledger)
+        .pre_spawn_check(&request)
+        .unwrap();
+
+    assert!(
+        matches!(decision, PreSpawnDecision::Allow),
+        "project-a budget must not count project-decoy's 10_000 tokens (got {decision:?})"
+    );
+}
+
+#[test]
+fn session_budget_does_not_count_other_sessions_cost() {
+    // Regression guard for the same no-op `scope_filter` bug class, pinned for
+    // the `Session` scope so future scope additions cannot silently leak.
+    let ledger = CostLedger::open_in_memory().unwrap();
+    let decoy = cost_entry_with_session("sess-decoy", "req-decoy", 10_000, 0);
+    ledger.api_spend().insert_cost_entry(&decoy).unwrap();
+    let real = cost_entry_with_session("sess-a", "req-real", 100, 0);
+    ledger.api_spend().insert_cost_entry(&real).unwrap();
+
+    let budget_id = ledger
+        .insert_budget(BudgetScope::Session, "sess-a")
+        .unwrap();
+    ledger
+        .insert_cap(budget_id, CapMetric::Tokens, CapKind::Hard, 500.0)
+        .unwrap();
+    let request = BudgetRequest {
+        scope: BudgetScope::Session,
+        scope_id: String::from("sess-a"),
+        token_estimate: 1,
+        cost_estimate: None,
+        fallback_route: None,
+    };
+
+    let decision = BudgetEnforcer::new(&ledger)
+        .pre_spawn_check(&request)
+        .unwrap();
+
+    assert!(
+        matches!(decision, PreSpawnDecision::Allow),
+        "sess-a budget must not count sess-decoy's 10_000 tokens (got {decision:?})"
+    );
+}
+
+#[test]
+fn domain_budget_does_not_count_other_domains_cost() {
+    // Regression guard for the same no-op `scope_filter` bug class, pinned for
+    // the `Domain` scope. `Agent` shares the same filter expression in
+    // `scope_filter`, so this test transitively covers `Agent` at the SQL level.
+    let ledger = CostLedger::open_in_memory().unwrap();
+    let decoy = sample_cost_entry(
+        AgentId::from_string(String::from("backend-decoy")),
+        "req-decoy",
+        10_000,
+        0,
+    );
+    ledger.api_spend().insert_cost_entry(&decoy).unwrap();
+    let real = sample_cost_entry(
+        AgentId::from_string(String::from("backend")),
+        "req-real",
+        100,
+        0,
+    );
+    ledger.api_spend().insert_cost_entry(&real).unwrap();
+
+    let budget_id = ledger
+        .insert_budget(BudgetScope::Domain, "backend")
+        .unwrap();
+    ledger
+        .insert_cap(budget_id, CapMetric::Tokens, CapKind::Hard, 500.0)
+        .unwrap();
+    let request = BudgetRequest {
+        scope: BudgetScope::Domain,
+        scope_id: String::from("backend"),
+        token_estimate: 1,
+        cost_estimate: None,
+        fallback_route: None,
+    };
+
+    let decision = BudgetEnforcer::new(&ledger)
+        .pre_spawn_check(&request)
+        .unwrap();
+
+    assert!(
+        matches!(decision, PreSpawnDecision::Allow),
+        "backend budget must not count backend-decoy's 10_000 tokens (got {decision:?})"
+    );
+}
+
+fn cost_entry_with_project(
+    project: &str,
+    request_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> CostEntry {
+    let mut entry = sample_cost_entry(
+        AgentId::from_string(String::from("backend")),
+        request_id,
+        input_tokens,
+        output_tokens,
+    );
+    entry.project = String::from(project);
+    entry
+}
+
+fn cost_entry_with_session(
+    session: &str,
+    request_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> CostEntry {
+    let mut entry = sample_cost_entry(
+        AgentId::from_string(String::from("backend")),
+        request_id,
+        input_tokens,
+        output_tokens,
+    );
+    entry.session = SessionId::from_string(String::from(session));
+    entry
+}

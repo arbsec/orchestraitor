@@ -34,7 +34,12 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 - `orchestraitor-core` now merges dynamic configuration table entries field-by-field, includes
   structured error causes and source chains, and omits sensitive tracing fields entirely.
-- `orchestraitor-provider-meta` now falls through corrupt or unreadable cache snapshots to the
-  bundled `models.dev` catalog when the live endpoint is unavailable.
+- `orchestraitor-cost-ledger` no longer exposes `BudgetScope::Organization` or
+  `BudgetScope::User`. The `scope_filter` previously mapped both variants to the SQL
+  tautology `?1 = ?1`, so a budget configured for one org or user silently counted every
+  ledger row, breaking isolation. The variants are deferred until `cost_entries` ships
+  real per-org / per-user attribution columns. Project, Session, Domain, and Agent
+  scopes continue to filter on their own columns and gain explicit regression tests
+  pinning scope isolation.
 
 [Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD
