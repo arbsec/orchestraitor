@@ -1743,7 +1743,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a791e6620676a875f362f3156ed213e73ca099a09bf992c18812abe65cc37b1"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -3227,7 +3227,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
- "toml_edit 0.22.27",
+ "toml_edit 0.25.13+spec-1.1.0",
 ]
 
 [[package]]
@@ -3262,7 +3262,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "toml 1.1.4+spec-1.1.0",
- "toml_edit 0.22.27",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4914,6 +4914,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
