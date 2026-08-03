@@ -114,7 +114,7 @@ figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Git (tech-stack.md §1, §6)
-gix = { version = "0.85.0", default-features = false, features = ["sha1", "worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
+gix = { version = "0.86.0", default-features = false, features = ["sha1", "worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
 
 # Tree-sitter (tech-stack.md §1, §9.1)
 tree-sitter = "0.26.11"
