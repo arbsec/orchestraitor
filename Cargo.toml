@@ -111,7 +111,7 @@ toml_edit = "0.22"
 figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 
 # Storage (tech-stack.md §1, §11)
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Git (tech-stack.md §1, §6)
 gix = { version = "0.85.0", default-features = false, features = ["sha1", "worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
