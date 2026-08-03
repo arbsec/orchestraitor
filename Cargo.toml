@@ -120,7 +120,7 @@ gix = { version = "0.85.0", default-features = false, features = ["sha1", "workt
 tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23"
-tree-sitter-javascript = "0.23"
+tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-bash = "0.23"
