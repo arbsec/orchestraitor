@@ -8,6 +8,7 @@
 
 pub mod dag;
 pub mod metadata;
+pub mod review_loop;
 pub mod schedule;
 
 pub use dag::{DagError, TaskDag};
@@ -15,4 +16,5 @@ pub use metadata::{
     Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
 };
+pub use review_loop::{ReviewLoopConfig, ReviewLoopConfigError, Severity};
 pub use schedule::{ParallelScheduler, SchedulerConfig, SchedulerConfigError};

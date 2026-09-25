@@ -23,16 +23,21 @@ All notable changes to Orchestraitor are recorded here. The format follows
   topological order (ties break by stable task ID), cycle detection listing the involved tasks,
   construction-time rejection of unknown/duplicate edges, and dependency-satisfied eligibility
   per §9.33.3 (#199).
-- `orchestraitor-delivery` `ParallelScheduler` (§9.33.3): deterministic selection over the
-  eligibility frontier with global concurrency, per-domain caps, review-capacity gating that
-  bounds in-flight implementations plus review backlog, and expected-file overlap
-  (repository-conflict) avoidance. Provider/token budgets stay with the runner's cost-ledger
-  path (§9.19.5–9.19.6) — the scheduler deliberately does not touch them (#200).
 - `orchestraitor-testkit` crate with a deterministic `OpenAI` Chat Completions mock server
   (spec §21.3): scripted non-streaming, SSE-streaming, and structured-output responses with
   deterministic IDs/timestamps, sequence-ordered script replay (last plan repeats), HTTP
   failures (e.g. 429), and a request-capture API for exact client-behavior assertions. CI can
   now test provider integrations without a live provider (#175).
+- Configurable review-loop parameters on `orchestraitor-delivery` (spec §9.33.4):
+  `ReviewLoopConfig` with spec-mandated defaults (`max_review_loops: 3`, `max_reviewers: 5`,
+  `required_reviewer_domains: ["security"]`, `minimum_severity_to_block: "high"`,
+  `allow_same_model`/`require_provider_diversity`/`require_human_review`: false,
+  `stop_when_no_blocking_findings: true`), an ordered `Severity` enum with a
+  `blocks()` threshold helper, a `for_security_sensitive()` constructor that mandates human
+  review per §21.1, and structural validation rejecting zero loop/reviewer limits and blank
+  reviewer-domain entries. Serde surfaces `deny_unknown_fields` so drift fails visibly.
+  Blocking verdicts remain with the runner/policy layer per the §9.33.7 security boundary
+  (#198).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
