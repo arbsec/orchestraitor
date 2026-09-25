@@ -8,6 +8,14 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `orchestraitor-delivery` crate (spec §9.33) with validated `TaskMetadata` for the
+  autonomous-delivery backlog: stable deterministic task ID, spec-requirement refs, acceptance
+  criteria, DAG dependency edges, domain + risk classification, expected files, required
+  verification/reviewer domains, autonomy level, routing override, named §9.26 retry-policy
+  profile, and completion-evidence kinds. Structural validation rejects empty identity/title,
+  self- or duplicate dependencies, missing spec refs or acceptance criteria, and
+  critical-risk tasks without a required security reviewer (§9.33.4) (#201).
+
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key

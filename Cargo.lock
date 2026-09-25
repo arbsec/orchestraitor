@@ -3689,6 +3689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-delivery"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "orchestraitor-events"
 version = "0.0.0"
 dependencies = [
