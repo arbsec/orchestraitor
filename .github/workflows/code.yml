@@ -38,6 +38,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
+      - name: Skill script self-tests
+        run: .agents/skills/github-project-workflow/scripts/tests/ready-queue-filter.bash
 
   test:
     name: Test (${{ matrix.os }})
