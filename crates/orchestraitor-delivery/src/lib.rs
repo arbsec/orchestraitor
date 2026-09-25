@@ -8,6 +8,7 @@
 
 pub mod convergence;
 pub mod dag;
+pub mod escalation;
 pub mod failures;
 pub mod findings;
 pub mod metadata;
@@ -20,6 +21,10 @@ pub use convergence::{
     DEFAULT_HARD_LOOP_CEILING,
 };
 pub use dag::{DagError, TaskDag};
+pub use escalation::{
+    EscalationOutcome, EscalationPolicy, EscalationPolicyError, EscalationState, EscalationStep,
+    next_escalation,
+};
 pub use failures::{
     DEFAULT_RETRY_DELAY_MS, DeliveryPhase, FailureClass, FailureLedger, FailureRecord,
     RetryDecision, classify,
