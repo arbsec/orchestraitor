@@ -12,6 +12,7 @@ pub mod escalation;
 pub mod failures;
 pub mod findings;
 pub mod metadata;
+pub mod retry_rules;
 pub mod review_loop;
 pub mod reviewer_selection;
 pub mod schedule;
@@ -36,6 +37,10 @@ pub use findings::{
 pub use metadata::{
     Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
+};
+pub use retry_rules::{
+    DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_DELAY_MS, IdempotencyProof, RetryGate, RetrySchedule,
+    RetryScheduleError,
 };
 pub use review_loop::{ReviewLoopConfig, ReviewLoopConfigError, Severity};
 pub use reviewer_selection::{

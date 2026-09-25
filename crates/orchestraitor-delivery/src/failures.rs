@@ -161,8 +161,9 @@ pub struct FailureRecord {
     /// time").
     pub next_retry_ms: Option<u64>,
     /// Stable correlation ID matching the §9.24.2 operation ID so logs,
-    /// receipts, and checkpoints join up across the chain (§9.33.5 tracing;
-    /// "even those MUST include a correlation ID"). Never a secret (§9.23.4).
+    /// receipts, and checkpoints join up across the chain (§9.34,
+    /// spec.md:3107; "even those MUST include a correlation ID"). Never a
+    /// secret (§9.23.4).
     pub correlation_id: String,
 }
 
@@ -265,6 +266,10 @@ pub fn classify(
 /// [`classify`] and enforced by the runner/policy layer (§9.33.7). Entries
 /// persist in the §9.33.6 durable store as serialized [`FailureRecord`]
 /// values.
+///
+/// The in-memory `Vec` is unbounded per the §9.33.5 persist-every-error
+/// mandate; retention and offload to the §9.33.6 durable store are the
+/// runner's concern, not this module's.
 #[derive(Debug, Default)]
 pub struct FailureLedger {
     records: Vec<FailureRecord>,
@@ -638,6 +643,12 @@ mod tests {
         let json = serde_json::to_string_pretty(&sample)?;
         let back: FailureRecord = serde_json::from_str(&json)?;
         assert_eq!(back, sample);
+
+        // The unmodified record (next_retry_ms: None) round-trips too.
+        let none_sample = record("delivery-failures", FailureClass::RateLimit, false);
+        let json = serde_json::to_string_pretty(&none_sample)?;
+        let back: FailureRecord = serde_json::from_str(&json)?;
+        assert_eq!(back, none_sample);
         Ok(())
     }
 
