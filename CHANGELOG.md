@@ -61,6 +61,18 @@ All notable changes to Orchestraitor are recorded here. The format follows
   retriable-class queries. Policy denials, missing approvals, and non-retriable configuration
   or security failures can never classify to a retry variant; classification proposes and
   Arbitraitor owns the policy verdicts (§2.2, §9.33.7) (#205).
+- Escalation chain on `orchestraitor-delivery` (spec §9.33.5): `EscalationStep` with exactly
+  the five mandated ladder steps (same agent with fresh context → alternate model → domain
+  expert → revised task plan → human escalation), a configurable `EscalationPolicy` whose
+  default is the full ladder in spec order and whose validation rejects empty ladders,
+  reordered or duplicated steps, and ladders not ending at `human_escalation` (a policy may
+  shorten the ordered chain but never reorder it, §9.22.4), and an `EscalationState` tracker
+  with a saturating per-step failure counter, explicit `advance()`, and an append-only ordered
+  history of left steps. The pure `next_escalation` proposes only `RetryAt { step }` at the
+  current step or the terminal `HumanEscalation` — every step spawns a fresh context
+  (§9.33.1, §7.3), per-step attempt budgets stay with the runner's retry policy (§9.26,
+  §9.22.1), and no outcome carries auto-approve semantics: escalation proposes, the
+  runner/policy layer executes, and Arbitraitor approves (§2.2, §9.33.7) (#206).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional
