@@ -23,6 +23,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
   topological order (ties break by stable task ID), cycle detection listing the involved tasks,
   construction-time rejection of unknown/duplicate edges, and dependency-satisfied eligibility
   per §9.33.3 (#199).
+- `orchestraitor-delivery` `ParallelScheduler` (§9.33.3): deterministic selection over the
+  eligibility frontier with global concurrency, per-domain caps, review-capacity gating that
+  bounds in-flight implementations plus review backlog, and expected-file overlap
+  (repository-conflict) avoidance. Provider/token budgets stay with the runner's cost-ledger
+  path (§9.19.5–9.19.6) — the scheduler deliberately does not touch them (#200).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
