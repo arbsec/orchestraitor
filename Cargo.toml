@@ -13,6 +13,7 @@ members = [
     "crates/orchestraitor-core",
     "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-daemon",
+    "crates/orchestraitor-delivery",
     "crates/orchestraitor-events",
     "crates/orchestraitor-lifecycle",
     "crates/orchestraitor-mcp",
