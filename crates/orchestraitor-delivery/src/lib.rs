@@ -9,6 +9,6 @@
 pub mod metadata;
 
 pub use metadata::{
-    Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass, SpecRef,
-    TaskMetadata, VerificationRef,
+    Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
+    SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
 };

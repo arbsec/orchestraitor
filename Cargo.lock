@@ -3692,6 +3692,7 @@ dependencies = [
 name = "orchestraitor-delivery"
 version = "0.0.0"
 dependencies = [
+ "orchestraitor-model",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

@@ -12,8 +12,9 @@ description = "Spec-driven autonomous delivery: task metadata, backlog DAG, runn
 workspace = true
 
 [dependencies]
+orchestraitor-model = { path = "../orchestraitor-model" }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true

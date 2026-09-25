@@ -2,13 +2,25 @@
 //!
 //! Each backlog task is a thin vertical slice carrying everything the runner,
 //! reviewers, and the audit trail need: traceability to spec requirements,
-//! DAG edges, routing and retry policy references, and the evidence that must
-//! exist before the task counts as done. Validity of the *content* (does the
-//! named check exist in CI, does the domain exist in the agent catalog) is
-//! enforced by the consumers; this module enforces structural validity.
+//! DAG edges, domain and risk/data-sensitivity classification, routing and
+//! retry policy references, and the evidence that must exist before the task
+//! counts as done. Structural validity is enforced here; semantic validity
+//! (does the named CI check exist, does the domain exist in the agent
+//! catalog) is enforced by the consumers.
+//!
+//! Durable persistence note (spec §9.33.6): serializers that store
+//! [`TaskMetadata`] MUST wrap it in a versioned envelope keyed by
+//! [`SCHEMA_VERSION`] and MUST run [`TaskMetadata::validate`] immediately after
+//! loading, so future schema changes fail visibly instead of silently
+//! deserializing into wrong defaults.
 
+use orchestraitor_model::DataSensitivity;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Current schema version of the task metadata record, for the versioned
+/// persistence envelope used by durable storage (§9.33.6).
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Stable backlog task identifier (spec §9.33.2 "stable ID").
 ///
@@ -77,7 +89,10 @@ impl DomainId {
     }
 }
 
-/// Risk classification (mirrors the delivery board's Risk field).
+/// Delivery-board risk classification (Low–Critical), distinct from
+/// [`DataSensitivity`]: risk drives review strictness and escalation, while
+/// data sensitivity drives §9.28 routing constraints (§9.33.2 "domain and risk
+/// classification ... maps to §9.19.1 domain + §9.28 data sensitivity").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskClass {
@@ -92,27 +107,24 @@ pub enum RiskClass {
 }
 
 /// Autonomy level of the implementer for this task (spec §9.33.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Autonomy {
     /// Runs without human interaction; may still hit Arbitraitor approval gates.
     Full,
     /// Autonomous execution with human-visible checkpoints.
-    #[default]
     Guided,
     /// Every step is gated on the operator.
     Manual,
 }
 
-/// Named required-verification check (spec §21.10 registry).
+/// Reference to a named required-verification check in the project-managed
+/// verification registry (spec §21.10). Metadata carries the stable registry
+/// key only; executable invocations live in the trusted registry, never in
+/// backlog content (backlog metadata is untrusted input, spec §6.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationRef {
-    /// Registry name of the check (e.g. `cargo-clippy`, `nextest-workspace`).
-    pub name: String,
-    /// Invocation override when the registry default does not suffice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
+#[serde(transparent)]
+pub struct VerificationRef(pub String);
 
 /// Evidence that proves a task is done (spec §9.33.2 "completion evidence").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,12 +150,18 @@ pub enum CompletionEvidence {
 /// Structural validation failure for [`TaskMetadata`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MetadataError {
-    /// The task identifier is empty.
+    /// The task identifier is empty or whitespace.
     #[error("task id must not be empty")]
     EmptyId,
-    /// The title is empty.
+    /// The title is empty or whitespace.
     #[error("task title must not be empty")]
     EmptyTitle,
+    /// The objective is empty or whitespace.
+    #[error("task {id} must have a non-empty objective")]
+    EmptyObjective {
+        /// Offending task.
+        id: String,
+    },
     /// No spec requirement references; traceability (§9.33.2) requires ≥1.
     #[error("task {id} must reference at least one spec requirement")]
     NoSpecRefs {
@@ -156,9 +174,33 @@ pub enum MetadataError {
         /// Offending task.
         id: String,
     },
-    /// The domain is empty.
+    /// The domain is empty or whitespace.
     #[error("task {id} must carry a domain classification")]
     EmptyDomain {
+        /// Offending task.
+        id: String,
+    },
+    /// No required-verification checks; completion is undecidable (§9.33.2).
+    #[error("task {id} must require at least one named verification")]
+    NoVerification {
+        /// Offending task.
+        id: String,
+    },
+    /// No required reviewer domains; review capacity cannot be planned (§9.33.4).
+    #[error("task {id} must require at least one reviewer domain")]
+    NoReviewerDomains {
+        /// Offending task.
+        id: String,
+    },
+    /// No completion evidence kinds; done-ness cannot be proven (§9.33.2).
+    #[error("task {id} must name at least one completion-evidence kind")]
+    NoCompletionEvidence {
+        /// Offending task.
+        id: String,
+    },
+    /// The named retry-policy profile is empty.
+    #[error("task {id} must name a retry-policy profile")]
+    EmptyRetryPolicy {
         /// Offending task.
         id: String,
     },
@@ -176,9 +218,11 @@ pub enum MetadataError {
         /// Duplicated dependency.
         dep: String,
     },
-    /// Security-reviewer requirement is mandatory for critical risk (spec §9.33.4).
-    #[error("critical-risk task {id} must require the security reviewer domain")]
-    CriticalWithoutSecurityReview {
+    /// Security-reviewer requirement is mandatory for security-relevant tasks
+    /// (§9.33.4: task domain is `security`, risk is `Critical`, or data
+    /// sensitivity is Confidential/Restricted).
+    #[error("security-relevant task {id} must require the security reviewer domain")]
+    SecurityReviewRequired {
         /// Offending task.
         id: String,
     },
@@ -202,36 +246,38 @@ pub struct TaskMetadata {
     pub dependencies: Vec<BacklogTaskId>,
     /// Agent-catalog domain for routing and reviewer selection.
     pub domain: DomainId,
-    /// Risk classification driving review strictness and human gates.
+    /// Delivery-board risk classification driving review strictness.
     pub risk: RiskClass,
+    /// §9.28 data sensitivity of what the task reads/writes, used for routing.
+    pub data_sensitivity: DataSensitivity,
     /// Files or components the change is expected to touch (review scoping).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_files: Vec<String>,
-    /// Named checks that must pass before review (spec §9.33.2).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Named registry checks that must pass before review (spec §9.33.2).
     pub required_verification: Vec<VerificationRef>,
     /// Reviewer domains that must cover the change set (spec §9.33.4).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_reviewer_domains: Vec<DomainId>,
-    /// Autonomy level (default `guided`).
-    #[serde(default)]
+    /// Autonomy level.
     pub autonomy: Autonomy,
     /// Explicit model route override; `None` defers to the §9.19.2 chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<String>,
-    /// Named §9.26 retry/budget policy profile (default `default`).
-    #[serde(default = "default_retry_policy")]
+    /// Named §9.26 retry/budget policy profile.
     pub retry_policy: String,
     /// Evidence that must exist before the task counts as done.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completion_evidence: Vec<CompletionEvidence>,
 }
 
-fn default_retry_policy() -> String {
-    "default".to_string()
-}
-
 impl TaskMetadata {
+    /// Returns true when the task is security-relevant for reviewer selection
+    /// (§9.33.4): security domain, critical risk, or confidential/restricted data.
+    #[must_use]
+    pub fn is_security_relevant(&self) -> bool {
+        self.risk == RiskClass::Critical
+            || self.data_sensitivity >= DataSensitivity::Confidential
+            || self.domain.as_str() == "security"
+    }
+
     /// Validates structural invariants (spec §9.33.2 fields and §9.33.4 rules).
     ///
     /// # Errors
@@ -242,17 +288,42 @@ impl TaskMetadata {
             return Err(MetadataError::EmptyId);
         }
         let id = self.id.to_string();
-        if self.title.is_empty() {
+        if self.title.trim().is_empty() {
             return Err(MetadataError::EmptyTitle);
+        }
+        if self.objective.trim().is_empty() {
+            return Err(MetadataError::EmptyObjective { id });
         }
         if self.spec_refs.is_empty() {
             return Err(MetadataError::NoSpecRefs { id });
         }
-        if self.acceptance_criteria.is_empty() {
+        if self.spec_refs.iter().any(|r| r.as_str().trim().is_empty()) {
+            return Err(MetadataError::NoSpecRefs { id });
+        }
+        if self.acceptance_criteria.iter().all(|c| c.trim().is_empty()) {
             return Err(MetadataError::NoAcceptanceCriteria { id });
         }
-        if self.domain.as_str().is_empty() {
+        if self.domain.as_str().trim().is_empty() {
             return Err(MetadataError::EmptyDomain { id });
+        }
+        if self.required_verification.is_empty() {
+            return Err(MetadataError::NoVerification { id });
+        }
+        if self
+            .required_verification
+            .iter()
+            .any(|v| v.0.trim().is_empty())
+        {
+            return Err(MetadataError::NoVerification { id });
+        }
+        if self.required_reviewer_domains.is_empty() {
+            return Err(MetadataError::NoReviewerDomains { id });
+        }
+        if self.completion_evidence.is_empty() {
+            return Err(MetadataError::NoCompletionEvidence { id });
+        }
+        if self.retry_policy.trim().is_empty() {
+            return Err(MetadataError::EmptyRetryPolicy { id });
         }
         if self.dependencies.contains(&self.id) {
             return Err(MetadataError::SelfDependency { id });
@@ -267,13 +338,13 @@ impl TaskMetadata {
             }
             seen.push(dep.clone());
         }
-        if self.risk == RiskClass::Critical
+        if self.is_security_relevant()
             && !self
                 .required_reviewer_domains
                 .iter()
                 .any(|d| d.as_str() == "security")
         {
-            return Err(MetadataError::CriticalWithoutSecurityReview { id });
+            return Err(MetadataError::SecurityReviewRequired { id });
         }
         Ok(())
     }
@@ -281,9 +352,9 @@ impl TaskMetadata {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn sample() -> TaskMetadata {
         TaskMetadata {
@@ -295,15 +366,13 @@ mod tests {
             dependencies: vec![BacklogTaskId::new("delivery-metadata")],
             domain: DomainId::new("backend"),
             risk: RiskClass::Medium,
+            data_sensitivity: DataSensitivity::Internal,
             expected_files: vec!["crates/orchestraitor-delivery/src/dag.rs".to_string()],
-            required_verification: vec![VerificationRef {
-                name: "nextest-workspace".to_string(),
-                command: None,
-            }],
+            required_verification: vec![VerificationRef("nextest-workspace".to_string())],
             required_reviewer_domains: vec![DomainId::new("backend")],
             autonomy: Autonomy::Guided,
             routing: None,
-            retry_policy: default_retry_policy(),
+            retry_policy: "default".to_string(),
             completion_evidence: vec![CompletionEvidence::Verification {
                 name: "nextest-workspace".to_string(),
             }],
@@ -311,35 +380,35 @@ mod tests {
     }
 
     #[test]
-    fn metadata_round_trips_through_json() {
+    fn metadata_round_trips_through_json() -> TestResult {
         let task = sample();
-        let json = serde_json::to_string_pretty(&task).unwrap();
-        let back: TaskMetadata = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&task)?;
+        let back: TaskMetadata = serde_json::from_str(&json)?;
         assert_eq!(task, back);
+        Ok(())
     }
 
     #[test]
-    fn defaults_are_applied_on_deserialize() {
+    fn deserializing_old_or_partial_records_fails_visibly() {
+        // No silent defaults: privacy-relevant and completion-contract fields
+        // are mandatory in serialized form.
         let json = r#"{
-            "id": "review-convergence",
-            "spec_refs": ["9.33.4"],
-            "title": "Convergence check",
-            "objective": "One full generation with no new findings converges",
-            "acceptance_criteria": ["no noteworthy findings converges"],
+            "id": "legacy-task",
+            "spec_refs": ["9.33.2"],
+            "title": "legacy",
+            "objective": "pre-schema record",
+            "acceptance_criteria": ["x"],
             "dependencies": [],
-            "domain": "testing",
-            "risk": "high"
+            "domain": "backend",
+            "risk": "low"
         }"#;
-        let task: TaskMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(task.autonomy, Autonomy::Guided);
-        assert_eq!(task.retry_policy, "default");
-        assert!(task.required_verification.is_empty());
-        assert!(task.completion_evidence.is_empty());
+        assert!(serde_json::from_str::<TaskMetadata>(json).is_err());
     }
 
     #[test]
-    fn valid_metadata_passes_validation() {
-        sample().validate().unwrap();
+    fn valid_internal_task_passes_validation() -> TestResult {
+        sample().validate()?;
+        Ok(())
     }
 
     #[test]
@@ -350,28 +419,36 @@ mod tests {
     }
 
     #[test]
-    fn empty_title_is_rejected() {
+    fn whitespace_title_is_rejected() {
         let mut task = sample();
-        task.title.clear();
+        task.title = "   ".to_string();
         assert_eq!(task.validate(), Err(MetadataError::EmptyTitle));
+    }
+
+    #[test]
+    fn empty_objective_is_rejected() {
+        let mut task = sample();
+        task.objective.clear();
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::EmptyObjective { .. })
+        ));
     }
 
     #[test]
     fn missing_spec_refs_break_traceability() {
         let mut task = sample();
         task.spec_refs.clear();
-        assert_eq!(
+        assert!(matches!(
             task.validate(),
-            Err(MetadataError::NoSpecRefs {
-                id: "delivery-dag-toposort".to_string()
-            })
-        );
+            Err(MetadataError::NoSpecRefs { .. })
+        ));
     }
 
     #[test]
-    fn missing_acceptance_criteria_is_rejected() {
+    fn blank_acceptance_criteria_are_rejected() {
         let mut task = sample();
-        task.acceptance_criteria.clear();
+        task.acceptance_criteria = vec!["  ".to_string()];
         assert!(matches!(
             task.validate(),
             Err(MetadataError::NoAcceptanceCriteria { .. })
@@ -379,12 +456,42 @@ mod tests {
     }
 
     #[test]
-    fn empty_domain_is_rejected() {
+    fn missing_verification_is_rejected() {
         let mut task = sample();
-        task.domain = DomainId::new("");
+        task.required_verification.clear();
         assert!(matches!(
             task.validate(),
-            Err(MetadataError::EmptyDomain { .. })
+            Err(MetadataError::NoVerification { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_reviewer_domains_are_rejected() {
+        let mut task = sample();
+        task.required_reviewer_domains.clear();
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::NoReviewerDomains { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_completion_evidence_is_rejected() {
+        let mut task = sample();
+        task.completion_evidence.clear();
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::NoCompletionEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_retry_policy_is_rejected() {
+        let mut task = sample();
+        task.retry_policy.clear();
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::EmptyRetryPolicy { .. })
         ));
     }
 
@@ -410,17 +517,35 @@ mod tests {
     }
 
     #[test]
-    fn critical_risk_requires_security_reviewer() {
+    fn security_relevance_requires_security_reviewer() -> TestResult {
+        // Critical risk.
         let mut task = sample();
         task.risk = RiskClass::Critical;
-        assert_eq!(
+        assert!(matches!(
             task.validate(),
-            Err(MetadataError::CriticalWithoutSecurityReview {
-                id: "delivery-dag-toposort".to_string()
-            })
-        );
+            Err(MetadataError::SecurityReviewRequired { .. })
+        ));
         task.required_reviewer_domains
             .push(DomainId::new("security"));
-        task.validate().unwrap();
+        task.validate()?;
+
+        // Security domain alone triggers it.
+        let mut task = sample();
+        task.domain = DomainId::new("security");
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::SecurityReviewRequired { .. })
+        ));
+
+        // Confidential/Restricted data triggers it; Internal does not.
+        let mut task = sample();
+        task.data_sensitivity = DataSensitivity::Confidential;
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::SecurityReviewRequired { .. })
+        ));
+        task.data_sensitivity = DataSensitivity::Internal;
+        task.validate()?;
+        Ok(())
     }
 }
