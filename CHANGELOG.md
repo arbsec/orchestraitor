@@ -48,6 +48,19 @@ All notable changes to Orchestraitor are recorded here. The format follows
   `DEFAULT_HARD_LOOP_CEILING: 5` is reached — the explicit `blocked`/`needs-human` state
   §9.33.4 mandates, never silent approval. There is no approve/pass variant: a converged
   verdict means "stop the loop; the runner/policy decides promotion" (§2.2, §9.33.7) (#197).
+- Delivery failure classification on `orchestraitor-delivery` (spec §9.33.5): `FailureClass`
+  with exactly the nine mandated classes (transient provider or network, rate limit, tool or
+  process, verification, merge conflict, invalid agent output, policy denial, approval
+  required, non-retriable configuration or security), the persisted `FailureRecord` covering
+  the §9.33.5 field list (task + attempt IDs, decompose/implement/verify/review/remediate
+  `DeliveryPhase`, agent/model/provider display strings, normalized class, retriable status,
+  workspace generation, evidence, partial-results flag, next retry time, and a §9.24.2-aligned
+  `correlation_id`), a pure `classify` mapping class plus attempt context to a `RetryDecision`
+  (`Retry`, rate-limit `retry-after` `Hold`, `FixRootCause`, bounded fresh-context `Reprompt`,
+  `AwaitUser`, `Escalate`), and an append-only `FailureLedger` with per-class counts and
+  retriable-class queries. Policy denials, missing approvals, and non-retriable configuration
+  or security failures can never classify to a retry variant; classification proposes and
+  Arbitraitor owns the policy verdicts (§2.2, §9.33.7) (#205).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional

@@ -8,6 +8,7 @@
 
 pub mod convergence;
 pub mod dag;
+pub mod failures;
 pub mod findings;
 pub mod metadata;
 pub mod review_loop;
@@ -18,6 +19,10 @@ pub use convergence::{
     DEFAULT_HARD_LOOP_CEILING,
 };
 pub use dag::{DagError, TaskDag};
+pub use failures::{
+    DEFAULT_RETRY_DELAY_MS, DeliveryPhase, FailureClass, FailureLedger, FailureRecord,
+    RetryDecision, classify,
+};
 pub use findings::{
     FindingError, FindingId, FindingLedger, FindingStatus, LedgerEntry, RecordOutcome,
     ReviewFinding,
