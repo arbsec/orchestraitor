@@ -73,6 +73,20 @@ All notable changes to Orchestraitor are recorded here. The format follows
   (§9.33.1, §7.3), per-step attempt budgets stay with the runner's retry policy (§9.26,
   §9.22.1), and no outcome carries auto-approve semantics: escalation proposes, the
   runner/policy layer executes, and Arbitraitor approves (§2.2, §9.33.7) (#206).
+- Retry gate and bounded backoff schedule on `orchestraitor-delivery` (spec §9.33.5,
+  §9.26.3): `IdempotencyProof` carries the typed evidence that a side-effecting operation
+  may be retried (checkpoint resume per §9.24.2, proven-idempotency marker, or rolled-back
+  effects — `Unproven` for absent evidence), and the pure `RetryGate::evaluate` re-asserts
+  the classification invariants before the runner executes any retry: unproven
+  tool/process failures override an incoming `Retry` to `FixRootCause` ("NEVER blindly
+  retry side-effecting actions"), and policy denials, approval requirements, and
+  non-retriable configuration or security failures always resolve to `Escalate`/`AwaitUser`
+  regardless of proof — no proof can launder a policy denial. `RetrySchedule` proposes the
+  §9.26.2 doubling backoff (base 200 ms, saturating at the `u64` boundary, capped at
+  `max_delay_ms`, no jitter — jitter and budgets stay with the runner) with structural
+  validation rejecting a zero base or a cap below the base. The gate is bookkeeping only:
+  classification proposes, the gate re-asserts, and Arbitraitor owns every security verdict
+  and enforcement decision (§2.2, §9.33.7) (#207).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional
