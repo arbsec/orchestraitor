@@ -50,6 +50,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Fixed
 
+- Lockfile refresh for yanked and advisory-flagged crates so `cargo deny check` and
+  `cargo audit` pass again: `chacha20 0.10.1 → 0.10.2` (yanked), `h2 0.4.15 → 0.4.19`
+  (RUSTSEC-2026-0258), `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285, with
+  `rustls-webpki 0.103.15`), `faster-hex 0.10.0 → 0.10.1` (RUSTSEC-2026-0306 warning).
+  All bumps stay inside the existing semver ranges; no manifest changes (#255).
 - `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
   new path with unchanged content is recognised as reuse, not reparse. Paths present in the
   previous index but absent from the new traversal are also evicted on reindex, so deleted
