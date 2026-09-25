@@ -38,6 +38,16 @@ All notable changes to Orchestraitor are recorded here. The format follows
   reviewer-domain entries. Serde surfaces `deny_unknown_fields` so drift fails visibly.
   Blocking verdicts remain with the runner/policy layer per the §9.33.7 security boundary
   (#198).
+- Review-loop convergence check on `orchestraitor-delivery` (spec §9.33.4): `evaluate` renders
+  a deterministic `ConvergenceVerdict` over the findings ledger and `ReviewLoopConfig` —
+  `Converged` only when a full review generation confirmed at the current head produced no new
+  noteworthy findings, no open non-stale finding meets the blocking threshold, no stale
+  finding would block if re-confirmed, and `stop_when_no_blocking_findings` is set;
+  `Continue { next_loop }` while remediation budget remains; and `Blocked` with
+  `MaxReviewLoops` / `ReviewBudgetHardCeiling` reasons when a configured limit or the absolute
+  `DEFAULT_HARD_LOOP_CEILING: 5` is reached — the explicit `blocked`/`needs-human` state
+  §9.33.4 mandates, never silent approval. There is no approve/pass variant: a converged
+  verdict means "stop the loop; the runner/policy decides promotion" (§2.2, §9.33.7) (#197).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional
