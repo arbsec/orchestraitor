@@ -61,6 +61,20 @@ All notable changes to Orchestraitor are recorded here. The format follows
   later convergence checker (#197) can discount them. `blocking_open_count` aggregates via
   `Severity::blocks` while discounting stale entries; no verdicts — blocking decisions stay
   with the runner/policy layer per §9.33.7 (#196).
+- Reviewer selection on `orchestraitor-delivery` (spec §9.33.4): `select_reviewers` turns a
+  pre-classified `ChangeSetProfile` (changed files, languages, task domain, risk,
+  dependency/config and auth/permissions/scripts/execution flags, coverage, Arbitraitor
+  findings) plus the `ReviewLoopConfig` into a deterministic `ReviewerSet` of `(domain, role)`
+  slots with a recorded `SelectionReason`. Selection always appends the general baseline
+  first, triggers the security reviewer on auth/permissions/dependencies/CI/scripts/execution
+  surface, critical risk, a security task domain, or Arbitraitor findings, matches the task
+  domain (covering the example's backend/frontend rows without a hardcoded taxonomy), and adds
+  the testing reviewer when coverage or verification changed. Domains deduplicate with the
+  highest-priority reason winning, `required_reviewer_domains` are always present and survive
+  `max_reviewers` truncation while counting toward the cap, and a required list that exceeds
+  the cap fails as `ConfigUnsatisfiable`. The `Language` enum degrades unknown tags to
+  `other`. Selection only proposes reviewers — gating and verdicts remain with the runner and
+  Arbitraitor per the §9.33.7 security boundary (#195).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key

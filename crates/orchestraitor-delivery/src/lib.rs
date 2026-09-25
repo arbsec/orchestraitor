@@ -11,6 +11,7 @@ pub mod dag;
 pub mod findings;
 pub mod metadata;
 pub mod review_loop;
+pub mod reviewer_selection;
 pub mod schedule;
 
 pub use convergence::{
@@ -27,4 +28,8 @@ pub use metadata::{
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
 };
 pub use review_loop::{ReviewLoopConfig, ReviewLoopConfigError, Severity};
+pub use reviewer_selection::{
+    ChangeSetProfile, GENERAL_DOMAIN, Language, ROLE_REVIEWING, ReviewerSelectionError,
+    ReviewerSet, ReviewerSlot, SECURITY_DOMAIN, SelectionReason, TESTING_DOMAIN, select_reviewers,
+};
 pub use schedule::{ParallelScheduler, SchedulerConfig, SchedulerConfigError};
