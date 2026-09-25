@@ -38,6 +38,19 @@ All notable changes to Orchestraitor are recorded here. The format follows
   reviewer-domain entries. Serde surfaces `deny_unknown_fields` so drift fails visibly.
   Blocking verdicts remain with the runner/policy layer per the §9.33.7 security boundary
   (#198).
+- Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
+  and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
+  evidence, affected paths, violated requirement or rule, proposed remediation, optional
+  line span), and `FindingId` derives a stable `(path, line, rule)` dedup key with lexical
+  path normalization (leading `./` segments, trailing slashes, surrounding whitespace
+  stripped). `FindingLedger` dedups re-reports across loops (tracking first/last loop,
+  occurrences, and per-generation heads), updates latest severity while keeping the maximum
+  severity ever seen for blocking aggregation, reopens findings that resurface after
+  resolution, resolves findings absent from a completed generation via
+  `resolve_unreported`, and flags open findings stale on `note_head` HEAD movement so a
+  later convergence checker (#197) can discount them. `blocking_open_count` aggregates via
+  `Severity::blocks` while discounting stale entries; no verdicts — blocking decisions stay
+  with the runner/policy layer per §9.33.7 (#196).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key

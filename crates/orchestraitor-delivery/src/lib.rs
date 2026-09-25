@@ -7,11 +7,16 @@
 //! receipts belong to Arbitraitor (spec §2.2, §9.33.7).
 
 pub mod dag;
+pub mod findings;
 pub mod metadata;
 pub mod review_loop;
 pub mod schedule;
 
 pub use dag::{DagError, TaskDag};
+pub use findings::{
+    FindingError, FindingId, FindingLedger, FindingStatus, LedgerEntry, RecordOutcome,
+    ReviewFinding,
+};
 pub use metadata::{
     Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
