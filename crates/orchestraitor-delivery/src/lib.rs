@@ -6,8 +6,10 @@
 //! Security decisions are never made here — policy, approvals, sandboxing, and
 //! receipts belong to Arbitraitor (spec §2.2, §9.33.7).
 
+pub mod dag;
 pub mod metadata;
 
+pub use dag::{DagError, TaskDag};
 pub use metadata::{
     Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
