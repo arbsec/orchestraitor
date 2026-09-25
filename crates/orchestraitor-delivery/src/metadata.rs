@@ -300,19 +300,21 @@ impl TaskMetadata {
         if self.spec_refs.iter().any(|r| r.as_str().trim().is_empty()) {
             return Err(MetadataError::NoSpecRefs { id });
         }
-        if self.acceptance_criteria.iter().any(|c| c.trim().is_empty()) {
-            return Err(MetadataError::NoAcceptanceCriteria { id });
-        }
         if self.domain.as_str().trim().is_empty() {
             return Err(MetadataError::EmptyDomain { id });
-        }
-        if self.required_verification.is_empty() {
-            return Err(MetadataError::NoVerification { id });
         }
         if self.acceptance_criteria.is_empty()
             || self.acceptance_criteria.iter().any(|c| c.trim().is_empty())
         {
             return Err(MetadataError::NoAcceptanceCriteria { id });
+        }
+        if self.required_verification.is_empty()
+            || self
+                .required_verification
+                .iter()
+                .any(|v| v.0.trim().is_empty())
+        {
+            return Err(MetadataError::NoVerification { id });
         }
         if self.required_reviewer_domains.is_empty() {
             return Err(MetadataError::NoReviewerDomains { id });
