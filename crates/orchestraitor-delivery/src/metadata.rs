@@ -309,12 +309,10 @@ impl TaskMetadata {
         if self.required_verification.is_empty() {
             return Err(MetadataError::NoVerification { id });
         }
-        if self
-            .required_verification
-            .iter()
-            .any(|v| v.0.trim().is_empty())
+        if self.acceptance_criteria.is_empty()
+            || self.acceptance_criteria.iter().any(|c| c.trim().is_empty())
         {
-            return Err(MetadataError::NoVerification { id });
+            return Err(MetadataError::NoAcceptanceCriteria { id });
         }
         if self.required_reviewer_domains.is_empty() {
             return Err(MetadataError::NoReviewerDomains { id });
@@ -466,6 +464,16 @@ mod tests {
     fn blank_acceptance_criteria_are_rejected() {
         let mut task = sample();
         task.acceptance_criteria = vec!["  ".to_string()];
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::NoAcceptanceCriteria { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_acceptance_criteria_list_is_rejected() {
+        let mut task = sample();
+        task.acceptance_criteria.clear();
         assert!(matches!(
             task.validate(),
             Err(MetadataError::NoAcceptanceCriteria { .. })
