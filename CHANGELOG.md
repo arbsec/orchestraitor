@@ -55,6 +55,14 @@ All notable changes to Orchestraitor are recorded here. The format follows
   (RUSTSEC-2026-0258), `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285, with
   `rustls-webpki 0.103.15`), `faster-hex 0.10.0 → 0.10.1` (RUSTSEC-2026-0306 warning).
   All bumps stay inside the existing semver ranges; no manifest changes (#255).
+- Restored `crates/orchestraitor-workspace/`, which the provider-proxy squash merge (b96657f, PR
+  #223) had deleted after PR #219 merged it (spec §9.4, MVP-4). `orchestraitor-tui` and
+  `orchestraitor-provider-neuralwatt` were likewise absent from `[workspace].members`. All crates
+  are now listed explicitly so `cargo --workspace` parity-gate commands cover every crate
+  regardless of the dependency graph. During verification, `orchestraitor-workspace`
+  `tests::snapshot_has_no_dot_git` failed once on a cold cache and then passed in one isolated
+  and four consecutive full-suite runs; per spec §21.10 this flake must be root-caused if it
+  recurs in CI.
 - `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
   new path with unchanged content is recognised as reuse, not reparse. Paths present in the
   previous index but absent from the new traversal are also evicted on reindex, so deleted

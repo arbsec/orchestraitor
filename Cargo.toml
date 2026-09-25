@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
+# Members are listed explicitly (not implicit via path dependencies) so that
+# `cargo --workspace` commands cover every crate regardless of the dependency
+# graph (regression fix for arbsec/orchestraitor#250).
 members = [
+    "crates/orchestraitor-adapter-api",
+    "crates/orchestraitor-adapter-host",
     "crates/orchestraitor-agent-catalog",
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-cli",
@@ -10,10 +15,14 @@ members = [
     "crates/orchestraitor-daemon",
     "crates/orchestraitor-events",
     "crates/orchestraitor-lifecycle",
+    "crates/orchestraitor-mcp",
     "crates/orchestraitor-model",
     "crates/orchestraitor-provider-api",
     "crates/orchestraitor-provider-meta",
+    "crates/orchestraitor-provider-neuralwatt",
     "crates/orchestraitor-provider-proxy",
+    "crates/orchestraitor-tui",
+    "crates/orchestraitor-workspace",
     "crates/orchestraitor-workspace-hack",
     "xtask",
 ]
