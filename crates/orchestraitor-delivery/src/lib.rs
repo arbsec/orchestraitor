@@ -6,12 +6,17 @@
 //! Security decisions are never made here — policy, approvals, sandboxing, and
 //! receipts belong to Arbitraitor (spec §2.2, §9.33.7).
 
+pub mod convergence;
 pub mod dag;
 pub mod findings;
 pub mod metadata;
 pub mod review_loop;
 pub mod schedule;
 
+pub use convergence::{
+    BlockedReason, ConvergenceError, ConvergenceInput, ConvergenceVerdict,
+    DEFAULT_HARD_LOOP_CEILING,
+};
 pub use dag::{DagError, TaskDag};
 pub use findings::{
     FindingError, FindingId, FindingLedger, FindingStatus, LedgerEntry, RecordOutcome,
