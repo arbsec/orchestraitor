@@ -50,7 +50,13 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
                   Status = Ready                         (Definition of Ready met)
                   no unresolved Blocked-By               (native issue dependencies)
                   no conflicting in-flight PR            (same spec section / crate)
-                Use `ready-queue` to list eligible issues as JSON.
+                Use `ready-queue` to list **candidate** eligible issues as JSON.
+                `ready-queue` cannot read Project v2 fields: it filters on leaf type
+                (native issue type when set, `task`/`bug` labels otherwise), the MVP
+                label, and unresolved blockers, and it fails closed when the blocker
+                list is truncated. The project-manager MUST verify the remaining
+                conditions (Status=Ready, Target=MVP, label freshness) on the board
+                before claiming.
 
 4. CLAIM        Assign the issue to @me and advance Status to "In Progress".
                 Use `claim-issue` (supports --dry-run).

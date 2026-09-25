@@ -63,6 +63,14 @@ All notable changes to Orchestraitor are recorded here. The format follows
   `tests::snapshot_has_no_dot_git` failed once on a cold cache and then passed in one isolated
   and four consecutive full-suite runs; per spec §21.10 this flake must be root-caused if it
   recurs in CI.
+- `ready-queue` (github-project-workflow skill) never produced output: the jq filter closed
+  `select(` early (stray `)`), leaf detection relied on null `issueType` (org-level native types
+  unset), and `blockedBy.totalCount` counted resolved blockers. The filter now lives in
+  `ready-queue.jq`, treats `task`/`bug` labels as leaf, filters only unresolved blockedBy edges,
+  and is regression-tested by `scripts/tests/ready-queue-filter.bash`, now run in CI (#251).
+  The output is a candidate queue: Project v2 `Status`/`Target` cannot be read by
+  `gh issue list`, so the project-manager still verifies those on the board before
+  claiming (documented in SKILL.md).
 - `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
   new path with unchanged content is recognised as reuse, not reparse. Paths present in the
   previous index but absent from the new traversal are also evicted on reindex, so deleted

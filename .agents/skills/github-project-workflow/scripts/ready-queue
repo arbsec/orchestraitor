@@ -32,23 +32,17 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
-# Filter with jq:
-# - issueType.name in ["Task","Bug"] (leaf)
-# - blockedBy.totalCount == 0 (no unresolved blockers)
+# Filter with jq (program lives in ready-queue.jq so it is regression-tested):
+# - leaf iff issueType.name in ["Task","Bug"] OR labels contain task/bug
+#   (org-level native types are unset; see [issue_types] in github-project.example.toml)
+# - no blockedBy node with state != "CLOSED" (totalCount counts resolved blockers too)
 # - has the MVP label (proxy for Target=MVP until Project field reads are implemented)
 #
 # The project-manager MUST verify Status=Ready before claiming — this script cannot
 # read Project v2 field values yet.
 MVP_LABEL="${ORC_MVP_LABEL:-MVP}"
 
-FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" '
-  map(select(
-    (.issueType.name // "") | test("^(Task|Bug)$"))
-    and (.blockedBy.totalCount // 0) == 0
-    and (any(.labels[].name; . == $mvp))
-  ))
-  | sort_by(.number)
-')"
+FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" -f "$SCRIPT_DIR/ready-queue.jq")"
 
 COUNT="$(echo "$FILTERED" | jq 'length')"
 
