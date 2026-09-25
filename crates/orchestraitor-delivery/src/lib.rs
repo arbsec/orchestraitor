@@ -8,9 +8,11 @@
 
 pub mod dag;
 pub mod metadata;
+pub mod schedule;
 
 pub use dag::{DagError, TaskDag};
 pub use metadata::{
     Autonomy, BacklogTaskId, CompletionEvidence, DomainId, MetadataError, RiskClass,
     SCHEMA_VERSION, SpecRef, TaskMetadata, VerificationRef,
 };
+pub use schedule::{ParallelScheduler, SchedulerConfig, SchedulerConfigError};
