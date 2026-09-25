@@ -23,6 +23,7 @@ members = [
     "crates/orchestraitor-provider-neuralwatt",
     "crates/orchestraitor-provider-proxy",
     "crates/orchestraitor-tui",
+    "crates/orchestraitor-testkit",
     "crates/orchestraitor-workspace",
     "crates/orchestraitor-workspace-hack",
     "xtask",
@@ -107,7 +108,7 @@ url = "2.5"
 
 # Server / proxy (tech-stack.md §1)
 hyper = { version = "1.11", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
 http-body-util = "0.1"
 tower = "0.5"
 

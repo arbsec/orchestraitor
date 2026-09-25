@@ -1,0 +1,23 @@
+[package]
+name = "orchestraitor-testkit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Deterministic provider simulator and test fixtures for Orchestraitor (spec §21.3)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
