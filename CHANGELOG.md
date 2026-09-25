@@ -19,6 +19,10 @@ All notable changes to Orchestraitor are recorded here. The format follows
   domain, critical risk, or confidential/restricted data) must require the security reviewer
   (§9.33.4). `SCHEMA_VERSION` anchors the versioned persistence envelope that §9.33.6 durable
   storage wraps around these records (#201).
+- `orchestraitor-delivery` `TaskDag`: validated backlog DAG with deterministic Kahn
+  topological order (ties break by stable task ID), cycle detection listing the involved tasks,
+  construction-time rejection of unknown/duplicate edges, and dependency-satisfied eligibility
+  per §9.33.3 (#199).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
