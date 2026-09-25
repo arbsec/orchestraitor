@@ -284,7 +284,7 @@ impl TaskMetadata {
     ///
     /// Returns the first [`MetadataError`] encountered.
     pub fn validate(&self) -> Result<(), MetadataError> {
-        if self.id.as_str().is_empty() {
+        if self.id.as_str().trim().is_empty() {
             return Err(MetadataError::EmptyId);
         }
         let id = self.id.to_string();
@@ -300,7 +300,7 @@ impl TaskMetadata {
         if self.spec_refs.iter().any(|r| r.as_str().trim().is_empty()) {
             return Err(MetadataError::NoSpecRefs { id });
         }
-        if self.acceptance_criteria.iter().all(|c| c.trim().is_empty()) {
+        if self.acceptance_criteria.iter().any(|c| c.trim().is_empty()) {
             return Err(MetadataError::NoAcceptanceCriteria { id });
         }
         if self.domain.as_str().trim().is_empty() {
@@ -416,6 +416,23 @@ mod tests {
         let mut task = sample();
         task.id = BacklogTaskId::new("");
         assert_eq!(task.validate(), Err(MetadataError::EmptyId));
+    }
+
+    #[test]
+    fn whitespace_id_is_rejected() {
+        let mut task = sample();
+        task.id = BacklogTaskId::new("\u{2003}");
+        assert_eq!(task.validate(), Err(MetadataError::EmptyId));
+    }
+
+    #[test]
+    fn blank_criterion_among_valid_ones_is_rejected() {
+        let mut task = sample();
+        task.acceptance_criteria = vec!["real criterion".to_string(), " ".to_string()];
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::NoAcceptanceCriteria { .. })
+        ));
     }
 
     #[test]
