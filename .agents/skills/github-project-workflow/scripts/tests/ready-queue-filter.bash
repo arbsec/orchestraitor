@@ -26,7 +26,9 @@ run_case "leaf/label/blocker semantics" '[
   {"number":3,"title":"closed blocker only","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"blockedBy":{"nodes":[{"state":"CLOSED"}],"totalCount":1}},
   {"number":4,"title":"epic not leaf","issueType":null,"labels":[{"name":"epic"},{"name":"MVP"}],"blockedBy":{"nodes":[],"totalCount":0}},
   {"number":5,"title":"not MVP","issueType":null,"labels":[{"name":"task"}],"blockedBy":{"nodes":[],"totalCount":0}},
-  {"number":6,"title":"native type Task without labels","issueType":{"name":"Task"},"labels":[{"name":"MVP"}],"blockedBy":{"nodes":[],"totalCount":0}}
+  {"number":6,"title":"native type Task without labels","issueType":{"name":"Task"},"labels":[{"name":"MVP"}],"blockedBy":{"nodes":[],"totalCount":0}},
+  {"number":7,"title":"native Feature but task label","issueType":{"name":"Feature"},"labels":[{"name":"task"},{"name":"MVP"}],"blockedBy":{"nodes":[],"totalCount":0}},
+  {"number":8,"title":"truncated blocker page hides open blocker","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"blockedBy":{"nodes":[{"state":"CLOSED"}],"totalCount":2}}
 ]' '[1,3,6]'
 
 echo "ready-queue-filter: all cases passed"
