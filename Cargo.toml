@@ -107,7 +107,7 @@ aws-lc-rs = "1.17.3"
 
 # Configuration (tech-stack.md §1, §13)
 toml = "1.1.3"
-toml_edit = "0.22"
+toml_edit = "0.25"
 figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 
 # Storage (tech-stack.md §1, §11)
