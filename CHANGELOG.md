@@ -28,6 +28,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
   bounds in-flight implementations plus review backlog, and expected-file overlap
   (repository-conflict) avoidance. Provider/token budgets stay with the runner's cost-ledger
   path (§9.19.5–9.19.6) — the scheduler deliberately does not touch them (#200).
+- `orchestraitor-testkit` crate with a deterministic `OpenAI` Chat Completions mock server
+  (spec §21.3): scripted non-streaming, SSE-streaming, and structured-output responses with
+  deterministic IDs/timestamps, sequence-ordered script replay (last plan repeats), HTTP
+  failures (e.g. 429), and a request-capture API for exact client-behavior assertions. CI can
+  now test provider integrations without a live provider (#175).
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against
   the Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3).
   Default base URL `https://api.neuralwatt.com/v1` (overridable via config); API key
