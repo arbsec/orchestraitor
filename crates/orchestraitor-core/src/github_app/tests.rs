@@ -1,3 +1,4 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex as StdMutex};
 use std::thread;
@@ -299,6 +300,47 @@ fn concurrent_mints_single_flight_into_one_transport_call() -> Result<(), GitHub
     );
     assert_eq!(fingerprints.len(), 2);
     assert_eq!(fingerprints[0], fingerprints[1]);
+    Ok(())
+}
+
+struct PanickingTransport {
+    arm_panic: bool,
+}
+
+impl InstallationTokenTransport for PanickingTransport {
+    fn create_access_token(
+        &self,
+        _installation_id: u64,
+        _app_jwt: &SecretString,
+    ) -> Result<AccessTokenResponse, GitHubAppError> {
+        assert!(!self.arm_panic, "forced transport panic");
+        Err(GitHubAppError::MalformedResponse {
+            detail: "panic path unexpectedly returned",
+        })
+    }
+}
+
+#[test]
+fn panicking_mint_does_not_wedge_subsequent_mints() -> Result<(), GitHubAppError> {
+    // A panic mid-mint runs without the cache lock held, so without the
+    // unwind guard the slot would stay in `Minting` and this test's second
+    // mint would block on the condvar forever (test-runner timeout = failure).
+    let now = Arc::new(StdMutex::new(1_000u64));
+    let auth = Arc::new(auth_with_fixture_pem(&now)?);
+
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        let _ = auth.installation_token(&PanickingTransport { arm_panic: true });
+    }));
+    assert!(panicked.is_err(), "the forced transport panic must unwind");
+
+    let transport = ScriptedTransport::new(FIXTURE_TOKEN_MARKER, EXPIRY_OK);
+    let token = auth.installation_token(&transport)?;
+    assert_eq!(
+        transport.call_count(),
+        1,
+        "the next mint must issue exactly one fresh transport call"
+    );
+    assert_eq!(token.expires_at_rfc3339(), EXPIRY_OK);
     Ok(())
 }
 

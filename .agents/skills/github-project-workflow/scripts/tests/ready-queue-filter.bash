@@ -12,7 +12,7 @@ JQ_PROGRAM="$HERE/../ready-queue.jq"
 run_case() {
   local name="$1" fixture="$2" expected="$3" service_slugs="${4:-arbsec-agent}"
   local service_json got
-  service_json="$(printf '%s' "$service_slugs" | tr ',' '\n' | sed '/^$/d' | jq -R . | jq -s .)"
+  service_json="$(printf '%s' "$service_slugs" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | jq -R . | jq -s .)"
   got="$(printf '%s' "$fixture" | jq --arg mvp "MVP" --argjson service "$service_json" -f "$JQ_PROGRAM" | jq -c 'map(.number)')"
   if [ "$got" != "$expected" ]; then
     echo "FAIL $name: expected $expected, got $got" >&2
@@ -54,5 +54,12 @@ run_case "service set is declarative, not inferred" '[
   {"number":1,"title":"renovate bot item","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"assignees":[{"login":"renovate[bot]"}],"blockedBy":{"nodes":[],"totalCount":0}},
   {"number":2,"title":"arbsec-agent item outside the set","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"assignees":[{"login":"arbsec-agent[bot]"}],"blockedBy":{"nodes":[],"totalCount":0}}
 ]' '[1]' 'renovate'
+# Whitespace around comma-separated slugs (the $ORC_SERVICE_IDENTITIES form)
+# is trimmed before matching, mirroring the config-file path (#307).
+run_case "whitespace-padded env slugs are trimmed" '[
+  {"number":1,"title":"arbsec-agent item","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"assignees":[{"login":"arbsec-agent[bot]"}],"blockedBy":{"nodes":[],"totalCount":0}},
+  {"number":2,"title":"renovate item","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"assignees":[{"login":"renovate[bot]"}],"blockedBy":{"nodes":[],"totalCount":0}},
+  {"number":3,"title":"human item","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"assignees":[{"login":"mekwall"}],"blockedBy":{"nodes":[],"totalCount":0}}
+]' '[1,2]' '  arbsec-agent ,  renovate  '
 
 echo "ready-queue-filter: all cases passed"

@@ -1,6 +1,7 @@
 //! Structured error taxonomy for Orchestraitor core.
 
 use std::error::Error as StdError;
+use std::fmt;
 
 use orchestraitor_model::error_codes::ErrorComponent;
 use thiserror::Error;
@@ -69,8 +70,11 @@ pub enum ConfigError {
 ///
 /// No variant ever carries the resolved secret value; identifiers such as
 /// environment-variable names and keyring ids are configuration references,
-/// not secret material.
-#[derive(Debug, Error)]
+/// not secret material. `Debug` is hand-written below because deriving it
+/// would forward to keyring-core's derived `Debug`, whose payload variants
+/// (`BadEncoding(Vec<u8>)`, `BadDataFormat(Vec<u8>, ..)`) embed the raw
+/// retrieved secret bytes (keyring-core 1.0.0).
+#[derive(Error)]
 pub enum SecretResolveError {
     /// The environment variable holding the secret is not set or is not valid
     /// Unicode; the underlying value is never inspected or reported.
@@ -97,10 +101,34 @@ pub enum SecretResolveError {
         service: String,
         /// Store-specific secret identifier.
         id: String,
-        /// Keyring backend error; never carries stored secret values.
+        /// Keyring backend error; forwarded only to `source()`, never to the
+        /// redacted `Debug` rendering.
         #[source]
         source: Box<keyring::Error>,
     },
+}
+
+impl fmt::Debug for SecretResolveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EnvMissing { id } => formatter
+                .debug_struct("EnvMissing")
+                .field("id", id)
+                .finish(),
+            Self::Empty { label } => formatter
+                .debug_struct("Empty")
+                .field("label", label)
+                .finish(),
+            Self::KeyringDisabled => formatter.write_str("KeyringDisabled"),
+            #[cfg(feature = "secrets-keyring")]
+            Self::KeyringLookup { service, id, .. } => formatter
+                .debug_struct("KeyringLookup")
+                .field("service", service)
+                .field("id", id)
+                .field("source", &format_args!("[redacted keyring error]"))
+                .finish(),
+        }
+    }
 }
 
 /// GitHub App service-identity authentication failures (spec
@@ -305,6 +333,59 @@ fn config_structured(error: &ConfigError) -> StructuredError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "secrets-keyring")]
+    #[test]
+    fn keyring_lookup_debug_never_renders_keyring_payload_bytes() {
+        // Regression for the blocking review finding: keyring-core 1.0.0
+        // derives `Debug`, so `BadEncoding(Vec<u8>)` renders the raw retrieved
+        // secret blob as decimal bytes. The manual `Debug` impl on
+        // `SecretResolveError` must redact the source, and the redaction must
+        // hold transitively through `GitHubAppError`'s derived `Debug`.
+        let marker: &[u8] = b"ORCHKEYRINGMARKER0017";
+        let rendered_payload = format!("{:?}", marker.to_vec());
+        let marker_text = std::str::from_utf8(marker).unwrap_or("");
+
+        let error = SecretResolveError::KeyringLookup {
+            service: "orchestraitor".to_string(),
+            id: "gh-app-pem".to_string(),
+            source: Box::new(keyring::Error::BadEncoding(marker.to_vec())),
+        };
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("BadEncoding"));
+        assert!(!debug.contains("BadDataFormat"));
+        assert!(!debug.contains(&rendered_payload));
+        assert!(!debug.contains(marker_text));
+        assert!(debug.contains("redacted"));
+
+        let wrapped = GitHubAppError::PrivateKeyResolution {
+            uri: "secret://keyring/gh-app-pem".to_string(),
+            source: Box::new(error),
+        };
+        let wrapped_debug = format!("{wrapped:?}");
+        assert!(!wrapped_debug.contains("BadEncoding"));
+        assert!(!wrapped_debug.contains("BadDataFormat"));
+        assert!(!wrapped_debug.contains(&rendered_payload));
+        assert!(!wrapped_debug.contains(marker_text));
+        assert!(wrapped_debug.contains("gh-app-pem"));
+
+        // The miette `Display`/`source()` chain stays intact and payload-free.
+        assert!(!format!("{wrapped}").contains(marker_text));
+        let mut chain_texts = Vec::new();
+        let mut current = wrapped.source();
+        while let Some(source) = current {
+            chain_texts.push(source.to_string());
+            current = source.source();
+        }
+        assert!(
+            chain_texts.iter().any(
+                |text| text.contains("keyring entry `orchestraitor/gh-app-pem` is unavailable")
+            )
+        );
+        for text in &chain_texts {
+            assert!(!text.contains(marker_text));
+        }
+    }
 
     #[test]
     fn errors_do_not_render_secret_values() {

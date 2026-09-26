@@ -37,6 +37,27 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"  # or secret://env/<V
   (`.agents/project/github-project.local.toml`), or `$ORC_SERVICE_IDENTITIES`,
   defaulting to `arbsec-agent`.
 
+### Why two `service_identities` surfaces (recorded decision)
+
+The ready-queue skill script runs outside the daemon today and owns its local
+config file, so it reads `[service_identities].slugs` from the project config
+(or `$ORC_SERVICE_IDENTITIES`) directly rather than querying the layered
+configuration. The layered config key `service_identities` is the future
+source of truth for the daemon-side scheduling queue. The two surfaces
+intentionally mirror the same semantics (case-insensitive `<slug>` or
+`<slug>[bot]` matching), and wiring the script to `orc config get
+service_identities` is the E0+ integration step — deliberately not part of
+the bootstrap-identity change.
+
+## Environment overrides
+
+- `ORCHESTRAITOR_GITHUB_API_ENDPOINT` (hidden, global flag
+  `--github-api-endpoint`): overrides the GitHub API base URL used by
+  `orc github mint-token`. This is a test/debug override only, for pointing at
+  a local stub or mock server. **Security note:** setting it changes the host
+  the App JWT bearer is sent to — point it only at infrastructure you control;
+  never set it in production or in shared CI against untrusted endpoints.
+
 ## `orc github mint-token`
 
 Mints one installation access token: signs an RS256 JWT with the App private

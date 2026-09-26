@@ -215,6 +215,45 @@ enum CacheState {
     Ready(InstallationToken),
 }
 
+/// Unwind safety net for the single-flight mint slot: a panic inside the mint
+/// runs after the cache lock has been released, so the `CachePoisoned`
+/// defence can never fire and a wedged `Minting` state would block later
+/// callers on the condvar forever. The guard resets the slot and wakes every
+/// waiter when the mint unwinds.
+struct MintSlotGuard<'a> {
+    cache: &'a Mutex<CacheState>,
+    minted: &'a Condvar,
+    armed: bool,
+}
+
+impl MintSlotGuard<'_> {
+    fn new<'a>(cache: &'a Mutex<CacheState>, minted: &'a Condvar) -> MintSlotGuard<'a> {
+        MintSlotGuard {
+            cache,
+            minted,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MintSlotGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.cache.lock()
+            && matches!(*state, CacheState::Minting)
+        {
+            *state = CacheState::Empty;
+        }
+        self.minted.notify_all();
+    }
+}
+
 /// Caching installation-token minter for the GitHub App service identity.
 ///
 /// Tokens are cached until `expiry − TOKEN_REFRESH_SKEW_SECS` and re-minted
@@ -301,9 +340,11 @@ impl GitHubAppAuth {
                 }
                 CacheState::Empty | CacheState::Ready(_) => {
                     *state = CacheState::Minting;
+                    drop(state);
+                    let mut slot_guard = MintSlotGuard::new(&self.cache, &self.minted);
                     let mint_outcome = {
-                        drop(state);
                         let outcome = self.mint_once(transport);
+                        slot_guard.disarm();
                         state = self
                             .cache
                             .lock()

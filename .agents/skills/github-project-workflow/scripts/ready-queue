@@ -37,7 +37,7 @@ if [ -z "$SERVICE_SLUGS" ]; then
     }' "$ORC_PROJECT_CONFIG")"
 fi
 SERVICE_SLUGS="${SERVICE_SLUGS:-arbsec-agent}"
-SERVICE_JSON="$(printf '%s' "$SERVICE_SLUGS" | tr ',' '\n' | sed '/^$/d' | jq -R . | jq -s .)"
+SERVICE_JSON="$(printf '%s' "$SERVICE_SLUGS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | jq -R . | jq -s .)"
 
 # Fetch open issues with the fields we need for filtering.
 # gh issue list --json returns blockedBy/subIssues as {nodes:[...],totalCount:N}.

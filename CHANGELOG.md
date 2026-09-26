@@ -32,6 +32,10 @@ All notable changes to Orchestraitor are recorded here. The format follows
   `[service_identities].slugs` in the project config, overridable via
   `$ORC_SERVICE_IDENTITIES`, defaulting to `arbsec-agent`; regression-tested
   by `scripts/tests/ready-queue-filter.bash` (#307).
+- Documented the hidden test/debug override `ORCHESTRAITOR_GITHUB_API_ENDPOINT`
+  (`--github-api-endpoint`) for `orc github mint-token`, including the security
+  note that it redirects where the App JWT bearer is sent
+  (`docs/cli/orc-github.md`) (#307).
 - `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
   workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
   resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference
@@ -265,6 +269,13 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Fixed
 
+- `SecretResolveError::KeyringLookup` no longer renders the keyring backend
+  error via its derived `Debug` (keyring-core payload variants embed the raw
+  retrieved secret bytes); the source now appears as a redacted marker while
+  the miette `Display`/`source()` chain stays intact and payload-free (#307).
+- `GitHubAppAuth` token cache: a panic mid-mint now resets the single-flight
+  slot and wakes waiters instead of leaving the cache wedged in the
+  `Minting` state (#307).
 - Lockfile refresh for yanked and advisory-flagged crates so `cargo deny check` and
   `cargo audit` pass again: `chacha20 0.10.1 → 0.10.2` (yanked), `h2 0.4.15 → 0.4.19`
   (RUSTSEC-2026-0258), `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285, with
