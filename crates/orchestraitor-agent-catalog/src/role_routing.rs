@@ -176,15 +176,6 @@ impl<'a> RoleRouter<'a> {
     }
 }
 
-/// Builds the decision record payload for one resolution.
-impl RoleRoutingDecision {
-    /// Comma-separated list of the six built-in orchestration role ids.
-    #[must_use]
-    pub fn built_in_role_ids() -> String {
-        known_role_ids()
-    }
-}
-
 fn role_entry<'a>(
     config: &'a OrchestraitorConfig,
     role: &str,

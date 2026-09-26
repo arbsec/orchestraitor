@@ -11,6 +11,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- `orc routing resolve` no longer dirties `git status` when run at the default store
+  path: `.orchestraitor/routing.db` and its WAL sidecars are gitignored. Routing
+  decision store errors now include the underlying cause in their `Display`
+  output (#309).
+
 ### Added
 
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against the
@@ -53,6 +60,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (`--github-api-endpoint`) for `orc github mint-token`, including the security
   note that it redirects where the App JWT bearer is sent
   (`docs/cli/orc-github.md`) (#307).
+- Static heuristic role routing for the six built-in orchestration roles (`explore`,
+  `research`, `plan`, `implement`, `review`, `verify`) per spec `30-model-routing.md`
+  §9.45 and spec §9.19.2: `roles.<id>.routing.*` keys are first-class configuration
+  (known-key reporting, layered merge, `orc config get roles.implement.routing.provider`
+  resolves out of the box via shipped built-in defaults for the Neuralwatt GLM-5.2
+  single-provider bootstrap of spec §10.3). `orc routing resolve --role <id> [--json]`
+  resolves a role through the layered configuration and persists a routing decision
+  record (role, provider, model, precedence path, fallback reason) to the local
+  `SQLite` store (`<config-dir>/routing.db`, WAL, `schema_migrations`-versioned).
+  Incomplete effective entries fail closed with a typed error naming the missing
+  configuration key; a role with no entry in any layer resolves via the documented
+  bootstrap default and records the fallback reason. No decision model, no custom
+  roles, no subscription awareness (E2) (#309).
 
 ### Fixed
 
