@@ -87,31 +87,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   configuration key; a role with no entry in any layer resolves via the documented
   bootstrap default and records the fallback reason. No decision model, no custom
   roles, no subscription awareness (E2) (#309).
-
-### Fixed
-
-- `SecretResolveError::KeyringLookup` no longer renders the keyring backend
-  error via its derived `Debug` (keyring-core payload variants embed the raw
-  retrieved secret bytes); the source now appears as a redacted marker while
-  the miette `Display`/`source()` chain stays intact and payload-free (#307).
-- `GitHubAppAuth` token cache: a panic mid-mint now resets the single-flight
-  slot and wakes waiters instead of leaving the cache wedged in the
-  `Minting` state (#307).
-- Lockfile refresh for yanked and advisory-flagged crates so supply-chain checks pass again:
-  `chacha20 0.10.1 → 0.10.2` (0.10.1 yanked), `h2 0.4.15 → 0.4.19` (RUSTSEC-2026-0258),
-  `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285), `faster-hex 0.10.0 → 0.10.1`
-  (RUSTSEC-2026-0306). All bumps stay inside the existing semver ranges.
-- `orchestraitor-context` index is keyed by blob digest instead of path: a file move with
-  unchanged content is recognized as reuse rather than a reparse, and files deleted from the
-  tree no longer remain queryable after reindex.
-- `orchestraitor-core` merges dynamic configuration table entries field-by-field and includes
-  structured error causes and source chains; sensitive tracing fields are omitted entirely.
-- `orchestraitor-cost-ledger` removes `BudgetScope::Organization` and `BudgetScope::User`
-  variants whose filter previously matched every ledger row, silently breaking budget
-  isolation; the variants are deferred until per-org/per-user attribution columns ship, and the
-  remaining scopes gain regression tests pinning scope isolation.
-- `orchestraitor-daemon` content-addressed reads recompute SHA-256 over returned bytes and
-  refuse corrupted or out-of-band-written blobs (`StoreError::DigestMismatch`); adversarial
-  tests pin that hash-chain validation rejects tampered event records.
-
-[Unreleased]: https://github.com/arbsec/orchestraitor/compare/HEAD
+- `orchestraitor-board` crate and `orc board` command: the bootstrap GitHub Projects v2
+  board provider (spec `10-orchestrator.md` §9.43, §9.40; #308). `orc board ready [--json]`
+  lists OPEN leaf Task/Bug items with `Target=MVP`, `Status=Ready`, and no unresolved
+  `blockedBy` edges on the shared board (a closed issue is excluded with a warning even when
+  its board fields say Ready/MVP; fail-closed on truncated
+  `blockedBy`/field/label windows;
+  malformed items are skipped with a warning, never a crash), and `orc board move <issue>
+  --status "<Status>"` resolves the item across all configured repositories (ambiguous
+  same-numbered issues fail with a typed reference error), writes the Status single-select
+  field and verifies the write by
+  read-back. Node IDs resolve at runtime from the human-readable names in
+  `.agents/project/github-project.local.toml` and are cached under
+  `$XDG_CACHE_HOME/orchestraitor/` — never inside the repository. Auth is injected via the
+  `BoardAuth` trait; the bootstrap `SecretUriAuth` stub resolves the configured
+  `secret://` URI (env-backed) and never sniffs ambient credentials; a hidden
+  `--github-graphql-endpoint` override serves GHES instances.
