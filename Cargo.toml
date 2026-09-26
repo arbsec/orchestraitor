@@ -63,7 +63,7 @@ arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", re
 arbitraitor-model      = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-policy     = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
-arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "8037545eafeda2bec7bebe98ef79b3a35f5fc85a" }
 arbitraitor-receipt    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-mcp        = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
