@@ -32,7 +32,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 - Repository governance and community documents: contribution guidance, security policy, code
   of conduct, and support documents, adapted from the sibling Arbitraitor repository.
 - Dual `MIT OR Apache-2.0` licensing, matching Arbitraitor.
-
 - GitHub App service identity (`arbsec-agent`) token-minting path (spec
   `10-orchestrator.md` §9.25.2, §9.41; issue #307). Layered config gains
   `github_app.slug` (built-in default `arbsec-agent`), `github_app.client_id`,
@@ -64,7 +63,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 - `GitHubAppAuth` token cache: a panic mid-mint now resets the single-flight
   slot and wakes waiters instead of leaving the cache wedged in the
   `Minting` state (#307).
-
 - Lockfile refresh for yanked and advisory-flagged crates so supply-chain checks pass again:
   `chacha20 0.10.1 → 0.10.2` (0.10.1 yanked), `h2 0.4.15 → 0.4.19` (RUSTSEC-2026-0258),
   `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285), `faster-hex 0.10.0 → 0.10.1`

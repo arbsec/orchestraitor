@@ -27,7 +27,10 @@ A change touches public behavior if the diff affects any of:
 - CI workflow changes (`.github/workflows/`) — these are not public behavior.
 - Code comment improvements (docstrings on private items).
 
-Even in these cases, `CHANGELOG.md [Unreleased]` may still warrant an entry ("chore: bump deps", "refactor: move X to Y").
+Even in these cases, no `CHANGELOG.md [Unreleased]` entry is warranted unless the change has
+a consumer-visible effect — internal development notes stay out of the changelog per
+`AGENTS.md` (release notes for consumers, never a development log); "chore: bump deps" and
+"refactor: move X to Y" entries belong in the PR description instead.
 
 ## `classify-docs-impact` output
 
