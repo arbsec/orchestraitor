@@ -151,9 +151,9 @@ dependencies = [
  "arbitraitor-core",
  "arbitraitor-intel",
  "arbitraitor-model",
- "arbitraitor-sandbox",
+ "arbitraitor-sandbox 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "arbitraitor-shell",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "async-trait",
  "serde",
  "serde_json",
@@ -171,7 +171,7 @@ source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4
 dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "bzip2",
  "flate2",
  "serde",
@@ -191,7 +191,7 @@ version = "0.1.0"
 source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f#4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f"
 dependencies = [
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "infer",
  "serde",
  "sha2 0.11.0",
@@ -205,7 +205,7 @@ source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-policy",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "rustix",
  "serde",
  "serde_json",
@@ -223,9 +223,9 @@ dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-model",
- "arbitraitor-sandbox",
+ "arbitraitor-sandbox 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "arbitraitor-store",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "cap-std",
  "cap-tempfile",
  "libc",
@@ -246,7 +246,7 @@ dependencies = [
  "arbitraitor-archive",
  "arbitraitor-artifact",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "async-trait",
  "bytes",
  "reqwest",
@@ -265,7 +265,7 @@ source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "async-trait",
  "csv",
  "serde",
@@ -290,7 +290,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-receipt",
  "arbitraitor-store",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "hex",
  "hmac 0.13.0",
  "serde",
@@ -307,7 +307,7 @@ name = "arbitraitor-model"
 version = "0.1.0"
 source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f#4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f"
 dependencies = [
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -321,7 +321,7 @@ source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4
 dependencies = [
  "arbitraitor-intel",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -333,7 +333,7 @@ version = "0.1.0"
 source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f#4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f"
 dependencies = [
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -349,7 +349,7 @@ dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-exec",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "minisign",
  "serde",
  "serde_json",
@@ -364,7 +364,18 @@ name = "arbitraitor-sandbox"
 version = "0.1.0"
 source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f#4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f"
 dependencies = [
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
+ "libc",
+ "rustix",
+ "serde",
+]
+
+[[package]]
+name = "arbitraitor-sandbox"
+version = "0.1.0"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=8037545eafeda2bec7bebe98ef79b3a35f5fc85a#8037545eafeda2bec7bebe98ef79b3a35f5fc85a"
+dependencies = [
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=8037545eafeda2bec7bebe98ef79b3a35f5fc85a)",
  "libc",
  "rustix",
  "serde",
@@ -376,7 +387,7 @@ version = "0.1.0"
 source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f#4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f"
 dependencies = [
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "base64 0.22.1",
  "flate2",
  "serde",
@@ -396,7 +407,7 @@ source = "git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
- "arbitraitor-workspace-hack",
+ "arbitraitor-workspace-hack 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f)",
  "async-trait",
  "cap-std",
  "cap-tempfile",
@@ -444,7 +455,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "proc-macro2",
- "pulley-interpreter",
+ "pulley-interpreter 47.0.2",
  "quote",
  "regex",
  "regex-automata",
@@ -461,12 +472,95 @@ dependencies = [
  "subtle",
  "syn 3.0.3",
  "tracing-core",
- "wasmparser",
+ "wasmparser 0.254.0",
  "wasmtime-internal-core 46.0.1",
  "zeroize",
  "zstd",
  "zstd-safe",
  "zstd-sys",
+]
+
+[[package]]
+name = "arbitraitor-workspace-hack"
+version = "0.1.0"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=8037545eafeda2bec7bebe98ef79b3a35f5fc85a#8037545eafeda2bec7bebe98ef79b3a35f5fc85a"
+dependencies = [
+ "aho-corasick",
+ "allocator-api2 0.2.21",
+ "anstyle",
+ "anyhow",
+ "bitflags 2.13.1",
+ "block-buffer 0.12.1",
+ "bstr",
+ "bumpalo",
+ "cc",
+ "cranelift-bitset 0.132.3",
+ "cranelift-bitset 0.136.1",
+ "crc32fast",
+ "crossbeam-utils",
+ "digest 0.10.7",
+ "digest 0.11.3",
+ "errno",
+ "flate2",
+ "futures-channel",
+ "futures-core",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
+ "hyper",
+ "hyper-util",
+ "icu_locale_core",
+ "icu_provider",
+ "id-arena",
+ "indexmap",
+ "libc",
+ "linux-raw-sys",
+ "litemap",
+ "log",
+ "memchr",
+ "num-traits",
+ "once_cell",
+ "potential_utf",
+ "proc-macro2",
+ "pulley-interpreter 45.0.3",
+ "pulley-interpreter 49.0.1",
+ "quote",
+ "regalloc2",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "rustc-hash",
+ "rustix",
+ "semver",
+ "serde",
+ "serde_core",
+ "serde_json",
+ "simd-adler32",
+ "slab",
+ "smallvec",
+ "stable_deref_trait",
+ "subtle",
+ "syn 2.0.119",
+ "syn 3.0.3",
+ "time",
+ "tinystr",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-core",
+ "wasm-encoder",
+ "wasmparser 0.258.0",
+ "wasmtime-internal-core 45.0.3",
+ "wasmtime-internal-core 49.0.1",
+ "writeable",
+ "yoke",
+ "zerofrom",
+ "zeroize",
+ "zerotrie",
+ "zerovec",
 ]
 
 [[package]]
@@ -962,6 +1056,17 @@ dependencies = [
 
 [[package]]
 name = "cranelift-bitset"
+version = "0.132.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf01ecc92fc5499789d79c3b817299d5a8ddd828d31dcf0f9cc3cc66f38dbb36"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "wasmtime-internal-core 45.0.3",
+]
+
+[[package]]
+name = "cranelift-bitset"
 version = "0.133.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "529143118c4eeb58c39ecb02319557d512be6c61348486422974ab8e3906b8a8"
@@ -978,6 +1083,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3cf66017aed971344230199ad35ca01c955cf824a0e65fed5240452d2a302445"
 dependencies = [
  "wasmtime-internal-core 47.0.2",
+]
+
+[[package]]
+name = "cranelift-bitset"
+version = "0.136.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76b63a4b0cfea80610150fffda11b1a9c3dc5a835403d9f381bf7d1a2874b4d7"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "wasmtime-internal-core 49.0.1",
 ]
 
 [[package]]
@@ -2712,6 +2828,7 @@ checksum = "92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29"
 dependencies = [
  "displaydoc",
  "litemap",
+ "serde",
  "tinystr",
  "writeable",
  "zerovec",
@@ -2765,6 +2882,8 @@ checksum = "139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
+ "serde",
+ "stable_deref_trait",
  "writeable",
  "yoke",
  "zerofrom",
@@ -3184,6 +3303,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leb128fmt"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
 name = "libbz2-rs-sys"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3597,7 +3722,7 @@ dependencies = [
  "arbitraitor-plugin-api",
  "arbitraitor-policy",
  "arbitraitor-receipt",
- "arbitraitor-sandbox",
+ "arbitraitor-sandbox 0.1.0 (git+https://github.com/arbsec/arbitraitor.git?rev=8037545eafeda2bec7bebe98ef79b3a35f5fc85a)",
  "orchestraitor-model",
 ]
 
@@ -4167,6 +4292,8 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
+ "serde_core",
+ "writeable",
  "zerovec",
 ]
 
@@ -4233,14 +4360,49 @@ dependencies = [
 
 [[package]]
 name = "pulley-interpreter"
+version = "45.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b04adf8f93264685f2c70a3edb8f828c791e71b22659253319c33f29d1165aef"
+dependencies = [
+ "cranelift-bitset 0.132.3",
+ "log",
+ "pulley-macros 45.0.3",
+ "wasmtime-internal-core 45.0.3",
+]
+
+[[package]]
+name = "pulley-interpreter"
 version = "47.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6064e52588328c1275d690baad99f8d4b3fdd870736966f1a63cfcbb20560b6"
 dependencies = [
  "cranelift-bitset 0.134.2",
  "log",
- "pulley-macros",
+ "pulley-macros 47.0.2",
  "wasmtime-internal-core 47.0.2",
+]
+
+[[package]]
+name = "pulley-interpreter"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0091857bc410bd7117eb6ac042ced7714c69f994a8b9c2ae30add2f73e3a25ac"
+dependencies = [
+ "cranelift-bitset 0.136.1",
+ "log",
+ "pulley-macros 49.0.1",
+ "wasmtime-internal-core 49.0.1",
+]
+
+[[package]]
+name = "pulley-macros"
+version = "45.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c120a6af1a574a42efcd9df2ad27cb78bc04118c5e0c69e90599f17301a1c7a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -4248,6 +4410,17 @@ name = "pulley-macros"
 version = "47.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e832980317bfc7f8c8538ffc9c69b82912f3e33ec70f7c855d521654c70fa62"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pulley-macros"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8798ebc6bf0ef227e204fa3fad05b04970599a85f456fd28365450fd679b2600"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4554,6 +4727,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "regalloc2"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "bumpalo",
+ "hashbrown 0.17.1",
+ "log",
+ "rustc-hash",
+ "serde",
+ "smallvec",
 ]
 
 [[package]]
@@ -5591,6 +5779,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -5600,12 +5789,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
 dependencies = [
  "displaydoc",
+ "serde_core",
  "zerovec",
 ]
 
@@ -6240,6 +6440,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-encoder"
+version = "0.258.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e974fe6821a8cf64575d51ea2194e2c8f77e7b66e9afe7419ce8a97f9ee0d251"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.258.0",
+]
+
+[[package]]
 name = "wasm-streams"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6266,6 +6476,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmparser"
+version = "0.258.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
+dependencies = [
+ "bitflags 2.13.1",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "wasmtime-internal-core"
+version = "45.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3073c03f97f871fe6400e68621c863b93ba79296f8e570285231952d23fcc804"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
+]
+
+[[package]]
 name = "wasmtime-internal-core"
 version = "46.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6285,6 +6520,18 @@ checksum = "ea33e1f9685be82f90223bebcf2ffefb6b596ea3d82a3c42384527b9c6f5b447"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
+]
+
+[[package]]
+name = "wasmtime-internal-core"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64b67114739063bb72bb8ed2b4994b8b22809d354432db68553ad529850f9536"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
 ]
 
 [[package]]
@@ -6721,6 +6968,7 @@ dependencies = [
  "displaydoc",
  "yoke",
  "zerofrom",
+ "zerovec",
 ]
 
 [[package]]
@@ -6729,6 +6977,7 @@ version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
 dependencies = [
+ "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",
