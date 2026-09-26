@@ -15,6 +15,7 @@ pub mod metadata;
 pub mod retry_rules;
 pub mod review_loop;
 pub mod reviewer_selection;
+pub mod runner;
 pub mod schedule;
 
 pub use convergence::{
@@ -46,5 +47,8 @@ pub use review_loop::{ReviewLoopConfig, ReviewLoopConfigError, Severity};
 pub use reviewer_selection::{
     ChangeSetProfile, GENERAL_DOMAIN, Language, ROLE_REVIEWING, ReviewerSelectionError,
     ReviewerSet, ReviewerSlot, SECURITY_DOMAIN, SelectionReason, TESTING_DOMAIN, select_reviewers,
+};
+pub use runner::{
+    AttemptOutcome, BacklogRunner, BlockReason, RunnerError, RunnerEvent, RunnerInput, StopReason,
 };
 pub use schedule::{ParallelScheduler, SchedulerConfig, SchedulerConfigError};
