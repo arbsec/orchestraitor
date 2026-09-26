@@ -38,12 +38,15 @@ orc board move <issue-number> --status "<Status option name>"
 - `orc board ready` lists items on the shared board that are leaf Task/Bug (native issue type
   wins over labels; the lowercase `task`/`bug` labels are the fallback while org-level types
   are unset), `Target=MVP`, `Status=Ready`, and have no unresolved `blockedBy` edges (open
-  blockers and truncated blocker windows both exclude). Only the repositories listed under
-  `[project].repos` are in scope, and results sort by issue number. Malformed or undecidable
-  items are skipped with a warning on stderr, never a crash.
-- `orc board move` finds the board item for an issue number in the configured repositories,
-  writes the Status single-select field via `updateProjectV2ItemFieldValue`, and verifies the
-  write by reading the field back before reporting success.
+  blockers and truncated blocker windows both exclude). Only OPEN issues qualify: a closed
+  issue is excluded with a warning even when its board fields say Ready/MVP. Only the
+  repositories listed under `[project].repos` are in scope, and results sort by issue number.
+  Malformed or undecidable items are skipped with a warning on stderr, never a crash.
+- `orc board move` finds the board item for an issue number in the configured repositories
+  (searching every configured repo; ambiguous same-numbered issues across them fail with a
+  typed error rather than picking one), writes the Status single-select field via
+  `updateProjectV2ItemFieldValue`, and verifies the write by reading the field back before
+  reporting success.
 
 `--json` on `ready` emits a stable JSON array of `{number, title, url, repo, item_id}`. The
 `item_id` is the runtime Projects v2 item node ID for follow-up board operations; it is never
