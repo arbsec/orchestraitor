@@ -76,6 +76,10 @@ impl ScriptServer {
                 }
                 match listener.accept() {
                     Ok((stream, _addr)) => {
+                        // macOS/BSD accepted sockets inherit the listener's
+                        // O_NONBLOCK, turning blocking reads into spurious
+                        // EWOULDBLOCK failures; clear it explicitly.
+                        let _ignore = stream.set_nonblocking(false);
                         let connection_rules = Arc::clone(&thread_rules);
                         let connection_requests = Arc::clone(&thread_requests);
                         let _ignore = thread::spawn(move || {
@@ -508,10 +512,10 @@ async fn issue_not_on_board_is_typed() -> Result<(), BoardError> {
 
     let result = client.move_item(&config_fixture(), 42, "In Progress").await;
 
-    assert!(matches!(
-        result,
-        Err(BoardError::ItemNotOnBoard { number: 42 })
-    ));
+    assert!(
+        matches!(result, Err(BoardError::ItemNotOnBoard { number: 42 })),
+        "unexpected result: {result:?}"
+    );
     Ok(())
 }
 
