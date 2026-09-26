@@ -125,3 +125,12 @@ target_field = "Target"
 target_value = "MVP"
 ready_field  = "Status"
 ready_value  = "Ready"
+
+# --- Board auth (bootstrap) ---------------------------------------------------
+# `orc board` never sniffs ambient credentials: the token source is declared here as a secret
+# URI (spec `40-arbitraitor-integration.md` §9.23). Until the GitHub App service identity module
+# lands, reads and writes use this explicitly labelled owner-fallback token.
+# Uncomment and point at an env var of your choosing:
+# [auth]
+# token = "secret://env/GH_TOKEN"   # or any env var: `secret://env/<VAR>`
+# `secret://keyring/<id>` is a typed "unavailable" error in the bootstrap slice.

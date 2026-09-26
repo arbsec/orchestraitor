@@ -60,6 +60,22 @@ pub struct ConfigPaths {
         global = true
     )]
     pub github_api_endpoint: Option<String>,
+    /// Alternate GitHub GraphQL endpoint for GHES and tests.
+    #[arg(
+        long,
+        env = "ORCHESTRAITOR_GITHUB_GRAPHQL_ENDPOINT",
+        hide = true,
+        global = true
+    )]
+    pub github_graphql_endpoint: Option<String>,
+    /// Alternate board node-id cache path for tests.
+    #[arg(
+        long,
+        env = "ORCHESTRAITOR_BOARD_CACHE_PATH",
+        hide = true,
+        global = true
+    )]
+    pub board_cache_path: Option<PathBuf>,
 }
 
 /// Top-level `orc` subcommands.
@@ -79,6 +95,9 @@ pub enum Commands {
     /// Resolve role model routing and inspect decision records.
     #[command(subcommand)]
     Routing(RoutingCommand),
+    /// Read and update the shared GitHub Projects v2 board.
+    #[command(subcommand)]
+    Board(BoardCommand),
 }
 
 /// `orc github` subcommands.
@@ -200,4 +219,31 @@ pub struct ResolveArgs {
     /// Emit stable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `orc board` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum BoardCommand {
+    /// List MVP-ready leaf board items (Target=MVP, Status=Ready, unblocked).
+    Ready(BoardReadyArgs),
+    /// Move a board item to a new Status value, verified by read-back.
+    Move(BoardMoveArgs),
+}
+
+/// Arguments for `orc board ready`.
+#[derive(Debug, Clone, Copy, Args)]
+pub struct BoardReadyArgs {
+    /// Emit stable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `orc board move`.
+#[derive(Debug, Clone, Args)]
+pub struct BoardMoveArgs {
+    /// Issue number on a configured board repository.
+    pub item: u64,
+    /// Target Status option name, e.g. "In Progress".
+    #[arg(long)]
+    pub status: String,
 }
