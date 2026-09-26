@@ -59,7 +59,7 @@ multiple_crate_versions = "allow"
 # Arbitraitor crates — pinned to commit 4ebebb3 (2026-07-29 main HEAD).
 # Update weekly; CI "Arbitraitor bump" job catches API drift.
 # When Arbitraitor publishes a semver tag, switch to tag = "v0.x.y".
-arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "8037545eafeda2bec7bebe98ef79b3a35f5fc85a" }
 arbitraitor-model      = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-policy     = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
