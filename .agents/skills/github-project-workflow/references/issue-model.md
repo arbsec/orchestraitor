@@ -12,9 +12,9 @@ GitHub native issue types are configured at the **organization level** (GA Apr 2
 
 ## Target
 
-- `MVP` — references a requirement in `docs/spec/spec.md` §998 (MVP requirements) or a §9 subsystem the MVP depends on.
-- `Next` — references spec §999 high-value differentiators. **Never scheduled during the MVP phase.**
-- `Later` — references spec §999 lower-priority post-MVP work. Not scheduled during MVP.
+- `MVP` — references a requirement in `docs/spec/60-milestones.md` §998 (MVP requirements) or a §9 subsystem the MVP depends on.
+- `Next` — references spec `60-milestones.md` §999 high-value differentiators. **Never scheduled during the MVP phase.**
+- `Later` — references spec `60-milestones.md` §999 lower-priority post-MVP work. Not scheduled during MVP.
 - `Icebox` — unscheduled. Not schedulable.
 
 During MVP delivery, only `Target = MVP` work may enter the ready-queue (workflow policy).
@@ -41,13 +41,13 @@ by its unresolved `blockedBy` edge.
 
 `Low`, `Medium`, `High`, `Critical`.
 
-`Critical` forces human review before release (spec §21.1) and routes to
+`Critical` forces human review before release (spec `50-contracts-data.md` §21.1) and routes to
 `@arbsec/security` via CODEOWNERS.
 
 ## Domain and Autonomy
 
 The live project does not currently have Domain or Autonomy fields. These are planned for
-future addition; until then, reviewer-domain selection (spec §9.33.4) is driven by labels and
+future addition; until then, reviewer-domain selection (spec `10-orchestrator.md` §9.33.4) is driven by labels and
 changed-file paths, and autonomy defaults to `manual` for anything touching the Arbitraitor
 integration boundary or security-sensitive paths.
 
@@ -65,7 +65,7 @@ Decomposition uses **native GitHub sub-issues** (the `parent` / `subIssues` rela
 
 A `blockedBy` edge means "this issue cannot start until that issue lands". It is NOT a transient/rate-limit/blocker; it is a hard DAG edge. The ready-queue excludes any issue with an unresolved `blockedBy` (workflow policy).
 
-Cross-repo blockers (Arbitraitor): open the canonical issue in `arbsec/arbitraitor`, then link from the Orchestraitor issue. The Orchestraitor issue carries a `blockedBy` edge (or body link for cross-repo) and is excluded from the ready-queue until the upstream PR lands (spec §16.2). Do NOT retry a `blocked:arbitraitor` issue as if it were transiently blocked (spec §9.26.1).
+Cross-repo blockers (Arbitraitor): open the canonical issue in `arbsec/arbitraitor`, then link from the Orchestraitor issue. The Orchestraitor issue carries a `blockedBy` edge (or body link for cross-repo) and is excluded from the ready-queue until the upstream PR lands (spec `40-arbitraitor-integration.md` §16.2). Do NOT retry a `blocked:arbitraitor` issue as if it were transiently blocked (spec `10-orchestrator.md` §9.26.1).
 
 ## Where this lives in `gh`
 

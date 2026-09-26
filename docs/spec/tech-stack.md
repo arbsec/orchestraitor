@@ -463,7 +463,7 @@ arbsec/orchestraitor
 ├── crates/orchestraitor-core              # domain types, layered config, error/slog infra
 ├── crates/orchestraitor-daemon            # orcd: durable supervisor, scheduler, config resolver, event owner, mcp-gateway supervisor
 ├── crates/orchestraitor-model             # serializable domain types; no I/O
-├── crates/orchestraitor-arbitraitor-client # typed client over arbitraitor crates (NOT a security authority)
+├── crates/orchestraitor-arb-client # typed client over arbitraitor crates (NOT a security authority)
 ├── crates/orchestraitor-workspace         # snapshot mode, gix controller, no .git exposed
 ├── crates/orchestraitor-context           # tree-sitter baseline indexer, context query tools
 ├── crates/orchestraitor-events            # normalized event schema, audit store

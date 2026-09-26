@@ -44,7 +44,7 @@ gh pr merge [<num>|<url>|<branch>] [flags]
   -d, --delete-branch        delete the branch after merge
   --auto                     enable auto-merge (waits for checks)
   --disable-auto             disable auto-merge
-  --admin                    BYPASS requirements — FORBIDDEN by this skill (spec §21.10)
+  --admin                    BYPASS requirements — FORBIDDEN by this skill (spec `50-contracts-data.md` §21.10)
   --match-head-commit <sha>  refuse merge if head moved since gate check
   -t, --subject <text>       merge commit subject
   -b, --body <text>          merge commit body

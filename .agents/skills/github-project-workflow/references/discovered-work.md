@@ -1,18 +1,18 @@
 # Discovered work
 
-Spec §9.33.2: "Never hide newly discovered work. Create a separate issue for independently testable or revertible follow-up work." This reference defines the three categories and where each one goes.
+Spec `10-orchestrator.md` §9.33.2: "Never hide newly discovered work. Create a separate issue for independently testable or revertible follow-up work." This reference defines the three categories and where each one goes.
 
 ## Three kinds of discovered work
 
 | Kind | What it is | Where it goes |
 |---|---|---|
-| **Blocker** | Work that MUST land before the current issue/PR can safely complete. The current work cannot proceed without it. | Native `blockedBy` edge. Current issue → `Status = Blocked`. If the blocker is a security capability, the canonical issue lives in `arbsec/arbitraitor` (spec §16.2). |
+| **Blocker** | Work that MUST land before the current issue/PR can safely complete. The current work cannot proceed without it. | Native `blockedBy` edge. Current issue → `Status = Blocked`. If the blocker is a security capability, the canonical issue lives in `arbsec/arbitraitor` (spec `40-arbitraitor-integration.md` §16.2). |
 | **Follow-up** | Independently testable/revertible work discovered during the current task, but NOT required to complete it safely. | A NEW leaf issue, linked from the current PR's "Newly discovered follow-up work" section. The current work may merge without it. |
 | **Hidden work** (forbidden) | Discovered work stuffed into the current PR to avoid opening an issue. | **Never.** Open a Follow-up instead. |
 
 ## The non-deferral rule
 
-Security or correctness defects **needed for safe completion** may NOT be deferred merely to shrink a PR (spec §9.33.2). If the defect blocks safe completion, it is a **blocker**, not a follow-up — it must land in this PR (or block the PR).
+Security or correctness defects **needed for safe completion** may NOT be deferred merely to shrink a PR (spec `10-orchestrator.md` §9.33.2). If the defect blocks safe completion, it is a **blocker**, not a follow-up — it must land in this PR (or block the PR).
 
 The rule of thumb: if the PR would be unsafe to merge without the fix, it is a blocker. If the PR is safe with or without it, it may be a follow-up.
 
@@ -31,7 +31,7 @@ scripts/create-blocker --repo arbsec/arbitraitor \
 Opens a separate leaf issue, linked from the current PR's body. The follow-up carries its own spec reference, acceptance criteria, and non-goals. It is never silently absorbed.
 
 ```sh
-scripts/create-follow-up --from-pr <pr> --title "..." --spec-ref "spec.md §9.19.5"
+scripts/create-follow-up --from-pr <pr> --title "..." --spec-ref "30-model-routing.md §9.19.5"
 ```
 
 ## Why this matters

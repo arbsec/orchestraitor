@@ -27,7 +27,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
   - [`references/issue-model.md`](references/issue-model.md) — Type/Target/Status/Domain/Risk/Autonomy fields, leaf-vs-decomposable rule.
   - [`references/definitions-of-ready-and-done.md`](references/definitions-of-ready-and-done.md) — Definition of Ready (schedulable) and Definition of Done (mergeable).
   - [`references/task-decomposition.md`](references/task-decomposition.md) — when and how to decompose into native sub-issues.
-  - [`references/discovered-work.md`](references/discovered-work.md) — blocker vs. follow-up vs. hidden-in-PR; spec §9.33.2.
+  - [`references/discovered-work.md`](references/discovered-work.md) — blocker vs. follow-up vs. hidden-in-PR; spec `10-orchestrator.md` §9.33.2.
   - [`references/gh-capabilities.md`](references/gh-capabilities.md) — verified `gh` CLI surface (v2.94.0+): issue types, sub-issues, dependencies, `--json` fields.
   - [`references/graphql.md`](references/graphql.md) — GraphQL for sub-issues, blocked-by, project fields/options; when `gh` first-class commands are insufficient.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output, and `--dry-run` on remote-mutating operations.
@@ -66,10 +66,10 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
                 missing spec), set the issue's Blocked-By edge and Status="Blocked".
                 Cross-repo blockers (Arbitraitor): open the issue in arbsec/arbitraitor,
                 then use `create-blocker --repo arbsec/arbitraitor` to link from here.
-                Do NOT retry a policy/Arbitraitor blocker as if it were transient (spec §9.26.1).
+                Do NOT retry a policy/Arbitraitor blocker as if it were transient (spec `10-orchestrator.md` §9.26.1).
 
 6. FOLLOW-UP    Independently testable/revertible discovered work gets its OWN issue,
-                never hidden inside the current PR (spec §9.33.2).
+                never hidden inside the current PR (spec `10-orchestrator.md` §9.33.2).
                 Use `create-follow-up`. Security/correctness defects needed for safe
                 completion may NOT be deferred merely to shrink PR scope.
 
@@ -113,7 +113,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 - **Dry-run first.** Remote-changing operations support `--dry-run` and print the exact commands/GraphQL they would execute.
 - **Preserve concurrent human edits.** Scripts compare `updatedAt` before and after; a mismatch exits `4` with "re-read and retry" rather than silently overwriting.
 - **No admin bypasses.** This skill never force-pushes, never bypasses review, never edits issues the caller cannot see.
-- **Cross-repo Arbitraitor blockers are linked, not duplicated.** Open the canonical issue in `arbsec/arbitraitor`, then create a `Blocked-By` edge from the Orchestraitor issue (spec §16.2).
+- **Cross-repo Arbitraitor blockers are linked, not duplicated.** Open the canonical issue in `arbsec/arbitraitor`, then create a `Blocked-By` edge from the Orchestraitor issue (spec `40-arbitraitor-integration.md` §16.2).
 
 ## How this skill relates to project policy
 

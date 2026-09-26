@@ -20,9 +20,9 @@ CRITICAL, HIGH, and MEDIUM findings are noteworthy. They MUST be resolved before
 
 LOW findings are not blocking but MUST be tracked. A PR with 50 unacknowledged LOW findings has NOT converged — the reviewer must explicitly defer each one.
 
-## Fresh contexts (spec §9.33.3)
+## Fresh contexts (spec `10-orchestrator.md` §9.33.3)
 
-Each review generation runs in a **fresh agent context** — never the implementer's session. The implementer may not approve their own security-sensitive changes (spec §21.1). Fresh context prevents:
+Each review generation runs in a **fresh agent context** — never the implementer's session. The implementer may not approve their own security-sensitive changes (spec `50-contracts-data.md` §21.1). Fresh context prevents:
 - accumulated authority leakage (the reviewer inherits the implementer's tool grants);
 - context poisoning from prior review loops;
 - confirmation bias from reviewing one's own reasoning.
@@ -42,7 +42,7 @@ review generation N (fresh context, current HEAD)
 
 ## Limits are safety valves, not convergence
 
-Reaching `max_review_loops` (default 3), a cost budget, or an elapsed-time limit produces a **`blocked`** or **`needs-human`** state (spec §9.24, §9.33.4). It NEVER counts as successful convergence. The implementer:
+Reaching `max_review_loops` (default 3), a cost budget, or an elapsed-time limit produces a **`blocked`** or **`needs-human`** state (spec `10-orchestrator.md` §9.24, §9.33.4). It NEVER counts as successful convergence. The implementer:
 1. Adds a human reviewer (`gh pr edit <num> --add-reviewer <human>`)
 2. Posts a comment summarizing remaining findings and what was tried
 3. Moves to the next task in the queue
@@ -55,8 +55,8 @@ The PR stays open, unmerged, in `blocked` state until a human resolves the remai
 - "All findings resolved" against a prior HEAD after new commits pushed (stale = not converged).
 - Reviewer and implementer agree the PR is "basically fine" without a full generation (opinion ≠ evidence).
 - Hitting the loop limit (giving up ≠ converging).
-- The implementer approving their own PR (spec §21.1 — not valid for security-sensitive changes).
-- An admin using `--admin` to bypass a red check (spec §21.10 — forbidden).
+- The implementer approving their own PR (spec `50-contracts-data.md` §21.1 — not valid for security-sensitive changes).
+- An admin using `--admin` to bypass a red check (spec `50-contracts-data.md` §21.10 — forbidden).
 
 ## How `convergence-status` computes the verdict
 

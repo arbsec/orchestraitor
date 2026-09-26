@@ -25,7 +25,7 @@ inspection, provenance, plan-bound approvals, output classification, promotion a
 and tamper-evident receipts — is implemented in Arbitraitor. Orchestraitor owns orchestration,
 provider/harness adapters, context optimization, and developer experience, and **never** ships a
 parallel security authority. When a security capability is missing, it is added to Arbitraitor
-first (`docs/spec/spec.md` §2.2, §16).
+first (spec `40-arbitraitor-integration.md` §2.2, §16).
 
 ```text
 Arbitraitor     Sole security engine and policy-enforced gate for untrusted artifacts/operations
@@ -46,7 +46,7 @@ current-thread runtime. It currently exposes:
 
 - `initialize` — protocol version negotiation
 - `health` — daemon status plus the Arbitraitor capability report from the
-  startup probe (spec §6.7, §16.7); reports `fail_closed` when any required
+  startup probe (spec `40-arbitraitor-integration.md` §6.7, §16.7); reports `fail_closed` when any required
   sandbox control is unavailable on the current platform
 - `shutdown` — graceful shutdown within the five-second budget
 
@@ -57,27 +57,29 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
 > release exists and Arbitraitor reports effective controls for your platform
-> (`docs/spec/spec.md` §6.7, §16.8).
+> (spec `40-arbitraitor-integration.md` §6.7, §16.8).
 
 ## Key design principles
 
 - **The agent is always untrusted** — model, wrapped harness, repository content, tools, MCP
-  servers, skills, and generated artifacts may behave incorrectly or maliciously (spec §6.1).
-- **A worktree is not a sandbox.** The trusted controller owns Git metadata (spec §6.2).
-- **Approval belongs to the trusted UI**, never to agent-generated text (spec §6.4).
-- **Static analysis narrows authority; it does not prove safety** (spec §6.5).
+  servers, skills, and generated artifacts may behave incorrectly or maliciously (spec `40-arbitraitor-integration.md` §6.1).
+- **A worktree is not a sandbox.** The trusted controller owns Git metadata (spec `40-arbitraitor-integration.md` §6.2).
+- **Approval belongs to the trusted UI**, never to agent-generated text (spec `40-arbitraitor-integration.md` §6.4).
+- **Static analysis narrows authority; it does not prove safety** (spec `40-arbitraitor-integration.md` §6.5).
 - **Arbitraitor is the sole security authority.** Missing capabilities fail closed or run in an
-  explicitly-labelled non-secure mode — never a silent duplicate (spec §6.7, §16.2).
+  explicitly-labelled non-secure mode — never a silent duplicate (spec `40-arbitraitor-integration.md` §6.7, §16.2).
 - **Transaction over mutation.** Every change is a versioned transaction: capture stage,
-  normalize, verify, review a compact diff, atomically promote or roll back (spec §9.5, §9.14).
+  normalize, verify, review a compact diff, atomically promote or roll back (spec `20-harness-worker.md` §9.5, `40-arbitraitor-integration.md` §9.14).
 - **Opinionated by default, customizable by design, never mysterious about active config**
-  (spec §9.22.11).
+  (spec `50-contracts-data.md` §9.22.11).
 - **Incremental adoption.** `orc observe` → `orc wrap` → `orc connect` → native; reversible,
-  with `orc disconnect` restoring prior state in under 30 seconds (spec §9.18.2, MVP-2).
+  with `orc disconnect` restoring prior state in under 30 seconds (spec `20-harness-worker.md` §9.18.2, `60-milestones.md` MVP-2).
 
 ## Specifications
 
-- [`docs/spec/spec.md`](docs/spec/spec.md) — product and architecture source of truth.
+- [`docs/spec/00-overview.md`](docs/spec/00-overview.md) — product and architecture source
+  of truth for the orchestrator-first document set;
+  [`spec.md`](docs/spec/spec.md) is the compatibility index for legacy `§N` references.
 - [`docs/spec/tech-stack.md`](docs/spec/tech-stack.md) — concrete crates, versions, license
   compatibility, runtime dependencies, platform support, and rejected alternatives.
 
@@ -89,7 +91,7 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 ## CLI configuration surface
 
 The `orc` binary also exposes the configuration inspection and migration commands required by
-spec §9.22.3 and §9.22.8:
+spec `50-contracts-data.md` §9.22.3 and §9.22.8:
 
 ```sh
 orc config get <key>
