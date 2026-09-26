@@ -419,13 +419,16 @@ This extends the signed team policies in §9.22.8b from "signed policy file" to 
 
 ## 22. Delivery milestones
 
-The delivery structure uses five milestones. Each milestone has explicit exit criteria covering security guarantees, compatibility limits, migration path, rollback behavior, and user-facing diagnostics. Do not call a milestone complete until its security guarantees, compatibility limits, migration path, rollback behavior, and user-facing diagnostics are tested.
+The delivery structure uses six milestones ordered around the self-referential orchestration loop (see [`10-orchestrator.md`](10-orchestrator.md)): the loop's pieces are proven hermetically first (M0), the loop runs live on the shared board second (M1), the operator surface and the standalone harness golden path land third (M2), and broadening follows (M3-M5). Each milestone has explicit exit criteria covering security guarantees, compatibility limits, migration path, rollback behavior, and user-facing diagnostics. Do not call a milestone complete until its security guarantees, compatibility limits, migration path, rollback behavior, and user-facing diagnostics are tested.
 
-### M0: Arbitraitor prerequisites and architecture validation
+### M0: Board abstraction, mediated mini-worker, and hermetic simulator E2E
 
 **Scope:**
 
-- Verify Arbitraitor provides the effective-control probes, approval token issuer, plan-context binding, receipt schema, and sandbox backends the MVP requires (see §16.2 mandatory workflow).
+- Board abstraction: the `BoardProvider` contract and the first providers behind it — the local provider for hermetic and offline operation, and the GitHub Projects v2 provider (see [`10-orchestrator.md`](10-orchestrator.md)).
+- Headless mini-worker executing one-shot tasks with a minimal mediated toolset (read, search, shell, write; see [`20-harness-worker.md`](20-harness-worker.md)).
+- Deterministic-simulator E2E for the whole loop — board → manager selection → worker → pull request → adversarial review → human-gated merge — with no live network (see §21.3).
+- Verify Arbitraitor provides the effective-control probes, approval token issuer, plan-context binding, receipt schema, and sandbox backends the MVP requires (see §16.2 mandatory workflow in [`40-arbitraitor-integration.md`](40-arbitraitor-integration.md)).
 - Validate the `arbitraitor_sandbox::compute_effective_controls()` probe matrix on Linux (Landlock, seccomp, namespaces, cgroups).
 - Validate `arbitraitor_mcp::ApprovalTokenIssuer` wiring with explicit `McpServer` construction (not the default stdio server; see §9.9).
 - Validate `arbitraitor_exec::ExecutionContextBuilder::from_operation(...)` receipt matrix.
@@ -435,17 +438,38 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 
 **Exit criteria:**
 
-- **Security guarantees:** Arbitraitor capability probes report `Available` for filesystem isolation, process tree containment, and privilege suppression on the reference Linux platform. Missing controls fail closed (§6.7).
-- **Compatibility limits:** Linux only. macOS is not claimed. `materialized-workspace` backend only; `projected-vfs` and `native-overlay` are not yet available.
+- **Security guarantees:** Arbitraitor capability probes report `Available` for filesystem isolation, process tree containment, and privilege suppression on the reference Linux platform. Missing controls fail closed (§6.7). Every mini-worker tool call crosses the Arbitraitor boundary and produces a receipt. The hermetic E2E touches no live network.
+- **Compatibility limits:** Linux only. macOS is not claimed. `materialized-workspace` backend only; `projected-vfs` and `native-overlay` are not yet available. The loop is proven against the deterministic simulator (§21.3) and the local board provider; the GitHub Projects v2 provider is not yet exercised against a live project.
 - **Migration path:** No migration needed (greenfield). `orc init` writes a proposed `orchestraitor.toml` with `# Proposed by orc init` comments (§9.22.6).
-- **Rollback behavior:** `orc init --dry-run` shows what would be written. No existing tooling is modified.
-- **User-facing diagnostics:** `orc doctor` reports Arbitraitor version, capability probe results, and any missing prerequisites.
+- **Rollback behavior:** `orc init --dry-run` shows what would be written. No existing tooling is modified. Hermetic loop runs leave no state outside the test sandbox and the local board.
+- **User-facing diagnostics:** `orc doctor` reports Arbitraitor version, capability probe results, and any missing prerequisites. Simulator E2E runs are reproducible from recorded fixtures.
 
-### M1: Linux golden path with one native provider and one wrapped harness
+### M1: Live self-referential loop on the shared board
 
 **Scope:**
 
-- Linux golden path end to end (see MVP-1 in §998):
+- The loop runs live against the real GitHub Project that carries Orchestraitor's own development backlog — the system self-hosts from this milestone on (see §9.33 and [`10-orchestrator.md`](10-orchestrator.md)).
+- Workers are bounded to leaf `Target=MVP` tasks that are `Ready` with no unresolved blockers; epics and features are decomposed into a leaf task DAG first (MVP-only scheduling).
+- Epic-focus scheduling is live: one active epic by default, standalone bug preemption, focus/pause/resume controls, and needs-human on exhausted or wholly blocked epics.
+- Isolated implementation with fresh, minimal contexts per task and durable orchestration state (see §9.33.3, §9.24).
+- Every autonomous run is bounded by the budget classes — attempts, re-plans, timeouts, concurrency, spend, and subscription usage (see §9.27).
+- Worker and role routing decisions are recorded with provenance (see [`30-model-routing.md`](30-model-routing.md)).
+- Merge remains human-gated: the loop opens pull requests and converges adversarial review (§9.33.4), but a human approves every merge.
+
+**Exit criteria:**
+
+- **Security guarantees:** Every worker session runs inside the Arbitraitor security boundary with capability preflight; missing controls fail closed (§6.7). Autonomous runs are bounded by the budget classes (attempts, re-plans, timeouts, concurrency, spend, subscription usage); exhausting a budget stops the run and produces a needs-human state, never a silent success. The loop never merges its own pull requests. Arbitraitor receipts are retained for every security-sensitive operation.
+- **Compatibility limits:** Linux only. One live board (the Orchestraitor development backlog on GitHub Projects v2). Workers execute leaf `Target=MVP` tasks only; post-MVP items are never scheduled. The standalone harness golden path is not yet claimed (M2).
+- **Migration path:** The loop adopts the existing shared board in place through the `BoardProvider` contract; no board data is exported, restructured, or migrated. `orc init` continues to write proposed configuration non-destructively (§9.22.6).
+- **Rollback behavior:** A campaign pass is abortable without losing board state; in-flight workers finish or roll back per lease semantics (§9.24.2). Board writes are status-field transitions that a human can revert on the board itself.
+- **User-facing diagnostics:** The board shows every loop state transition. `orc backlog show` reports the active epic, ready-queue contents, blocked dependencies, and budget consumption. Needs-human states name the blocking condition.
+
+### M2: Operator chat and standalone harness golden path
+
+**Scope:**
+
+- `orc chat`: the operator's progress and drafting surface — progress reported from durable state, drafting limited to advisory output under a distinct authority profile (see [`10-orchestrator.md`](10-orchestrator.md)).
+- Standalone harness golden path end to end (see MVP-1 in §998):
   `orc init` → detect project and existing agent tooling → import configuration non-destructively → launch native or wrapped harness → create managed workspace → expose built-in tools and approved MCP servers → apply transactional edits → format and run safe fixes → verify → review compact diff → promote or roll back → retain Arbitraitor receipts.
 - One native provider: Neuralwatt with GLM-5.2 (see §10.3, Appendix B).
 - One wrapped harness: Claude Code (see §10.1 Mode C, Appendix D).
@@ -459,7 +483,6 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 - Performance harness.
 - Cost and subscription ledger (see §9.19.4–§9.19.6).
 - Domain detection at `orc init` (see §9.20, §9.21).
-- Spec-driven autonomous delivery (secondary goal; see §9.33): backlog decomposition, task DAG, isolated implementation w/ fresh contexts, adversarial review loop, durable orchestration state, `orc backlog` CLI controls.
 - Adoption and shadow modes: `orc observe`, `orc wrap`, `orc connect`, `orc proxy` (see MVP-2 in §998).
 - Explicit guarantee levels surfaced in every session (see MVP-3 in §998).
 - Transactional workspace foundation (see MVP-4 in §998).
@@ -469,13 +492,13 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 
 **Exit criteria:**
 
-- **Security guarantees:** The kill criteria in §4.3 are met. A wrapped harness cannot reach host credentials, the main checkout, host `.git`, SSH keys, or cloud credentials. A malicious repository configuration attack that succeeds in a conventional worktree setup is blocked by output promotion. Arbitraitor receipts are retained for every security-sensitive operation.
+- **Security guarantees:** The kill criteria in §4.3 are met. A wrapped harness cannot reach host credentials, the main checkout, host `.git`, SSH keys, or cloud credentials. A malicious repository configuration attack that succeeds in a conventional worktree setup is blocked by output promotion. Arbitraitor receipts are retained for every security-sensitive operation. `orc chat` drafts carry no execution authority; chat output becomes action only through the operator and the normal transaction path.
 - **Compatibility limits:** Linux only. One native provider (Neuralwatt GLM-5.2). One wrapped harness (Claude Code). `materialized-workspace` backend only. macOS, WSL2, and Windows native are not claimed.
 - **Migration path:** `orc init` detects and proposes configuration non-destructively. `orc connect --dry-run` previews changes. `orc disconnect` restores previous configuration. All setup operations support dry-run, diff, backup, rollback, and removal (§9.18.2).
 - **Rollback behavior:** 100% rollback reliability for committed transactions. Partial failure does not corrupt the trusted checkout. Crash recovery transitions `running` tasks to `orphaned` and preserves partial results (§9.24).
-- **User-facing diagnostics:** `orc status` displays integration mode, workspace backend, filesystem enforcement, process containment, network containment, secret protection, MCP containment, host access, privileged-operation support, and known gaps (MVP-3). `orc doctor` tests streaming, tool calls, models, credentials, sandbox controls, and unsupported capabilities.
+- **User-facing diagnostics:** `orc status` displays integration mode, workspace backend, filesystem enforcement, process containment, network containment, secret protection, MCP containment, host access, privileged-operation support, and known gaps (MVP-3). `orc doctor` tests streaming, tool calls, models, credentials, sandbox controls, and unsupported capabilities. `orc chat` reports loop progress from durable state, not model recollection.
 
-### M2: macOS parity and additional provider/harness adapters
+### M3: macOS parity and additional provider/harness adapters
 
 **Scope:**
 
@@ -493,11 +516,11 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 
 - **Security guarantees:** macOS capability report is honest about the difference from Linux. Strict mode fails closed when `seatbelt`/`sandbox-exec` is unavailable. Standard mode offers explicit degraded capability report where policy permits. Never advertise a stronger guarantee than the active platform backend can enforce (§9.32.6).
 - **Compatibility limits:** Linux + macOS. Multiple providers and wrapped harnesses. `materialized-workspace` backend only on both platforms. WSL2 and Windows native are not claimed. `projected-vfs` and `native-overlay` backends are not yet available.
-- **Migration path:** Existing M1 configurations migrate forward. `orc config migrate` applies forward-only migrations with backup (§9.22.8). Schema versions are stamped.
-- **Rollback behavior:** Same as M1. `orc config migrate --undo` reverts the most recent migration.
+- **Migration path:** Existing M2 configurations migrate forward. `orc config migrate` applies forward-only migrations with backup (§9.22.8). Schema versions are stamped.
+- **Rollback behavior:** Same as M2. `orc config migrate --undo` reverts the most recent migration.
 - **User-facing diagnostics:** `orc doctor` reports per-platform capability matrix. Conformance suite results are surfaced via `orc doctor` and the release-notes generator. Combinations are classified `supported` / `degraded` / `experimental` / `broken` (§9.30.2).
 
-### M3: IDE integrations, proxy/gateway maturity and workplace pilot
+### M4: IDE integrations, proxy/gateway maturity and workplace pilot
 
 **Scope:**
 
@@ -516,11 +539,11 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 
 - **Security guarantees:** IDE plugins open session workspaces in untrusted or restricted mode. Agent-generated IDE configuration remains disabled until promoted (§9.14, §15.6). The trusted IDE plugin does not auto-trust agent-generated project configuration. Provider-proxy mode never claims filesystem or shell containment when the external harness executes tools outside Arbitraitor (§10.1 Mode D).
 - **Compatibility limits:** Linux + macOS + WSL2 (Linux guest). IDE integrations for JetBrains, VS Code, Zed, Neovim. `projected-vfs` and `native-overlay` backends are experimental on Linux, not yet default. Windows native is not claimed.
-- **Migration path:** `orc connect jetbrains`, `orc connect vscode` configure IDE integrations with dry-run, backup, and rollback support (§9.18.2). Existing M2 configurations migrate forward.
+- **Migration path:** `orc connect jetbrains`, `orc connect vscode` configure IDE integrations with dry-run, backup, and rollback support (§9.18.2). Existing M3 configurations migrate forward.
 - **Rollback behavior:** `orc disconnect <integration>` restores previous configuration for every IDE integration. IDE plugin removal leaves no residue.
 - **User-facing diagnostics:** `orc status` displays per-integration enforcement level (e.g., `claude-code: managed-process`, `my-mcp-server: mcp-tool-gateway`, `local-ollama: provider-proxy`). `orc doctor <integration>` tests streaming, tool calls, models, credentials, sandbox controls, and unsupported capabilities per integration.
 
-### M4: advanced context, learning, experimentation and system assistance
+### M5: advanced context, learning, experimentation and system assistance
 
 **Scope:**
 
@@ -541,7 +564,7 @@ The delivery structure uses five milestones. Each milestone has explicit exit cr
 
 - **Security guarantees:** Advanced features (earned autonomy, model shadowing, system assistance) never bypass Arbitraitor invariants. System Assistance mode is opt-in, separately capability-reported, and uses a synthetic shadow system root where available. Signed team packs separate mandatory policy ceilings from overridable defaults. Users and org policy retain final control over autonomy decisions.
 - **Compatibility limits:** Linux + macOS + WSL2 + Windows native (prototype). `projected-vfs` and `native-overlay` backends are default on Linux where conformance passes; experimental on macOS. Remote workers are supported with a separate threat model.
-- **Migration path:** Existing M3 configurations migrate forward. Signed team packs are versioned and migratable. `orc config migrate` handles schema evolution across versions.
+- **Migration path:** Existing M4 configurations migrate forward. Signed team packs are versioned and migratable. `orc config migrate` handles schema evolution across versions.
 - **Rollback behavior:** Time-travel and session branching preserve the original session. Model shadowing never applies changes. Earned autonomy recommendations are proposals, not automatic changes to durable project knowledge. System Assistance mode stages repairs rather than applying them directly.
 - **User-facing diagnostics:** `orc doctor` reports advanced feature availability, capability reports for System Assistance mode, signed team pack verification status, and knowledge-index federation health.
 
