@@ -11,12 +11,22 @@ description = "Layered config, error, tracing, and secret URI infrastructure for
 [lints]
 workspace = true
 
+[features]
+default = ["secrets-keyring"]
+# OS-keyring secret resolution (spec 40-arbitraitor-integration.md §9.23.1).
+secrets-keyring = ["dep:keyring"]
+
 [dependencies]
 figment = { workspace = true }
+jsonwebtoken = { workspace = true }
+keyring = { workspace = true, optional = true }
 orchestraitor-model = { path = "../orchestraitor-model" }
 schemars = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }

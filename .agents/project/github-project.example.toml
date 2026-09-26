@@ -70,6 +70,14 @@ field = "Start date"
 type  = "date"
 field = "Target date"
 
+# --- Service identities (spec 10-orchestrator.md §9.41) ------------------------
+# Bot logins granted service-identity scheduling: the ready queue excludes items
+# assigned to humans but keeps items assigned to these identities schedulable.
+# GitHub App logins render as `<slug>[bot]`; both that and the bare slug form
+# match. The daemon-side default lives in layered config `service_identities`.
+[service_identities]
+slugs = ["arbsec-agent"]
+
 # --- Labels (advisory; the project fields above are authoritative) ---------------
 [labels]
 blocked_arbitraitor = "blocked:arbitraitor"   # cross-repo Arbitraitor upstream blocker

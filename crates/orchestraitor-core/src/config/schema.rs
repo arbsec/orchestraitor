@@ -28,6 +28,28 @@ pub struct OrchestraitorConfig {
     pub data_governance: Option<BTreeMap<String, DataGovernanceConfig>>,
     /// Data classification rules keyed by rule id.
     pub data_classification: Option<BTreeMap<String, DataClassificationConfig>>,
+    /// GitHub App service identity used for agent-driven GitHub operations
+    /// (spec `10-orchestrator.md` §9.25.2).
+    pub github_app: Option<GitHubAppConfig>,
+    /// Service-identity bot slugs for the ready-queue assignee exclusion:
+    /// items assigned to a service identity stay schedulable while items
+    /// assigned to a human are excluded (spec `10-orchestrator.md` §9.41).
+    pub service_identities: Option<Vec<String>>,
+}
+
+/// GitHub App service identity configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitHubAppConfig {
+    /// GitHub App slug (e.g. `arbsec-agent`).
+    pub slug: Option<String>,
+    /// GitHub App client ID, used as the JWT `iss` claim. The numeric app ID
+    /// is rejected by GitHub with 401 (runbook `.omo/drafts/github-app-setup.md` §5).
+    pub client_id: Option<String>,
+    /// GitHub App installation ID for the deployment organization; installation
+    /// tokens are minted per installation.
+    pub installation_id: Option<u64>,
+    /// Secret URI for the App private key PEM (spec `40-arbitraitor-integration.md` §9.23).
+    pub private_key_uri: Option<SecretUri>,
 }
 
 /// Normalization configuration block.

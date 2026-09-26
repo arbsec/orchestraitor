@@ -103,6 +103,7 @@ orc config diff [--layer=project|user|org|dir] [--json]
 orc config migrate
 orc models refresh
 orc models rollback
+orc github mint-token
 ```
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
@@ -112,6 +113,15 @@ keys. `orc config migrate` is forward-only, writes a `.bak.*` backup, and uses `
 existing comments survive migration. `orc models refresh` forces an immediate models.dev
 catalog fetch into the local cache; `orc models rollback` returns to the previous cached
 snapshot without deleting manually configured models.
+
+## GitHub App service identity
+
+All agent-driven GitHub operations authenticate as the org-owned `arbsec-agent`
+GitHub App (installation access tokens minted from the App private key; ~1h
+expiry; no long-lived PAT). `orc github mint-token` exercises the minting path
+and prints only non-secret metadata. See
+[docs/cli/orc-github.md](docs/cli/orc-github.md) for configuration and
+fail-closed behavior (spec `10-orchestrator.md` §9.25.2).
 
 ## Contributing and security
 

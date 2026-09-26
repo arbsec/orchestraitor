@@ -60,6 +60,9 @@ book/src/adr/
 .env.*
 !.env.example
 *.pem
+# Exception: throwaway RSA test fixtures registered with nothing (see each
+# fixtures README; used by the GitHub App JWT tests, issue #307).
+!crates/orchestraitor-core/tests/fixtures/github-app-rsa-test*.pem
 *.key
 *.p12
 *.age

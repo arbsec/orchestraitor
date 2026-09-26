@@ -22,6 +22,8 @@ orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -30,3 +32,4 @@ toml_edit = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+time = { workspace = true }

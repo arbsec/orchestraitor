@@ -1,7 +1,7 @@
 //! `orc config` implementation.
 
 mod edit;
-mod layers;
+pub(crate) mod layers;
 mod values;
 
 use std::fs;

@@ -52,6 +52,14 @@ pub struct ConfigPaths {
         global = true
     )]
     pub models_dev_endpoint: Option<String>,
+    /// Alternate GitHub API base URL for token-mint tests.
+    #[arg(
+        long,
+        env = "ORCHESTRAITOR_GITHUB_API_ENDPOINT",
+        hide = true,
+        global = true
+    )]
+    pub github_api_endpoint: Option<String>,
 }
 
 /// Top-level `orc` subcommands.
@@ -65,6 +73,17 @@ pub enum Commands {
     /// Manage the cached models.dev catalog.
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// GitHub App service-identity operations.
+    #[command(subcommand, name = "github")]
+    GitHub(GitHubCommand),
+}
+
+/// `orc github` subcommands.
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum GitHubCommand {
+    /// Mint one installation access token and print only non-secret metadata
+    /// (expiry, installation id, SHA-256 fingerprint prefix — never the token).
+    MintToken,
 }
 
 /// Arguments for `orc init`.

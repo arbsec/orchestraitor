@@ -8,8 +8,9 @@ pub use parse::{ConfigParseReport, parse_toml_config};
 pub use resolver::ConfigResolver;
 pub use schema::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigSource, DataClassificationConfig,
-    DataGovernanceConfig, DomainConfig, NormalizationConfig, OrchestraitorConfig, ProviderConfig,
-    ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig, SubscriptionConfig,
+    DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig,
+    SubscriptionConfig,
 };
 
 use crate::error::OrchestraitorError;
