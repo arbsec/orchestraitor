@@ -6,12 +6,18 @@
 #![forbid(unsafe_code)]
 
 mod controller;
+mod delivery;
 mod history;
 mod materialize;
 mod symlink;
 mod types;
 
 pub use controller::WorkspaceController;
+pub use delivery::{
+    CommitIdentity, CredentialError, Delivery, DeliveryError, DeliveryOutcome, DeliveryRequest,
+    DraftPullRequestSpec, GitError, NewPullRequest, PullRequestHandle, PullRequestTransport,
+    PushCredentialProvider, TaskWorktree,
+};
 pub use history::{BlameLine, HistoryDiff, LogEntry, PathChange, PathChangeKind};
 pub use types::{
     FileDigest, ReconciliationReport, Result, Snapshot, SnapshotOptions, WorkspaceError,

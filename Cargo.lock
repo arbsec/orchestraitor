@@ -4264,6 +4264,7 @@ dependencies = [
  "orchestraitor-core",
  "orchestraitor-model",
  "rustix",
+ "secrecy",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
