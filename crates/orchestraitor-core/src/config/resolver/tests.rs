@@ -248,3 +248,70 @@ fn github_app_fields_merge_across_layers() -> Result<(), OrchestraitorError> {
     );
     Ok(())
 }
+
+#[test]
+fn role_routing_entries_merge_across_layers() -> Result<(), OrchestraitorError> {
+    let defaults = OrchestraitorConfig {
+        roles: Some(BTreeMap::from([(
+            String::from("implement"),
+            RoleConfig {
+                routing: Some(RoutingConfig {
+                    provider: Some(String::from("neuralwatt")),
+                    model: Some(String::from("glm-5.2")),
+                    profile: None,
+                }),
+            },
+        )])),
+        ..OrchestraitorConfig::default()
+    };
+    let project = OrchestraitorConfig {
+        roles: Some(BTreeMap::from([(
+            String::from("implement"),
+            RoleConfig {
+                routing: Some(RoutingConfig {
+                    provider: None,
+                    model: Some(String::from("glm-5.2-flash")),
+                    profile: None,
+                }),
+            },
+        )])),
+        ..OrchestraitorConfig::default()
+    };
+
+    let resolver = ConfigResolver::new()
+        .with_config(source(ConfigLayer::BuiltInDefaults, "built-in"), defaults)
+        .with_config(source(ConfigLayer::Project, "project"), project);
+    let config = resolver.resolve_config()?;
+    let routing = config
+        .roles
+        .and_then(|roles| roles.get("implement").cloned())
+        .and_then(|role| role.routing);
+
+    assert_eq!(
+        routing
+            .as_ref()
+            .and_then(|routing| routing.provider.as_deref()),
+        Some("neuralwatt")
+    );
+    assert_eq!(
+        routing
+            .as_ref()
+            .and_then(|routing| routing.model.as_deref()),
+        Some("glm-5.2-flash")
+    );
+    let provider = resolver.resolve_value("roles.implement.routing.provider", |config| {
+        config
+            .roles
+            .as_ref()?
+            .get("implement")?
+            .routing
+            .as_ref()?
+            .provider
+            .clone()
+    })?;
+    assert_eq!(
+        provider.map(|value| value.source.layer),
+        Some(ConfigLayer::BuiltInDefaults)
+    );
+    Ok(())
+}

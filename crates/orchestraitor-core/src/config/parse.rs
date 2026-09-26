@@ -92,6 +92,7 @@ fn is_known_key(key: &str) -> bool {
             &["protocol", "endpoint", "models", "env", "api_key"],
         )
         || matches_agent_domain_routing_key(key)
+        || matches_role_routing_key(key)
         || matches_dynamic_key(key, "agents.domains", &["description", "roles"])
         || matches_dynamic_key(key, "subscriptions", &["provider", "budget"])
         || matches_dynamic_key(key, "budgets", &["token_cap", "cost_cap"])
@@ -120,6 +121,17 @@ fn matches_agent_domain_routing_key(key: &str) -> bool {
     matches!(
         parts.as_slice(),
         [_domain, "routing", "provider" | "model" | "profile"]
+    )
+}
+
+fn matches_role_routing_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("roles.") else {
+        return false;
+    };
+    let parts = rest.split('.').collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        [_role, "routing", "provider" | "model" | "profile"]
     )
 }
 
@@ -216,6 +228,29 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"
         assert_eq!(
             report.config.service_identities.as_deref(),
             Some(["arbsec-agent".to_string()].as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn role_routing_keys_are_known() -> Result<(), OrchestraitorError> {
+        let report = parse_toml_config(
+            "[roles.implement.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+        )?;
+        assert!(report.unknown_keys.is_empty());
+        assert!(
+            report.keys.contains("roles.implement.routing.provider")
+                && report.keys.contains("roles.implement.routing.model")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_role_entry_key_is_reported_as_unknown() -> Result<(), OrchestraitorError> {
+        let report = parse_toml_config("[roles.implement]\nprovider = \"neuralwatt\"\n")?;
+        assert_eq!(
+            report.unknown_keys,
+            vec!["roles.implement.provider".to_string()]
         );
         Ok(())
     }

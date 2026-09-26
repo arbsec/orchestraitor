@@ -115,6 +115,144 @@ fn models_refresh_fetches_live_catalog() -> miette::Result<()> {
     Ok(())
 }
 
+#[test]
+fn config_get_resolves_builtin_role_routing_keys() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "config",
+        "get",
+        "roles.implement.routing.provider",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+
+    assert_eq!(String::from_utf8(output).into_diagnostic()?, "neuralwatt\n");
+    Ok(())
+}
+
+#[test]
+fn routing_resolve_persists_six_distinct_role_records() -> miette::Result<()> {
+    use orchestraitor_agent_catalog::{BUILT_IN_ORCHESTRATION_ROLES, RoleRoutingDecisionStore};
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+
+    for role in BUILT_IN_ORCHESTRATION_ROLES {
+        let mut output = Vec::new();
+        let cli = Cli::parse_from([
+            "orc",
+            "--config-dir",
+            &config_dir.display().to_string(),
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "routing",
+            "resolve",
+            "--role",
+            role.id,
+            "--json",
+        ]);
+        orchestraitor_cli::run_with_writer(cli, &mut output)?;
+        let json: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
+        assert_eq!(json["role"], role.id);
+        assert_eq!(json["provider"], "neuralwatt");
+        assert_eq!(json["model"], "glm-5.2");
+        assert!(json["record_id"].is_number());
+    }
+
+    let store = RoleRoutingDecisionStore::open(&config_dir.join("routing.db"))
+        .map_err(|error| miette::miette!("decision store reopen failed: {error}"))?;
+    let records = store
+        .list()
+        .map_err(|error| miette::miette!("decision store list failed: {error}"))?;
+    assert_eq!(records.len(), 6);
+    let distinct: std::collections::BTreeSet<_> =
+        records.iter().map(|record| record.role.as_str()).collect();
+    assert_eq!(distinct.len(), 6);
+    Ok(())
+}
+
+#[test]
+fn routing_resolve_inherits_missing_subkey_from_builtin_defaults() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[roles.implement.routing]\nprovider = \"neuralwatt\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "routing",
+        "resolve",
+        "--role",
+        "implement",
+        "--json",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    let json: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
+
+    assert_eq!(json["provider"], "neuralwatt");
+    assert_eq!(json["model"], "glm-5.2");
+    assert_eq!(
+        json["precedence_path"],
+        "roles.implement.routing (provider: project, model: built-in-defaults)"
+    );
+    Ok(())
+}
+
+#[test]
+fn routing_resolve_unconfigured_provider_names_the_key() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+         [roles.plan.routing]\nprovider = \"unknownco\"\nmodel = \"x\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "routing",
+        "resolve",
+        "--role",
+        "plan",
+    ]);
+    let result = orchestraitor_cli::run_with_writer(cli, &mut output);
+
+    let error = match result {
+        Ok(()) => return Err(miette::miette!("unconfigured provider resolved silently")),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("roles.plan.routing.provider"),
+        "error must name the offending key, got: {error}"
+    );
+    Ok(())
+}
+
 fn spawn_catalog_server() -> miette::Result<String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
     let endpoint = format!(
