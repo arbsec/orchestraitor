@@ -36,6 +36,16 @@ All notable changes to Orchestraitor are recorded here. The format follows
   (`--github-api-endpoint`) for `orc github mint-token`, including the security
   note that it redirects where the App JWT bearer is sent
   (`docs/cli/orc-github.md`) (#307).
+- Spec §9.47 (GitHub event ingress and agent-authored PR attribution): push-path event relay
+  from default-branch-resident GitHub Actions workflows (`workflow_run` pattern — never the
+  PR's merge ref) to the NAT'd daemon over an ephemeral, ACL-scoped Tailscale node;
+  conditional-ETag poll fallback; envelope authentication performed by Arbitraitor (§2.2,
+  §16.1) with the ingress `blocked:arbitraitor` until the capability exists (§16.2);
+  untrusted-envelope boundary (§6.1/§9.37(d)); relay credential via §9.23 secret URIs; bounded
+  ingress queue; durable delivery-key idempotency (§9.26.3); visible `degraded`/needs-human
+  failure behavior; agent-authored PR attribution labels (`agent-created` +
+  `needs-human-review` on security-touching diffs) derived from launch facts and corrected
+  bidirectionally as explicit provenance exceptions to board-wins (§9.43).
 - `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
   workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
   resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference
