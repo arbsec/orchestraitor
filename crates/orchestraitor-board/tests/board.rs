@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use orchestraitor_board::cache::FieldNodeIds;
@@ -66,6 +66,7 @@ impl ScriptServer {
         let shutdown = Arc::new(Mutex::new(false));
         let thread_requests = Arc::clone(&requests);
         let thread_shutdown = Arc::clone(&shutdown);
+        let thread_rules = Arc::new(rules);
         let join = thread::spawn(move || {
             loop {
                 if let Ok(guard) = thread_shutdown.lock()
@@ -75,7 +76,11 @@ impl ScriptServer {
                 }
                 match listener.accept() {
                     Ok((stream, _addr)) => {
-                        serve_connection(stream, &rules, &thread_requests);
+                        let connection_rules = Arc::clone(&thread_rules);
+                        let connection_requests = Arc::clone(&thread_requests);
+                        let _ignore = thread::spawn(move || {
+                            serve_connection(stream, &connection_rules, &connection_requests);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -179,6 +184,19 @@ fn serve_connection(
         }
     };
     let _ignore = stream.write_all(response.as_bytes());
+    // Dropping a socket with unread inbound bytes emits TCP RST (macOS
+    // especially), failing the client's in-flight response read as
+    // IncompleteMessage; drain to peer-EOF before dropping instead.
+    let _ignore = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ignore = stream.shutdown(std::net::Shutdown::Write);
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    let mut tail = [0_u8; 1024];
+    while Instant::now() < drain_deadline {
+        match stream.read(&mut tail) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
