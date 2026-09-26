@@ -36,6 +36,21 @@ All notable changes to Orchestraitor are recorded here. The format follows
   (`--github-api-endpoint`) for `orc github mint-token`, including the security
   note that it redirects where the App JWT bearer is sent
   (`docs/cli/orc-github.md`) (#307).
+- `orchestraitor-board` crate and `orc board` command: the bootstrap GitHub Projects v2
+  board provider (spec `10-orchestrator.md` §9.43, §9.40; #308). `orc board ready [--json]`
+  lists leaf Task/Bug items with `Target=MVP`, `Status=Ready`, and no unresolved `blockedBy`
+  edges on the shared board (fail-closed on truncated `blockedBy`/field/label windows;
+  malformed items are skipped with a warning, never a crash), and `orc board move <issue>
+  --status "<Status>"` writes the Status single-select field and verifies the write by
+  read-back. Node IDs resolve at runtime from the human-readable names in
+  `.agents/project/github-project.local.toml` and are cached under
+  `$XDG_CACHE_HOME/orchestraitor/` — never inside the repository. Auth is injected via the
+  `BoardAuth` trait; the bootstrap `SecretUriAuth` stub resolves the configured
+  `secret://` URI (env-backed) and never sniffs ambient credentials. Fixture-driven tests
+  cover the predicate, the mocked status-write round-trip, cache hits, and typed auth and
+  rate-limit failures; a hidden `--github-graphql-endpoint` override serves GHES and tests.
+- Compatibility-index rows for spec §9.40 and §9.43 so board code and docs can reference
+  the kanban-abstraction and blocked-dependency sections.
 - `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
   workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
   resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference

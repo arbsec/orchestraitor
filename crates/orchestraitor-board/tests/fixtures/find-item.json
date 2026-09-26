@@ -1,0 +1,14 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_fixture_42",
+        "projectItems": {
+          "nodes": [
+            { "id": "PVTI_F_42", "project": { "id": "PVT_fixture_project" } }
+          ]
+        }
+      }
+    }
+  }
+}
