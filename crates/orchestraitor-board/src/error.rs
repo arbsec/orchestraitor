@@ -134,6 +134,26 @@ pub enum BoardError {
         /// Issue number requested on the command line.
         number: u64,
     },
+    /// The same issue number matched board items under more than one
+    /// configured repository; the client cannot choose without guessing.
+    #[error(
+        "issue #{number} matches board items in multiple configured repositories: {}",
+        .repos.join(", ")
+    )]
+    AmbiguousItemReference {
+        /// Issue number requested on the command line.
+        number: u64,
+        /// Configured repositories whose same-numbered issue holds a board item.
+        repos: Vec<String>,
+    },
+    /// A GraphQL connection window disagreed with its own counters or cursor
+    /// state (node count vs. `totalCount`, or a next page without a cursor);
+    /// the client refuses to guess and fails closed.
+    #[error("GitHub GraphQL connection window `{window}` is undecidable; failing closed")]
+    TruncatedConnection {
+        /// Connection window name (for example `items` or `projectItems`).
+        window: &'static str,
+    },
     /// The issue exists but is not a member of the configured project.
     #[error("issue #{number} is not an item on the configured board")]
     ItemNotOnBoard {

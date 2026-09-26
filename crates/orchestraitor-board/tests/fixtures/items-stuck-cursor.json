@@ -1,0 +1,10 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": { "hasNextPage": true, "endCursor": null },
+        "nodes": []
+      }
+    }
+  }
+}

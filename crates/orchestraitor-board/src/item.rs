@@ -52,6 +52,7 @@ pub(crate) struct ItemContent {
     #[serde(rename = "__typename")]
     pub(crate) typename: String,
     pub(crate) number: Option<u64>,
+    pub(crate) state: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) url: Option<String>,
     pub(crate) repository: Option<RepositoryRef>,
@@ -124,6 +125,9 @@ pub enum ItemSkip {
     Malformed(&'static str),
     /// Truncated connection windows make the item's safety undecidable.
     Truncated(&'static str),
+    /// The item's issue state is not `OPEN`; closed issues never enter the
+    /// ready queue even when board field values say otherwise.
+    NotOpen,
 }
 
 /// Flat, validated view of one board item from a configured repository.
@@ -156,7 +160,7 @@ impl RawItem {
     /// repositories, or explains why the item cannot be trusted to evaluate.
     ///
     /// `repoless_ok` entries (draft issues, pull requests) return
-    /// `Err(None)` — a silent non-issue skip rather than a warning.
+    /// `Ok(None)` — a silent non-issue skip rather than a warning.
     pub(crate) fn facts(
         &self,
         repos: &[String],
@@ -183,6 +187,13 @@ impl RawItem {
         let number = content
             .number
             .ok_or(ItemSkip::Malformed("issue has no number"))?;
+        let state = content
+            .state
+            .as_deref()
+            .ok_or(ItemSkip::Malformed("issue has no state"))?;
+        if state != "OPEN" {
+            return Err(ItemSkip::NotOpen);
+        }
         let title = content
             .title
             .clone()
@@ -235,7 +246,7 @@ impl RawItem {
 /// Fail-closed truncation check matching the ready-queue script's
 /// `len(nodes) == totalCount` rule: any mismatch means the window cannot prove
 /// eligibility, so the item is excluded.
-fn truncated(nodes_len: usize, total_count: u64) -> bool {
+pub(crate) fn truncated(nodes_len: usize, total_count: u64) -> bool {
     u64::try_from(nodes_len) != Ok(total_count)
 }
 
