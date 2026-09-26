@@ -19,6 +19,7 @@ workspace = true
 clap = { workspace = true }
 miette = { workspace = true }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
+orchestraitor-board = { path = "../orchestraitor-board" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }

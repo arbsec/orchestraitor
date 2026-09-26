@@ -330,3 +330,115 @@ fn spawn_access_token_server(
     });
     Ok((endpoint, observed))
 }
+
+const BOARD_RESOLVE_PROJECT: &str = r#"{"data":{"organization":{"projectV2":{"id":"PVT_fixture_project","title":"Arbsec Development"}}}}"#;
+const BOARD_RESOLVE_FIELDS: &str = r#"{"data":{"node":{"fields":{"nodes":[{"id":"PVTSSF_fixture_status","name":"Status","options":[{"id":"OPT_fixture_ready","name":"Ready"},{"id":"OPT_fixture_in_progress","name":"In Progress"}]},{"id":"PVTSSF_fixture_target","name":"Target","options":[{"id":"OPT_fixture_mvp","name":"MVP"}]}]}}}}"#;
+const BOARD_ITEMS: &str = r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PVTI_F_130","content":{"__typename":"Issue","number":130,"state":"OPEN","title":"Eligible native task","url":"https://github.com/arbsec/orchestraitor/issues/130","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0},"blockedBy":{"nodes":[],"totalCount":0}},"fieldValues":{"totalCount":2,"nodes":[{"name":"MVP","field":{"name":"Target"}},{"name":"Ready","field":{"name":"Status"}}]}},{"id":"PVTI_F_139","content":null,"fieldValues":{"totalCount":0,"nodes":[]}}]}}}}"#;
+
+#[test]
+fn board_ready_emits_json_ready_queue() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let project_dir = temp.path().join("project");
+    let agents_dir = project_dir.join(".agents").join("project");
+    fs::create_dir_all(&agents_dir).into_diagnostic()?;
+    // The `secret://env/PATH` stub keeps the test free of credential material:
+    // every test process has PATH, and the scripted server ignores the token.
+    fs::write(
+        agents_dir.join("github-project.local.toml"),
+        "[project]\norganization = \"arbsec\"\nnumber = 1\nrepos = [\"arbsec/orchestraitor\"]\n\n[issue_types]\nleaf_implementable = [\"Task\", \"Bug\"]\n\n[mvp]\ntarget_field = \"Target\"\ntarget_value = \"MVP\"\nready_field = \"Status\"\nready_value = \"Ready\"\n\n[auth]\ntoken = \"secret://env/PATH\"\n",
+    )
+    .into_diagnostic()?;
+    let endpoint = spawn_graphql_server(&[
+        ("projectV2(number", BOARD_RESOLVE_PROJECT),
+        ("fields(first", BOARD_RESOLVE_FIELDS),
+        ("items(first", BOARD_ITEMS),
+    ])?;
+    let cache_path = temp.path().join("board-cache.json");
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--project-dir",
+        &project_dir.display().to_string(),
+        "--github-graphql-endpoint",
+        &endpoint,
+        "--board-cache-path",
+        &cache_path.display().to_string(),
+        "board",
+        "ready",
+        "--json",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    let printed = String::from_utf8(output).into_diagnostic()?;
+    let parsed: serde_json::Value = serde_json::from_str(&printed).into_diagnostic()?;
+    let numbers: Vec<u64> = parsed
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("number").and_then(serde_json::Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    assert_eq!(numbers, [130]);
+    assert!(printed.contains("\"item_id\": \"PVTI_F_130\""));
+    assert!(!printed.contains("139"), "malformed item must be skipped");
+    Ok(())
+}
+
+#[test]
+fn board_ready_without_local_config_is_an_actionable_error() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "board",
+        "ready",
+    ]);
+    let result = orchestraitor_cli::run_with_writer(cli, &mut output);
+    assert!(result.is_err());
+    let error = match result {
+        Ok(()) => return Err(miette::miette!("board ready succeeded without config")),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("github-project.local.toml"));
+    Ok(())
+}
+
+/// Accepts sequential one-request connections (`connection: close`), matching
+/// the request body against `(needle, payload)` rules in order.
+fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miette::Result<String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!(
+        "http://{}/graphql",
+        listener.local_addr().into_diagnostic()?
+    );
+    thread::spawn(move || {
+        while let Ok((mut stream, _addr)) = listener.accept() {
+            let mut buffer = vec![0_u8; 65_536].into_boxed_slice();
+            let Ok(read) = stream.read(&mut buffer) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let payload = rules
+                .iter()
+                .find(|(needle, _)| text.contains(needle))
+                .map_or(
+                    r#"{"data":null,"errors":[{"message":"unmatched request"}]}"#,
+                    |(_, payload)| payload,
+                );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok(endpoint)
+}

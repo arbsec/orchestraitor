@@ -169,6 +169,8 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.33.7 | `10-orchestrator.md#9337-security-boundary` |
 | §9.33.8 | `10-orchestrator.md#9338-design-principles` |
 | §9.34 | `10-orchestrator.md#934-structured-error-taxonomy` |
+| §9.40 | `10-orchestrator.md#940-blocked-dependency-semantics` |
+| §9.43 | `10-orchestrator.md#943-kanban-board-abstraction` |
 | §10 | `20-harness-worker.md#10-agent-and-provider-integration` |
 | §10.1 | `20-harness-worker.md#101-integration-modes` |
 | §10.2 | `30-model-routing.md#102-provider-transport-architecture` |
