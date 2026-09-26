@@ -13,7 +13,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 - Creating a draft PR linked to a leaf issue + spec references.
 - Inspecting CI/Actions failures and classifying them (transient vs. real failure vs. flake).
-- Running an adversarial-review generation in a fresh context (spec §9.33.3).
+- Running an adversarial-review generation in a fresh context (spec `10-orchestrator.md` §9.33.3).
 - Fetching review-thread state to deduplicate findings across loops.
 - Verifying the PR checklist (the `<!-- orc:* -->` markers in `.github/PULL_REQUEST_TEMPLATE.md`).
 - Deciding merge eligibility: all checks pass + threads resolved + convergence achieved.
@@ -29,7 +29,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/review-findings.md`](references/review-findings.md) — severity taxonomy (CRITICAL/HIGH/MEDIUM/LOW), deduplication, tracking across loops.
   - [`references/gh-capabilities.md`](references/gh-capabilities.md) — verified `gh` CLI surface: `pr checks --json`, `pr view --json` (and its **missing** `reviewThreads`), `pr merge --squash --match-head-commit`, `pr review`.
   - [`references/graphql.md`](references/graphql.md) — the `pullRequest.reviewThreads` connection with `isResolved`/`isOutdated`/`comments`; resolve/unresolve mutations.
-  - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec §9.17.1, §9.33).
+  - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `10-orchestrator.md` §9.33).
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
 
 ## Core procedure
@@ -41,19 +41,19 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 2. CI             Push commits; watch checks with `pr-checks`.
                   Classify each failure:
-                    transient (timeout, 429, 5xx, runner OOM)  → bounded retry per spec §9.26.2
+                    transient (timeout, 429, 5xx, runner OOM)  → bounded retry per spec `10-orchestrator.md` §9.26.2
                     real failure                              → fix root cause; do NOT reroll
                     flake                                     → identify + file issue; do NOT
-                                                              rerun until green (spec §21.10)
+                                                              rerun until green (spec `50-contracts-data.md` §21.10)
                   Required AND non-optional checks must ALL pass. A missing/skipped
                   check is a failure, not a pass.
 
-3. REVIEW         Select reviewers by changed area (spec §9.33.4):
+3. REVIEW         Select reviewers by changed area (spec `10-orchestrator.md` §9.33.4):
                     general, security, backend, frontend, data, devops, testing,
                     documentation — per .agents/project/orchestraitor-workflow.md.
                   Each reviewer MUST use a FRESH context (new agent spawn, not the
                   implementer's session). Implementers may not approve their own
-                  security-sensitive changes (spec §21.1).
+                  security-sensitive changes (spec `50-contracts-data.md` §21.1).
                   This skill does NOT perform the review itself; it tracks generations.
 
 4. FINDINGS       Fetch review threads with `review-threads` (GraphQL; `gh pr view
@@ -71,7 +71,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   NO new noteworthy findings AND all earlier blocking findings are
                   resolved. See pr-convergence.md.
                   Reaching a configured loop/cost/time limit produces a `blocked` or
-                  `needs-human` state (spec §9.24, §9.33.4) — NEVER silent approval.
+                  `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
                   + checklist.
 
@@ -79,7 +79,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   surface is touched (CLI, config, env vars, public APIs, daemon
                   protocol, built-in tools, MCP, provider support, security guarantees,
                   error behavior, install/migrate/remove), human-facing docs MUST
-                  update in this same PR (spec §9.17.1, §9.33). CHANGELOG [Unreleased]
+                  update in this same PR (spec `10-orchestrator.md` §9.33). CHANGELOG [Unreleased]
                   gains an entry per public-behavior change. Reconcile the checklist
                   with `reconcile-checklist`.
 
@@ -91,7 +91,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                     - documentation updated
                     - PR checklist items checked based on EVIDENCE
                   `gh pr merge --squash --delete-branch --match-head-commit <sha>`.
-                  Never use --admin to bypass a red gate (spec §21.10, AGENTS.md).
+                  Never use --admin to bypass a red gate (spec `50-contracts-data.md` §21.10, AGENTS.md).
 
 9. RECONCILE      After merge: close the linked issue (or confirm the PR's "Closes #N"
                   did), delete the branch, remove the worktree. Move the issue to
@@ -124,7 +124,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 - **No merge on red.** `merge-gate` exits non-zero if any required or non-optional check is not passing. A skipped/missing check is a failure.
 - **No admin bypass.** This skill never passes `--admin` to `gh pr merge`. Reaching a limit is a `blocked` state, not a merge path.
-- **Fresh-context reviews only.** The skill tracks review *generations*; it does not let a reviewer approve their own implementation (spec §21.1, §9.33.3). Security-sensitive changes require human review before release.
+- **Fresh-context reviews only.** The skill tracks review *generations*; it does not let a reviewer approve their own implementation (spec `50-contracts-data.md` §21.1, `10-orchestrator.md` §9.33.3). Security-sensitive changes require human review before release.
 - **HEAD is authoritative.** Reviews rerun against the current HEAD after each commit. Stale convergence is not convergence.
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.

@@ -20,7 +20,7 @@ Two repositories share one security model. Pick the right home **before** openin
   plugin/artifact inspection, network and secret enforcement, plan-bound approvals, output
   classification and promotion authorization, provenance, and security receipts. A missing
   security capability for Orchestraitor MUST be added to Arbitraitor first (`AGENTS.md`,
-  spec §16.2).
+  spec `40-arbitraitor-integration.md` §16.2).
 - **Orchestraitor (`arbsec/orchestraitor`)** owns: the agent loop and session lifecycle,
   provider/harness adapters, the CLI/TUI/GUI/IDE/MCP/ACP surfaces, the context compiler,
   format-on-write and transaction orchestration, workspace lifecycle, and the presentation of
@@ -35,7 +35,8 @@ The application code does not exist yet (pre-implementation). You can still cont
 specification, governance, and documentation:
 
 1. Fork and clone the repository.
-2. Read [`AGENTS.md`](AGENTS.md) and [`docs/spec/spec.md`](docs/spec/spec.md).
+2. Read [`AGENTS.md`](AGENTS.md) and the [`docs/spec/`](docs/spec) specification (start
+   at [`00-overview.md`](docs/spec/00-overview.md)).
 3. Create a worktree — **never commit directly to `main`**:
 
    ```sh
@@ -48,13 +49,13 @@ specification, governance, and documentation:
 
 ## Workflow
 
-1. **Only the project-manager agent selects work** during autonomous delivery (spec §9.33.1).
+1. **Only the project-manager agent selects work** during autonomous delivery (spec `10-orchestrator.md` §9.33.1).
    Outside autonomous runs, pick an issue labeled `Target = MVP`, `Status = Ready`, with no
    unresolved blockers (see [workflow policy](.agents/project/orchestraitor-workflow.md)).
 2. **Only leaf Tasks and Bugs are directly implementable.** Decompose Epics and Features into
    leaf work first, using native GitHub sub-issues; use native issue dependencies for blocking.
 3. **One independently testable, revertible concern per PR.** Never hide newly discovered work
-   inside a larger PR — open a separate issue/PR for follow-ups (spec §9.33.2).
+   inside a larger PR — open a separate issue/PR for follow-ups (spec `10-orchestrator.md` §9.33.2).
 4. **Check for conflicting in-flight work** before starting (open issues/PRs touching the same
    spec section or crate).
 5. **Run pre-PR checks** (all must pass once `Cargo.toml` exists):
@@ -72,7 +73,7 @@ specification, governance, and documentation:
 6. **Open a PR** with a Conventional Commits title, linked issue, spec references, security
    impact, test evidence, and documentation impact. Complete the
    [PR checklist](.github/PULL_REQUEST_TEMPLATE.md).
-7. **Adversarial review by a different agent/session is mandatory** (spec §21.1). Reviewers use
+7. **Adversarial review by a different agent/session is mandatory** (spec `50-contracts-data.md` §21.1). Reviewers use
    fresh contexts; each new commit re-runs review against the current HEAD. Security-sensitive
    changes require human review before release.
 8. **Squash merge** on green CI with all review threads resolved. Clean up your worktree.
@@ -95,11 +96,11 @@ docs(spec): clarify context provenance envelope
 - No `unwrap()`/`expect()` in production code. No `as any`/`@ts-ignore` equivalents, no blanket
   `#[allow(...)]`.
 - No `unsafe` in Orchestraitor crates where avoidable; OS-specific unsafe security code belongs
-  in isolated **Arbitraitor** crates with explicit safety invariants (spec §21.2.7).
+  in isolated **Arbitraitor** crates with explicit safety invariants (spec `50-contracts-data.md` §21.2.7).
 - Newtypes for security-relevant values (hashes, identities, digest-based optimistic
   concurrency).
 - Match Arbitraitor conventions: `thiserror` 2 at library boundaries, `miette` at the CLI
-  boundary, errors and traces never leak secrets (spec §9.23.4).
+  boundary, errors and traces never leak secrets (spec `40-arbitraitor-integration.md` §9.23.4).
 
 ## Dependencies
 
@@ -113,7 +114,7 @@ Never add a dependency without justification in the PR.
 
 Any change to **public behavior** updates human-facing docs in the same PR — README, CLI
 reference, configuration docs, `CHANGELOG.md` `[Unreleased]`. Generated `cargo doc` and code
-comments alone do not satisfy this requirement (spec §9.17.1, §9.33).
+comments alone do not satisfy this requirement (spec `10-orchestrator.md` §9.33).
 
 ## Questions?
 

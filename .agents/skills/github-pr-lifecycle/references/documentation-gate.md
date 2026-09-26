@@ -1,6 +1,6 @@
 # Documentation gate
 
-Any change to **public behavior** updates human-facing docs in the same PR (spec §9.17.1, §9.33, AGENTS.md). This reference defines what counts as public behavior and how `classify-docs-impact` classifies it.
+Any change to **public behavior** updates human-facing docs in the same PR (spec `10-orchestrator.md` §9.33, AGENTS.md). This reference defines what counts as public behavior and how `classify-docs-impact` classifies it.
 
 ## Public behavior surfaces
 
@@ -13,7 +13,7 @@ A change touches public behavior if the diff affects any of:
 | Environment variables | `ORCHESTRATOR_*`, `NEURALWATT_API_KEY`, `ZHIPU_API_KEY`, any `*_API_KEY` referenced in code |
 | Public APIs | `pub fn`, `pub struct`, `pub trait`, `pub enum` in `crates/orchestraitor-{core,model,events,adapter-api,provider-api,mcp}/` |
 | Daemon protocols | JSON-RPC method names/schemas in `crates/orchestraitor-daemon/`, `crates/orchestraitor-provider-proxy/` |
-| Built-in tools | `fs.*`, `format.run`, `lint.run`, `check.run`, `test.run`, `task.run` (spec §9.5/MVP-6) |
+| Built-in tools | `fs.*`, `format.run`, `lint.run`, `check.run`, `test.run`, `task.run` (spec `20-harness-worker.md` §9.5/`60-milestones.md` MVP-6) |
 | MCP behavior | `crates/orchestraitor-mcp/`, tool schema, namespacing, lifecycle |
 | Provider support | `crates/orchestraitor-provider-*/`, new/changed provider configs, `[[providers]]` blocks |
 | Security guarantees | `SECURITY.md`, `AGENTS.md` security rules, capability report surfaces |
