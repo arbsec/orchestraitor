@@ -1,0 +1,1317 @@
+# Read-back verification — 638 project items fetched
+
+## (a) Epics
+[PASS] epic E0 present on board
+[PASS] E0 Priority=P0 — got P0
+[PASS] E0 Target=MVP — got MVP
+[PASS] E0 Risk=High — got High
+[PASS] E0 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E0 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E0 has >=1 leaf Task (sub-issues: 11)
+[PASS] E0 UNASSIGNED
+[PASS] epic E1 present on board
+[PASS] E1 Priority=P1 — got P1
+[PASS] E1 Target=MVP — got MVP
+[PASS] E1 Risk=Medium — got Medium
+[PASS] E1 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E1 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E1 has >=1 leaf Task (sub-issues: 8)
+[PASS] E1 UNASSIGNED
+[PASS] epic E2 present on board
+[PASS] E2 Priority=P1 — got P1
+[PASS] E2 Target=MVP — got MVP
+[PASS] E2 Risk=Medium — got Medium
+[PASS] E2 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E2 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E2 has >=1 leaf Task (sub-issues: 6)
+[PASS] E2 UNASSIGNED
+[PASS] epic E3 present on board
+[PASS] E3 Priority=P1 — got P1
+[PASS] E3 Target=MVP — got MVP
+[PASS] E3 Risk=Medium — got Medium
+[PASS] E3 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E3 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E3 has >=1 leaf Task (sub-issues: 8)
+[PASS] E3 UNASSIGNED
+[PASS] epic E4 present on board
+[PASS] E4 Priority=P1 — got P1
+[PASS] E4 Target=MVP — got MVP
+[PASS] E4 Risk=Medium — got Medium
+[PASS] E4 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E4 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E4 has >=1 leaf Task (sub-issues: 4)
+[PASS] E4 UNASSIGNED
+[PASS] epic E5 present on board
+[PASS] E5 Priority=P1 — got P1
+[PASS] E5 Target=MVP — got MVP
+[PASS] E5 Risk=Critical — got Critical
+[PASS] E5 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E5 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E5 has >=1 leaf Task (sub-issues: 8)
+[PASS] E5 UNASSIGNED
+[PASS] epic E6 present on board
+[PASS] E6 Priority=P1 — got P1
+[PASS] E6 Target=MVP — got MVP
+[PASS] E6 Risk=Medium — got Medium
+[PASS] E6 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E6 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E6 has >=1 leaf Task (sub-issues: 5)
+[PASS] E6 UNASSIGNED
+[PASS] epic E7 present on board
+[PASS] E7 Priority=P1 — got P1
+[PASS] E7 Target=MVP — got MVP
+[PASS] E7 Risk=Medium — got Medium
+[PASS] E7 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E7 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E7 has >=1 leaf Task (sub-issues: 5)
+[PASS] E7 UNASSIGNED
+[PASS] epic E8 present on board
+[PASS] E8 Priority=P1 — got P1
+[PASS] E8 Target=MVP — got MVP
+[PASS] E8 Risk=Critical — got Critical
+[PASS] E8 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E8 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E8 has >=1 leaf Task (sub-issues: 7)
+[PASS] E8 UNASSIGNED
+[PASS] epic E9 present on board
+[PASS] E9 Priority=P2 — got P2
+[PASS] E9 Target=MVP — got MVP
+[PASS] E9 Risk=Low — got Low
+[PASS] E9 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E9 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E9 has >=1 leaf Task (sub-issues: 4)
+[PASS] E9 UNASSIGNED
+[PASS] epic E10 present on board
+[PASS] E10 Priority=P1 — got P1
+[PASS] E10 Target=MVP — got MVP
+[PASS] E10 Risk=High — got High
+[PASS] E10 Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] E10 carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] E10 has >=1 leaf Task (sub-issues: 5)
+[PASS] E10 UNASSIGNED
+[PASS] epic ICE present on board
+[PASS] ICE Priority=P3 — got P3
+[PASS] ICE Target=Icebox — got Icebox
+[PASS] ICE Risk=Low — got Low
+[PASS] ICE Status=Backlog (epics are not schedulable) — got Backlog
+[PASS] ICE carries `epic` label (native Epic type blocked — see manifest §1) — labels=['epic']
+[PASS] ICE has >=1 leaf Task (sub-issues: 1)
+[PASS] ICE UNASSIGNED
+
+## (a) Leaf Tasks
+[PASS] E0-T1 present on board
+[PASS] E0-T1 native type Task — got Task
+[PASS] E0-T1 in arbsec/orchestraitor
+[PASS] E0-T1 Status=Ready — got Ready
+[PASS] E0-T1 Target=MVP — got MVP
+[PASS] E0-T1 Priority=P0 — got P0
+[PASS] E0-T1 Risk=Critical — got Critical
+[PASS] E0-T1 Estimate=3 — got 3.0
+[PASS] E0-T1 is a native sub-issue of E0
+[PASS] E0-T1 non-empty body
+[PASS] E0-T1 body has >=1 docs/spec/ anchor
+[PASS] E0-T1 body has acceptance criteria
+[PASS] E0-T1 body has QA scenarios
+[PASS] E0-T1 body byte-identical to manifest (sha256)
+[PASS] E0-T1 label `needs-human-review`
+[PASS] E0-T1 label `MVP` (Target proxy)
+[PASS] E0-T1 UNASSIGNED
+[PASS] E0-T1 thin-slice marker present
+[PASS] E0-T2 present on board
+[PASS] E0-T2 native type Task — got Task
+[PASS] E0-T2 in arbsec/orchestraitor
+[PASS] E0-T2 Status=Ready — got Ready
+[PASS] E0-T2 Target=MVP — got MVP
+[PASS] E0-T2 Priority=P0 — got P0
+[PASS] E0-T2 Risk=Low — got Low
+[PASS] E0-T2 Estimate=5 — got 5.0
+[PASS] E0-T2 is a native sub-issue of E0
+[PASS] E0-T2 non-empty body
+[PASS] E0-T2 body has >=1 docs/spec/ anchor
+[PASS] E0-T2 body has acceptance criteria
+[PASS] E0-T2 body has QA scenarios
+[PASS] E0-T2 body byte-identical to manifest (sha256)
+[PASS] E0-T2 label `MVP` (Target proxy)
+[PASS] E0-T2 UNASSIGNED
+[PASS] E0-T2 thin-slice marker present
+[PASS] E0-T3 present on board
+[PASS] E0-T3 native type Task — got Task
+[PASS] E0-T3 in arbsec/orchestraitor
+[PASS] E0-T3 Status=Ready — got Ready
+[PASS] E0-T3 Target=MVP — got MVP
+[PASS] E0-T3 Priority=P0 — got P0
+[PASS] E0-T3 Risk=Low — got Low
+[PASS] E0-T3 Estimate=3 — got 3.0
+[PASS] E0-T3 is a native sub-issue of E0
+[PASS] E0-T3 non-empty body
+[PASS] E0-T3 body has >=1 docs/spec/ anchor
+[PASS] E0-T3 body has acceptance criteria
+[PASS] E0-T3 body has QA scenarios
+[PASS] E0-T3 body byte-identical to manifest (sha256)
+[PASS] E0-T3 label `MVP` (Target proxy)
+[PASS] E0-T3 UNASSIGNED
+[PASS] E0-T3 thin-slice marker present
+[PASS] E0-T4 present on board
+[PASS] E0-T4 native type Task — got Task
+[PASS] E0-T4 in arbsec/orchestraitor
+[PASS] E0-T4 Status=Ready — got Ready
+[PASS] E0-T4 Target=MVP — got MVP
+[PASS] E0-T4 Priority=P0 — got P0
+[PASS] E0-T4 Risk=Medium — got Medium
+[PASS] E0-T4 Estimate=8 — got 8.0
+[PASS] E0-T4 is a native sub-issue of E0
+[PASS] E0-T4 non-empty body
+[PASS] E0-T4 body has >=1 docs/spec/ anchor
+[PASS] E0-T4 body has acceptance criteria
+[PASS] E0-T4 body has QA scenarios
+[PASS] E0-T4 body byte-identical to manifest (sha256)
+[PASS] E0-T4 label `MVP` (Target proxy)
+[PASS] E0-T4 UNASSIGNED
+[PASS] E0-T4 thin-slice marker present
+[PASS] E0-T5 present on board
+[PASS] E0-T5 native type Task — got Task
+[PASS] E0-T5 in arbsec/orchestraitor
+[PASS] E0-T5 Status=Ready — got Ready
+[PASS] E0-T5 Target=MVP — got MVP
+[PASS] E0-T5 Priority=P0 — got P0
+[PASS] E0-T5 Risk=Critical — got Critical
+[PASS] E0-T5 Estimate=8 — got 8.0
+[PASS] E0-T5 is a native sub-issue of E0
+[PASS] E0-T5 non-empty body
+[PASS] E0-T5 body has >=1 docs/spec/ anchor
+[PASS] E0-T5 body has acceptance criteria
+[PASS] E0-T5 body has QA scenarios
+[PASS] E0-T5 body byte-identical to manifest (sha256)
+[PASS] E0-T5 label `needs-human-review`
+[PASS] E0-T5 label `MVP` (Target proxy)
+[PASS] E0-T5 UNASSIGNED
+[PASS] E0-T5 thin-slice marker present
+[PASS] E0-T6 present on board
+[PASS] E0-T6 native type Task — got Task
+[PASS] E0-T6 in arbsec/orchestraitor
+[PASS] E0-T6 Status=Ready — got Ready
+[PASS] E0-T6 Target=MVP — got MVP
+[PASS] E0-T6 Priority=P0 — got P0
+[PASS] E0-T6 Risk=Medium — got Medium
+[PASS] E0-T6 Estimate=5 — got 5.0
+[PASS] E0-T6 is a native sub-issue of E0
+[PASS] E0-T6 non-empty body
+[PASS] E0-T6 body has >=1 docs/spec/ anchor
+[PASS] E0-T6 body has acceptance criteria
+[PASS] E0-T6 body has QA scenarios
+[PASS] E0-T6 body byte-identical to manifest (sha256)
+[PASS] E0-T6 label `MVP` (Target proxy)
+[PASS] E0-T6 UNASSIGNED
+[PASS] E0-T6 thin-slice marker present
+[PASS] E0-T7 present on board
+[PASS] E0-T7 native type Task — got Task
+[PASS] E0-T7 in arbsec/orchestraitor
+[PASS] E0-T7 Status=Ready — got Ready
+[PASS] E0-T7 Target=MVP — got MVP
+[PASS] E0-T7 Priority=P0 — got P0
+[PASS] E0-T7 Risk=Medium — got Medium
+[PASS] E0-T7 Estimate=5 — got 5.0
+[PASS] E0-T7 is a native sub-issue of E0
+[PASS] E0-T7 non-empty body
+[PASS] E0-T7 body has >=1 docs/spec/ anchor
+[PASS] E0-T7 body has acceptance criteria
+[PASS] E0-T7 body has QA scenarios
+[PASS] E0-T7 body byte-identical to manifest (sha256)
+[PASS] E0-T7 label `MVP` (Target proxy)
+[PASS] E0-T7 UNASSIGNED
+[PASS] E0-T7 thin-slice marker present
+[PASS] E0-T8 present on board
+[PASS] E0-T8 native type Task — got Task
+[PASS] E0-T8 in arbsec/orchestraitor
+[PASS] E0-T8 Status=Ready — got Ready
+[PASS] E0-T8 Target=MVP — got MVP
+[PASS] E0-T8 Priority=P0 — got P0
+[PASS] E0-T8 Risk=Critical — got Critical
+[PASS] E0-T8 Estimate=5 — got 5.0
+[PASS] E0-T8 is a native sub-issue of E0
+[PASS] E0-T8 non-empty body
+[PASS] E0-T8 body has >=1 docs/spec/ anchor
+[PASS] E0-T8 body has acceptance criteria
+[PASS] E0-T8 body has QA scenarios
+[PASS] E0-T8 body byte-identical to manifest (sha256)
+[PASS] E0-T8 label `needs-human-review`
+[PASS] E0-T8 label `MVP` (Target proxy)
+[PASS] E0-T8 UNASSIGNED
+[PASS] E0-T8 thin-slice marker present
+[PASS] E0-T9 present on board
+[PASS] E0-T9 native type Task — got Task
+[PASS] E0-T9 in arbsec/orchestraitor
+[PASS] E0-T9 Status=Ready — got Ready
+[PASS] E0-T9 Target=MVP — got MVP
+[PASS] E0-T9 Priority=P0 — got P0
+[PASS] E0-T9 Risk=Low — got Low
+[PASS] E0-T9 Estimate=3 — got 3.0
+[PASS] E0-T9 is a native sub-issue of E0
+[PASS] E0-T9 non-empty body
+[PASS] E0-T9 body has >=1 docs/spec/ anchor
+[PASS] E0-T9 body has acceptance criteria
+[PASS] E0-T9 body has QA scenarios
+[PASS] E0-T9 body byte-identical to manifest (sha256)
+[PASS] E0-T9 label `MVP` (Target proxy)
+[PASS] E0-T9 UNASSIGNED
+[PASS] E0-T9 thin-slice marker present
+[PASS] E0-T10 present on board
+[PASS] E0-T10 native type Task — got Task
+[PASS] E0-T10 in arbsec/orchestraitor
+[PASS] E0-T10 Status=Ready — got Ready
+[PASS] E0-T10 Target=MVP — got MVP
+[PASS] E0-T10 Priority=P0 — got P0
+[PASS] E0-T10 Risk=Medium — got Medium
+[PASS] E0-T10 Estimate=5 — got 5.0
+[PASS] E0-T10 is a native sub-issue of E0
+[PASS] E0-T10 non-empty body
+[PASS] E0-T10 body has >=1 docs/spec/ anchor
+[PASS] E0-T10 body has acceptance criteria
+[PASS] E0-T10 body has QA scenarios
+[PASS] E0-T10 body byte-identical to manifest (sha256)
+[PASS] E0-T10 label `MVP` (Target proxy)
+[PASS] E0-T10 UNASSIGNED
+[PASS] E0-T10 thin-slice marker present
+[PASS] E0-T11 present on board
+[PASS] E0-T11 native type Task — got Task
+[PASS] E0-T11 in arbsec/orchestraitor
+[PASS] E0-T11 Status=Ready — got Ready
+[PASS] E0-T11 Target=MVP — got MVP
+[PASS] E0-T11 Priority=P0 — got P0
+[PASS] E0-T11 Risk=Low — got Low
+[PASS] E0-T11 Estimate=2 — got 2.0
+[PASS] E0-T11 is a native sub-issue of E0
+[PASS] E0-T11 non-empty body
+[PASS] E0-T11 body has >=1 docs/spec/ anchor
+[PASS] E0-T11 body has acceptance criteria
+[PASS] E0-T11 body has QA scenarios
+[PASS] E0-T11 body byte-identical to manifest (sha256)
+[PASS] E0-T11 label `MVP` (Target proxy)
+[PASS] E0-T11 UNASSIGNED
+[PASS] E0-T11 thin-slice marker present
+[PASS] E1-T1 present on board
+[PASS] E1-T1 native type Task — got Task
+[PASS] E1-T1 in arbsec/orchestraitor
+[PASS] E1-T1 Status=Ready — got Ready
+[PASS] E1-T1 Target=MVP — got MVP
+[PASS] E1-T1 Priority=P1 — got P1
+[PASS] E1-T1 Risk=Low — got Low
+[PASS] E1-T1 Estimate=5 — got 5.0
+[PASS] E1-T1 is a native sub-issue of E1
+[PASS] E1-T1 non-empty body
+[PASS] E1-T1 body has >=1 docs/spec/ anchor
+[PASS] E1-T1 body has acceptance criteria
+[PASS] E1-T1 body has QA scenarios
+[PASS] E1-T1 body byte-identical to manifest (sha256)
+[PASS] E1-T1 label `MVP` (Target proxy)
+[PASS] E1-T1 UNASSIGNED
+[PASS] E1-T2 present on board
+[PASS] E1-T2 native type Task — got Task
+[PASS] E1-T2 in arbsec/orchestraitor
+[PASS] E1-T2 Status=Ready — got Ready
+[PASS] E1-T2 Target=MVP — got MVP
+[PASS] E1-T2 Priority=P1 — got P1
+[PASS] E1-T2 Risk=Low — got Low
+[PASS] E1-T2 Estimate=5 — got 5.0
+[PASS] E1-T2 is a native sub-issue of E1
+[PASS] E1-T2 non-empty body
+[PASS] E1-T2 body has >=1 docs/spec/ anchor
+[PASS] E1-T2 body has acceptance criteria
+[PASS] E1-T2 body has QA scenarios
+[PASS] E1-T2 body byte-identical to manifest (sha256)
+[PASS] E1-T2 label `MVP` (Target proxy)
+[PASS] E1-T2 UNASSIGNED
+[PASS] E1-T3 present on board
+[PASS] E1-T3 native type Task — got Task
+[PASS] E1-T3 in arbsec/orchestraitor
+[PASS] E1-T3 Status=Ready — got Ready
+[PASS] E1-T3 Target=MVP — got MVP
+[PASS] E1-T3 Priority=P1 — got P1
+[PASS] E1-T3 Risk=Medium — got Medium
+[PASS] E1-T3 Estimate=8 — got 8.0
+[PASS] E1-T3 is a native sub-issue of E1
+[PASS] E1-T3 non-empty body
+[PASS] E1-T3 body has >=1 docs/spec/ anchor
+[PASS] E1-T3 body has acceptance criteria
+[PASS] E1-T3 body has QA scenarios
+[PASS] E1-T3 body byte-identical to manifest (sha256)
+[PASS] E1-T3 label `MVP` (Target proxy)
+[PASS] E1-T3 UNASSIGNED
+[PASS] E1-T4 present on board
+[PASS] E1-T4 native type Task — got Task
+[PASS] E1-T4 in arbsec/orchestraitor
+[PASS] E1-T4 Status=Ready — got Ready
+[PASS] E1-T4 Target=MVP — got MVP
+[PASS] E1-T4 Priority=P1 — got P1
+[PASS] E1-T4 Risk=Medium — got Medium
+[PASS] E1-T4 Estimate=5 — got 5.0
+[PASS] E1-T4 is a native sub-issue of E1
+[PASS] E1-T4 non-empty body
+[PASS] E1-T4 body has >=1 docs/spec/ anchor
+[PASS] E1-T4 body has acceptance criteria
+[PASS] E1-T4 body has QA scenarios
+[PASS] E1-T4 body byte-identical to manifest (sha256)
+[PASS] E1-T4 label `MVP` (Target proxy)
+[PASS] E1-T4 UNASSIGNED
+[PASS] E1-T5 present on board
+[PASS] E1-T5 native type Task — got Task
+[PASS] E1-T5 in arbsec/orchestraitor
+[PASS] E1-T5 Status=Ready — got Ready
+[PASS] E1-T5 Target=MVP — got MVP
+[PASS] E1-T5 Priority=P1 — got P1
+[PASS] E1-T5 Risk=Medium — got Medium
+[PASS] E1-T5 Estimate=5 — got 5.0
+[PASS] E1-T5 is a native sub-issue of E1
+[PASS] E1-T5 non-empty body
+[PASS] E1-T5 body has >=1 docs/spec/ anchor
+[PASS] E1-T5 body has acceptance criteria
+[PASS] E1-T5 body has QA scenarios
+[PASS] E1-T5 body byte-identical to manifest (sha256)
+[PASS] E1-T5 label `MVP` (Target proxy)
+[PASS] E1-T5 UNASSIGNED
+[PASS] E1-T6 present on board
+[PASS] E1-T6 native type Task — got Task
+[PASS] E1-T6 in arbsec/orchestraitor
+[PASS] E1-T6 Status=Ready — got Ready
+[PASS] E1-T6 Target=MVP — got MVP
+[PASS] E1-T6 Priority=P1 — got P1
+[PASS] E1-T6 Risk=Medium — got Medium
+[PASS] E1-T6 Estimate=8 — got 8.0
+[PASS] E1-T6 is a native sub-issue of E1
+[PASS] E1-T6 non-empty body
+[PASS] E1-T6 body has >=1 docs/spec/ anchor
+[PASS] E1-T6 body has acceptance criteria
+[PASS] E1-T6 body has QA scenarios
+[PASS] E1-T6 body byte-identical to manifest (sha256)
+[PASS] E1-T6 label `MVP` (Target proxy)
+[PASS] E1-T6 UNASSIGNED
+[PASS] E1-T7 present on board
+[PASS] E1-T7 native type Task — got Task
+[PASS] E1-T7 in arbsec/orchestraitor
+[PASS] E1-T7 Status=Ready — got Ready
+[PASS] E1-T7 Target=MVP — got MVP
+[PASS] E1-T7 Priority=P1 — got P1
+[PASS] E1-T7 Risk=Medium — got Medium
+[PASS] E1-T7 Estimate=5 — got 5.0
+[PASS] E1-T7 is a native sub-issue of E1
+[PASS] E1-T7 non-empty body
+[PASS] E1-T7 body has >=1 docs/spec/ anchor
+[PASS] E1-T7 body has acceptance criteria
+[PASS] E1-T7 body has QA scenarios
+[PASS] E1-T7 body byte-identical to manifest (sha256)
+[PASS] E1-T7 label `MVP` (Target proxy)
+[PASS] E1-T7 UNASSIGNED
+[PASS] E1-T8 present on board
+[PASS] E1-T8 native type Task — got Task
+[PASS] E1-T8 in arbsec/orchestraitor
+[PASS] E1-T8 Status=Ready — got Ready
+[PASS] E1-T8 Target=MVP — got MVP
+[PASS] E1-T8 Priority=P1 — got P1
+[PASS] E1-T8 Risk=Low — got Low
+[PASS] E1-T8 Estimate=3 — got 3.0
+[PASS] E1-T8 is a native sub-issue of E1
+[PASS] E1-T8 non-empty body
+[PASS] E1-T8 body has >=1 docs/spec/ anchor
+[PASS] E1-T8 body has acceptance criteria
+[PASS] E1-T8 body has QA scenarios
+[PASS] E1-T8 body byte-identical to manifest (sha256)
+[PASS] E1-T8 label `MVP` (Target proxy)
+[PASS] E1-T8 UNASSIGNED
+[PASS] E2-T1 present on board
+[PASS] E2-T1 native type Task — got Task
+[PASS] E2-T1 in arbsec/orchestraitor
+[PASS] E2-T1 Status=Ready — got Ready
+[PASS] E2-T1 Target=MVP — got MVP
+[PASS] E2-T1 Priority=P1 — got P1
+[PASS] E2-T1 Risk=Low — got Low
+[PASS] E2-T1 Estimate=3 — got 3.0
+[PASS] E2-T1 is a native sub-issue of E2
+[PASS] E2-T1 non-empty body
+[PASS] E2-T1 body has >=1 docs/spec/ anchor
+[PASS] E2-T1 body has acceptance criteria
+[PASS] E2-T1 body has QA scenarios
+[PASS] E2-T1 body byte-identical to manifest (sha256)
+[PASS] E2-T1 label `MVP` (Target proxy)
+[PASS] E2-T1 UNASSIGNED
+[PASS] E2-T2 present on board
+[PASS] E2-T2 native type Task — got Task
+[PASS] E2-T2 in arbsec/orchestraitor
+[PASS] E2-T2 Status=Ready — got Ready
+[PASS] E2-T2 Target=MVP — got MVP
+[PASS] E2-T2 Priority=P1 — got P1
+[PASS] E2-T2 Risk=Low — got Low
+[PASS] E2-T2 Estimate=5 — got 5.0
+[PASS] E2-T2 is a native sub-issue of E2
+[PASS] E2-T2 non-empty body
+[PASS] E2-T2 body has >=1 docs/spec/ anchor
+[PASS] E2-T2 body has acceptance criteria
+[PASS] E2-T2 body has QA scenarios
+[PASS] E2-T2 body byte-identical to manifest (sha256)
+[PASS] E2-T2 label `MVP` (Target proxy)
+[PASS] E2-T2 UNASSIGNED
+[PASS] E2-T3 present on board
+[PASS] E2-T3 native type Task — got Task
+[PASS] E2-T3 in arbsec/orchestraitor
+[PASS] E2-T3 Status=Ready — got Ready
+[PASS] E2-T3 Target=MVP — got MVP
+[PASS] E2-T3 Priority=P1 — got P1
+[PASS] E2-T3 Risk=Low — got Low
+[PASS] E2-T3 Estimate=3 — got 3.0
+[PASS] E2-T3 is a native sub-issue of E2
+[PASS] E2-T3 non-empty body
+[PASS] E2-T3 body has >=1 docs/spec/ anchor
+[PASS] E2-T3 body has acceptance criteria
+[PASS] E2-T3 body has QA scenarios
+[PASS] E2-T3 body byte-identical to manifest (sha256)
+[PASS] E2-T3 label `MVP` (Target proxy)
+[PASS] E2-T3 UNASSIGNED
+[PASS] E2-T4 present on board
+[PASS] E2-T4 native type Task — got Task
+[PASS] E2-T4 in arbsec/orchestraitor
+[PASS] E2-T4 Status=Ready — got Ready
+[PASS] E2-T4 Target=MVP — got MVP
+[PASS] E2-T4 Priority=P1 — got P1
+[PASS] E2-T4 Risk=Medium — got Medium
+[PASS] E2-T4 Estimate=5 — got 5.0
+[PASS] E2-T4 is a native sub-issue of E2
+[PASS] E2-T4 non-empty body
+[PASS] E2-T4 body has >=1 docs/spec/ anchor
+[PASS] E2-T4 body has acceptance criteria
+[PASS] E2-T4 body has QA scenarios
+[PASS] E2-T4 body byte-identical to manifest (sha256)
+[PASS] E2-T4 label `MVP` (Target proxy)
+[PASS] E2-T4 UNASSIGNED
+[PASS] E2-T5 present on board
+[PASS] E2-T5 native type Task — got Task
+[PASS] E2-T5 in arbsec/orchestraitor
+[PASS] E2-T5 Status=Ready — got Ready
+[PASS] E2-T5 Target=MVP — got MVP
+[PASS] E2-T5 Priority=P1 — got P1
+[PASS] E2-T5 Risk=Medium — got Medium
+[PASS] E2-T5 Estimate=5 — got 5.0
+[PASS] E2-T5 is a native sub-issue of E2
+[PASS] E2-T5 non-empty body
+[PASS] E2-T5 body has >=1 docs/spec/ anchor
+[PASS] E2-T5 body has acceptance criteria
+[PASS] E2-T5 body has QA scenarios
+[PASS] E2-T5 body byte-identical to manifest (sha256)
+[PASS] E2-T5 label `MVP` (Target proxy)
+[PASS] E2-T5 UNASSIGNED
+[PASS] E2-T6 present on board
+[PASS] E2-T6 native type Task — got Task
+[PASS] E2-T6 in arbsec/orchestraitor
+[PASS] E2-T6 Status=Ready — got Ready
+[PASS] E2-T6 Target=MVP — got MVP
+[PASS] E2-T6 Priority=P1 — got P1
+[PASS] E2-T6 Risk=Medium — got Medium
+[PASS] E2-T6 Estimate=5 — got 5.0
+[PASS] E2-T6 is a native sub-issue of E2
+[PASS] E2-T6 non-empty body
+[PASS] E2-T6 body has >=1 docs/spec/ anchor
+[PASS] E2-T6 body has acceptance criteria
+[PASS] E2-T6 body has QA scenarios
+[PASS] E2-T6 body byte-identical to manifest (sha256)
+[PASS] E2-T6 label `MVP` (Target proxy)
+[PASS] E2-T6 UNASSIGNED
+[PASS] E3-T1 present on board
+[PASS] E3-T1 native type Task — got Task
+[PASS] E3-T1 in arbsec/orchestraitor
+[PASS] E3-T1 Status=Ready — got Ready
+[PASS] E3-T1 Target=MVP — got MVP
+[PASS] E3-T1 Priority=P1 — got P1
+[PASS] E3-T1 Risk=Low — got Low
+[PASS] E3-T1 Estimate=3 — got 3.0
+[PASS] E3-T1 is a native sub-issue of E3
+[PASS] E3-T1 non-empty body
+[PASS] E3-T1 body has >=1 docs/spec/ anchor
+[PASS] E3-T1 body has acceptance criteria
+[PASS] E3-T1 body has QA scenarios
+[PASS] E3-T1 body byte-identical to manifest (sha256)
+[PASS] E3-T1 label `MVP` (Target proxy)
+[PASS] E3-T1 UNASSIGNED
+[PASS] E3-T2 present on board
+[PASS] E3-T2 native type Task — got Task
+[PASS] E3-T2 in arbsec/orchestraitor
+[PASS] E3-T2 Status=Ready — got Ready
+[PASS] E3-T2 Target=MVP — got MVP
+[PASS] E3-T2 Priority=P1 — got P1
+[PASS] E3-T2 Risk=Medium — got Medium
+[PASS] E3-T2 Estimate=3 — got 3.0
+[PASS] E3-T2 is a native sub-issue of E3
+[PASS] E3-T2 non-empty body
+[PASS] E3-T2 body has >=1 docs/spec/ anchor
+[PASS] E3-T2 body has acceptance criteria
+[PASS] E3-T2 body has QA scenarios
+[PASS] E3-T2 body byte-identical to manifest (sha256)
+[PASS] E3-T2 label `MVP` (Target proxy)
+[PASS] E3-T2 UNASSIGNED
+[PASS] E3-T3 present on board
+[PASS] E3-T3 native type Task — got Task
+[PASS] E3-T3 in arbsec/orchestraitor
+[PASS] E3-T3 Status=Ready — got Ready
+[PASS] E3-T3 Target=MVP — got MVP
+[PASS] E3-T3 Priority=P1 — got P1
+[PASS] E3-T3 Risk=Low — got Low
+[PASS] E3-T3 Estimate=2 — got 2.0
+[PASS] E3-T3 is a native sub-issue of E3
+[PASS] E3-T3 non-empty body
+[PASS] E3-T3 body has >=1 docs/spec/ anchor
+[PASS] E3-T3 body has acceptance criteria
+[PASS] E3-T3 body has QA scenarios
+[PASS] E3-T3 body byte-identical to manifest (sha256)
+[PASS] E3-T3 label `MVP` (Target proxy)
+[PASS] E3-T3 UNASSIGNED
+[PASS] E3-T4 present on board
+[PASS] E3-T4 native type Task — got Task
+[PASS] E3-T4 in arbsec/orchestraitor
+[PASS] E3-T4 Status=Ready — got Ready
+[PASS] E3-T4 Target=MVP — got MVP
+[PASS] E3-T4 Priority=P1 — got P1
+[PASS] E3-T4 Risk=Low — got Low
+[PASS] E3-T4 Estimate=2 — got 2.0
+[PASS] E3-T4 is a native sub-issue of E3
+[PASS] E3-T4 non-empty body
+[PASS] E3-T4 body has >=1 docs/spec/ anchor
+[PASS] E3-T4 body has acceptance criteria
+[PASS] E3-T4 body has QA scenarios
+[PASS] E3-T4 body byte-identical to manifest (sha256)
+[PASS] E3-T4 label `MVP` (Target proxy)
+[PASS] E3-T4 UNASSIGNED
+[PASS] E3-T5 present on board
+[PASS] E3-T5 native type Task — got Task
+[PASS] E3-T5 in arbsec/orchestraitor
+[PASS] E3-T5 Status=Ready — got Ready
+[PASS] E3-T5 Target=MVP — got MVP
+[PASS] E3-T5 Priority=P1 — got P1
+[PASS] E3-T5 Risk=Critical — got Critical
+[PASS] E3-T5 Estimate=5 — got 5.0
+[PASS] E3-T5 is a native sub-issue of E3
+[PASS] E3-T5 non-empty body
+[PASS] E3-T5 body has >=1 docs/spec/ anchor
+[PASS] E3-T5 body has acceptance criteria
+[PASS] E3-T5 body has QA scenarios
+[PASS] E3-T5 body byte-identical to manifest (sha256)
+[PASS] E3-T5 label `needs-human-review`
+[PASS] E3-T5 label `MVP` (Target proxy)
+[PASS] E3-T5 UNASSIGNED
+[PASS] E3-T6 present on board
+[PASS] E3-T6 native type Task — got Task
+[PASS] E3-T6 in arbsec/orchestraitor
+[PASS] E3-T6 Status=Ready — got Ready
+[PASS] E3-T6 Target=MVP — got MVP
+[PASS] E3-T6 Priority=P1 — got P1
+[PASS] E3-T6 Risk=Medium — got Medium
+[PASS] E3-T6 Estimate=3 — got 3.0
+[PASS] E3-T6 is a native sub-issue of E3
+[PASS] E3-T6 non-empty body
+[PASS] E3-T6 body has >=1 docs/spec/ anchor
+[PASS] E3-T6 body has acceptance criteria
+[PASS] E3-T6 body has QA scenarios
+[PASS] E3-T6 body byte-identical to manifest (sha256)
+[PASS] E3-T6 label `MVP` (Target proxy)
+[PASS] E3-T6 UNASSIGNED
+[PASS] E3-T7 present on board
+[PASS] E3-T7 native type Task — got Task
+[PASS] E3-T7 in arbsec/orchestraitor
+[PASS] E3-T7 Status=Ready — got Ready
+[PASS] E3-T7 Target=MVP — got MVP
+[PASS] E3-T7 Priority=P1 — got P1
+[PASS] E3-T7 Risk=High — got High
+[PASS] E3-T7 Estimate=3 — got 3.0
+[PASS] E3-T7 is a native sub-issue of E3
+[PASS] E3-T7 non-empty body
+[PASS] E3-T7 body has >=1 docs/spec/ anchor
+[PASS] E3-T7 body has acceptance criteria
+[PASS] E3-T7 body has QA scenarios
+[PASS] E3-T7 body byte-identical to manifest (sha256)
+[PASS] E3-T7 label `MVP` (Target proxy)
+[PASS] E3-T7 UNASSIGNED
+[PASS] E3-T8 present on board
+[PASS] E3-T8 native type Task — got Task
+[PASS] E3-T8 in arbsec/orchestraitor
+[PASS] E3-T8 Status=Ready — got Ready
+[PASS] E3-T8 Target=MVP — got MVP
+[PASS] E3-T8 Priority=P1 — got P1
+[PASS] E3-T8 Risk=Low — got Low
+[PASS] E3-T8 Estimate=3 — got 3.0
+[PASS] E3-T8 is a native sub-issue of E3
+[PASS] E3-T8 non-empty body
+[PASS] E3-T8 body has >=1 docs/spec/ anchor
+[PASS] E3-T8 body has acceptance criteria
+[PASS] E3-T8 body has QA scenarios
+[PASS] E3-T8 body byte-identical to manifest (sha256)
+[PASS] E3-T8 label `MVP` (Target proxy)
+[PASS] E3-T8 UNASSIGNED
+[PASS] E4-T1 present on board
+[PASS] E4-T1 native type Task — got Task
+[PASS] E4-T1 in arbsec/orchestraitor
+[PASS] E4-T1 Status=Ready — got Ready
+[PASS] E4-T1 Target=MVP — got MVP
+[PASS] E4-T1 Priority=P1 — got P1
+[PASS] E4-T1 Risk=Medium — got Medium
+[PASS] E4-T1 Estimate=8 — got 8.0
+[PASS] E4-T1 is a native sub-issue of E4
+[PASS] E4-T1 non-empty body
+[PASS] E4-T1 body has >=1 docs/spec/ anchor
+[PASS] E4-T1 body has acceptance criteria
+[PASS] E4-T1 body has QA scenarios
+[PASS] E4-T1 body byte-identical to manifest (sha256)
+[PASS] E4-T1 label `MVP` (Target proxy)
+[PASS] E4-T1 UNASSIGNED
+[PASS] E4-T2 present on board
+[PASS] E4-T2 native type Task — got Task
+[PASS] E4-T2 in arbsec/orchestraitor
+[PASS] E4-T2 Status=Ready — got Ready
+[PASS] E4-T2 Target=MVP — got MVP
+[PASS] E4-T2 Priority=P1 — got P1
+[PASS] E4-T2 Risk=Medium — got Medium
+[PASS] E4-T2 Estimate=8 — got 8.0
+[PASS] E4-T2 is a native sub-issue of E4
+[PASS] E4-T2 non-empty body
+[PASS] E4-T2 body has >=1 docs/spec/ anchor
+[PASS] E4-T2 body has acceptance criteria
+[PASS] E4-T2 body has QA scenarios
+[PASS] E4-T2 body byte-identical to manifest (sha256)
+[PASS] E4-T2 label `MVP` (Target proxy)
+[PASS] E4-T2 UNASSIGNED
+[PASS] E4-T3 present on board
+[PASS] E4-T3 native type Task — got Task
+[PASS] E4-T3 in arbsec/orchestraitor
+[PASS] E4-T3 Status=Ready — got Ready
+[PASS] E4-T3 Target=MVP — got MVP
+[PASS] E4-T3 Priority=P1 — got P1
+[PASS] E4-T3 Risk=Medium — got Medium
+[PASS] E4-T3 Estimate=5 — got 5.0
+[PASS] E4-T3 is a native sub-issue of E4
+[PASS] E4-T3 non-empty body
+[PASS] E4-T3 body has >=1 docs/spec/ anchor
+[PASS] E4-T3 body has acceptance criteria
+[PASS] E4-T3 body has QA scenarios
+[PASS] E4-T3 body byte-identical to manifest (sha256)
+[PASS] E4-T3 label `MVP` (Target proxy)
+[PASS] E4-T3 UNASSIGNED
+[PASS] E4-T4 present on board
+[PASS] E4-T4 native type Task — got Task
+[PASS] E4-T4 in arbsec/orchestraitor
+[PASS] E4-T4 Status=Ready — got Ready
+[PASS] E4-T4 Target=MVP — got MVP
+[PASS] E4-T4 Priority=P1 — got P1
+[PASS] E4-T4 Risk=Critical — got Critical
+[PASS] E4-T4 Estimate=8 — got 8.0
+[PASS] E4-T4 is a native sub-issue of E4
+[PASS] E4-T4 non-empty body
+[PASS] E4-T4 body has >=1 docs/spec/ anchor
+[PASS] E4-T4 body has acceptance criteria
+[PASS] E4-T4 body has QA scenarios
+[PASS] E4-T4 body byte-identical to manifest (sha256)
+[PASS] E4-T4 label `needs-human-review`
+[PASS] E4-T4 label `MVP` (Target proxy)
+[PASS] E4-T4 UNASSIGNED
+[PASS] E5-T1 present on board
+[PASS] E5-T1 native type Task — got Task
+[PASS] E5-T1 in arbsec/orchestraitor
+[PASS] E5-T1 Status=Ready — got Ready
+[PASS] E5-T1 Target=MVP — got MVP
+[PASS] E5-T1 Priority=P1 — got P1
+[PASS] E5-T1 Risk=Critical — got Critical
+[PASS] E5-T1 Estimate=8 — got 8.0
+[PASS] E5-T1 is a native sub-issue of E5
+[PASS] E5-T1 non-empty body
+[PASS] E5-T1 body has >=1 docs/spec/ anchor
+[PASS] E5-T1 body has acceptance criteria
+[PASS] E5-T1 body has QA scenarios
+[PASS] E5-T1 body byte-identical to manifest (sha256)
+[PASS] E5-T1 label `needs-human-review`
+[PASS] E5-T1 label `MVP` (Target proxy)
+[PASS] E5-T1 UNASSIGNED
+[PASS] E5-T2 present on board
+[PASS] E5-T2 native type Task — got Task
+[PASS] E5-T2 in arbsec/orchestraitor
+[PASS] E5-T2 Status=Ready — got Ready
+[PASS] E5-T2 Target=MVP — got MVP
+[PASS] E5-T2 Priority=P1 — got P1
+[PASS] E5-T2 Risk=Critical — got Critical
+[PASS] E5-T2 Estimate=8 — got 8.0
+[PASS] E5-T2 is a native sub-issue of E5
+[PASS] E5-T2 non-empty body
+[PASS] E5-T2 body has >=1 docs/spec/ anchor
+[PASS] E5-T2 body has acceptance criteria
+[PASS] E5-T2 body has QA scenarios
+[PASS] E5-T2 body byte-identical to manifest (sha256)
+[PASS] E5-T2 label `needs-human-review`
+[PASS] E5-T2 label `MVP` (Target proxy)
+[PASS] E5-T2 UNASSIGNED
+[PASS] E5-T3 present on board
+[PASS] E5-T3 native type Task — got Task
+[PASS] E5-T3 in arbsec/orchestraitor
+[PASS] E5-T3 Status=Ready — got Ready
+[PASS] E5-T3 Target=MVP — got MVP
+[PASS] E5-T3 Priority=P1 — got P1
+[PASS] E5-T3 Risk=Critical — got Critical
+[PASS] E5-T3 Estimate=5 — got 5.0
+[PASS] E5-T3 is a native sub-issue of E5
+[PASS] E5-T3 non-empty body
+[PASS] E5-T3 body has >=1 docs/spec/ anchor
+[PASS] E5-T3 body has acceptance criteria
+[PASS] E5-T3 body has QA scenarios
+[PASS] E5-T3 body byte-identical to manifest (sha256)
+[PASS] E5-T3 label `needs-human-review`
+[PASS] E5-T3 label `MVP` (Target proxy)
+[PASS] E5-T3 UNASSIGNED
+[PASS] E5-T4 present on board
+[PASS] E5-T4 native type Task — got Task
+[PASS] E5-T4 in arbsec/orchestraitor
+[PASS] E5-T4 Status=Ready — got Ready
+[PASS] E5-T4 Target=MVP — got MVP
+[PASS] E5-T4 Priority=P1 — got P1
+[PASS] E5-T4 Risk=Critical — got Critical
+[PASS] E5-T4 Estimate=5 — got 5.0
+[PASS] E5-T4 is a native sub-issue of E5
+[PASS] E5-T4 non-empty body
+[PASS] E5-T4 body has >=1 docs/spec/ anchor
+[PASS] E5-T4 body has acceptance criteria
+[PASS] E5-T4 body has QA scenarios
+[PASS] E5-T4 body byte-identical to manifest (sha256)
+[PASS] E5-T4 label `needs-human-review`
+[PASS] E5-T4 label `MVP` (Target proxy)
+[PASS] E5-T4 UNASSIGNED
+[PASS] E5-T5 present on board
+[PASS] E5-T5 native type Task — got Task
+[PASS] E5-T5 in arbsec/orchestraitor
+[PASS] E5-T5 Status=Ready — got Ready
+[PASS] E5-T5 Target=MVP — got MVP
+[PASS] E5-T5 Priority=P1 — got P1
+[PASS] E5-T5 Risk=Critical — got Critical
+[PASS] E5-T5 Estimate=5 — got 5.0
+[PASS] E5-T5 is a native sub-issue of E5
+[PASS] E5-T5 non-empty body
+[PASS] E5-T5 body has >=1 docs/spec/ anchor
+[PASS] E5-T5 body has acceptance criteria
+[PASS] E5-T5 body has QA scenarios
+[PASS] E5-T5 body byte-identical to manifest (sha256)
+[PASS] E5-T5 label `needs-human-review`
+[PASS] E5-T5 label `MVP` (Target proxy)
+[PASS] E5-T5 UNASSIGNED
+[PASS] E5-T6 present on board
+[PASS] E5-T6 native type Task — got Task
+[PASS] E5-T6 in arbsec/orchestraitor
+[PASS] E5-T6 Status=Ready — got Ready
+[PASS] E5-T6 Target=MVP — got MVP
+[PASS] E5-T6 Priority=P1 — got P1
+[PASS] E5-T6 Risk=Critical — got Critical
+[PASS] E5-T6 Estimate=3 — got 3.0
+[PASS] E5-T6 is a native sub-issue of E5
+[PASS] E5-T6 non-empty body
+[PASS] E5-T6 body has >=1 docs/spec/ anchor
+[PASS] E5-T6 body has acceptance criteria
+[PASS] E5-T6 body has QA scenarios
+[PASS] E5-T6 body byte-identical to manifest (sha256)
+[PASS] E5-T6 label `needs-human-review`
+[PASS] E5-T6 label `MVP` (Target proxy)
+[PASS] E5-T6 UNASSIGNED
+[PASS] E5-T7 present on board
+[PASS] E5-T7 native type Task — got Task
+[PASS] E5-T7 in arbsec/orchestraitor
+[PASS] E5-T7 Status=Backlog — got Backlog
+[PASS] E5-T7 Target=MVP — got MVP
+[PASS] E5-T7 Priority=P1 — got P1
+[PASS] E5-T7 Risk=Critical — got Critical
+[PASS] E5-T7 Estimate=5 — got 5.0
+[PASS] E5-T7 is a native sub-issue of E5
+[PASS] E5-T7 non-empty body
+[PASS] E5-T7 body has >=1 docs/spec/ anchor
+[PASS] E5-T7 body has acceptance criteria
+[PASS] E5-T7 body has QA scenarios
+[PASS] E5-T7 body byte-identical to manifest (sha256)
+[PASS] E5-T7 label `needs-human-review`
+[PASS] E5-T7 label `blocked:arbitraitor`
+[PASS] E5-T7 label `MVP` (Target proxy)
+[PASS] E5-T7 UNASSIGNED
+[PASS] E5-T8 present on board
+[PASS] E5-T8 native type Task — got Task
+[PASS] E5-T8 in arbsec/orchestraitor
+[PASS] E5-T8 Status=Backlog — got Backlog
+[PASS] E5-T8 Target=MVP — got MVP
+[PASS] E5-T8 Priority=P1 — got P1
+[PASS] E5-T8 Risk=Critical — got Critical
+[PASS] E5-T8 Estimate=5 — got 5.0
+[PASS] E5-T8 is a native sub-issue of E5
+[PASS] E5-T8 non-empty body
+[PASS] E5-T8 body has >=1 docs/spec/ anchor
+[PASS] E5-T8 body has acceptance criteria
+[PASS] E5-T8 body has QA scenarios
+[PASS] E5-T8 body byte-identical to manifest (sha256)
+[PASS] E5-T8 label `needs-human-review`
+[PASS] E5-T8 label `blocked:arbitraitor`
+[PASS] E5-T8 label `MVP` (Target proxy)
+[PASS] E5-T8 UNASSIGNED
+[PASS] E6-T1 present on board
+[PASS] E6-T1 native type Task — got Task
+[PASS] E6-T1 in arbsec/orchestraitor
+[PASS] E6-T1 Status=Ready — got Ready
+[PASS] E6-T1 Target=MVP — got MVP
+[PASS] E6-T1 Priority=P1 — got P1
+[PASS] E6-T1 Risk=Medium — got Medium
+[PASS] E6-T1 Estimate=5 — got 5.0
+[PASS] E6-T1 is a native sub-issue of E6
+[PASS] E6-T1 non-empty body
+[PASS] E6-T1 body has >=1 docs/spec/ anchor
+[PASS] E6-T1 body has acceptance criteria
+[PASS] E6-T1 body has QA scenarios
+[PASS] E6-T1 body byte-identical to manifest (sha256)
+[PASS] E6-T1 label `MVP` (Target proxy)
+[PASS] E6-T1 UNASSIGNED
+[PASS] E6-T2 present on board
+[PASS] E6-T2 native type Task — got Task
+[PASS] E6-T2 in arbsec/orchestraitor
+[PASS] E6-T2 Status=Ready — got Ready
+[PASS] E6-T2 Target=MVP — got MVP
+[PASS] E6-T2 Priority=P1 — got P1
+[PASS] E6-T2 Risk=Low — got Low
+[PASS] E6-T2 Estimate=3 — got 3.0
+[PASS] E6-T2 is a native sub-issue of E6
+[PASS] E6-T2 non-empty body
+[PASS] E6-T2 body has >=1 docs/spec/ anchor
+[PASS] E6-T2 body has acceptance criteria
+[PASS] E6-T2 body has QA scenarios
+[PASS] E6-T2 body byte-identical to manifest (sha256)
+[PASS] E6-T2 label `MVP` (Target proxy)
+[PASS] E6-T2 UNASSIGNED
+[PASS] E6-T3 present on board
+[PASS] E6-T3 native type Task — got Task
+[PASS] E6-T3 in arbsec/orchestraitor
+[PASS] E6-T3 Status=Ready — got Ready
+[PASS] E6-T3 Target=MVP — got MVP
+[PASS] E6-T3 Priority=P1 — got P1
+[PASS] E6-T3 Risk=Critical — got Critical
+[PASS] E6-T3 Estimate=5 — got 5.0
+[PASS] E6-T3 is a native sub-issue of E6
+[PASS] E6-T3 non-empty body
+[PASS] E6-T3 body has >=1 docs/spec/ anchor
+[PASS] E6-T3 body has acceptance criteria
+[PASS] E6-T3 body has QA scenarios
+[PASS] E6-T3 body byte-identical to manifest (sha256)
+[PASS] E6-T3 label `needs-human-review`
+[PASS] E6-T3 label `MVP` (Target proxy)
+[PASS] E6-T3 UNASSIGNED
+[PASS] E6-T4 present on board
+[PASS] E6-T4 native type Task — got Task
+[PASS] E6-T4 in arbsec/orchestraitor
+[PASS] E6-T4 Status=Ready — got Ready
+[PASS] E6-T4 Target=MVP — got MVP
+[PASS] E6-T4 Priority=P1 — got P1
+[PASS] E6-T4 Risk=Medium — got Medium
+[PASS] E6-T4 Estimate=3 — got 3.0
+[PASS] E6-T4 is a native sub-issue of E6
+[PASS] E6-T4 non-empty body
+[PASS] E6-T4 body has >=1 docs/spec/ anchor
+[PASS] E6-T4 body has acceptance criteria
+[PASS] E6-T4 body has QA scenarios
+[PASS] E6-T4 body byte-identical to manifest (sha256)
+[PASS] E6-T4 label `MVP` (Target proxy)
+[PASS] E6-T4 UNASSIGNED
+[PASS] E6-T5 present on board
+[PASS] E6-T5 native type Task — got Task
+[PASS] E6-T5 in arbsec/orchestraitor
+[PASS] E6-T5 Status=Ready — got Ready
+[PASS] E6-T5 Target=MVP — got MVP
+[PASS] E6-T5 Priority=P1 — got P1
+[PASS] E6-T5 Risk=Critical — got Critical
+[PASS] E6-T5 Estimate=3 — got 3.0
+[PASS] E6-T5 is a native sub-issue of E6
+[PASS] E6-T5 non-empty body
+[PASS] E6-T5 body has >=1 docs/spec/ anchor
+[PASS] E6-T5 body has acceptance criteria
+[PASS] E6-T5 body has QA scenarios
+[PASS] E6-T5 body byte-identical to manifest (sha256)
+[PASS] E6-T5 label `needs-human-review`
+[PASS] E6-T5 label `MVP` (Target proxy)
+[PASS] E6-T5 UNASSIGNED
+[PASS] E7-T1 present on board
+[PASS] E7-T1 native type Task — got Task
+[PASS] E7-T1 in arbsec/orchestraitor
+[PASS] E7-T1 Status=Ready — got Ready
+[PASS] E7-T1 Target=MVP — got MVP
+[PASS] E7-T1 Priority=P1 — got P1
+[PASS] E7-T1 Risk=Medium — got Medium
+[PASS] E7-T1 Estimate=5 — got 5.0
+[PASS] E7-T1 is a native sub-issue of E7
+[PASS] E7-T1 non-empty body
+[PASS] E7-T1 body has >=1 docs/spec/ anchor
+[PASS] E7-T1 body has acceptance criteria
+[PASS] E7-T1 body has QA scenarios
+[PASS] E7-T1 body byte-identical to manifest (sha256)
+[PASS] E7-T1 label `MVP` (Target proxy)
+[PASS] E7-T1 UNASSIGNED
+[PASS] E7-T2 present on board
+[PASS] E7-T2 native type Task — got Task
+[PASS] E7-T2 in arbsec/orchestraitor
+[PASS] E7-T2 Status=Ready — got Ready
+[PASS] E7-T2 Target=MVP — got MVP
+[PASS] E7-T2 Priority=P1 — got P1
+[PASS] E7-T2 Risk=Medium — got Medium
+[PASS] E7-T2 Estimate=3 — got 3.0
+[PASS] E7-T2 is a native sub-issue of E7
+[PASS] E7-T2 non-empty body
+[PASS] E7-T2 body has >=1 docs/spec/ anchor
+[PASS] E7-T2 body has acceptance criteria
+[PASS] E7-T2 body has QA scenarios
+[PASS] E7-T2 body byte-identical to manifest (sha256)
+[PASS] E7-T2 label `MVP` (Target proxy)
+[PASS] E7-T2 UNASSIGNED
+[PASS] E7-T3 present on board
+[PASS] E7-T3 native type Task — got Task
+[PASS] E7-T3 in arbsec/orchestraitor
+[PASS] E7-T3 Status=Ready — got Ready
+[PASS] E7-T3 Target=MVP — got MVP
+[PASS] E7-T3 Priority=P1 — got P1
+[PASS] E7-T3 Risk=Low — got Low
+[PASS] E7-T3 Estimate=2 — got 2.0
+[PASS] E7-T3 is a native sub-issue of E7
+[PASS] E7-T3 non-empty body
+[PASS] E7-T3 body has >=1 docs/spec/ anchor
+[PASS] E7-T3 body has acceptance criteria
+[PASS] E7-T3 body has QA scenarios
+[PASS] E7-T3 body byte-identical to manifest (sha256)
+[PASS] E7-T3 label `MVP` (Target proxy)
+[PASS] E7-T3 UNASSIGNED
+[PASS] E7-T4 present on board
+[PASS] E7-T4 native type Task — got Task
+[PASS] E7-T4 in arbsec/orchestraitor
+[PASS] E7-T4 Status=Ready — got Ready
+[PASS] E7-T4 Target=MVP — got MVP
+[PASS] E7-T4 Priority=P1 — got P1
+[PASS] E7-T4 Risk=Critical — got Critical
+[PASS] E7-T4 Estimate=3 — got 3.0
+[PASS] E7-T4 is a native sub-issue of E7
+[PASS] E7-T4 non-empty body
+[PASS] E7-T4 body has >=1 docs/spec/ anchor
+[PASS] E7-T4 body has acceptance criteria
+[PASS] E7-T4 body has QA scenarios
+[PASS] E7-T4 body byte-identical to manifest (sha256)
+[PASS] E7-T4 label `needs-human-review`
+[PASS] E7-T4 label `MVP` (Target proxy)
+[PASS] E7-T4 UNASSIGNED
+[PASS] E7-T5 present on board
+[PASS] E7-T5 native type Task — got Task
+[PASS] E7-T5 in arbsec/orchestraitor
+[PASS] E7-T5 Status=Ready — got Ready
+[PASS] E7-T5 Target=MVP — got MVP
+[PASS] E7-T5 Priority=P1 — got P1
+[PASS] E7-T5 Risk=Medium — got Medium
+[PASS] E7-T5 Estimate=5 — got 5.0
+[PASS] E7-T5 is a native sub-issue of E7
+[PASS] E7-T5 non-empty body
+[PASS] E7-T5 body has >=1 docs/spec/ anchor
+[PASS] E7-T5 body has acceptance criteria
+[PASS] E7-T5 body has QA scenarios
+[PASS] E7-T5 body byte-identical to manifest (sha256)
+[PASS] E7-T5 label `MVP` (Target proxy)
+[PASS] E7-T5 UNASSIGNED
+[PASS] E8-T1 present on board
+[PASS] E8-T1 native type Task — got Task
+[PASS] E8-T1 in arbsec/orchestraitor
+[PASS] E8-T1 Status=Ready — got Ready
+[PASS] E8-T1 Target=MVP — got MVP
+[PASS] E8-T1 Priority=P1 — got P1
+[PASS] E8-T1 Risk=High — got High
+[PASS] E8-T1 Estimate=5 — got 5.0
+[PASS] E8-T1 is a native sub-issue of E8
+[PASS] E8-T1 non-empty body
+[PASS] E8-T1 body has >=1 docs/spec/ anchor
+[PASS] E8-T1 body has acceptance criteria
+[PASS] E8-T1 body has QA scenarios
+[PASS] E8-T1 body byte-identical to manifest (sha256)
+[PASS] E8-T1 label `MVP` (Target proxy)
+[PASS] E8-T1 UNASSIGNED
+[PASS] E8-T2 present on board
+[PASS] E8-T2 native type Task — got Task
+[PASS] E8-T2 in arbsec/orchestraitor
+[PASS] E8-T2 Status=Ready — got Ready
+[PASS] E8-T2 Target=MVP — got MVP
+[PASS] E8-T2 Priority=P1 — got P1
+[PASS] E8-T2 Risk=Critical — got Critical
+[PASS] E8-T2 Estimate=5 — got 5.0
+[PASS] E8-T2 is a native sub-issue of E8
+[PASS] E8-T2 non-empty body
+[PASS] E8-T2 body has >=1 docs/spec/ anchor
+[PASS] E8-T2 body has acceptance criteria
+[PASS] E8-T2 body has QA scenarios
+[PASS] E8-T2 body byte-identical to manifest (sha256)
+[PASS] E8-T2 label `needs-human-review`
+[PASS] E8-T2 label `MVP` (Target proxy)
+[PASS] E8-T2 UNASSIGNED
+[PASS] E8-T3 present on board
+[PASS] E8-T3 native type Task — got Task
+[PASS] E8-T3 in arbsec/orchestraitor
+[PASS] E8-T3 Status=Ready — got Ready
+[PASS] E8-T3 Target=MVP — got MVP
+[PASS] E8-T3 Priority=P1 — got P1
+[PASS] E8-T3 Risk=Critical — got Critical
+[PASS] E8-T3 Estimate=5 — got 5.0
+[PASS] E8-T3 is a native sub-issue of E8
+[PASS] E8-T3 non-empty body
+[PASS] E8-T3 body has >=1 docs/spec/ anchor
+[PASS] E8-T3 body has acceptance criteria
+[PASS] E8-T3 body has QA scenarios
+[PASS] E8-T3 body byte-identical to manifest (sha256)
+[PASS] E8-T3 label `needs-human-review`
+[PASS] E8-T3 label `MVP` (Target proxy)
+[PASS] E8-T3 UNASSIGNED
+[PASS] E8-T4 present on board
+[PASS] E8-T4 native type Task — got Task
+[PASS] E8-T4 in arbsec/orchestraitor
+[PASS] E8-T4 Status=Ready — got Ready
+[PASS] E8-T4 Target=MVP — got MVP
+[PASS] E8-T4 Priority=P1 — got P1
+[PASS] E8-T4 Risk=Critical — got Critical
+[PASS] E8-T4 Estimate=3 — got 3.0
+[PASS] E8-T4 is a native sub-issue of E8
+[PASS] E8-T4 non-empty body
+[PASS] E8-T4 body has >=1 docs/spec/ anchor
+[PASS] E8-T4 body has acceptance criteria
+[PASS] E8-T4 body has QA scenarios
+[PASS] E8-T4 body byte-identical to manifest (sha256)
+[PASS] E8-T4 label `needs-human-review`
+[PASS] E8-T4 label `MVP` (Target proxy)
+[PASS] E8-T4 UNASSIGNED
+[PASS] E8-T5 present on board
+[PASS] E8-T5 native type Task — got Task
+[PASS] E8-T5 in arbsec/orchestraitor
+[PASS] E8-T5 Status=Ready — got Ready
+[PASS] E8-T5 Target=MVP — got MVP
+[PASS] E8-T5 Priority=P1 — got P1
+[PASS] E8-T5 Risk=Critical — got Critical
+[PASS] E8-T5 Estimate=5 — got 5.0
+[PASS] E8-T5 is a native sub-issue of E8
+[PASS] E8-T5 non-empty body
+[PASS] E8-T5 body has >=1 docs/spec/ anchor
+[PASS] E8-T5 body has acceptance criteria
+[PASS] E8-T5 body has QA scenarios
+[PASS] E8-T5 body byte-identical to manifest (sha256)
+[PASS] E8-T5 label `needs-human-review`
+[PASS] E8-T5 label `MVP` (Target proxy)
+[PASS] E8-T5 UNASSIGNED
+[PASS] E8-T6 present on board
+[PASS] E8-T6 native type Task — got Task
+[PASS] E8-T6 in arbsec/orchestraitor
+[PASS] E8-T6 Status=Ready — got Ready
+[PASS] E8-T6 Target=MVP — got MVP
+[PASS] E8-T6 Priority=P1 — got P1
+[PASS] E8-T6 Risk=Critical — got Critical
+[PASS] E8-T6 Estimate=3 — got 3.0
+[PASS] E8-T6 is a native sub-issue of E8
+[PASS] E8-T6 non-empty body
+[PASS] E8-T6 body has >=1 docs/spec/ anchor
+[PASS] E8-T6 body has acceptance criteria
+[PASS] E8-T6 body has QA scenarios
+[PASS] E8-T6 body byte-identical to manifest (sha256)
+[PASS] E8-T6 label `needs-human-review`
+[PASS] E8-T6 label `MVP` (Target proxy)
+[PASS] E8-T6 UNASSIGNED
+[PASS] E8-T7 present on board
+[PASS] E8-T7 native type Task — got Task
+[PASS] E8-T7 in arbsec/orchestraitor
+[PASS] E8-T7 Status=Ready — got Ready
+[PASS] E8-T7 Target=MVP — got MVP
+[PASS] E8-T7 Priority=P1 — got P1
+[PASS] E8-T7 Risk=High — got High
+[PASS] E8-T7 Estimate=3 — got 3.0
+[PASS] E8-T7 is a native sub-issue of E8
+[PASS] E8-T7 non-empty body
+[PASS] E8-T7 body has >=1 docs/spec/ anchor
+[PASS] E8-T7 body has acceptance criteria
+[PASS] E8-T7 body has QA scenarios
+[PASS] E8-T7 body byte-identical to manifest (sha256)
+[PASS] E8-T7 label `MVP` (Target proxy)
+[PASS] E8-T7 UNASSIGNED
+[PASS] E9-T1 present on board
+[PASS] E9-T1 native type Task — got Task
+[PASS] E9-T1 in arbsec/orchestraitor
+[PASS] E9-T1 Status=Ready — got Ready
+[PASS] E9-T1 Target=MVP — got MVP
+[PASS] E9-T1 Priority=P2 — got P2
+[PASS] E9-T1 Risk=Low — got Low
+[PASS] E9-T1 Estimate=3 — got 3.0
+[PASS] E9-T1 is a native sub-issue of E9
+[PASS] E9-T1 non-empty body
+[PASS] E9-T1 body has >=1 docs/spec/ anchor
+[PASS] E9-T1 body has acceptance criteria
+[PASS] E9-T1 body has QA scenarios
+[PASS] E9-T1 body byte-identical to manifest (sha256)
+[PASS] E9-T1 label `MVP` (Target proxy)
+[PASS] E9-T1 UNASSIGNED
+[PASS] E9-T2 present on board
+[PASS] E9-T2 native type Task — got Task
+[PASS] E9-T2 in arbsec/orchestraitor
+[PASS] E9-T2 Status=Ready — got Ready
+[PASS] E9-T2 Target=MVP — got MVP
+[PASS] E9-T2 Priority=P2 — got P2
+[PASS] E9-T2 Risk=Medium — got Medium
+[PASS] E9-T2 Estimate=3 — got 3.0
+[PASS] E9-T2 is a native sub-issue of E9
+[PASS] E9-T2 non-empty body
+[PASS] E9-T2 body has >=1 docs/spec/ anchor
+[PASS] E9-T2 body has acceptance criteria
+[PASS] E9-T2 body has QA scenarios
+[PASS] E9-T2 body byte-identical to manifest (sha256)
+[PASS] E9-T2 label `MVP` (Target proxy)
+[PASS] E9-T2 UNASSIGNED
+[PASS] E9-T3 present on board
+[PASS] E9-T3 native type Task — got Task
+[PASS] E9-T3 in arbsec/orchestraitor
+[PASS] E9-T3 Status=Ready — got Ready
+[PASS] E9-T3 Target=MVP — got MVP
+[PASS] E9-T3 Priority=P2 — got P2
+[PASS] E9-T3 Risk=Medium — got Medium
+[PASS] E9-T3 Estimate=3 — got 3.0
+[PASS] E9-T3 is a native sub-issue of E9
+[PASS] E9-T3 non-empty body
+[PASS] E9-T3 body has >=1 docs/spec/ anchor
+[PASS] E9-T3 body has acceptance criteria
+[PASS] E9-T3 body has QA scenarios
+[PASS] E9-T3 body byte-identical to manifest (sha256)
+[PASS] E9-T3 label `MVP` (Target proxy)
+[PASS] E9-T3 UNASSIGNED
+[PASS] E9-T4 present on board
+[PASS] E9-T4 native type Task — got Task
+[PASS] E9-T4 in arbsec/orchestraitor
+[PASS] E9-T4 Status=Ready — got Ready
+[PASS] E9-T4 Target=MVP — got MVP
+[PASS] E9-T4 Priority=P2 — got P2
+[PASS] E9-T4 Risk=High — got High
+[PASS] E9-T4 Estimate=3 — got 3.0
+[PASS] E9-T4 is a native sub-issue of E9
+[PASS] E9-T4 non-empty body
+[PASS] E9-T4 body has >=1 docs/spec/ anchor
+[PASS] E9-T4 body has acceptance criteria
+[PASS] E9-T4 body has QA scenarios
+[PASS] E9-T4 body byte-identical to manifest (sha256)
+[PASS] E9-T4 label `MVP` (Target proxy)
+[PASS] E9-T4 UNASSIGNED
+[PASS] E10-T1 present on board
+[PASS] E10-T1 native type Task — got Task
+[PASS] E10-T1 in arbsec/orchestraitor
+[PASS] E10-T1 Status=Ready — got Ready
+[PASS] E10-T1 Target=MVP — got MVP
+[PASS] E10-T1 Priority=P1 — got P1
+[PASS] E10-T1 Risk=Medium — got Medium
+[PASS] E10-T1 Estimate=8 — got 8.0
+[PASS] E10-T1 is a native sub-issue of E10
+[PASS] E10-T1 non-empty body
+[PASS] E10-T1 body has >=1 docs/spec/ anchor
+[PASS] E10-T1 body has acceptance criteria
+[PASS] E10-T1 body has QA scenarios
+[PASS] E10-T1 body byte-identical to manifest (sha256)
+[PASS] E10-T1 label `MVP` (Target proxy)
+[PASS] E10-T1 UNASSIGNED
+[PASS] E10-T2 present on board
+[PASS] E10-T2 native type Task — got Task
+[PASS] E10-T2 in arbsec/orchestraitor
+[PASS] E10-T2 Status=Ready — got Ready
+[PASS] E10-T2 Target=MVP — got MVP
+[PASS] E10-T2 Priority=P1 — got P1
+[PASS] E10-T2 Risk=High — got High
+[PASS] E10-T2 Estimate=5 — got 5.0
+[PASS] E10-T2 is a native sub-issue of E10
+[PASS] E10-T2 non-empty body
+[PASS] E10-T2 body has >=1 docs/spec/ anchor
+[PASS] E10-T2 body has acceptance criteria
+[PASS] E10-T2 body has QA scenarios
+[PASS] E10-T2 body byte-identical to manifest (sha256)
+[PASS] E10-T2 label `MVP` (Target proxy)
+[PASS] E10-T2 UNASSIGNED
+[PASS] E10-T3 present on board
+[PASS] E10-T3 native type Task — got Task
+[PASS] E10-T3 in arbsec/orchestraitor
+[PASS] E10-T3 Status=Ready — got Ready
+[PASS] E10-T3 Target=MVP — got MVP
+[PASS] E10-T3 Priority=P1 — got P1
+[PASS] E10-T3 Risk=High — got High
+[PASS] E10-T3 Estimate=5 — got 5.0
+[PASS] E10-T3 is a native sub-issue of E10
+[PASS] E10-T3 non-empty body
+[PASS] E10-T3 body has >=1 docs/spec/ anchor
+[PASS] E10-T3 body has acceptance criteria
+[PASS] E10-T3 body has QA scenarios
+[PASS] E10-T3 body byte-identical to manifest (sha256)
+[PASS] E10-T3 label `MVP` (Target proxy)
+[PASS] E10-T3 UNASSIGNED
+[PASS] E10-T4 present on board
+[PASS] E10-T4 native type Task — got Task
+[PASS] E10-T4 in arbsec/orchestraitor
+[PASS] E10-T4 Status=Ready — got Ready
+[PASS] E10-T4 Target=MVP — got MVP
+[PASS] E10-T4 Priority=P1 — got P1
+[PASS] E10-T4 Risk=High — got High
+[PASS] E10-T4 Estimate=3 — got 3.0
+[PASS] E10-T4 is a native sub-issue of E10
+[PASS] E10-T4 non-empty body
+[PASS] E10-T4 body has >=1 docs/spec/ anchor
+[PASS] E10-T4 body has acceptance criteria
+[PASS] E10-T4 body has QA scenarios
+[PASS] E10-T4 body byte-identical to manifest (sha256)
+[PASS] E10-T4 label `MVP` (Target proxy)
+[PASS] E10-T4 UNASSIGNED
+[PASS] E10-T5 present on board
+[PASS] E10-T5 native type Task — got Task
+[PASS] E10-T5 in arbsec/orchestraitor
+[PASS] E10-T5 Status=Ready — got Ready
+[PASS] E10-T5 Target=MVP — got MVP
+[PASS] E10-T5 Priority=P1 — got P1
+[PASS] E10-T5 Risk=Low — got Low
+[PASS] E10-T5 Estimate=3 — got 3.0
+[PASS] E10-T5 is a native sub-issue of E10
+[PASS] E10-T5 non-empty body
+[PASS] E10-T5 body has >=1 docs/spec/ anchor
+[PASS] E10-T5 body has acceptance criteria
+[PASS] E10-T5 body has QA scenarios
+[PASS] E10-T5 body byte-identical to manifest (sha256)
+[PASS] E10-T5 label `MVP` (Target proxy)
+[PASS] E10-T5 UNASSIGNED
+[PASS] ICE-T1 present on board
+[PASS] ICE-T1 native type Task — got Task
+[PASS] ICE-T1 in arbsec/orchestraitor
+[PASS] ICE-T1 Status=Backlog — got Backlog
+[PASS] ICE-T1 Target=Icebox — got Icebox
+[PASS] ICE-T1 Priority=P3 — got P3
+[PASS] ICE-T1 Risk=Low — got Low
+[PASS] ICE-T1 Estimate=8 — got 8.0
+[PASS] ICE-T1 is a native sub-issue of ICE
+[PASS] ICE-T1 non-empty body
+[PASS] ICE-T1 body has >=1 docs/spec/ anchor
+[PASS] ICE-T1 body has acceptance criteria
+[PASS] ICE-T1 body has QA scenarios
+[PASS] ICE-T1 body byte-identical to manifest (sha256)
+[PASS] ICE-T1 UNASSIGNED
+
+## (a) gap-linked tasks
+[PASS] E5-T7 gap-linked at Backlog
+[PASS] E5-T7 gap-linked Risk=Critical
+[PASS] E5-T7 needs-human-review label
+[PASS] E5-T8 gap-linked at Backlog
+[PASS] E5-T8 gap-linked Risk=Critical
+[PASS] E5-T8 needs-human-review label
+
+## (b) Dependency edges (native blockedBy)
+[PASS] E1 -> E3 (epic wave edge)
+[PASS] E2 -> E3 (epic wave edge)
+[PASS] E1 -> E7 (epic wave edge)
+[PASS] E3 -> E7 (epic wave edge)
+[PASS] E4 -> E7 (epic wave edge)
+[PASS] E5 -> E7 (epic wave edge)
+[PASS] E6 -> E7 (epic wave edge)
+[PASS] E7 -> E8 (epic wave edge)
+[PASS] E8 -> E9 (epic wave edge)
+[PASS] E8 -> E10 (epic wave edge)
+[PASS] E5-T7 -> arbsec/arbitraitor#746 (cross-repo blockedBy)
+[PASS] E5-T8 -> arbsec/arbitraitor#747 (cross-repo blockedBy)
+[PASS] all 53 task-level edges resolve
+
+## (c) arbitraitor gap issues
+[PASS] gh issue view arbsec/arbitraitor#746 (GAP-HEADLESS-APPROVAL) — #746 state=OPEN labels=['enhancement', 'security-sensitive']
+[PASS] gh issue view arbsec/arbitraitor#747 (GAP-STABLE-EMBEDDING) — #747 state=OPEN labels=['enhancement']
+[PASS] E5-T7 carries blocked:arbitraitor label
+[PASS] E5-T8 carries blocked:arbitraitor label
+
+TOTAL: 1304 passed, 0 failed

@@ -1,0 +1,1517 @@
+{
+ "epics": [
+  {
+   "key": "E0",
+   "title": "Epic: E0 \u2014 Self-improving bootstrap (thin vertical slice)",
+   "priority": "P0",
+   "target": "MVP",
+   "risk": "High"
+  },
+  {
+   "key": "E1",
+   "title": "Epic: E1 \u2014 Board abstraction + providers + multi-org workspaces",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E2",
+   "title": "Epic: E2 \u2014 Model routing + DecisionProvider + subscription awareness",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E3",
+   "title": "Epic: E3 \u2014 Coordinator decision tools",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E4",
+   "title": "Epic: E4 \u2014 Mini-agent harness",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E5",
+   "title": "Epic: E5 \u2014 Arbitraitor worker mediation",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Critical"
+  },
+  {
+   "key": "E6",
+   "title": "Epic: E6 \u2014 Task\u2192worktree\u2192draft-PR lifecycle",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E7",
+   "title": "Epic: E7 \u2014 Campaign session runner",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Medium"
+  },
+  {
+   "key": "E8",
+   "title": "Epic: E8 \u2014 Watch daemon + budgets + epic-focus controls",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "Critical"
+  },
+  {
+   "key": "E9",
+   "title": "Epic: E9 \u2014 Operator chat",
+   "priority": "P2",
+   "target": "MVP",
+   "risk": "Low"
+  },
+  {
+   "key": "E10",
+   "title": "Epic: E10 \u2014 E2E + adversarial + CI hardening",
+   "priority": "P1",
+   "target": "MVP",
+   "risk": "High"
+  },
+  {
+   "key": "ICE",
+   "title": "Epic: ICE \u2014 TUI dashboard (C7 deferral, Icebox)",
+   "priority": "P3",
+   "target": "Icebox",
+   "risk": "Low"
+  }
+ ],
+ "tasks": [
+  {
+   "id": "E0-T1",
+   "epic": "E0",
+   "title": "Task: bootstrap-identity \u2014 register the ORCHESTRATOR SERVICE IDENTITY (GitHub App `arbsec-agent`) + token-minting path",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nRegister the GitHub App service identity for agent-driven GitHub operations\n(machine identity per ledger D11) and wire the token-minting path: manifest\nflow per the runbook `.omo/drafts/github-app-setup.md`, slug `arbsec-agent`,\nper-installation least-privilege permissions (issues: write, pull requests:\nwrite, projects read+write for the org boards the daemon works on \u2014 nothing\nelse), private-key-minted installation access tokens with ~1h expiry (no\nlong-lived PAT in daemon config), and bot attribution for commits/PRs/comments.\n\n## Thin-slice scope\n\nTHIN SLICE: App registration (owner-level UI action) + installation + the\ntoken-minting path for the single shared board. Workspace multi-credential\ngeneralization deepens in E1 (multi-org workspaces).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.25.2 (short-lived, resource-scoped authority)\n- `docs/spec/10-orchestrator.md` \u00a79.41 (service-identity set for assignee exclusion)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.23 (secret resolution \u2014 `secret://keyring/<id>` / `secret://env/<VAR>` URIs, never committed plaintext)\n- Runbook: `.omo/drafts/github-app-setup.md` (manifest flow, minimal permissions, installation, token minting, assignee caveat)\n- Ledger D11 (rationale: least privilege, ~1h tokens, webhooks, rate-limit class, auditability, bot attribution)\n\n## Acceptance criteria\n\n- [ ] The GitHub App `arbsec-agent` exists with the manifest-flow permissions from the runbook (owner UI action; record the App ID in the runbook, never the private key)\n- [ ] `orc config get github_app.slug` resolves `arbsec-agent` through the \u00a79.22 layered configuration\n- [ ] Token minting produces an installation token with expiry <= 1h; the private key resolves via a `secret://` URI (never a path in the repo)\n- [ ] Assignee caveat documented: board Status + Orchestraitor run-state carry ownership; the ready-queue assignee-exclusion treats the App bot slug as the SERVICE identity (items assigned to humans are excluded)\n- [ ] `cargo nextest run --workspace` green including new unit tests for token-expiry handling\n\n## QA scenarios\n\n- Happy: `orc config get github_app.slug` -> `arbsec-agent`; minted token authenticates a read-only installations call; evidence `.omo/evidence/<task-slug>/token-mint.txt`\n- Failure: expired/absent private key -> minting fails closed with a `secret://` resolution error (no fallback to ambient owner auth without an explicit labelled fallback); evidence `.omo/evidence/<task-slug>/mint-fail-closed.txt`\n\n## Non-goals\n\nNo machine user account; no assignee-field semantics for the bot (fields only accept user accounts); no webhook receiver (polling-first per D5).\n\n## Security impact\n\nCredential handling at the orchestration boundary: short-lived scoped tokens, keyring-backed private key, zero long-lived PATs. Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nUnit tests for expiry/refresh logic; negative test: minting with a revoked/absent key fails closed. No live-GitHub CI dependency (fixtures).\n\n## Documentation impact\n\nRunbook `.omo/drafts/github-app-setup.md` updated with the actual App ID + permission list; `CHANGELOG.md` `[Unreleased]` entry; agent docs note (plan todo 6 owns the full mandate).\n\n## Dependencies\n\nNone (first E0 task; everything needing a GitHub identity consumes it).\n\n## Rollback implications\n\nApp registration is reversible (delete the App / uninstall); config keys are layered and removable via `orc config unset`.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "5712e4cce07bd61c0b1018f2daca4825a7fa136399e99c96e4f2d5168cfe45d4"
+  },
+  {
+   "id": "E0-T2",
+   "epic": "E0",
+   "title": "Task: bootstrap-board \u2014 minimal GitHub Projects v2 board provider (read + status-write)",
+   "risk": "Low",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nMinimal board provider for the bootstrap loop: read the ready-queue (leaf\nTask/Bug, Target=MVP, Status=Ready, no unresolved blockedBy) from the shared\nGitHub Projects v2 board and write Status field transitions. Org/project/\nfield/option node IDs resolved at runtime via GraphQL and cached OUTSIDE the\nrepository (never committed).\n\n## Thin-slice scope\n\nTHIN SLICE: read + status-write only, single board, no reconcile views, no\nworkspaces. The full `BoardProvider` contract, sqlite provider, adaptive\nrate-limit tick, and multi-org workspaces deepen in E1.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (kanban board abstraction \u2014 provider subset)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (blockedBy edges are the DAG \u2014 queue predicate filters on them)\n- `.agents/project/github-project.example.toml` (field/option names; node-ID caching convention)\n- Ledger F27 (GraphQL mutation shapes: `addProjectV2ItemById`, `updateProjectV2ItemFieldValue`)\n\n## Acceptance criteria\n\n- [ ] `orc board ready --json` lists exactly the leaf Task/Bug items with Target=MVP, Status=Ready, and no unresolved blockedBy on the shared board\n- [ ] A status write (`orc board move <item> --status \"In Progress\"`) round-trips: read-back shows the new Status\n- [ ] Node IDs are resolved at runtime and cached under `$XDG_CACHE_HOME` (or `~/.cache`), never inside any repo\n- [ ] `cargo nextest run --workspace` green; provider unit tests run against recorded GraphQL fixtures (no live network in CI)\n\n## QA scenarios\n\n- Happy: `orc board ready --json` against the live shared board returns the expected queue shape; evidence `.omo/evidence/<task-slug>/ready-live.txt`\n- Failure: GraphQL auth/rate-limit error surfaces as a typed error (no unwrap/panic); a fixture with a malformed item body is skipped with a warning, not a crash; evidence `.omo/evidence/<task-slug>/malformed-fixture.txt`\n\n## Non-goals\n\nNo field writes beyond Status; no dependency-edge writes; no local sqlite provider; no reconcile/stall views.\n\n## Security impact\n\nRead-mostly surface; board content is untrusted input (\u00a76.1) \u2014 item bodies are never executed or interpolated into commands.\n\n## Testing requirements\n\nFixture-based unit tests (recorded GraphQL responses); one live smoke exercised manually with evidence captured.\n\n## Documentation impact\n\n`docs/cli/` entry for `orc board ready` / `orc board move`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone (consumes E0-T1's identity when writing; reads work under owner auth until then).\n\n## Rollback implications\n\nPure addition; status writes are board-field transitions a human can revert on the board itself.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "202a1fbaab739b71f8ba4c394e2d9d7699c30e7538c058266398992991ebe35d"
+  },
+  {
+   "id": "E0-T3",
+   "epic": "E0",
+   "title": "Task: bootstrap-routing \u2014 heuristic static role\u2192model routing table",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nStatic heuristic routing for the bootstrap: the six built-in roles\n(explore, research, plan, implement, review, verify) map to\n`(provider, model)` entries resolved through layered configuration; every\nresolution is persisted as a minimal routing decision record. No decision\nmodel, no subscription awareness.\n\n## Thin-slice scope\n\nTHIN SLICE: static table only, single provider (Neuralwatt GLM-5.2 per\nspec \u00a710.3). Role registry generalization, \u00a79.19.2 precedence chains,\nDecisionProvider, and subscription awareness deepen in E2.\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (role-based model routing \u2014 heuristic table first)\n- `docs/spec/30-model-routing.md` \u00a79.19.2 (per-domain and per-role routing precedence)\n- `docs/spec/50-contracts-data.md` \u00a79.22 (layered configuration)\n\n## Acceptance criteria\n\n- [ ] All six built-in roles resolve to a `(provider, model)` pair from config; `orc config get roles.implement.routing.provider` resolves\n- [ ] Every resolution persists a decision record (role, provider, model, precedence path) to the local sqlite store\n- [ ] A role with no table entry resolves via the documented fallback and records the fallback reason\n- [ ] `cargo nextest run --workspace` green including routing-table unit tests\n\n## QA scenarios\n\n- Happy: resolve each of the six roles -> six decision records with distinct roles; evidence `.omo/evidence/<task-slug>/six-roles.txt`\n- Failure: missing config layer -> typed configuration error naming the missing key (no default-to-first-model guess); evidence `.omo/evidence/<task-slug>/missing-key.txt`\n\n## Non-goals\n\nNo DecisionProvider; no jev; no subscription/quota gating; no custom roles.\n\n## Security impact\n\nNone (selection only; no credentials touched beyond existing provider config).\n\n## Testing requirements\n\nUnit tests over layered-config fixtures; determinism test (same inputs -> same resolution).\n\n## Documentation impact\n\nConfig reference for `roles.<id>.routing.*`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nConfig-only; `orc config unset` removes the table.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "e2d6219d2fb7f4e7bf982cfe0e72208dbb0a7ac44133670aece3c0c8f33c7d31"
+  },
+  {
+   "id": "E0-T4",
+   "epic": "E0",
+   "title": "Task: bootstrap-worker \u2014 headless mini-worker with the 4-tool minimal set",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [
+    "E0-T5"
+   ],
+   "body": "## Objective\n\nHeadless one-shot mini-agent worker (mini-swe-agent pattern): task in,\nstructured result + PR out, exit code. Minimal mediated toolset of exactly\nfour tools: read files, search, mediated bash (via `arbitraitor_exec`), and\nwrite via the transactional/normalization path. Attempt-bounded.\n\n## Thin-slice scope\n\nTHIN SLICE: one-shot headless only; single worker shape; prompt minimal.\nStandalone interactive mode, toolset hardening, and the MCP proxy deepen in\nE4. Search via approved MCP servers lands in E0-T10.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.38 (MCP-early tool strategy \u2014 worker toolset context)\n- `docs/spec/60-milestones.md` \u00a7998 MVP-6 (built-in coding tools)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh-context implementer)\n- Ledger F17/F21 (mini-swe-agent pattern: single loop, curated toolset, bounded)\n\n## Acceptance criteria\n\n- [ ] `orc worker run --task <id> --json` executes one leaf task end-to-end and exits 0 on success / non-zero on typed failure\n- [ ] The worker has exactly four tools; any other capability request fails closed at the mediation boundary\n- [ ] Every tool call crosses the Arbitraitor boundary and produces a receipt\n- [ ] Budgets (owner-adjustable at the board): attempts 3 | re-plan 2 | worker timeout 45m | concurrency 2 | stall 10m | backoff 10s*2^n capped at 5m | spend $10/day soft cap | run budget 4h.\n- [ ] `cargo nextest run --workspace` green; worker loop unit tests use the deterministic simulator (no live provider in CI)\n\n## QA scenarios\n\n- Happy: worker completes a fixture leaf task against the simulator; structured result JSON contains task id, exit code, PR ref; evidence `.omo/evidence/<task-slug>/worker-happy.txt`\n- Failure: task exceeding attempt budget stops with a typed exhaustion failure (no infinite retry); a tool call outside the 4-tool set is refused and recorded; evidence `.omo/evidence/<task-slug>/worker-bounds.txt`\n\n## Non-goals\n\nNo interactive mode; no sub-agent spawning; no model self-selection (routing is E0-T3); no review behavior.\n\n## Security impact\n\nThe worker is the untrusted principal: all I/O mediated; untrusted output quarantined per \u00a79.14.\n\n## Testing requirements\n\nSimulator-backed unit + integration tests; negative tests for tool-set escape and budget exhaustion.\n\n## Documentation impact\n\n`docs/cli/` for `orc worker run`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T5 (mediation \u2014 the worker runs mediated from its first run).\n\n## Rollback implications\n\nWorker is a new binary path; no existing behavior modified.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "d17d52d50a3d0acf58bc44bdc6733a1b5ae60682cb94f4e6017a216e76fdeaca"
+  },
+  {
+   "id": "E0-T5",
+   "epic": "E0",
+   "title": "Task: bootstrap-mediation \u2014 Restricted-sandbox mediation + capability preflight for the mini-worker",
+   "risk": "Critical",
+   "estimate": 8,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nWire the mini-worker's execution behind Arbitraitor: spawn under\n`arbitraitor_sandbox::SandboxMode::Restricted`, run\n`arbitraitor_sandbox::compute_effective_controls()` as a fail-closed\ncapability preflight before any worker starts, and route bash through\n`arbitraitor_exec::ExecutionContextBuilder` (mediated exec). Missing\ncontrols block the run (explicitly labelled non-secure mode is NOT available\nfor the bootstrap loop).\n\n## Thin-slice scope\n\nTHIN SLICE: single-platform (Linux) Restricted mode + preflight + mediated\nbash. Full mediation surface (leases, receipts, approval-required handling,\ngap-filed workflow) deepens in E5.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.6 (sandbox integration \u2014 `compute_effective_controls`, `configure_command`, `apply_sandbox`)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.7 (sole security authority; fail closed)\n- `docs/spec/40-arbitraitor-integration.md` \u00a716.2 (mandatory security feature workflow)\n- `docs/spec/tech-stack.md` \u00a72.2 (real Arbitraitor identifiers)\n\n## Acceptance criteria\n\n- [ ] Worker spawn calls `compute_effective_controls(SandboxMode::Restricted, platform)` and refuses to start when any required control is unavailable (fail closed, typed error naming the missing control)\n- [ ] Mediated bash goes through `arbitraitor_exec::ExecutionContextBuilder` with an explicit ExecutionPolicy; no direct `std::process` spawn on the worker path\n- [ ] Preflight result is recorded in the run state (controls matrix + verdict)\n- [ ] `cargo nextest run --workspace` green; negative test asserts the forbidden effect did not occur (a denied exec leaves no filesystem/network side effect)\n\n## QA scenarios\n\n- Happy: on the reference Linux platform, preflight reports Required controls Available and the worker runs mediated; evidence `.omo/evidence/<task-slug>/preflight-ok.txt`\n- Failure: simulated missing control (fixture) -> worker refuses to start with the missing control named; a network-denied exec leaves no connection (assert, not just error-observed); evidence `.omo/evidence/<task-slug>/preflight-fail-closed.txt`\n\n## Non-goals\n\nNo macOS/Windows (ADR-0024 fail-closed there); no approval flows (E5); no receipts store (E5); no Disposable mode.\n\n## Security impact\n\nDirect wiring of the sandbox boundary: Risk=Critical, needs-human-review. Orchestraitor implements no security primitive \u2014 it consumes Arbitraitor's.\n\n## Testing requirements\n\nAdversarial negatives (\u00a721.4): assert forbidden effects did not happen; capability-matrix fixture tests.\n\n## Documentation impact\n\n`orc doctor` surfaces the preflight matrix; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream in E0 (E0-T4 consumes this).\n\n## Rollback implications\n\nFail-closed by construction; disabling mediation is not an option on this path.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "4996f400da334fc2e6dab7f0bddc3e4288300e08f2263f5d8bc59a6a4f149213"
+  },
+  {
+   "id": "E0-T6",
+   "epic": "E0",
+   "title": "Task: bootstrap-delivery \u2014 worktree\u2192DCO commit\u2192scoped push\u2192draft PR",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nDelivery path for worker output: provision a worktree per task, commit with\nDCO sign-off (bot attribution per D11), push via a scoped lease credential,\nand open a draft PR whose body carries the spec anchors and evidence links.\n\n## Thin-slice scope\n\nTHIN SLICE: single-repo delivery, one branch naming scheme, draft PR only.\nFull lifecycle (risk re-label, lease credential rotation, multi-repo) deepens\nin E6.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.2 (a worktree is not a sandbox \u2014 trusted controller owns Git metadata)\n- `docs/spec/20-harness-worker.md` \u00a79.4 (workspace and Git controller)\n- `docs/spec/10-orchestrator.md` \u00a79.33.2 (task fields, spec traceability)\n- AGENTS.md (worktree-first rule; DCO; conventional commits)\n\n## Acceptance criteria\n\n- [ ] `orc worker run` output lands on branch `type/<slug>` in a per-task worktree; the main checkout is never touched\n- [ ] Commits carry `Signed-off-by` (DCO) and the bot identity; repo ruleset verification passes\n- [ ] Push uses a scoped, short-lived credential (installation token via E0-T1's minting path), never the owner's ambient auth\n- [ ] Draft PR opened with spec anchors + evidence paths in the body; PR is a draft (never opened ready-to-merge)\n- [ ] `cargo nextest run --workspace` green including lifecycle unit tests\n\n## QA scenarios\n\n- Happy: fixture task -> worktree -> commit -> push -> draft PR URL captured in the structured result; evidence `.omo/evidence/<task-slug>/delivery-happy.txt`\n- Failure: push credential expired -> typed failure, no fallback to ambient auth, worktree preserved for retry; evidence `.omo/evidence/<task-slug>/push-expired.txt`\n\n## Non-goals\n\nNo merge behavior (human-gated, always); no PR-time risk re-label (E6); no multi-repo.\n\n## Security impact\n\nScoped credentials only; Git metadata owned by the trusted controller (worker never sees `.git` of the main checkout).\n\n## Testing requirements\n\nIntegration test against a local bare remote fixture; negative test for credential expiry.\n\n## Documentation impact\n\n`docs/cli/` delivery flags; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Consumes E0-T1 (bot identity + scoped credential) when available; degrades to labelled owner-auth fallback until then.\n\n## Rollback implications\n\nWorktrees are disposable; branches deletable; draft PRs closable \u2014 full revert path.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "cbb49cf06bddd56b8bc04a25000a2c39836d44f143f2b9a5d588f3bee3078b75"
+  },
+  {
+   "id": "E0-T7",
+   "epic": "E0",
+   "title": "Task: bootstrap-campaign \u2014 ONE-SHOT campaign pass (session-per-decision)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E0-T2",
+    "E0-T3",
+    "E0-T4"
+   ],
+   "body": "## Objective\n\nA single campaign session: fresh, short-lived manager invocation that reads\nthe reconciled board state, applies the epic-focus rule minimally (P0-first\nqueue ordering), selects at most one eligible task, persists exactly ONE\ndecision record (kind, selected task, role, model+provider, worker args,\nrationale, alternatives), and exits. No-op decisions carry a typed reason.\n\n## Thin-slice scope\n\nTHIN SLICE: one-shot pass, no daemon, no FocusState assembly beyond the\nqueue, no typed stop-condition taxonomy beyond no-op reasons. Full campaign\nsemantics deepen in E7; the always-running daemon arrives in E8.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.35 (campaign orchestration: session-per-decision)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh contexts)\n- `docs/spec/30-model-routing.md` \u00a79.45 (role resolution for the manager pass)\n\n## Acceptance criteria\n\n- [ ] `orc campaign run --once --json` performs one pass and exits; exactly one decision record is persisted per pass\n- [ ] No-op passes persist a typed reason (empty-queue | all-blocked | epic-exhausted) with the blocked graph attached for all-blocked\n- [ ] The session holds no state between invocations (crash-safe by construction; next pass is fresh)\n- [ ] `cargo nextest run --workspace` green; campaign tests run hermetically (sqlite board + simulator)\n\n## QA scenarios\n\n- Happy: seeded sqlite board with one Ready task -> pass selects it, spawns the worker via the daemon-less direct path, records the decision; evidence `.omo/evidence/<task-slug>/campaign-once.txt`\n- Failure: board with only blocked tasks -> no-op with reason all-blocked + blocked graph; no worker spawned; evidence `.omo/evidence/<task-slug>/campaign-noop.txt`\n\n## Non-goals\n\nNo polling loop (E0-T8); no budgets beyond worker-level; no epic-focus controls; no review-worker (E7).\n\n## Security impact\n\nManager output is a decision record (structured, typed); worker args carry explicit capability requests only.\n\n## Testing requirements\n\nHermetic integration tests; determinism test (same board -> same selection).\n\n## Documentation impact\n\n`docs/cli/` for `orc campaign run`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T2 (board read), E0-T3 (role resolution), E0-T4 (worker to spawn).\n\n## Rollback implications\n\nDecision records are append-only local state; a bad pass is re-runnable fresh.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "51b5984e9deecb2a7736e1cadaf89448976d55607bc1f5fcf2abcf7e6fe9ec36"
+  },
+  {
+   "id": "E0-T8",
+   "epic": "E0",
+   "title": "Task: bootstrap-loop \u2014 simple loop runner `orc loop` (cron-shaped)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E0-T7"
+   ],
+   "body": "## Objective\n\nA simple, foreground loop runner: poll the board -> run one campaign pass ->\nsupervise in-flight workers -> repeat. Enforces the minimal guard set\n(concurrency cap, stall timeout, attempt bounds) so the bootstrap loop cannot\nrun forever. This is deliberately NOT the watch daemon \u2014 no reconcile\nsemantics, no budget classes beyond the minimal guards, no controls surface.\n\n## Thin-slice scope\n\nTHIN SLICE: cron-shaped foreground runner with minimal guards. The full\nwatch daemon (adaptive tick, stall reaping, budget classes, `orc backlog`\ncontrols, restart recovery) deepens in E8.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (watch daemon \u2014 the E8 deepening)\n- `docs/spec/10-orchestrator.md` \u00a79.35 (campaign sessions the loop drives)\n- `docs/spec/10-orchestrator.md` \u00a79.24 (leases/TTLs the minimal guards approximate)\n\n## Acceptance criteria\n\n- [ ] `orc loop` runs pass-then-supervise cycles; SIGTERM stops cleanly within the daemon budget\n- [ ] Minimal guards enforced: Budgets (owner-adjustable at the board): attempts 3 | re-plan 2 | worker timeout 45m | concurrency 2 | stall 10m | backoff 10s*2^n capped at 5m | spend $10/day soft cap | run budget 4h.\n- [ ] A stalled worker (no heartbeat within the stall timeout) is killed and the task transitions to a typed stalled state (never silent retry)\n- [ ] `cargo nextest run --workspace` green; loop tests use a virtual clock (no real sleeps in CI)\n\n## QA scenarios\n\n- Happy: seeded board -> loop picks a task, runs the worker, records decision + result, next tick sees the updated board; evidence `.omo/evidence/<task-slug>/loop-happy.txt`\n- Failure: worker exceeding stall timeout is reaped (process gone \u2014 assert, not just error-observed); concurrency never exceeds the cap (assert via run-state); evidence `.omo/evidence/<task-slug>/loop-guards.txt`\n\n## Non-goals\n\nNo daemonization/systemd; no epic-focus controls; no spend budgets; no restart recovery.\n\n## Security impact\n\nGuard-touching (stall kills, concurrency caps, attempt bounds): Risk=Critical, needs-human-review \u2014 a weakened guard is a runaway loop.\n\n## Testing requirements\n\nVirtual-clock unit tests; adversarial: guardrail-weakening fixture (a config attempting to disable guards is rejected or visibly labelled).\n\n## Documentation impact\n\n`docs/cli/` for `orc loop`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T7 (campaign pass).\n\n## Rollback implications\n\nForeground process; stopping it leaves board state intact (board-wins on next run).\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "7d4a43a366dc6f6182cba5b0031750ccf3de18cfce255b0e158fdb84bf30d454"
+  },
+  {
+   "id": "E0-T9",
+   "epic": "E0",
+   "title": "Task: bootstrap-reporting \u2014 failure-driven Bug auto-file at attempts-exhaustion + blocking-fix exception (IS-14)",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E0-T7"
+   ],
+   "body": "## Objective\n\nWhen a task exhausts its attempt budget on a reproducible failure, the loop\nfiles a Bug at Status=Triage with structured failure context (normalized\nfailure class per \u00a79.33.5, evidence pointers, task/session links) alongside\nthe task's blocked/needs-human transition. Implement the report-\u2260-self-fix\nrule with its single exception: a defect BLOCKING the reporting agent's\ncurrent task is fixed in that task's own PR with a regression test; if too\nlarge, the Bug becomes a blockedBy dependency.\n\n## Thin-slice scope\n\nTHIN SLICE: failure-driven auto-file (a) + blocking-fix exception only. The\ndiscretionary `report_issue` tool (b) lands with the coordinator tools in\nE3; ownership-routed arbitraitor gaps keep the `blocked:arbitraitor` flow\n(E5-T6 owns the helper).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.37 (agent issue reporting \u2014 (a) failure-driven auto-file; report \u2260 self-fix; blocking-fix exception)\n- `docs/spec/10-orchestrator.md` \u00a79.33.5 (failures and retries \u2014 failure classes)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (blockedBy dependency for too-large fixes)\n\n## Acceptance criteria\n\n- [ ] A task exhausting its attempt budget on a reproducible failure produces: (1) a Bug filed at Status=Triage with class, evidence pointers, task/session links, and (2) the task's transition to blocked/needs-human \u2014 both visible on the board\n- [ ] The reporting agent does NOT pick up its own reported bug (file-and-continue/end-task default)\n- [ ] Blocking-fix exception: a blocking defect fixed in-task lands with a regression test and closes/links the Bug; a too-large fix becomes a blockedBy edge instead\n- [ ] Agent-authored issue bodies are marker-wrapped untrusted content (\u00a76.1/\u00a79.37(d)) \u2014 never executed, never auto-scheduled\n- [ ] `cargo nextest run --workspace` green including auto-file unit tests\n\n## QA scenarios\n\n- Happy: fixture task failing reproducibly past its budget -> Bug exists at Triage with structured context; task blocked; evidence `.omo/evidence/<task-slug>/autofile-happy.txt`\n- Failure: injection attempt in the failure context (instructions addressed to the PM embedded in the error text) appears in the Bug body as quoted data only \u2014 no field beyond title/class/description is influenced; evidence `.omo/evidence/<task-slug>/autofile-injection.txt`\n\n## Non-goals\n\nNo discretionary reporting tool (E3); no auto-triage/promotion of filed Bugs (triage is a human/PM gate).\n\n## Security impact\n\nUntrusted content boundary: agent-authored bodies are data. Marker-wrapping + injection hardening required.\n\n## Testing requirements\n\nNegative/adversarial tests for the injection boundary; unit tests for exhaustion detection.\n\n## Documentation impact\n\nWorkflow docs note (Bug auto-file semantics); CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T7 (campaign pass detects exhaustion).\n\n## Rollback implications\n\nFiled Bugs are closable; the transition is a board field write (revertible on the board).\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "8180744b708c4aefbfec35610adec0d6299792e32b9246cc62199ee0599f8c35"
+  },
+  {
+   "id": "E0-T10",
+   "epic": "E0",
+   "title": "Task: bootstrap-mcp-search \u2014 worker search/code-intelligence via approved MCP servers (D10 MCP-early)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E0-T4"
+   ],
+   "body": "## Objective\n\nSatisfy the worker's search/code-intelligence needs from day one via\napproved, fingerprinted MCP servers instead of native indexing: a\ncodegraph-style symbol/call-graph server and a codebase-memory-style\nknowledge-graph server, wired into the worker's search tool. Servers are\nuntrusted principals under \u00a79.18.1 containment: fingerprinted per session,\nlaunched through Arbitraitor inspection, contained in a Restricted sandbox\nminimum; MCP annotations are advisory input only.\n\n## Thin-slice scope\n\nTHIN SLICE: two approved servers behind the worker search tool. The built-in\nMCP PROXY (one endpoint fronting built-ins + externals + arbitraitor's own\nserver) deepens in E4; native indexing paths mature later per \u00a79.15/\u00a79.16.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.38 (MCP-early tool strategy)\n- `docs/spec/20-harness-worker.md` \u00a79.18.1 (MCP and tool drift \u2014 fingerprinting, advisory annotations)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.6 (sandbox containment for launched servers)\n- Ledger D10 (MCP-early + proxy decision; pulls knowledge-index federation forward from \u00a7999/M4)\n\n## Acceptance criteria\n\n- [ ] Worker search tool resolves queries through the two approved MCP servers; results are marked with their source server\n- [ ] Each server is fingerprinted (executable digest, per-tool schema digests) before first use; a digest change re-triggers approval (schema-drift detection)\n- [ ] Servers launch inside Arbitraitor-reported containment (Restricted minimum); annotations never grant authority\n- [ ] Tool results quoted into agent context pass the `sanitize_for_agent` boundary\n- [ ] `cargo nextest run --workspace` green; server-fingerprint unit tests with fixture servers\n\n## QA scenarios\n\n- Happy: search query returns symbol/call-graph results tagged with the serving server + fingerprint; evidence `.omo/evidence/<task-slug>/mcp-search-happy.txt`\n- Failure: a server whose schema digest changed since approval is quarantined (calls refused, drift event recorded) \u2014 the server's own `readOnly` annotation does not restore it; evidence `.omo/evidence/<task-slug>/mcp-drift-quarantine.txt`\n\n## Non-goals\n\nNo MCP proxy component (E4); no new search indexing in Orchestraitor; no trust in server claims.\n\n## Security impact\n\nUntrusted-server boundary: fingerprinting + containment + advisory-annotations-only. Authority always from Arbitraitor's analyzer.\n\n## Testing requirements\n\nFingerprint/drift unit tests; negative test: annotation-claimed `readOnly` server attempting a write is blocked by policy, not by its claim.\n\n## Documentation impact\n\nApproved-server configuration docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T4 (worker toolset).\n\n## Rollback implications\n\nServers are config-approved (removable); search falls back to no-results with a typed reason, never to an unmediated path.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "ccb89fc2d1b97422d8561eb982b6cbe249aa0f546d0f9c3c551c362e6694f460"
+  },
+  {
+   "id": "E0-T11",
+   "epic": "E0",
+   "title": "Task: bootstrap-review \u2014 wire draft-PR review trigger to the EXISTING adversarial-review policy (no autonomous reviewer in E0)",
+   "risk": "Low",
+   "estimate": 2,
+   "labels": [],
+   "blocked_by": [
+    "E0-T6"
+   ],
+   "body": "## Objective\n\nConnect the loop's draft PRs to the repo's existing fresh-context\nadversarial-review workflow (AGENTS.md review and merge invariants;\n`.agents/skills/github-pr-lifecycle`): the loop moves the board item to\nIn Review, requests review per the workflow policy, and tracks convergence \u2014\nit does NOT implement a reviewer. The autonomous review-worker (IS-6 leg)\nlands under E7; until then review is the existing policy ridden as-is.\n\n## Thin-slice scope\n\nTHIN SLICE: trigger + board tracking only. The autonomous review-worker\ndeepens in E7 (E7-T5).\n\n## References\n\n- AGENTS.md (review and merge invariants \u2014 the authority this task rides)\n- `.agents/project/orchestraitor-workflow.md` (PR convergence requirements)\n- `docs/spec/10-orchestrator.md` \u00a79.33.4 (change-set and PR review loop)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh-context reviewers)\n\n## Acceptance criteria\n\n- [ ] When a worker opens a draft PR, the board item transitions to In Review and a review is requested per the workflow policy (reviewer selection stays manual/policy-driven in E0)\n- [ ] The loop never merges, never approves, and never dismisses reviews \u2014 merge stays human-gated\n- [ ] Convergence state is tracked from board/PR facts (review threads resolved, checks green) without the loop acting on them\n- [ ] `cargo nextest run --workspace` green including trigger unit tests\n\n## QA scenarios\n\n- Happy: fixture draft PR -> item In Review + review requested; evidence `.omo/evidence/<task-slug>/review-trigger.txt`\n- Failure: a PR with an unresolved blocking thread is never treated as converged (state stays In Review); evidence `.omo/evidence/<task-slug>/no-false-convergence.txt`\n\n## Non-goals\n\nNo reviewer agent; no review-loop automation beyond trigger + tracking; no merge authority.\n\n## Security impact\n\nNone new (rides existing policy); the loop's non-merge invariant is asserted in E10-T4.\n\n## Testing requirements\n\nUnit tests for the trigger; negative test for false convergence.\n\n## Documentation impact\n\nWorkflow docs note (loop rides existing review policy until E7); CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T6 (draft PR exists first).\n\n## Rollback implications\n\nTrigger is a board transition + review request \u2014 both revertible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P0",
+   "body_sha256": "dcad5c71a21dadf8922e2ed257bb7a956579b4021bcc151186b6aa8379aa6476"
+  },
+  {
+   "id": "E1-T1",
+   "epic": "E1",
+   "title": "Task: board-contract \u2014 `BoardProvider` trait + local read-cache semantics",
+   "risk": "Low",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nDefine the `BoardProvider` contract per \u00a79.43: items (stable identity, type,\ntitle, body), statuses, typed custom fields, dependency edges (native\nblockedBy, cross-board within a workspace), cross-references, and search.\nImplement the single-canonical-provider semantics: work items live ON the\nprovider; Orchestraitor keeps a local read-cache that is never authoritative\n(write-through then refresh); runtime state stays local-only keyed by stable\nboard item identity.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (kanban board abstraction \u2014 full contract)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (blockedBy edges are the DAG \u2014 no mirrored second graph)\n- Ledger D5 (state/sync semantics: board-wins, `board-diverged` events, last-synced stamps)\n\n## Acceptance criteria\n\n- [ ] The trait covers all six contract areas (items/statuses/fields/edges/cross-refs/search) with typed errors; `cargo doc` renders without warnings\n- [ ] A reference in-memory implementation serves the test suite; cache semantics tested: write-through then refresh, stale reads stamped with last-synced\n- [ ] `cargo nextest run --workspace` green including contract conformance tests\n\n## QA scenarios\n\n- Happy: conformance suite passes against the in-memory provider (items, field writes, edges, search); evidence `.omo/evidence/<task-slug>/contract-conformance.txt`\n- Failure: a provider returning a divergent state after a local write triggers a board-wins reconcile + `board-diverged` event (assert the event, not just the absence of a crash); evidence `.omo/evidence/<task-slug>/board-diverged.txt`\n\n## Non-goals\n\nNo GitHub/sqlite implementations (follow-up tasks); no UI.\n\n## Security impact\n\nBoard content is untrusted input (\u00a76.1); the contract treats bodies as opaque data.\n\n## Testing requirements\n\nConformance test suite reusable by all providers; negative tests for cache-authority violations.\n\n## Documentation impact\n\nContract docs (trait-level); CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nNew trait \u2014 additive; no existing behavior changed.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "746f1b76f24fbb0c4a417e7b8dbd70c3af533876e223bc1655c13bda43ac373c"
+  },
+  {
+   "id": "E1-T2",
+   "epic": "E1",
+   "title": "Task: board-sqlite \u2014 local sqlite board provider (CI/offline)",
+   "risk": "Low",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E1-T1"
+   ],
+   "body": "## Objective\n\nImplement the `BoardProvider` contract over a local sqlite database: the\nCI/offline path so tests never hit the network (deterministic-simulator\nrule, \u00a721.3). Supports the full contract surface including dependency edges\nand cross-references within the local board.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (providers \u2014 local sqlite for CI and offline)\n- `docs/spec/50-contracts-data.md` \u00a721.3 (deterministic simulator; CI never depends on live services)\n- Ledger D5 (single canonical provider per deployment \u2014 sqlite is an alternative canonical, not a mirror)\n\n## Acceptance criteria\n\n- [ ] The E1-T1 conformance suite passes against the sqlite provider\n- [ ] Board fixtures can be seeded/inspected via a dev command (`orc board fixture load/list` or test helper)\n- [ ] `cargo nextest run --workspace` green with zero network access in the test process (assert via test harness sandbox)\n\n## QA scenarios\n\n- Happy: seeded sqlite board drives a full hermetic campaign pass (with E0/E7 components) offline; evidence `.omo/evidence/<task-slug>/sqlite-hermetic.txt`\n- Failure: corrupted sqlite file -> typed storage error with recovery guidance, no panic; evidence `.omo/evidence/<task-slug>/sqlite-corrupt.txt`\n\n## Non-goals\n\nNo sync to GitHub; no multi-board semantics (single board).\n\n## Security impact\n\nLocal-only store; no credentials.\n\n## Testing requirements\n\nConformance suite + migration test for schema changes.\n\n## Documentation impact\n\nProvider docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T1 (contract).\n\n## Rollback implications\n\nDatabase file is deletable; no external state.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "9fa77192ae56ccbe7693da4c6835af58c79353464eebefa82f64b9e359fc0315"
+  },
+  {
+   "id": "E1-T3",
+   "epic": "E1",
+   "title": "Task: board-github \u2014 GitHub Projects v2 provider (full surface, cached node IDs, adaptive rate-limit tick)",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [
+    "E1-T1"
+   ],
+   "body": "## Objective\n\nFull-depth GitHub Projects v2 provider: all contract areas over Projects v2\nGraphQL (items, fields, dependency edges, cross-references, search), with\norg/project/field/option node IDs resolved at runtime and cached OUTSIDE the\nrepository, and a poll tick that adapts to rate-limit feedback (secondary\nlimits honored; backoff on 403/429 class responses).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (GitHub Projects v2 first provider; cached node IDs; adaptive tick)\n- `.agents/project/github-project.example.toml` (field/option names; node-ID caching convention)\n- Ledger F27 (GraphQL shapes; `projects_v2_item` webhook actions \u2014 optional later trigger)\n\n## Acceptance criteria\n\n- [ ] The E1-T1 conformance suite passes against the GitHub provider (live run, evidence captured; CI uses recorded fixtures)\n- [ ] Node-ID cache lives outside the repo (XDG cache dir); no node IDs in any tracked file (grep-verified in CI)\n- [ ] Rate-limit feedback adapts the tick cadence; secondary-rate-limit responses back off, never hammer\n- [ ] `cargo nextest run --workspace` green (fixture-backed); live smoke evidence recorded\n\n## QA scenarios\n\n- Happy: full conformance pass against the shared board (read-only assertions + one scratch status write on a test item, reverted); evidence `.omo/evidence/<task-slug>/github-conformance.txt`\n- Failure: simulated 403 secondary-rate-limit fixture -> cadence backs off (assert inter-request delay grew); malformed item body -> skipped with warning; evidence `.omo/evidence/<task-slug>/github-ratelimit.txt`\n\n## Non-goals\n\nNo webhooks (polling-first per D5); no writes beyond contract surface; no board schema changes.\n\n## Security impact\n\nToken handling via the service identity (E0-T1); board content untrusted.\n\n## Testing requirements\n\nFixture unit tests + live smoke; rate-limit adaptation tests with a virtual clock.\n\n## Documentation impact\n\nProvider docs incl. cache location; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T1 (contract).\n\n## Rollback implications\n\nRead-mostly; writes are board transitions revertible on the board.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "13db6b3cf3681d138a626e6761fb2dda8369b69522f0316ce33758863bc55bd7"
+  },
+  {
+   "id": "E1-T4",
+   "epic": "E1",
+   "title": "Task: board-queue \u2014 ready-queue view: epic-focus predicate + assignee exclusion + eligibility filters",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E1-T1"
+   ],
+   "body": "## Objective\n\nThe ready-queue view over any `BoardProvider`: promote only leaf Tasks/Bugs of\nthe active epic (priority-ordered P0-P3) that satisfy the workflow-policy\neligibility rules (Target=MVP, Status=Ready, no unresolved blockedBy, no\nconflicting in-flight PR), with bug-preemption ordering (standalone Bugs\nalways preempt unless epic-linked) and human-exclusion (items assigned to\nhumans are excluded; the service-identity set is declared in configuration,\nnever inferred).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.41 (epic-focus scheduling policy \u2014 queue predicate, bug preemption, human exclusion)\n- `.agents/project/orchestraitor-workflow.md` (MVP-only scheduling rules)\n- Ledger D11 (service-identity set: the App bot slug + configured machine identities)\n\n## Acceptance criteria\n\n- [ ] `orc board ready --json` returns exactly the eligible items for a seeded board (epic-focus + priority order + bug preemption + exclusions)\n- [ ] Assignee exclusion: items assigned to any human are excluded; items assigned to a configured service identity are schedulable; unassigned items are schedulable\n- [ ] blockedBy filtering uses the provider's native edges (no shadow DAG)\n- [ ] `cargo nextest run --workspace` green including queue-predicate unit tests over sqlite fixtures\n\n## QA scenarios\n\n- Happy: seeded board (active epic + standalone Bug + human-assigned item + blocked item) -> queue lists Bug first, then epic tasks by priority, excluding the human-assigned and blocked items; evidence `.omo/evidence/<task-slug>/queue-predicate.txt`\n- Failure: dependency cycle among seeded items -> cycle named in a needs-human report, no item from the cycle scheduled; evidence `.omo/evidence/<task-slug>/queue-cycle.txt`\n\n## Non-goals\n\nNo focus controls (E8); no stall views (E1-T5); no scheduling (selection is the campaign's job).\n\n## Security impact\n\nQueue correctness is a scheduling-safety property (wrong queue = wrong work executed); no security primitive.\n\n## Testing requirements\n\nProperty-style tests over fixture boards; cycle-detection negative test.\n\n## Documentation impact\n\nQueue semantics docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T1 (contract); consumes E0-T1's service-identity config.\n\n## Rollback implications\n\nView-only; no state mutated.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "8a8c70061d8994bd007d955663f9ec1ff58b117a2e3122da1b8177c631647ea1"
+  },
+  {
+   "id": "E1-T5",
+   "epic": "E1",
+   "title": "Task: board-reconcile \u2014 stall + reconcile views (board-wins, stale-blocker drift, cycle detection)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E1-T1"
+   ],
+   "body": "## Objective\n\nReconcile and stall views over the board abstraction: every poll tick is a\nreconcile with board-wins semantics (`board-diverged` events; last-synced\nstamps), stale-blocker drift surfacing (blocker Done but edge unresolved ->\nvisible report, never silently rewritten), and dependency-cycle detection\nproducing a needs-human report naming the cycle's members.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (reconcile semantics)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (cycles; stale-blocker drift)\n- `docs/spec/10-orchestrator.md` \u00a79.36 (poll tick = reconcile pass)\n- Ledger D4 (blocked/dependency semantics: cycles, drift, hard waits)\n\n## Acceptance criteria\n\n- [ ] A reconcile pass over a diverged state produces a `board-diverged` event and adopts the board's value\n- [ ] Stale-blocker drift (blocker Done, edge unresolved) is surfaced as a report; the edge is NOT rewritten or dropped\n- [ ] Cycle detection names all members and produces a needs-human report; cyclic tasks are never scheduled\n- [ ] `cargo nextest run --workspace` green including reconcile unit tests\n\n## QA scenarios\n\n- Happy: divergent local/board fixture -> board wins + event recorded; evidence `.omo/evidence/<task-slug>/reconcile-wins.txt`\n- Failure: cyclic fixture -> needs-human report with member list; no auto-break; drift fixture -> report only; evidence `.omo/evidence/<task-slug>/cycle-and-drift.txt`\n\n## Non-goals\n\nNo automatic edge repair; no stall reaping (E8 owns the reaper; this task provides the views).\n\n## Security impact\n\nNone (view layer); correctness-critical for scheduling safety.\n\n## Testing requirements\n\nUnit tests with fixture graphs; negative tests for silent rewrites (assert edge unchanged).\n\n## Documentation impact\n\nReconcile semantics docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T1 (contract).\n\n## Rollback implications\n\nView-only; events are append-only local state.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "2f88f855cc3b965cdd0053c8d86cf5327bf23df1734e42790d3113c44a947c54"
+  },
+  {
+   "id": "E1-T6",
+   "epic": "E1",
+   "title": "Task: board-workspace \u2014 multi-org workspaces (N boards, per-board credentials)",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [
+    "E1-T1"
+   ],
+   "body": "## Objective\n\nWorkspace configuration owning multiple organizations and their projects \u2014\neach project a board-provider instance with its own credentials (never a\nshared ambient token). One daemon run serves exactly one active workspace;\nswitching is an explicit daemon-level action.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.42 (multi-org workspaces and cross-project epics)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.23 (secret resolution per credential)\n- Ledger D5 (single canonical provider per workspace)\n\n## Acceptance criteria\n\n- [ ] A workspace config with two boards (e.g. one sqlite + one GitHub fixture) instantiates two provider instances with distinct credential resolution\n- [ ] No ambient token use: each provider resolves its own credentials via `secret://` URIs\n- [ ] One active workspace per run; switching is explicit and logged\n- [ ] `cargo nextest run --workspace` green including workspace config unit tests\n\n## QA scenarios\n\n- Happy: two-board workspace -> both boards readable, items keyed by (provider, stable id); evidence `.omo/evidence/<task-slug>/workspace-two-boards.txt`\n- Failure: a board with unresolvable credentials fails closed for that board only (other board unaffected, error typed); evidence `.omo/evidence/<task-slug>/workspace-cred-fail.txt`\n\n## Non-goals\n\nNo cross-board epics (E1-T7); no credential UI.\n\n## Security impact\n\nPer-board credential isolation \u2014 a compromised board credential must not reach another board.\n\n## Testing requirements\n\nNegative test: credential isolation (board A's token cannot address board B).\n\n## Documentation impact\n\nWorkspace configuration docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T1 (contract).\n\n## Rollback implications\n\nConfig-layer change; removable via `orc config unset`.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "2fc718e54a3c0907d43b578b997a78898b349779d38f549e7fb39be9198d89b7"
+  },
+  {
+   "id": "E1-T7",
+   "epic": "E1",
+   "title": "Task: board-cross-epic \u2014 cross-project epics (anchor board + cross-board membership edges)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E1-T6"
+   ],
+   "body": "## Objective\n\nConnectable projects: an Epic lives on an anchor board and may span multiple\nprojects; its Tasks/Sub-tasks are targeted at specific projects through\ncross-board membership edges. Epic-focus, blockedBy edges, and bug-preemption\nresolve ACROSS all boards of the workspace (the epic's sub-graph is the union\nof its member items, not a copy).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.42 (cross-project epics; workspace-wide resolution)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (blockedBy may cross boards within the workspace)\n- `docs/spec/10-orchestrator.md` \u00a79.41 (focus/preemption resolution across boards)\n\n## Acceptance criteria\n\n- [ ] An epic on the anchor board with member tasks on a second board resolves its sub-graph as the union (no copies)\n- [ ] A blockedBy edge from a task on board A to an issue on board B gates the task within the workspace\n- [ ] Epic-focus treats the cross-board sub-graph as one queue; bug-preemption applies to standalone Bugs on any board\n- [ ] `cargo nextest run --workspace` green including cross-board fixture tests\n\n## QA scenarios\n\n- Happy: two-board fixture with a cross-board epic -> focus queue includes member tasks from both boards in priority order; evidence `.omo/evidence/<task-slug>/cross-board-focus.txt`\n- Failure: a cross-board blocker that closes on board B promotes the board-A task on the next reconcile (assert promotion); a cross-board cycle is reported, not scheduled; evidence `.omo/evidence/<task-slug>/cross-board-blocks.txt`\n\n## Non-goals\n\nNo cross-workspace resolution; no board-data copying.\n\n## Security impact\n\nNone new (resolution layer over existing providers).\n\n## Testing requirements\n\nCross-board fixture tests; promotion + cycle negatives.\n\n## Documentation impact\n\nCross-project epic docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T6 (workspaces).\n\n## Rollback implications\n\nEdges are board data (revertible on the boards); no migration.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "7d581081e34b7d05b29cdb4bddb1c99ac803692dcdd9fa3f68fd4453d2a38eba"
+  },
+  {
+   "id": "E1-T8",
+   "epic": "E1",
+   "title": "Task: board-migration \u2014 `orc board import/export` provider switching",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E1-T2",
+    "E1-T3"
+   ],
+   "body": "## Objective\n\nExplicit provider-switching migration: `orc board import/export` moves board\ncontent between providers (e.g. sqlite -> GitHub Projects v2) as a one-shot\nmigration with a dry-run diff \u2014 never a live mirror (single canonical\nprovider per deployment).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.43 (switching is an explicit migration, not a mirror)\n- Ledger D5 (provider switching semantics)\n\n## Acceptance criteria\n\n- [ ] `orc board export --provider sqlite --out <file>` writes a complete, versioned snapshot (items, fields, edges)\n- [ ] `orc board import --provider github --in <file> --dry-run` shows the exact writes; without `--dry-run` applies them idempotently (re-run is a no-op)\n- [ ] `cargo nextest run --workspace` green including round-trip unit tests\n\n## QA scenarios\n\n- Happy: sqlite -> file -> sqlite round-trip preserves items/fields/edges (assert equality); evidence `.omo/evidence/<task-slug>/roundtrip.txt`\n- Failure: import with a conflicting item (same stable id, different content) -> typed conflict error listing conflicts, nothing written; evidence `.omo/evidence/<task-slug>/import-conflict.txt`\n\n## Non-goals\n\nNo continuous sync; no GitHub-to-GitHub project moves.\n\n## Security impact\n\nExport files contain board content (untrusted data) \u2014 treated as data on import; no credentials in exports.\n\n## Testing requirements\n\nRound-trip + conflict tests.\n\n## Documentation impact\n\n`docs/cli/` for import/export; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E1-T2, E1-T3 (both providers exist).\n\n## Rollback implications\n\nDry-run first; imports are idempotent and auditable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "b4098274e8cd148848dc99521be3db7738ed70f2a997874fc2448ea766c059a2"
+  },
+  {
+   "id": "E2-T1",
+   "epic": "E2",
+   "title": "Task: routing-registry \u2014 role registry (built-in six + custom roles via layered config)",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe role registry: built-in roles (explore, research, plan, implement,\nreview, verify) plus user-defined custom roles, held as configuration (not a\nhardcoded taxonomy); roles compose with the \u00a79.19.1 (domain, role) catalog\nand resolve through \u00a79.19.2 precedence (`roles.<id>.routing.*` sub-keys carry\nthe same layer semantics as `agents.domains.<id>.routing.*`).\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (role-based model routing \u2014 registry)\n- `docs/spec/30-model-routing.md` \u00a79.19.1 (domains, roles, generic fallback)\n- `docs/spec/30-model-routing.md` \u00a79.19.2 (precedence)\n- `docs/spec/50-contracts-data.md` \u00a79.22 (layered configuration)\n\n## Acceptance criteria\n\n- [ ] All six built-in roles are defined and resolvable; a custom role defined in a config layer resolves identically\n- [ ] Precedence test: layer override changes a role's resolution; removal falls back correctly\n- [ ] `cargo nextest run --workspace` green including registry unit tests\n\n## QA scenarios\n\n- Happy: `orc config get roles.review.routing` resolves for built-in and custom roles; evidence `.omo/evidence/<task-slug>/registry-resolve.txt`\n- Failure: ambiguous same-layer conflict (two shards defining the same role key) -> `orc config validate` rejects it (\u00a79.22.3 semantics); evidence `.omo/evidence/<task-slug>/registry-conflict.txt`\n\n## Non-goals\n\nNo router logic (E2-T2); no DecisionProvider (E2-T4).\n\n## Security impact\n\nNone (configuration surface).\n\n## Testing requirements\n\nUnit tests over layer fixtures; conflict-validation negative.\n\n## Documentation impact\n\nConfig reference for `roles.*`; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nConfig-only; `orc config unset` per key.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "3082249c221db34ca586df6ed8f7777b867d0ea491ed9ffdf847160ac5e25286"
+  },
+  {
+   "id": "E2-T2",
+   "epic": "E2",
+   "title": "Task: routing-heuristic \u2014 heuristic router (static table, \u00a79.19.2 precedence, fallback chain)",
+   "risk": "Low",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E2-T1"
+   ],
+   "body": "## Objective\n\nThe default router: a static heuristic table \u2014 role -> `(provider, model)`\nentries resolved through layered configuration and the \u00a79.19.2 precedence\nchain, with the documented fallback chain when entries are missing. The\nheuristic table remains the fallback when a `DecisionProvider` is configured\nbut unavailable. Workers never select their own model \u2014 the control plane\nresolves `(provider, model, routing_reason)` and records it per call.\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (heuristic table first; fallback chain)\n- `docs/spec/30-model-routing.md` \u00a79.19.2 (precedence)\n\n## Acceptance criteria\n\n- [ ] Role resolution returns `(provider, model, routing_reason)` with the precedence path recorded\n- [ ] Missing-entry fallback follows the documented chain (role -> domain default -> generic fallback) and records which step fired\n- [ ] Determinism: same config + ledger state -> same resolution (replay test)\n- [ ] `cargo nextest run --workspace` green including router unit tests\n\n## QA scenarios\n\n- Happy: each built-in role resolves; a role with a partial table walks the fallback chain with reasons; evidence `.omo/evidence/<task-slug>/heuristic-resolve.txt`\n- Failure: no resolution possible (empty config) -> typed routing failure, no default-to-first-model guess; evidence `.omo/evidence/<task-slug>/heuristic-unresolvable.txt`\n\n## Non-goals\n\nNo decision model; no subscription gating (E2-T6).\n\n## Security impact\n\nNone (selection only).\n\n## Testing requirements\n\nPrecedence + determinism unit tests; unresolvable-role negative.\n\n## Documentation impact\n\nRouting docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E2-T1 (registry).\n\n## Rollback implications\n\nConfig-driven; table removable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "0dc73b2f45dcaae3cd0d36cdfeddbf59b46fad8f8f02153f0b3a2512a602e17a"
+  },
+  {
+   "id": "E2-T3",
+   "epic": "E2",
+   "title": "Task: routing-records \u2014 persisted, replayable routing decision records",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E2-T2"
+   ],
+   "body": "## Objective\n\nEvery routing resolution is persisted as a decision record: resolved\n`(provider, model)`, the precedence path that produced it, alternatives\nconsidered, and per-alternative skip reasons (including\n`skipped-because-quota`). Records are replayable: given the same board\nstate, configuration, and ledger state, a resolution is deterministic and\nauditable.\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (routing decision records)\n- `docs/spec/10-orchestrator.md` \u00a79.35 (decision-record shape the campaign consumes)\n\n## Acceptance criteria\n\n- [ ] Each resolution writes a record with provider, model, precedence path, alternatives[], skip reasons\n- [ ] Replay: re-resolving with recorded inputs reproduces the same decision (test)\n- [ ] `cargo nextest run --workspace` green including record unit tests\n\n## QA scenarios\n\n- Happy: resolve + replay -> identical records; evidence `.omo/evidence/<task-slug>/record-replay.txt`\n- Failure: a record with missing precedence path fails validation on write (typed), not silently; evidence `.omo/evidence/<task-slug>/record-invalid.txt`\n\n## Non-goals\n\nNo analytics/UI beyond storage.\n\n## Security impact\n\nRecords must not contain secrets (\u00a79.23.4 redaction rules apply to any provider metadata logged).\n\n## Testing requirements\n\nReplay determinism tests; secret-redaction negative (fixture with a token in provider metadata -> redacted).\n\n## Documentation impact\n\nRecord schema docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E2-T2 (router produces resolutions).\n\n## Rollback implications\n\nAppend-only local state; deletable with the run store.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "474c79183440250a16d0d8b49c84b7d9e8133c7393f23e087c724bb4ca0b6ff7"
+  },
+  {
+   "id": "E2-T4",
+   "epic": "E2",
+   "title": "Task: routing-decisionprovider \u2014 `DecisionProvider` trait (typed structured outputs, calibrated confidence)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `DecisionProvider` trait in provider-api: a decision model returns typed\nstructured outputs with calibrated confidence \u2014 not string generation. A\n`DecisionProvider` proposes role-to-model resolutions and the campaign\nsession's task-selection decision; the heuristic table stays the default\nand the fallback chain. The transport type must not assume message streams\n(new provider class).\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (DecisionProvider)\n- `docs/spec/30-model-routing.md` \u00a710.2 (provider transport architecture \u2014 new class must fit)\n- Ledger F18 (jev/TypeSafe System One: typed outputs, parallel sampling, calibrated probabilities \u2014 vendor claims)\n\n## Acceptance criteria\n\n- [ ] The trait is defined in `orchestraitor-provider-api` with typed output + confidence fields; `cargo doc` clean\n- [ ] A fixture DecisionProvider (deterministic, table-driven) implements it and plugs into the router behind a config flag (default off)\n- [ ] `cargo nextest run --workspace` green including trait + fixture tests\n\n## QA scenarios\n\n- Happy: fixture provider proposes resolutions; records carry provider + confidence; heuristic stays default; evidence `.omo/evidence/<task-slug>/fixture-provider.txt`\n- Failure: provider unavailable/erroring -> fallback chain engages (heuristic), unavailability recorded in the record; evidence `.omo/evidence/<task-slug>/provider-fallback.txt`\n\n## Non-goals\n\nNo TypeSafe/jev adapter (E2-T5); no live decision-model dependency.\n\n## Security impact\n\nNew provider class: untrusted outputs are typed data; no authority granted by a proposal.\n\n## Testing requirements\n\nTrait conformance via fixture; fallback negative.\n\n## Documentation impact\n\nProvider-api docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone (parallel to E2-T2; the router consumes it when configured).\n\n## Rollback implications\n\nDefault-off feature; config flag removal disables.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "8156001829040ae25cea16512dc963488d4b9ec2cae1b0b8875daa67140bda23"
+  },
+  {
+   "id": "E2-T5",
+   "epic": "E2",
+   "title": "Task: routing-jev \u2014 TypeSafe/jev adapter (fixture-tested, default-off until license allowlisted)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E2-T4"
+   ],
+   "body": "## Objective\n\nThe reference `DecisionProvider` adapter for the TypeSafe/jev \"System One\"\nmodel: typed outputs, parallel sampling, calibrated probabilities. The\nadapter is fixture-tested only (no live dependency), default-off, and stays\noff until the license is allowlisted per the dependency policy\n(tech-stack \u00a717). No hard dependency on TypeSafe/jev exists anywhere in the\nworkspace.\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.45 (jev as reference adapter shape; default-off)\n- `docs/spec/tech-stack.md` \u00a717 (license status: not yet allowlisted) and \u00a718 (dependency policy)\n- Ledger F18 (jev properties; no Rust SDK \u2014 transport must not assume string generation)\n\n## Acceptance criteria\n\n- [ ] The adapter implements `DecisionProvider` over recorded fixtures (typed outputs + confidence); zero live-network tests\n- [ ] The adapter is gated behind a default-off config flag; with the flag off, no jev code path executes\n- [ ] `cargo nextest run --workspace` green; `cargo deny check` clean (no TypeSafe dependency added while un-allowlisted)\n- [ ] A documented enable-path exists for when the license is allowlisted (config + policy note)\n\n## QA scenarios\n\n- Happy: fixture-driven adapter test produces typed resolutions with confidence; records carry the provider tag; evidence `.omo/evidence/<task-slug>/jev-fixture.txt`\n- Failure: flag off -> router uses heuristic table only (assert no adapter call); malformed fixture output -> typed parse failure, fallback engages; evidence `.omo/evidence/<task-slug>/jev-off-and-malformed.txt`\n\n## Non-goals\n\nNo live API integration; no license decision (owner-level, per policy).\n\n## Security impact\n\nUntrusted typed outputs; no credentials while default-off.\n\n## Testing requirements\n\nFixture conformance; default-off negative; malformed-output negative.\n\n## Documentation impact\n\nAdapter docs + enable-path note; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E2-T4 (trait).\n\n## Rollback implications\n\nDefault-off; flag removal fully disables.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "3e97a36b18827770f686a9664b0ecb541b81a6bf8370b1f441164f7853455e01"
+  },
+  {
+   "id": "E2-T6",
+   "epic": "E2",
+   "title": "Task: routing-subscription \u2014 subscription-aware routing (usage state, eligibility gate, all-exhausted stop)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E2-T2"
+   ],
+   "body": "## Objective\n\nSubscription-aware routing per \u00a79.46: the cost ledger tracks per-subscription\nusage state (`measured`, `estimated`, or `user-configured`) as the\neligibility input; the gate prefers subscription-backed instances with\nremaining usage, SKIPS exhausted subscriptions when an alternative offers a\nsimilar model (recorded as `skipped-because-quota` in alternatives[]); when\nALL subscriptions offering a suitable model are exhausted, the router stops\nspawning that role's work and emits a needs-human signal \u2014 never a silent\nfall-through to metered paid spend (falling through is an explicit recorded\nconfiguration choice).\n\n## References\n\n- `docs/spec/30-model-routing.md` \u00a79.46 (subscription-aware routing)\n- `docs/spec/30-model-routing.md` \u00a79.19.4-\u00a79.19.6 (cost and subscription ledger, caps, budget scopes)\n- Ledger D6 (subscription spend guards; first subscription provider: Neuralwatt)\n\n## Acceptance criteria\n\n- [ ] Usage state per subscription is tracked in the cost ledger with its source kind (measured/estimated/user-configured)\n- [ ] Eligibility gate: exhausted subscription + alternative available -> alternative chosen, skip recorded with reason `skipped-because-quota`\n- [ ] All-exhausted: no alternative -> role's work stops + needs-human signal; no metered fall-through unless explicitly configured (and then recorded)\n- [ ] `cargo nextest run --workspace` green including gate unit tests\n\n## QA scenarios\n\n- Happy: mixed fixture (one subscription with quota, one exhausted) -> eligible one chosen, skip reason recorded; evidence `.omo/evidence/<task-slug>/gate-eligible.txt`\n- Failure: all exhausted -> needs-human, no spawn, no spend; explicit-override config -> fall-through happens only when configured and is recorded in the decision record; evidence `.omo/evidence/<task-slug>/all-exhausted.txt`\n\n## Non-goals\n\nNo provider-side quota API integration (user-configured windows suffice for v1); no monetary budget enforcement (E8).\n\n## Security impact\n\nNone (eligibility logic); interacts with spend safety (E8-T3).\n\n## Testing requirements\n\nGate unit tests; all-exhausted + explicit-override negatives.\n\n## Documentation impact\n\nSubscription config docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E2-T2 (router).\n\n## Rollback implications\n\nConfig-driven; gate removable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "1cc2b38f0cb8820454dbae805cba7849f79751a0451a9e55239db5c4813e05d1"
+  },
+  {
+   "id": "E3-T1",
+   "epic": "E3",
+   "title": "Task: tools-board-query \u2014 `board.query` decision tool",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `board.query` coordinator decision tool: read board state \u2014 items,\nstatuses, fields, dependency edges, blocked graph \u2014 through the\n`BoardProvider` contract, exposed on the MVP-6-style built-in tool layer for\norchestration rather than file operations.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (coordinator decision tools \u2014 board.query)\n- `docs/spec/10-orchestrator.md` \u00a79.43 (board abstraction the tool reads)\n- `docs/spec/60-milestones.md` \u00a7998 MVP-6 (tool-layer shape)\n\n## Acceptance criteria\n\n- [ ] `board.query` accepts structured filters (status, type, epic, fields) and returns typed results (no raw provider JSON passthrough)\n- [ ] The blocked-graph query returns the transitive blocked set for an item\n- [ ] Tool invocation is recorded in the event store with the \u00a79.25.1 delegation chain\n- [ ] `cargo nextest run --workspace` green including tool unit tests (sqlite board fixtures)\n\n## QA scenarios\n\n- Happy: query by epic + status returns typed items incl. dependency edges; evidence `.omo/evidence/<task-slug>/board-query.txt`\n- Failure: injection fixture (filter value containing instructions) is treated as data \u2014 results unchanged, no command execution; evidence `.omo/evidence/<task-slug>/board-query-injection.txt`\n\n## Non-goals\n\nNo writes (E3-T2); no policy decisions.\n\n## Security impact\n\nRead-only; untrusted board content stays data.\n\n## Testing requirements\n\nUnit tests + injection negative (shared harness with E3-T7).\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone (consumes E1 contract at runtime).\n\n## Rollback implications\n\nAdditive tool; disable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "d431da2a763fd3be8b510b227772422139c4fe06b94509029c4f67ea48eea058"
+  },
+  {
+   "id": "E3-T2",
+   "epic": "E3",
+   "title": "Task: tools-board-move \u2014 `board.move` guarded board transitions",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E3-T1"
+   ],
+   "body": "## Objective\n\nThe `board.move` decision tool: guarded board transitions (status/field\nwrites) \u2014 validated against workflow-policy rules, lease-checked, and\nreconcile-visible. Never a raw provider write: transitions the provider or\nworkflow policy rejects are refused with typed reasons.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (board.move \u2014 guarded, lease-checked)\n- `.agents/project/orchestraitor-workflow.md` (transition rules the guard enforces)\n\n## Acceptance criteria\n\n- [ ] Valid transitions apply; invalid ones (e.g. moving an item with an unresolved blocker into In Progress) are refused with typed reasons\n- [ ] Lease check: moving an item another session holds a lease on is refused\n- [ ] Every applied transition is reconcile-visible (board-wins on next tick)\n- [ ] `cargo nextest run --workspace` green including guard unit tests\n\n## QA scenarios\n\n- Happy: Ready -> In Progress for an owned, unblocked item applies and round-trips; evidence `.omo/evidence/<task-slug>/move-happy.txt`\n- Failure: policy-invalid + lease-conflict fixtures -> typed refusals, board unchanged; evidence `.omo/evidence/<task-slug>/move-refused.txt`\n\n## Non-goals\n\nNo edge writes; no field writes beyond status-class fields.\n\n## Security impact\n\nGuard correctness prevents out-of-policy state changes (scheduling safety).\n\n## Testing requirements\n\nGuard unit tests; refusal negatives.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E3-T1 (shared tool surface).\n\n## Rollback implications\n\nTransitions are board writes \u2014 revertible on the board.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "4087466718972fe9d7595fcb7ec0c8b111bf5b897628301a911d22d37fe883e3"
+  },
+  {
+   "id": "E3-T3",
+   "epic": "E3",
+   "title": "Task: tools-decision-record \u2014 `decision.record` (append-only, replayable)",
+   "risk": "Low",
+   "estimate": 2,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `decision.record` decision tool: persist a decision record with rationale\nper the \u00a79.35 shape (kind, selected task, role, model+provider, worker\narguments, rationale, alternatives considered) \u2014 append-only and replayable.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (decision.record)\n- `docs/spec/10-orchestrator.md` \u00a79.35 (decision record shape)\n\n## Acceptance criteria\n\n- [ ] Records are append-only (no update/delete path on the tool)\n- [ ] The \u00a79.35 fields are validated on write; malformed records are refused\n- [ ] `cargo nextest run --workspace` green including record unit tests\n\n## QA scenarios\n\n- Happy: a spawn decision persists with all fields; replay reads it back identically; evidence `.omo/evidence/<task-slug>/decision-record.txt`\n- Failure: attempt to append a record missing required fields -> typed refusal; evidence `.omo/evidence/<task-slug>/decision-refused.txt`\n\n## Non-goals\n\nNo analytics; no cross-session mutation.\n\n## Security impact\n\nRecords must not contain secrets (redaction rules).\n\n## Testing requirements\n\nSchema validation + append-only negatives.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nAppend-only local state.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "a651cb556abc1d7a972d1caca9ced9b067072e3d616fd27163d7f840b3cc301c"
+  },
+  {
+   "id": "E3-T4",
+   "epic": "E3",
+   "title": "Task: tools-router-consult \u2014 `router.consult` decision tool",
+   "risk": "Low",
+   "estimate": 2,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `router.consult` decision tool: ask the model router for a\n`(provider, model)` resolution with alternatives \u2014 resolving through the\nrole registry and returning the same record shape the router persists,\nincluding skip reasons.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (router.consult)\n- `docs/spec/30-model-routing.md` \u00a79.45 (role resolution; decision records)\n\n## Acceptance criteria\n\n- [ ] Consult returns `(provider, model, routing_reason)` + alternatives with skip reasons\n- [ ] Consulting does not mutate routing state (read-only resolution)\n- [ ] `cargo nextest run --workspace` green including consult unit tests\n\n## QA scenarios\n\n- Happy: consult for each built-in role returns resolutions + alternatives; evidence `.omo/evidence/<task-slug>/router-consult.txt`\n- Failure: unresolvable role -> typed failure with the missing-config key named; evidence `.omo/evidence/<task-slug>/consult-unresolvable.txt`\n\n## Non-goals\n\nNo model selection by the worker (control-plane only).\n\n## Security impact\n\nNone (read-only).\n\n## Testing requirements\n\nUnit tests; unresolvable negative.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone (consumes E2 router at runtime).\n\n## Rollback implications\n\nAdditive tool.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "991f0a979caede83dbc9159154fa03c4e219d6e3f77c29c127ed41115550bbf1"
+  },
+  {
+   "id": "E3-T5",
+   "epic": "E3",
+   "title": "Task: tools-worker-delegate \u2014 `worker.delegate` with scoped authority (\u00a79.25.2)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `worker.delegate` decision tool: spawn a worker with scoped authority \u2014\nexplicit capability requests, lease-aligned expiry, never the parent's full\nauthority. Every invocation is assembled into a `PlanContext` and authorized\nvia `arbitraitor_mcp::ApprovalTokenIssuer` where security-sensitive\n(\u00a79.25.3), evaluated by Arbitraitor's `PolicyEngine`, recorded with the\n\u00a79.25.1 delegation chain.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (worker.delegate \u2014 scoped authority)\n- `docs/spec/10-orchestrator.md` \u00a79.25.2 (short-lived, resource-scoped authority)\n- `docs/spec/10-orchestrator.md` \u00a79.25.3 (authority issuance and validation belong to Arbitraitor)\n- `docs/spec/tech-stack.md` \u00a72.2 (real identifiers: `PlanContext`, `ApprovalTokenIssuer`, `PolicyEngine`)\n\n## Acceptance criteria\n\n- [ ] Delegation requires explicit capability requests; a request without capabilities is refused\n- [ ] Granted authority expires with the lease (expiry test with virtual clock); the parent's authority is never inherited implicitly\n- [ ] Every delegation is recorded (delegation chain + decision record)\n- [ ] `cargo nextest run --workspace` green including delegation unit tests\n\n## QA scenarios\n\n- Happy: delegate with explicit capabilities -> worker runs with exactly those (assert via receipt scope); evidence `.omo/evidence/<task-slug>/delegate-scoped.txt`\n- Failure: expired-authority use is refused by the mediation boundary (assert the forbidden effect did not occur); a delegation attempting parent-scope capabilities is refused; evidence `.omo/evidence/<task-slug>/delegate-refusals.txt`\n\n## Non-goals\n\nNo authority minting in Orchestraitor (Arbitraitor's job); no human-approval UI.\n\n## Security impact\n\nCapability-issuance wiring at the trust boundary: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nAdversarial negatives: scope-escalation attempts, expiry races.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream in E3 (consumes E5 mediation at runtime).\n\n## Rollback implications\n\nAdditive tool; disable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "14e63a47a757d9af6b502f0890f868c11cd76042178529d9f616fe151c88257c"
+  },
+  {
+   "id": "E3-T6",
+   "epic": "E3",
+   "title": "Task: tools-budget-capability \u2014 `budget.check` + `capability.check` decision tools",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `budget.check` decision tool (query spend, run/time, and subscription\nbudget state per \u00a79.36 classes) and the `capability.check` decision tool\n(query Arbitraitor's capability report for a requested operation shape \u2014\nreporting Arbitraitor's answer, never creating one).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (budget.check, capability.check)\n- `docs/spec/10-orchestrator.md` \u00a79.36 (budget classes)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.7 (capability reporting \u2014 Arbitraitor's answer)\n\n## Acceptance criteria\n\n- [ ] `budget.check` returns the three budget classes' current state (spend, run/time, subscription) with remaining values\n- [ ] `capability.check` returns Arbitraitor's capability report for a requested operation shape, verbatim (no local interpretation)\n- [ ] `cargo nextest run --workspace` green including both tools' unit tests\n\n## QA scenarios\n\n- Happy: budget.check against a fixture ledger returns per-class state; capability.check returns the probe matrix for a bash-exec shape; evidence `.omo/evidence/<task-slug>/check-tools.txt`\n- Failure: capability.check when Arbitraitor reports a missing control -> the report says so (fail-closed information, no local fallback answer); evidence `.omo/evidence/<task-slug>/capability-missing.txt`\n\n## Non-goals\n\nNo enforcement (E8 daemon enforces); no probe implementation (Arbitraitor's).\n\n## Security impact\n\nReporting layer only; must not fabricate capability answers.\n\n## Testing requirements\n\nUnit tests; no-fabrication negative.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nAdditive tools.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "156da7e72dbb04dcfcbcc01d9d88ac45cd9e144c856e41e60a8f8a8d5514a5f3"
+  },
+  {
+   "id": "E3-T7",
+   "epic": "E3",
+   "title": "Task: tools-injection-negatives \u2014 injection-boundary negative test suite for decision tools",
+   "risk": "High",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E3-T1"
+   ],
+   "body": "## Objective\n\nThe mandatory adversarial test surface for the decision tools: a tool\nargument containing instructions, marker-escape attempts, or content\naddressed to a different principal MUST be treated as data \u2014 quoted,\nsanitized, never executed. Shared fixture library covering all \u00a79.39 tools.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.39 (injection-boundary negatives are mandatory test surface)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.1 (agent is always untrusted)\n- `docs/spec/50-contracts-data.md` \u00a721.4 (adversarial tests)\n\n## Acceptance criteria\n\n- [ ] A fixture corpus of injection payloads (instructions, marker escapes, cross-principal content) runs against every decision tool\n- [ ] Each case asserts the forbidden effect did not occur (no command execution, no field influence beyond typed inputs, no authority grant)\n- [ ] `cargo nextest run --workspace` green; the suite runs in CI\n\n## QA scenarios\n\n- Happy: all payloads neutralized (results typed, no execution); evidence `.omo/evidence/<task-slug>/injection-suite.txt`\n- Failure (proof the suite bites): a deliberately weakened tool fixture (one that interpolates arguments) is caught by the suite -> test fails; evidence `.omo/evidence/<task-slug>/suite-detects-weakness.txt`\n\n## Non-goals\n\nNo fuzzing infrastructure beyond the corpus; no live-model tests.\n\n## Security impact\n\nThis IS the security test surface for the tool boundary.\n\n## Testing requirements\n\nThe suite itself; a canary case proving detection (guardrail-weakening fixture pattern).\n\n## Documentation impact\n\nTest-surface docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E3-T1 (first tool exists; suite extends to all).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "a1655c6beec017d53a3cd5f6ceed238a6c422a0b0a83cf67b460730732a42483"
+  },
+  {
+   "id": "E3-T8",
+   "epic": "E3",
+   "title": "Task: tools-report-issue \u2014 discretionary `report_issue` tool (IS-14b, Triage-only)",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe discretionary `report_issue` coordinator tool per IS-14/\u00a79.37(b): agents\nreport issues noticed but not task-fatal \u2014 structured content (title, class,\ndescription), evidence links, affected paths. Files at Status=Triage ONLY;\nnever auto-scheduled, never promoted to Ready by the reporting path, never\nassigned to its reporter. Agent-authored bodies are marker-wrapped untrusted\ncontent.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.37(b) (discretionary reporting)\n- `docs/spec/10-orchestrator.md` \u00a79.37(d) (untrusted content)\n- `docs/spec/10-orchestrator.md` \u00a79.39 (tool surface)\n\n## Acceptance criteria\n\n- [ ] `report_issue` files an issue at Status=Triage with structured fields; the reporter is not the assignee\n- [ ] The filed issue is never promoted to Ready by the reporting path (assert queue exclusion)\n- [ ] Bodies are marker-wrapped; injection corpus cases pass (reuses E3-T7 fixtures)\n- [ ] `cargo nextest run --workspace` green including tool unit tests\n\n## QA scenarios\n\n- Happy: worker reports a noticed defect -> Triage issue with class + evidence links; evidence `.omo/evidence/<task-slug>/report-issue.txt`\n- Failure: a report attempting to set Status=Ready or assign itself -> refused (typed); injection payload in description -> quoted data only; evidence `.omo/evidence/<task-slug>/report-refusals.txt`\n\n## Non-goals\n\nNo auto-triage; no scheduling; no self-fix (report \u2260 self-fix).\n\n## Security impact\n\nUntrusted-content boundary (same as E0-T9).\n\n## Testing requirements\n\nRefusal + injection negatives.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nFiled issues closable; tool disable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "4ca7fa17263514f48b7a08c3074e6d98eb1b588853565e0f96087cb7b0f0d0a7"
+  },
+  {
+   "id": "E4-T1",
+   "epic": "E4",
+   "title": "Task: harness-headless \u2014 headless one-shot worker mode (full depth)",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nDeepen the E0-T4 bootstrap worker into the full headless one-shot mode:\ntask in, structured result + PR out, exit code \u2014 with structured result\nschema (task id, session id, exit code, PR ref, evidence paths, failure\nclass), checkpoint/resume on interruption, and the full mediated toolset\ncontract.\n\n## References\n\n- `docs/spec/20-harness-worker.md` \u00a710.1 (integration modes)\n- `docs/spec/10-orchestrator.md` \u00a79.24 (lifecycle \u2014 checkpoint resume)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh-context implementer)\n\n## Acceptance criteria\n\n- [ ] `orc worker run --task <id> --json` emits the full structured result schema; exit codes typed (success, task-failure, exhaustion, mediation-refusal)\n- [ ] Interruption mid-task checkpoints; resume continues from the checkpoint (virtual-clock test)\n- [ ] `cargo nextest run --workspace` green; simulator-backed integration tests\n\n## QA scenarios\n\n- Happy: fixture task completes; result JSON validates against the schema; evidence `.omo/evidence/<task-slug>/headless-happy.txt`\n- Failure: kill -9 mid-run -> restart resumes from checkpoint (assert no duplicated side effects via idempotency receipts); evidence `.omo/evidence/<task-slug>/headless-resume.txt`\n\n## Non-goals\n\nNo interactive mode (E4-T2); no sub-agents; no review behavior.\n\n## Security impact\n\nSame mediation boundary as E0-T4 (all I/O mediated).\n\n## Testing requirements\n\nIntegration + crash-resume tests; idempotency assertions (\u00a79.26.3).\n\n## Documentation impact\n\n`docs/cli/` worker docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (deepens E0-T4).\n\n## Rollback implications\n\nNew mode; existing paths unchanged.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "33cfd6632ebd9481a08d0d9fb5c2136bddedcf0741f973993b7275dce54c3d2f"
+  },
+  {
+   "id": "E4-T2",
+   "epic": "E4",
+   "title": "Task: harness-interactive \u2014 standalone interactive mode (`orc`)",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [
+    "E4-T1"
+   ],
+   "body": "## Objective\n\nStandalone interactive harness mode: `orc` interactive coding/troubleshooting\non the same loop core as the headless worker \u2014 one loop, two entry modes.\nInteractive sessions run under the same mediation boundary and event\nrecording as worker sessions.\n\n## References\n\n- `docs/spec/20-harness-worker.md` \u00a710.1 (integration modes)\n- `docs/spec/60-milestones.md` M2 (standalone harness golden path)\n\n## Acceptance criteria\n\n- [ ] `orc` (no subcommand) starts an interactive session on the shared loop core; tool surface identical to the worker's mediated set\n- [ ] Session events recorded like worker sessions (durable, replayable)\n- [ ] `cargo nextest run --workspace` green; interactive smoke via PTY fixture\n\n## QA scenarios\n\n- Happy: PTY-fixture session performs read/search/write via mediated tools; transcript recorded; evidence `.omo/evidence/<task-slug>/interactive-happy.txt`\n- Failure: a tool refused by policy in interactive mode surfaces the typed refusal to the user (no silent skip); evidence `.omo/evidence/<task-slug>/interactive-refusal.txt`\n\n## Non-goals\n\nNo TUI dashboard (Icebox epic); no wrapped-harness adapters (Mode C is M2+ scope, separate backlog).\n\n## Security impact\n\nSame boundary; interactive approval prompts route to the trusted UI (\u00a76.4).\n\n## Testing requirements\n\nPTY fixture tests; refusal-surfacing negative.\n\n## Documentation impact\n\n`docs/cli/` interactive docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E4-T1 (loop core).\n\n## Rollback implications\n\nNew mode; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "646c47c847c01a83f375106827bf6240b3794be47c27c1e6d6c9cf719388eb5c"
+  },
+  {
+   "id": "E4-T3",
+   "epic": "E4",
+   "title": "Task: harness-toolset \u2014 minimal mediated toolset hardening + attempt bounds",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E4-T1"
+   ],
+   "body": "## Objective\n\nHarden the minimal mediated toolset (read files, search, mediated bash,\ntransactional write) to production quality: per-tool policy presentation,\nattempt bounds per task and per tool class, and the transactional write path\nfully wired (capture -> normalize -> verify -> compact diff -> promote or\nroll back).\n\n## References\n\n- `docs/spec/60-milestones.md` \u00a7998 MVP-6 (built-in coding tools)\n- `docs/spec/20-harness-worker.md` \u00a79.5 (filesystem transaction and normalization engine)\n- `docs/spec/10-orchestrator.md` \u00a79.26 (retry semantics \u2014 bounded)\n\n## Acceptance criteria\n\n- [ ] Attempt bounds enforced per task and per tool class: Budgets (owner-adjustable at the board): attempts 3 | re-plan 2 | worker timeout 45m | concurrency 2 | stall 10m | backoff 10s*2^n capped at 5m | spend $10/day soft cap | run budget 4h.\n- [ ] Transactional writes produce a reviewable compact diff; rollback restores prior state (test)\n- [ ] `cargo nextest run --workspace` green including toolset unit + property tests\n\n## QA scenarios\n\n- Happy: write via transaction -> diff -> promote; rollback path restores byte-identical prior state; evidence `.omo/evidence/<task-slug>/transaction-roundtrip.txt`\n- Failure: tool exceeding its attempt budget stops with typed exhaustion; a normalization failure rolls back cleanly; evidence `.omo/evidence/<task-slug>/toolset-bounds.txt`\n\n## Non-goals\n\nNo new tools beyond the four; no MCP proxy (E4-T4).\n\n## Security impact\n\nTransactional path is the trusted-output boundary (\u00a79.14 promotion).\n\n## Testing requirements\n\nProperty tests for rollback; exhaustion negatives.\n\n## Documentation impact\n\nTool reference docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E4-T1 (loop core).\n\n## Rollback implications\n\nHardening; behavior compatible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "348e923cf72f721b391d8e2b44b00c6163cc1c12b6dd6f34dcf26f21ddec4958"
+  },
+  {
+   "id": "E4-T4",
+   "epic": "E4",
+   "title": "Task: harness-mcp-proxy \u2014 built-in MCP PROXY (one endpoint; routing/policy-surface only)",
+   "risk": "Critical",
+   "estimate": 8,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe built-in MCP PROXY per D10/\u00a79.38: agents get ONE endpoint that fronts\n(1) the MVP-6 built-in tool surface, (2) approved external MCP servers, and\n(3) Arbitraitor's own MCP server. The proxy does tool namespacing,\nfingerprint pinning, schema-drift detection, and per-tool policy\npresentation. It is NEVER a security authority: no allow/deny/verdict\ndecisions, no capability issuance, no enforcement beyond what Arbitraitor\nenforces; proxying MUST NOT widen any grant. Tool results surfaced to agents\npass `sanitize_for_agent` when quoted into agent-facing context.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.38 (built-in MCP proxy \u2014 full contract)\n- `docs/spec/20-harness-worker.md` \u00a79.18.1 (MCP containment; advisory annotations)\n- `docs/spec/tech-stack.md` \u00a72.3 (mandatory Arbitraitor MCP wiring)\n- Ledger D10 (mcproxy-go as transport-aggregation pattern-reference ONLY)\n\n## Acceptance criteria\n\n- [ ] One proxy endpoint fronts built-ins + approved externals + arbitraitor's MCP server with namespaced tool identities\n- [ ] Fingerprint pinning + schema-drift detection quarantine mismatched servers (drift event recorded)\n- [ ] Grant-preservation test: a tool call through the proxy crosses the same Arbitraitor boundary as a direct call \u2014 a call denied directly is denied through the proxy (assert the forbidden effect did not occur)\n- [ ] Results quoted to agents pass `sanitize_for_agent`\n- [ ] `cargo nextest run --workspace` green including proxy unit + adversarial tests\n\n## QA scenarios\n\n- Happy: namespaced call routes to the right backend; drift quarantine works; evidence `.omo/evidence/<task-slug>/proxy-routing.txt`\n- Failure: grant-widening fixture (a proxied call shape that would bypass a direct-call denial) -> the suite catches it (call still denied); annotation-only `readOnly` claim does not restore a quarantined server; evidence `.omo/evidence/<task-slug>/proxy-no-widening.txt`\n\n## Non-goals\n\nNo security decisions in the proxy; no new MCP servers; no transport reimplementation beyond aggregation.\n\n## Security impact\n\nTrust-boundary component: Risk=Critical, needs-human-review \u2014 the invariant is \"proxying MUST NOT widen any grant\".\n\n## Testing requirements\n\nAdversarial grant-preservation suite; drift negatives; sanitize boundary tests.\n\n## Documentation impact\n\nProxy architecture docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (consumes E0-T10 approved-server fingerprints at runtime).\n\n## Rollback implications\n\nProxy is optional-fronting (direct calls remain); disable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "22cfa9a9d18429312f1c557e99649e1d912c0b2e1c57fa8a903a44042b443562"
+  },
+  {
+   "id": "E5-T1",
+   "epic": "E5",
+   "title": "Task: mediation-sandbox \u2014 Restricted sandbox wiring + effective-controls preflight (full depth)",
+   "risk": "Critical",
+   "estimate": 8,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nFull-depth sandbox wiring for all workers: spawn under\n`arbitraitor_sandbox::SandboxMode::Restricted` via `configure_command` /\n`apply_sandbox`, preflight `compute_effective_controls()` per spawn with the\nmatrix recorded, fail-closed on any missing required control, and the\nper-session capability report surfaced (\u00a79.32.4 shape).\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.6 (sandbox integration)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.7 (fail closed)\n- `docs/spec/tech-stack.md` \u00a72.2 (`SandboxMode::Restricted`, `compute_effective_controls`, `configure_command`, `apply_sandbox`)\n\n## Acceptance criteria\n\n- [ ] Every worker spawn runs the preflight and records the controls matrix + verdict in run state\n- [ ] Missing required control -> typed refusal naming the control; no worker process starts\n- [ ] Per-session capability report available to `orc doctor` and `capability.check`\n- [ ] `cargo nextest run --workspace` green; adversarial negatives assert forbidden effects did not occur\n\n## QA scenarios\n\n- Happy: reference Linux platform -> Required controls Available; worker runs; matrix recorded; evidence `.omo/evidence/<task-slug>/sandbox-preflight.txt`\n- Failure: fixture-missing control -> refusal with control named; a sandbox-escape attempt fixture (write outside workspace) leaves no file (assert); evidence `.omo/evidence/<task-slug>/sandbox-fail-closed.txt`\n\n## Non-goals\n\nNo sandbox implementation (Arbitraitor's); no macOS/Windows (ADR-0024); no Disposable mode.\n\n## Security impact\n\nThe core containment wiring: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nAdversarial containment negatives (\u00a721.4: assert the forbidden effect did not happen).\n\n## Documentation impact\n\nMediation docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (deepens E0-T5).\n\n## Rollback implications\n\nFail-closed; no non-secure bypass on this path.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "bbf67e64d30ba4d9bb4b12afd8a436279cd90eae92bf90d2efad808203765ecb"
+  },
+  {
+   "id": "E5-T2",
+   "epic": "E5",
+   "title": "Task: mediation-exec \u2014 `arbitraitor_exec::ExecutionContextBuilder` mediated bash (full policy surface)",
+   "risk": "Critical",
+   "estimate": 8,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E5-T1"
+   ],
+   "body": "## Objective\n\nFull mediated-exec wiring: every worker bash call goes through\n`arbitraitor_exec::ExecutionContextBuilder` with explicit ExecutionPolicy,\nNetworkPolicy, EnvAllowlist/EnvDenyList, and ResourceLimits; receipts\nproduced per execution; no direct process spawn anywhere on the worker path.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.10 (command and script analysis)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.12 (network enforcement)\n- `docs/spec/tech-stack.md` \u00a72.2 (`ExecutionContextBuilder`, `NetworkPolicy`, `EnvAllowlist`, `EnvDenyList`, `ResourceLimits`)\n\n## Acceptance criteria\n\n- [ ] All worker bash is mediated with the full policy surface; a workspace-wide test asserts no `std::process::Command` on worker paths\n- [ ] Network-denied exec leaves no connection (assert); env outside the allowlist is not visible to the child (assert)\n- [ ] Resource limits enforced (fixture exceeding limits is killed; output truncated per policy)\n- [ ] `cargo nextest run --workspace` green including mediation integration tests\n\n## QA scenarios\n\n- Happy: mediated bash with allowlisted env + network policy executes and produces a receipt; evidence `.omo/evidence/<task-slug>/exec-mediated.txt`\n- Failure: denied network call -> no connection (assert via socket fixture); denied env var -> absent from child env; oversized output -> truncated + receipt notes it; evidence `.omo/evidence/<task-slug>/exec-denials.txt`\n\n## Non-goals\n\nNo policy authoring (Arbitraitor's); no shell reimplementation.\n\n## Security impact\n\nExecution boundary: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nAdversarial negatives per policy dimension (network/env/resources).\n\n## Documentation impact\n\nMediation docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E5-T1 (sandbox first).\n\n## Rollback implications\n\nFail-closed path; no bypass.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "689de8bb3719849fe1334093aeb3bf35becacd49861010ac7d874cff01fc0725"
+  },
+  {
+   "id": "E5-T3",
+   "epic": "E5",
+   "title": "Task: mediation-preflight-gate \u2014 capability preflight fail-closed gate (startup + per-spawn)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E5-T1"
+   ],
+   "body": "## Objective\n\nThe capability preflight gate: at daemon/loop startup AND before every\nworker spawn, probe Arbitraitor's capability report for the operation shape\nabout to run; any missing capability blocks the run (fail closed) and routes\nto the gap workflow (E5-T6) \u2014 never a silent downgrade, never a local\nworkaround.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.7 (sole security authority; fail closed)\n- `docs/spec/40-arbitraitor-integration.md` \u00a716.2 (mandatory security feature workflow)\n- `docs/spec/10-orchestrator.md` \u00a79.36 (kick-off conditions respect capability)\n\n## Acceptance criteria\n\n- [ ] Startup probe + per-spawn gate implemented; missing capability -> typed block + gap workflow trigger\n- [ ] The gate's decision is recorded (probe result + verdict) per spawn\n- [ ] `cargo nextest run --workspace` green; negative tests assert blocked spawns produced no worker process\n\n## QA scenarios\n\n- Happy: all capabilities present -> spawn proceeds; evidence `.omo/evidence/<task-slug>/gate-pass.txt`\n- Failure: fixture-missing capability -> no worker process exists after the refused spawn (assert pid absence), gap issue path invoked; evidence `.omo/evidence/<task-slug>/gate-block.txt`\n\n## Non-goals\n\nNo capability implementation; no \"non-secure mode\" on this path.\n\n## Security impact\n\nThe fail-closed invariant itself: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nAssert-absence negatives (never claim pass merely because an error occurred).\n\n## Documentation impact\n\nMediation docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E5-T1 (probe surface).\n\n## Rollback implications\n\nFail-closed; nothing to roll back.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "e4f987b10306e725d413b4cff26f3eabf12c36e119d9c605eebe533ead20b70d"
+  },
+  {
+   "id": "E5-T4",
+   "epic": "E5",
+   "title": "Task: mediation-lifecycle \u2014 lease/cancellation wiring onto the \u00a79.24 lifecycle",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E5-T1"
+   ],
+   "body": "## Objective\n\nWire worker supervision onto the \u00a79.24 lifecycle: leases with TTLs,\nheartbeats local-only, lease expiry -> `orphaned` (never direct `failed`),\ncancellation that releases resources promptly and visibly, checkpoint\nresume for `approval-required` / `input-required` stable states.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.24 (task and session lifecycle; \u00a79.24.2 cancellation/recovery/leases/idempotency)\n- `docs/spec/10-orchestrator.md` \u00a79.27.4 (cancellation releases resources promptly and visibly)\n- `crates/orchestraitor-lifecycle/` (existing state-machine scaffolding to drive)\n\n## Acceptance criteria\n\n- [ ] Lease acquire/expire/reap transitions validated by the existing lifecycle state machine; orphaned -> re-run fresh\n- [ ] Cancellation kills the worker, reclaims the worktree/lease, and records the release (visible)\n- [ ] `approval-required`/`input-required` hold the lease and resume from checkpoint\n- [ ] `cargo nextest run --workspace` green including lifecycle integration tests (virtual clock)\n\n## QA scenarios\n\n- Happy: lease expiry -> orphaned -> fresh re-run; cancellation -> resources released (worktree gone, lease freed \u2014 assert); evidence `.omo/evidence/<task-slug>/lifecycle-transitions.txt`\n- Failure: cancel during a mediated exec -> the child process is gone (assert pid absence) and the receipt records cancellation; evidence `.omo/evidence/<task-slug>/cancel-during-exec.txt`\n\n## Non-goals\n\nNo reaper daemon (E8); no budget logic.\n\n## Security impact\n\nCancellation correctness is containment-adjacent (prompt resource release): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nVirtual-clock transition tests; assert-absence cancellation negatives.\n\n## Documentation impact\n\nLifecycle docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E5-T1 (mediated spawn first).\n\n## Rollback implications\n\nState-machine transitions; recoverable by construction.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "3680f2ca102844caff2bf6a5fb261fb48abbcbb5c825c8d8902416b7dc6b3b3b"
+  },
+  {
+   "id": "E5-T5",
+   "epic": "E5",
+   "title": "Task: mediation-receipts-approvals \u2014 receipts + approval-required handling",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E5-T3"
+   ],
+   "body": "## Objective\n\nReceipts and approvals for mediated work: every security-sensitive operation\nproduces an Arbitraitor receipt (retained, exportable); approval-demanding\noperations transition the worker to the stable `approval-required` state\nwith checkpoint, surfaced to the trusted UI path \u2014 never approved by\nagent-generated text (\u00a76.4).\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.9 (approval integration \u2014 `PlanContext`, `ApprovalTokenIssuer`)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.14 (output quarantine and promotion)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.4 (approval belongs to the trusted UI)\n- `docs/spec/tech-stack.md` \u00a72.3 (mandatory MCP wiring \u2014 explicit `McpServer` construction)\n\n## Acceptance criteria\n\n- [ ] Every security-sensitive mediated op yields a retained receipt; receipt export works (`orc evidence export` shape)\n- [ ] Approval-demanding op -> `approval-required` stable state + checkpoint; resume after approval\n- [ ] Agent-generated approval text is never trusted (adversarial fixture)\n- [ ] `cargo nextest run --workspace` green including approval-path integration tests\n\n## QA scenarios\n\n- Happy: approval-demanding fixture -> state + checkpoint; approval via trusted path -> resume; receipts complete; evidence `.omo/evidence/<task-slug>/approval-flow.txt`\n- Failure: fake approval text in tool output -> not trusted (assert state unchanged); evidence `.omo/evidence/<task-slug>/fake-approval.txt`\n\n## Non-goals\n\nNo headless prompt implementation (that is the Arbitraitor gap \u2014 E5-T7); no approval UI design beyond the trusted-path contract.\n\n## Security impact\n\nApproval boundary: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nFake-approval adversarial negative; receipt-completeness assertions.\n\n## Documentation impact\n\nMediation docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E5-T3 (gate first). Headless prompt UX additionally waits on E5-T7 (upstream gap).\n\n## Rollback implications\n\nStable states; recoverable by design.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "f2df790c8ad1fc5f627a888bc8264d0f7df4d6973cf709a15a8d6654e5e9ca83"
+  },
+  {
+   "id": "E5-T6",
+   "epic": "E5",
+   "title": "Task: mediation-gap-helper \u2014 `file_arbitraitor_gap` helper (missing capability \u2192 upstream issue + blocked wait)",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe `file_arbitraitor_gap` helper: when a required Arbitraitor capability is\nmissing, open a canonical issue in `arbsec/arbitraitor` with reproducible\ncontext, link it from the blocked Orchestraitor task via a native cross-repo\nblockedBy edge + the `blocked:arbitraitor` label, and hold a hard wait (never\nretried as transient, \u00a79.26.1) while bug-flow and other epic work continue.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a716.2 (mandatory security feature workflow)\n- `.agents/project/orchestraitor-workflow.md` (ownership boundaries; cross-repo blocker handling)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (`blocked:arbitraitor` = hard wait)\n- `docs/spec/10-orchestrator.md` \u00a79.37(c) (routing follows the ownership table)\n\n## Acceptance criteria\n\n- [ ] A detected gap produces an arbsec/arbitraitor issue with reproducible context (capability, operation shape, probe result, affected Orchestraitor task)\n- [ ] The Orchestraitor task gains the cross-repo blockedBy edge + `blocked:arbitraitor` label and leaves the ready queue\n- [ ] The hard wait is never retried as transient (retry-class test); other work continues\n- [ ] `cargo nextest run --workspace` green including helper unit tests (fixture API)\n\n## QA scenarios\n\n- Happy: fixture gap -> upstream issue + edge + label; queue excludes the task; other-epic work unaffected; evidence `.omo/evidence/<task-slug>/gap-filed.txt`\n- Failure: a transient network error during filing is retried per \u00a79.26.2 backoff, but a filed gap is NEVER retried as transient (assert retry classification); evidence `.omo/evidence/<task-slug>/gap-retry-classification.txt`\n\n## Non-goals\n\nNo workaround implementation; no arbitraitor-repo changes beyond the filed issues.\n\n## Security impact\n\nOwnership-boundary enforcement: Risk=Critical, needs-human-review (a missed gap = an unmediated path).\n\n## Testing requirements\n\nRetry-classification negatives; queue-exclusion assertions.\n\n## Documentation impact\n\nGap workflow docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream.\n\n## Rollback implications\n\nFiled issues closable; edges removable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "ae8c5a69da0db77ee0f29a75e8901261e59577f548d43c4ec080d5d74aa5ae97"
+  },
+  {
+   "id": "E5-T7",
+   "epic": "E5",
+   "title": "Task: mediation-headless-approval \u2014 headless approval path for workers (BLOCKED on arbitraitor gap)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review",
+    "blocked:arbitraitor"
+   ],
+   "blocked_by": [
+    "E5-T5",
+    "GAP-HEADLESS-APPROVAL"
+   ],
+   "status": "Backlog",
+   "body": "## Objective\n\nConsume a headless/non-interactive `arbitraitor_mcp::ApprovalPrompt`\nimplementation once Arbitraitor ships one: surface approval-required to the\norchestrator's trusted UI path (operator notification + explicit\nresolution), persisting pending approvals as durable state. Today only\n`StdinApprovalPrompt` exists, which cannot serve one-shot headless workers.\n\n## References\n\n- Upstream: arbsec/arbitraitor issue \"Headless/non-interactive ApprovalPrompt implementation (arbitraitor_mcp::ApprovalPrompt has only StdinApprovalPrompt)\" \u2014 this task's blocker (cross-repo blockedBy edge)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.9 (approval integration)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.4 (approval belongs to the trusted UI)\n- Ledger F15 (only `StdinApprovalPrompt` shipped; ADR-0013 plan-bound approval model)\n\n## Acceptance criteria\n\n- [ ] Blocked until the upstream headless ApprovalPrompt lands; this task stays out of the ready queue (hard wait, `blocked:arbitraitor`)\n- [ ] Once unblocked: headless workers surface approval-required via the trusted path; no stdin dependency; resume-from-checkpoint works\n- [ ] `cargo nextest run --workspace` green including headless-approval integration tests\n\n## QA scenarios\n\n- Happy (post-unblock): approval-demanding fixture in a headless run -> pending approval persisted -> resolved via trusted path -> resume; evidence `.omo/evidence/<task-slug>/headless-approval.txt`\n- Failure: approval denied -> task transitions to a typed blocked state (never auto-approved); evidence `.omo/evidence/<task-slug>/headless-denied.txt`\n\n## Non-goals\n\nNo approval-prompt implementation in Orchestraitor (Arbitraitor owns it); no auto-approval.\n\n## Security impact\n\nApproval boundary: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nPost-unblock integration tests; denial negatives.\n\n## Documentation impact\n\nMediation docs; CHANGELOG `[Unreleased]` when implemented.\n\n## Dependencies\n\n- Blocked by E5-T5 (approval handling) and the upstream arbitraitor gap issue (cross-repo blockedBy; hard wait per \u00a79.26.1/\u00a79.40).\n\n## Rollback implications\n\nNot started until unblocked (Status=Backlog).\n",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "9146cda9903e31d2df807083e3ee955f3fb98b7d8f33999fc86ff6213c27cc32"
+  },
+  {
+   "id": "E5-T8",
+   "epic": "E5",
+   "title": "Task: mediation-stable-embedding \u2014 consume the stable Arbitraitor embedding API (BLOCKED on ADR-0038)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review",
+    "blocked:arbitraitor"
+   ],
+   "blocked_by": [
+    "GAP-STABLE-EMBEDDING"
+   ],
+   "status": "Backlog",
+   "body": "## Objective\n\nMigrate Orchestraitor's Arbitraitor consumption onto the stable embedding\nAPI surface once ADR-0038 (pipeline-engine crate extraction, currently\nProposed) lands: consume `arbitraitor-engine` + the engine-owned\n`InspectionResultReceipt` wrapper instead of ad-hoc composition over the\nindividual crates, removing the current divergence risk (three compositions\nwith different coverage today).\n\n## References\n\n- Upstream: arbsec/arbitraitor issue \"Land ADR-0038 pipeline-engine extraction (arbitraitor-engine) to give embedders one stable pipeline surface\" \u2014 this task's blocker (cross-repo blockedBy edge)\n- `docs/spec/tech-stack.md` \u00a72.2 note (ADR-0038 staged extraction; until then, direct dependency on individual crates is the only option)\n- Ledger F15 (ADR-0038 Proposed; 3 divergent pipeline compositions in CLI/daemon/MCP)\n\n## Acceptance criteria\n\n- [ ] Blocked until ADR-0038 extraction lands; hard wait, `blocked:arbitraitor`, out of the ready queue\n- [ ] Once unblocked: Orchestraitor depends on `arbitraitor-engine` (or the ADR-0038-documented surface) with no ad-hoc pipeline composition; `cargo deny check` + `cargo audit` clean\n- [ ] `cargo nextest run --workspace` green after migration\n\n## QA scenarios\n\n- Happy (post-unblock): workspace builds against the engine surface; receipts use the engine-owned wrapper; evidence `.omo/evidence/<task-slug>/engine-migration.txt`\n- Failure: any residual ad-hoc composition -> CI grep/test fails the migration; evidence `.omo/evidence/<task-slug>/no-adhoc-composition.txt`\n\n## Non-goals\n\nNo engine implementation (Arbitraitor's); no API design for them.\n\n## Security impact\n\nIntegration-boundary migration: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nPost-unblock migration tests; composition-purity check.\n\n## Documentation impact\n\ntech-stack dependency notes update; CHANGELOG `[Unreleased]` when implemented.\n\n## Dependencies\n\n- Blocked by the upstream ADR-0038 landing (cross-repo blockedBy; hard wait).\n\n## Rollback implications\n\nNot started until unblocked (Status=Backlog).\n",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "61d131c5874e859e581e00fd28b71fbd1ef0c6d366f343d501730c45c8fdac6d"
+  },
+  {
+   "id": "E6-T1",
+   "epic": "E6",
+   "title": "Task: lifecycle-worktree \u2014 worktree-per-task provisioning (trusted controller owns Git metadata)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nFull worktree-per-task provisioning: allocate, name (`type/<slug>`), track,\nand reap worktrees; the trusted controller owns all Git metadata \u2014 the\nworker never sees the main checkout's `.git`; stale-workspace cleanup on\ntask completion/failure.\n\n## References\n\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.2 (a worktree is not a sandbox)\n- `docs/spec/20-harness-worker.md` \u00a79.4 (workspace and Git controller)\n- AGENTS.md (worktree-first rule)\n\n## Acceptance criteria\n\n- [ ] Worktrees provision/reap per task lifecycle; run state tracks the mapping (task -> worktree path)\n- [ ] Worker sandbox cannot reach the main checkout (adversarial fixture: assert no write outside the worktree)\n- [ ] Stale-workspace cleanup runs on terminal states; orphaned worktrees surfaced\n- [ ] `cargo nextest run --workspace` green including provisioning unit tests\n\n## QA scenarios\n\n- Happy: provision -> run -> reap; mapping recorded; evidence `.omo/evidence/<task-slug>/worktree-lifecycle.txt`\n- Failure: escape fixture (write to ../ from inside the worker) -> no file outside the worktree (assert); evidence `.omo/evidence/<task-slug>/worktree-containment.txt`\n\n## Non-goals\n\nNo VFS/overlay backends (Arbitraitor-owned, \u00a79.4.2); no multi-repo.\n\n## Security impact\n\nGit-metadata ownership is a trust boundary (\u00a76.2).\n\n## Testing requirements\n\nContainment negatives; cleanup tests.\n\n## Documentation impact\n\nWorkspace docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (deepens E0-T6).\n\n## Rollback implications\n\nWorktrees disposable; cleanup idempotent.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "acb39c4bc8bbd1aded9a5035ce6fa28a705fde87fd90755ec96fde2002d6784c"
+  },
+  {
+   "id": "E6-T2",
+   "epic": "E6",
+   "title": "Task: lifecycle-dco \u2014 DCO commit path with bot attribution",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E6-T1"
+   ],
+   "body": "## Objective\n\nThe commit path: conventional-commit messages, `Signed-off-by` DCO trailer,\nbot attribution (git user.name/email convention for the App bot identity\nper D11), and commit signing per repo rules where applicable.\n\n## References\n\n- AGENTS.md (Conventional Commits; DCO)\n- Ledger D11 (bot attribution convention)\n- `docs/spec/10-orchestrator.md` \u00a79.33.2 (task traceability into the PR)\n\n## Acceptance criteria\n\n- [ ] Worker commits carry type-prefixed conventional messages + DCO trailer + bot identity\n- [ ] Repo DCO ruleset accepts the commits (CI check green on fixture PRs)\n- [ ] `cargo nextest run --workspace` green including commit-path unit tests\n\n## QA scenarios\n\n- Happy: fixture commit passes `git log --format='%B'` assertions + DCO check; evidence `.omo/evidence/<task-slug>/dco-commit.txt`\n- Failure: missing sign-off -> the commit is rejected by the repo ruleset (assert via fixture push); evidence `.omo/evidence/<task-slug>/dco-rejected.txt`\n\n## Non-goals\n\nNo merge commits (squash-merge policy); no signing-key management (keyring path is E0-T1).\n\n## Security impact\n\nAttribution integrity (auditable authorship).\n\n## Testing requirements\n\nFormat assertions; ruleset-rejection negative.\n\n## Documentation impact\n\nDelivery docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E6-T1 (worktree first).\n\n## Rollback implications\n\nCommits are revertible; branches deletable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "b15870aadade300442dd1fbff3c5dcb3ab2d13d6846c7cf41f3fc3efe7397440"
+  },
+  {
+   "id": "E6-T3",
+   "epic": "E6",
+   "title": "Task: lifecycle-push-credential \u2014 scoped lease push credential (short-lived, repo-scoped)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E0-T1"
+   ],
+   "body": "## Objective\n\nThe push credential path: mint a short-lived, repository-scoped credential\nvia the GitHub App installation (E0-T1) for each push lease; credentials\nnever persist beyond the lease; no ambient owner auth on the push path;\nexpiry mid-lease fails closed with a typed error and a retryable lease\nrefresh.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.25.2 (short-lived, resource-scoped authority)\n- `docs/spec/40-arbitraitor-integration.md` \u00a79.23 (secret resolution; in-memory handling, zeroize)\n- Ledger D11 (installation-token minting)\n\n## Acceptance criteria\n\n- [ ] Pushes authenticate with a lease-scoped token minted per delivery; token lifetime bounded by the lease\n- [ ] No credential material in logs, error messages, or run state (\u00a79.23.4 redaction; test)\n- [ ] Expiry mid-push -> typed failure + lease refresh + retry (bounded per \u00a79.26)\n- [ ] `cargo nextest run --workspace` green including credential-path unit tests (fixture minter)\n\n## QA scenarios\n\n- Happy: push with minted lease token succeeds; token discarded after; evidence `.omo/evidence/<task-slug>/push-lease.txt`\n- Failure: expired token -> typed failure, no fallback to ambient auth, refresh + bounded retry; redaction test greps logs for token material (zero hits); evidence `.omo/evidence/<task-slug>/push-expiry-redaction.txt`\n\n## Non-goals\n\nNo long-lived tokens; no cross-repo credential reuse.\n\n## Security impact\n\nCredential handling: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nRedaction negatives; expiry/refresh tests.\n\n## Documentation impact\n\nDelivery docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E0-T1 (App identity + minting path).\n\n## Rollback implications\n\nLease tokens expire naturally; path disableable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "6deb5d3f2f15b8d0aeb639d58632b07e98ecf04c1f5aa149f82e3f004f8256c6"
+  },
+  {
+   "id": "E6-T4",
+   "epic": "E6",
+   "title": "Task: lifecycle-draft-pr \u2014 draft PR creation with spec anchors + evidence links",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E6-T1",
+    "E6-T2"
+   ],
+   "body": "## Objective\n\nDraft PR creation: PR body carries the task's spec anchors, acceptance\ncriteria status, QA evidence paths, and the checklist markers the\nPR-lifecycle policy consumes; PR opens as draft; the board item links the PR.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.33.2 (task fields; spec traceability)\n- `.agents/project/orchestraitor-workflow.md` (PR convergence requirements the body must support)\n- `.github/PULL_REQUEST_TEMPLATE.md` (checklist markers)\n\n## Acceptance criteria\n\n- [ ] PR body includes spec anchors (document-qualified `docs/spec/...` refs), evidence paths, and the repo's PR checklist markers\n- [ ] PR opens as draft; board item links it (linked PR visible on the board)\n- [ ] `cargo nextest run --workspace` green including PR-body unit tests\n\n## QA scenarios\n\n- Happy: fixture delivery -> draft PR with complete body; board link present; evidence `.omo/evidence/<task-slug>/draft-pr.txt`\n- Failure: body missing required sections -> typed validation failure before opening (no incomplete PR); evidence `.omo/evidence/<task-slug>/pr-body-validation.txt`\n\n## Non-goals\n\nNo merge behavior; no review automation (E0-T11/E7-T5 own triggers).\n\n## Security impact\n\nPR bodies are untrusted content for downstream agents (marker-wrapped evidence).\n\n## Testing requirements\n\nBody-validation tests; link assertions.\n\n## Documentation impact\n\nDelivery docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E6-T1, E6-T2 (worktree + commit path).\n\n## Rollback implications\n\nDraft PRs closable; links removable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "e33a7bbf8218a7b616f809217d54552166afec4019839d3cd8b01dfdc8ba05af"
+  },
+  {
+   "id": "E6-T5",
+   "epic": "E6",
+   "title": "Task: lifecycle-risk-relabel \u2014 PR-time actual-diff Risk re-label (Critical + needs-human-review on security-touching diffs)",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E6-T4"
+   ],
+   "body": "## Objective\n\nAt PR time, re-derive the task's Risk from the ACTUAL diff (not the planned\none): when the diff touches security-sensitive areas (the Arbitraitor\nintegration boundary, provider transports/proxy, capability issuance, output\npromotion, network/secret handling, `unsafe`), the item is re-labelled\nRisk=Critical with the `needs-human-review` label and routed per the\nworkflow policy \u2014 even if the task was originally estimated lower. This is\nthe guardrail-weakening detector at the delivery gate.\n\n## References\n\n- `.agents/project/orchestraitor-workflow.md` (security-first review; required reviewer domains by touched area)\n- `docs/spec/50-contracts-data.md` \u00a721.1 (human review for security-sensitive changes)\n- `docs/spec/10-orchestrator.md` \u00a79.33.4 (review loop consumes the risk)\n\n## Acceptance criteria\n\n- [ ] A diff touching any security-sensitive area (fixture list from the workflow policy table) triggers Risk=Critical + `needs-human-review` + the security reviewer domain\n- [ ] A diff NOT touching those areas leaves the risk unchanged (no false positives beyond the policy table)\n- [ ] The re-label decision is recorded (areas matched) and visible on the board item\n- [ ] `cargo nextest run --workspace` green including re-label unit tests over diff fixtures\n\n## QA scenarios\n\n- Happy: fixture diff touching `crates/orchestraitor-arb-client/` -> re-label to Critical + needs-human-review; evidence `.omo/evidence/<task-slug>/relabel-critical.txt`\n- Failure: guardrail-weakening fixture (a diff that removes a mediation check while the task was Risk=Low) -> re-label fires (assert); a pure-docs diff -> no re-label; evidence `.omo/evidence/<task-slug>/relabel-guardrail.txt`\n\n## Non-goals\n\nNo review automation; no merge authority; no risk DE-escalation (only escalation is automatic).\n\n## Security impact\n\nThis IS a delivery-gate guard: Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nGuardrail-weakening adversarial fixtures; false-positive negatives.\n\n## Documentation impact\n\nDelivery docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E6-T4 (draft PR exists first).\n\n## Rollback implications\n\nLabels are board fields \u2014 revertible; the record is append-only.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "4712b4183aaeaf9f95b63d26dba53fe1ea4608012b7ed20500c79976932ce156"
+  },
+  {
+   "id": "E7-T1",
+   "epic": "E7",
+   "title": "Task: campaign-session \u2014 session-per-decision campaign session (full semantics)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nFull campaign semantics per \u00a79.35: a fresh, bounded manager invocation that\nreads the reconciled board state, applies the epic-focus scheduling policy,\nselects at most one eligible unit of work, persists exactly ONE decision\nrecord, and exits. A spawn decision hands the record to the watch daemon\n(E8) \u2014 the campaign session never spawns workers itself. No long-lived\norchestrator conversation; no accumulated context; no decision outside a\nrecorded session.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.35 (campaign orchestration: session-per-decision)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh contexts)\n- Ledger D5 (manager session = one board pass -> one decision -> exit)\n\n## Acceptance criteria\n\n- [ ] One session = one decision record (spawn or no-op) then exit; no cross-session state\n- [ ] Spawn decisions carry kind, selected task, role, model+provider, worker args, rationale, alternatives\n- [ ] A crashed session is safe by construction (next tick runs a fresh one; no partial-decision recovery)\n- [ ] `cargo nextest run --workspace` green; hermetic campaign tests (sqlite board + simulator)\n\n## QA scenarios\n\n- Happy: seeded board -> session selects per epic-focus + priority, records the decision, exits; evidence `.omo/evidence/<task-slug>/campaign-session.txt`\n- Failure: kill mid-session -> no partial decision persisted (assert record count); next session runs fresh; evidence `.omo/evidence/<task-slug>/campaign-crash.txt`\n\n## Non-goals\n\nNo daemon (E8); no worker supervision; no review-worker (E7-T5).\n\n## Security impact\n\nManager output is structured, typed, recorded; capability requests explicit.\n\n## Testing requirements\n\nHermetic integration; crash-safety assertions; determinism.\n\n## Documentation impact\n\nCampaign docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (deepens E0-T7; E8 daemon consumes the records).\n\n## Rollback implications\n\nAppend-only decision records; sessions are disposable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "814e83c2a842a60d476a87594fd8db057e5924c5f6608229e555320487653da6"
+  },
+  {
+   "id": "E7-T2",
+   "epic": "E7",
+   "title": "Task: campaign-focusstate \u2014 FocusState context assembly",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E7-T1"
+   ],
+   "body": "## Objective\n\nFocusState context assembly: the campaign session's input context is the\nreconciled board state filtered through the epic-focus policy \u2014 active\nepic, its cross-board sub-graph, ready-queue contents with priorities,\nblocked graph, budget consumption, and the no-op history \u2014 assembled fresh\nper session from durable state, never from a previous session's memory.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.35 (campaign reads reconciled state)\n- `docs/spec/10-orchestrator.md` \u00a79.41 (epic-focus policy \u2014 what the context carries)\n- `docs/spec/10-orchestrator.md` \u00a79.43 (durable homes the context reads)\n\n## Acceptance criteria\n\n- [ ] FocusState carries active epic, sub-graph, queue, blocked graph, budgets, no-op history \u2014 all stamped with last-synced\n- [ ] Context assembly is deterministic from durable state (replay test)\n- [ ] `cargo nextest run --workspace` green including assembly unit tests\n\n## QA scenarios\n\n- Happy: seeded board + budgets -> FocusState snapshot matches expected fixture; evidence `.omo/evidence/<task-slug>/focusstate.txt`\n- Failure: stale board read -> last-synced stamp present and older than write time (assert visible staleness, never silent freshness); evidence `.omo/evidence/<task-slug>/focusstate-stale.txt`\n\n## Non-goals\n\nNo context compiler integration (later); no chat surface.\n\n## Security impact\n\nContext is untrusted-content-bearing (board bodies) \u2014 marker-wrapped when quoted.\n\n## Testing requirements\n\nDeterminism + staleness tests.\n\n## Documentation impact\n\nCampaign docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E7-T1 (session shell).\n\n## Rollback implications\n\nRead-only assembly; no state.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "46038ad098f743f46b27c6cf78e270ef60f11b50bdbd09b9acee0dd1e665b99a"
+  },
+  {
+   "id": "E7-T3",
+   "epic": "E7",
+   "title": "Task: campaign-noop-reasons \u2014 typed no-op reasons (empty-queue / all-blocked / epic-exhausted)",
+   "risk": "Low",
+   "estimate": 2,
+   "labels": [],
+   "blocked_by": [
+    "E7-T1"
+   ],
+   "body": "## Objective\n\nTyped no-op reasons per \u00a79.35: `empty-queue` (no eligible work exists at\nall), `all-blocked` (eligible work exists but every candidate is blocked;\nthe blocked graph is attached), `epic-exhausted` (the active epic has no\nremaining schedulable work). Distinct reasons are distinct states \u2014 never\na generic \"nothing to do\".\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.35 (no-op reasons)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (blocked graph attachment)\n- `docs/spec/10-orchestrator.md` \u00a79.41 (epic-exhausted -> needs-human)\n\n## Acceptance criteria\n\n- [ ] Each of the three conditions produces its typed reason; all-blocked attaches the blocked graph\n- [ ] No-op decisions are persisted like any decision record (kind=no-op + reason)\n- [ ] `cargo nextest run --workspace` green including reason-classification unit tests\n\n## QA scenarios\n\n- Happy: three seeded boards (empty / all-blocked / exhausted epic) -> three distinct typed no-ops; evidence `.omo/evidence/<task-slug>/noop-reasons.txt`\n- Failure: a board with one blocked + one eligible task -> NOT all-blocked (the eligible one is selected); misclassification fixture fails the test; evidence `.omo/evidence/<task-slug>/noop-misclassification.txt`\n\n## Non-goals\n\nNo needs-human emission (E8 owns the signal surface); no chat exposure.\n\n## Security impact\n\nNone (classification).\n\n## Testing requirements\n\nClassification tests incl. boundary cases.\n\n## Documentation impact\n\nCampaign docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E7-T1.\n\n## Rollback implications\n\nAppend-only records.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "676551737597ed61089e4a44482e5df916ac5857079e091fca953f1733cfd7e9"
+  },
+  {
+   "id": "E7-T4",
+   "epic": "E7",
+   "title": "Task: campaign-stop-conditions \u2014 typed stop conditions (budget stops \u2192 blocked/needs-human, never silent)",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E7-T1"
+   ],
+   "body": "## Objective\n\nTyped stop conditions for campaign sessions and their workers: exhausting a\nbudget (attempts, re-plan, run/time, spend, subscription) produces an\nexplicit `blocked` or `needs-human` state with the limiting budget named \u2014\nnever a silent skip, never a weakened retry, never a success-by-exhaustion.\nNon-retriable classes (merge conflict, verification failure, policy denial)\nnever loop.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.35 (session semantics)\n- `docs/spec/10-orchestrator.md` \u00a79.36 (budget enforcement \u2014 the daemon side)\n- `docs/spec/10-orchestrator.md` \u00a79.33.5 (failure classes)\n- `docs/spec/10-orchestrator.md` \u00a79.26 (retry semantics)\n\n## Acceptance criteria\n\n- [ ] Each budget class has a typed stop condition naming the budget and remaining state\n- [ ] A stop produces blocked/needs-human on the board item + the decision record; no silent skip\n- [ ] Non-retriable classes terminate without retry (test)\n- [ ] `cargo nextest run --workspace` green including stop-condition unit tests (virtual clock)\n\n## QA scenarios\n\n- Happy: fixture exhausting attempts -> blocked + named budget + linked Bug (E0-T9 path); evidence `.omo/evidence/<task-slug>/stop-attempts.txt`\n- Failure: guardrail-weakening fixture (a stop condition that would convert exhaustion into success) -> the suite catches it; evidence `.omo/evidence/<task-slug>/stop-guardrail.txt`\n\n## Non-goals\n\nNo budget enforcement in the session (E8 daemon enforces; the session types and records).\n\n## Security impact\n\nGuard-touching (stop semantics are the anti-forever-loop guard): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nGuardrail-weakening adversarial fixtures; non-retriable negatives.\n\n## Documentation impact\n\nCampaign docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E7-T1.\n\n## Rollback implications\n\nTyped states; recoverable by design.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "ebec953b618371b549abff541ddf761af6e867f59cb93cacb3debce985a48caf"
+  },
+  {
+   "id": "E7-T5",
+   "epic": "E7",
+   "title": "Task: campaign-review-worker \u2014 autonomous review-worker driving the existing adversarial-review loop (IS-6 leg)",
+   "risk": "Medium",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E7-T1"
+   ],
+   "body": "## Objective\n\nThe autonomous review-worker (IS-6 leg): a fresh-context reviewer session\nthat drives the EXISTING adversarial-review workflow to convergence \u2014\nrequests reviews per the workflow policy, tracks threads/findings, reruns\nreview against the current HEAD on new commits, and surfaces convergence or\nneeds-human. The review-worker never merges, never approves its own work,\nand never weakens review invariants; merge remains human-gated.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.33.4 (change-set and PR review loop)\n- `docs/spec/10-orchestrator.md` \u00a79.33.3 (fresh-context reviewers)\n- `.agents/project/orchestraitor-workflow.md` (PR convergence requirements \u2014 the policy this worker drives)\n- AGENTS.md (review and merge invariants \u2014 the authority)\n\n## Acceptance criteria\n\n- [ ] The review-worker triggers review, deduplicates findings, tracks resolution, and reruns on new commits (targeting current HEAD)\n- [ ] Reaching max_review_loops produces blocked/needs-human \u2014 never silent approval (hard ceiling respected)\n- [ ] The worker never merges, never approves, never dismisses reviews (assert)\n- [ ] `cargo nextest run --workspace` green including review-worker unit tests (fixture PRs)\n\n## QA scenarios\n\n- Happy: fixture PR with actionable findings -> worker drives resolution -> convergence detected -> human gate remains; evidence `.omo/evidence/<task-slug>/review-worker.txt`\n- Failure: loop-limit fixture -> needs-human (not approval); a PR with unresolved blocking threads is never marked converged; evidence `.omo/evidence/<task-slug>/review-limits.txt`\n\n## Non-goals\n\nNo new review policy (rides the existing one); no merge authority; no reviewer-model selection changes.\n\n## Security impact\n\nPreserves the adversarial-review invariant; merge-safety asserted in E10-T4.\n\n## Testing requirements\n\nConvergence + limit fixtures; never-merge assertions.\n\n## Documentation impact\n\nCampaign docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E7-T1 (session shell).\n\n## Rollback implications\n\nWorker is a driver over existing policy; disable via config.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "4d95be808682b2bd22c3324f0df3fc1a9ef42f15673ff105d118388801a7ef2a"
+  },
+  {
+   "id": "E8-T1",
+   "epic": "E8",
+   "title": "Task: daemon-watch \u2014 `orcd watch` poll tick (adaptive cadence, reconcile per tick)",
+   "risk": "High",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe always-running watch daemon's poll tick: polls the board provider on a\nfixed default cadence, operator-configurable through the \u00a79.22 layers and\nadapted to provider rate-limit feedback. Every tick is a reconcile pass:\nboard-wins sync with `board-diverged` events, promotion of newly unblocked\ntasks, and re-evaluation of kick-off conditions (new eligible work, unblocked\ntask, released lease/worker slot, reset budget window). The daemon owns no\ndecisions \u2014 campaign sessions decide; the daemon executes and supervises.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (watch daemon \u2014 poll tick, kick-off conditions)\n- `docs/spec/10-orchestrator.md` \u00a79.43 (reconcile semantics per tick)\n- Ledger D5 (polling-first; default 30s tick, rate-limit-adaptive)\n\n## Acceptance criteria\n\n- [ ] `orcd watch` runs the tick loop; cadence adapts to rate-limit feedback (virtual-clock test)\n- [ ] Each tick performs the reconcile pass (board-wins + events) and re-evaluates kick-off conditions\n- [ ] The daemon never nudges a human and never bypasses a budget to keep the loop moving\n- [ ] `cargo nextest run --workspace` green including tick unit tests\n\n## QA scenarios\n\n- Happy: seeded board change -> next tick reconciles + kicks a campaign session; evidence `.omo/evidence/<task-slug>/watch-tick.txt`\n- Failure: rate-limit feedback -> cadence backs off (assert delay growth); a tick that errors is logged and the loop continues (no crash-loop); evidence `.omo/evidence/<task-slug>/watch-backoff.txt`\n\n## Non-goals\n\nNo stall reaping (E8-T2); no budgets (E8-T3/T4); no controls (E8-T5/T6); no webhook receiver.\n\n## Security impact\n\nDaemon core (unprivileged; foreground + systemd-user documented modes).\n\n## Testing requirements\n\nVirtual-clock tick tests; backoff tests.\n\n## Documentation impact\n\n`docs/cli/` daemon docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (consumes E1 provider + E7 sessions at runtime).\n\n## Rollback implications\n\nStopping the daemon leaves board state intact; board-wins on restart.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "ee6365ae50a6073f1c5c215ed09345285cb99e6482daf8daf4abdeac6e8749b3"
+  },
+  {
+   "id": "E8-T2",
+   "epic": "E8",
+   "title": "Task: daemon-stall-reaper \u2014 stall reaping + orphan detection (leases, TTLs, reaper interval)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E8-T1"
+   ],
+   "body": "## Objective\n\nStall and orphan enforcement per \u00a79.36/\u00a79.24: heartbeats are local, lease\nexpiry transitions to `orphaned` (never direct `failed`), the reaper walks\nrunning tasks on its configured interval, a campaign session producing no\ndecision record within its lease is orphaned and re-run fresh, and a stalled\nworker is detected the same way and killed.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (stall and orphan detection)\n- `docs/spec/10-orchestrator.md` \u00a79.24 (leases + TTLs; reaper interval; \u00a79.24.2 recovery)\n- Ledger F3 (spec \u00a79.24 already defines the primitives \u2014 this task drives them)\n\n## Acceptance criteria\n\n- [ ] Lease expiry -> `orphaned` transition (never `failed`); reaper walks running tasks on interval\n- [ ] A stalled worker is killed; the task transitions to a typed stalled state; the kill is recorded\n- [ ] A campaign session with no decision within its lease is orphaned and re-run fresh\n- [ ] `cargo nextest run --workspace` green; reaper tests use a virtual clock; kill assertions verify the process is gone\n\n## QA scenarios\n\n- Happy: fixture stalled worker (no heartbeat past the stall timeout) -> reaped; evidence `.omo/evidence/<task-slug>/reap-stalled.txt`\n- Failure: a healthy worker (heartbeats flowing) is NOT reaped (assert); a reaped worker's process is verifiably gone (assert pid absence); evidence `.omo/evidence/<task-slug>/reap-precision.txt`\n\n## Non-goals\n\nNo budgets; no controls; no cross-machine supervision.\n\n## Security impact\n\nGuard-touching (kills processes): Risk=Critical, needs-human-review \u2014 a too-aggressive or too-lax reaper is a safety defect.\n\n## Testing requirements\n\nVirtual-clock reaper tests; false-reap negatives; assert-absence kill checks.\n\n## Documentation impact\n\nDaemon docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T1 (tick loop).\n\n## Rollback implications\n\nReaper interval configurable; transitions recoverable by design.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "9bbc479b609b9bd6f82b5a5694bc9e9a4509c664cc2371cf76ff69dccd8d525b"
+  },
+  {
+   "id": "E8-T3",
+   "epic": "E8",
+   "title": "Task: daemon-budgets-run-spend \u2014 run + spend budget enforcement ($10/day soft cap, 4h run budget)",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E8-T1"
+   ],
+   "body": "## Objective\n\nRun/time and monetary-spend budget enforcement before any spawn: per-task and\nper-campaign run budgets, calendar-durable daily spend caps, and the\nfailure behavior \u2014 a budget stop produces an explicit `blocked` or\n`needs-human` state, never a silent skip and never a weakened retry.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (budget enforcement \u2014 classes + failure behavior)\n- `docs/spec/30-model-routing.md` \u00a79.19.6 (budget scopes)\n- Ledger D8 (budget VALUES live in task bodies, owner-adjustable at the board)\n\n## Acceptance criteria\n\n- [ ] Before any spawn the daemon enforces run/time budgets (per task, per campaign) and monetary spend (daily, calendar-durable)\n- [ ] Default values (owner-adjustable at the board): Budgets (owner-adjustable at the board): attempts 3 | re-plan 2 | worker timeout 45m | concurrency 2 | stall 10m | backoff 10s*2^n capped at 5m | spend $10/day soft cap | run budget 4h.\n- [ ] A budget stop produces blocked/needs-human naming the limiting budget; never a silent skip\n- [ ] `cargo nextest run --workspace` green; budget tests use a virtual clock + fixture ledger\n\n## QA scenarios\n\n- Happy: spend under cap -> spawn proceeds; run under budget -> proceeds; evidence `.omo/evidence/<task-slug>/budgets-pass.txt`\n- Failure: spend at cap -> no spawn + needs-human naming spend; run over 4h -> stop + blocked; calendar rollover resets the daily cap (virtual-clock test); evidence `.omo/evidence/<task-slug>/budgets-stop.txt`\n\n## Non-goals\n\nNo subscription budgets (E8-T4); no per-tool budgets (E4-T3); no payment integration.\n\n## Security impact\n\nGuard-touching (spend safety): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nCap/rollover tests; never-silent-skip negatives; guardrail-weakening fixture (config attempting to disable budgets is rejected or visibly labelled).\n\n## Documentation impact\n\nDaemon docs + budget config reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T1 (tick loop).\n\n## Rollback implications\n\nBudgets configurable; stops are visible states.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "4c54c83c0b847b6c5a23e90eda4efd999f76715599b294e12cab55e8698bc793"
+  },
+  {
+   "id": "E8-T4",
+   "epic": "E8",
+   "title": "Task: daemon-budgets-subscription \u2014 subscription-usage budget class (wired to \u00a79.46)",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E8-T3"
+   ],
+   "body": "## Objective\n\nThe subscription-usage budget class in the daemon's pre-spawn enforcement:\nsubscription exhaustion (per \u00a79.46's all-exhausted stop) is a budget stop\nlike run and spend \u2014 the daemon stops spawning the affected role's work and\nemits needs-human, never silently falling through to metered spend.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (budget classes incl. subscription)\n- `docs/spec/30-model-routing.md` \u00a79.46 (subscription-aware routing \u2014 the router side)\n- Ledger D6 (subscription spend guards)\n\n## Acceptance criteria\n\n- [ ] Pre-spawn enforcement includes the subscription class; all-exhausted (from the router's eligibility gate) stops the role's work + needs-human\n- [ ] The stop names the exhausted subscriptions; no metered fall-through unless explicitly configured\n- [ ] `cargo nextest run --workspace` green including subscription-budget unit tests\n\n## QA scenarios\n\n- Happy: subscription with remaining usage -> spawn proceeds; evidence `.omo/evidence/<task-slug>/sub-budget-pass.txt`\n- Failure: all subscriptions exhausted -> no spawn + needs-human naming them; explicit-override config -> fall-through only when configured and recorded; evidence `.omo/evidence/<task-slug>/sub-budget-stop.txt`\n\n## Non-goals\n\nNo usage introspection APIs (E2-T6 owns state); no provider integrations.\n\n## Security impact\n\nGuard-touching (spend safety): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nExhaustion + override negatives.\n\n## Documentation impact\n\nDaemon docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T3 (budget framework).\n\n## Rollback implications\n\nConfigurable; stops are visible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "b290f17ca83aeecc27d26b4ddc286e1acafa7c4cf48123b6fcb7f83bf5d44355"
+  },
+  {
+   "id": "E8-T5",
+   "epic": "E8",
+   "title": "Task: daemon-backlog-controls \u2014 `orc backlog pause/resume/cancel/retry/skip/reprioritize/assign`",
+   "risk": "Critical",
+   "estimate": 5,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E8-T1"
+   ],
+   "body": "## Objective\n\nThe operator's backlog controls per \u00a79.33.6: `orc backlog pause|resume|\ncancel|retry|skip|assign|status|show` \u2014 durable, board-visible control\nsurface over the loop. Pause lets in-flight work finish per lease semantics\nwhile new spawns are blocked; cancel/retry/skip/reprioritize/assign map to\nguarded board transitions + run-state updates.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.33.6 (durability and control \u2014 the verbatim control set)\n- `docs/spec/10-orchestrator.md` \u00a79.24 (lease semantics on pause)\n- `docs/spec/10-orchestrator.md` \u00a79.39 (board.move \u2014 the guarded path controls ride)\n\n## Acceptance criteria\n\n- [ ] All controls implemented; each is durable (survives restart) and board-visible\n- [ ] Pause: in-flight work finishes per lease; new spawns blocked; resume lifts it\n- [ ] Controls validate against the same guards as board.move (no policy-violating transitions)\n- [ ] `cargo nextest run --workspace` green including control unit tests\n\n## QA scenarios\n\n- Happy: pause -> running task completes, no new spawns; resume -> spawns resume; retry re-queues a typed-failed task; evidence `.omo/evidence/<task-slug>/backlog-controls.txt`\n- Failure: cancel on a task another session holds -> lease-checked refusal; a control attempting a policy-invalid transition -> typed refusal; evidence `.omo/evidence/<task-slug>/backlog-refusals.txt`\n\n## Non-goals\n\nNo epic-focus controls (E8-T6); no chat steering (E9-T3 maps onto these).\n\n## Security impact\n\nGuard-touching (pause/cancel are loop-safety controls): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nDurability (restart) tests; lease/refusal negatives.\n\n## Documentation impact\n\n`docs/cli/` backlog reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T1 (daemon surface).\n\n## Rollback implications\n\nControls are guarded transitions \u2014 revertible on the board.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "e494243e5fe593481965477b0be6cc1fcc7ad017a4046f207ab4f49f5cde706e"
+  },
+  {
+   "id": "E8-T6",
+   "epic": "E8",
+   "title": "Task: daemon-epic-focus \u2014 `orc epic focus/pause/resume` + `auto_advance_epic` opt-in",
+   "risk": "Critical",
+   "estimate": 3,
+   "labels": [
+    "needs-human-review"
+   ],
+   "blocked_by": [
+    "E8-T1"
+   ],
+   "body": "## Objective\n\nEpic-focus controls per \u00a79.41: `orc epic focus <epic>` switches the active\nepic; `orc epic pause` pauses focus (in-flight work finishes per lease\nsemantics while new spawns are blocked); `orc epic resume` lifts the pause.\nExhausted or wholly-blocked active epic -> needs-human signal while\nbug-flow continues; the loop NEVER silently auto-switches unless\n`auto_advance_epic` is explicitly configured (default: visible stop).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.41 (epic-focus scheduling policy \u2014 controls, exhaustion, auto_advance_epic)\n- `docs/spec/10-orchestrator.md` \u00a79.40 (wholly-blocked epic -> needs-human)\n\n## Acceptance criteria\n\n- [ ] focus/pause/resume implemented with lease-safe semantics; focus state is durable\n- [ ] Exhausted/wholly-blocked epic -> needs-human + bug-flow continues (test)\n- [ ] No silent auto-switch by default; `auto_advance_epic` opt-in recorded when configured\n- [ ] `cargo nextest run --workspace` green including focus-control unit tests\n\n## QA scenarios\n\n- Happy: focus E0 -> queue promotes only E0 tasks; pause -> in-flight finishes, no new spawns; evidence `.omo/evidence/<task-slug>/epic-focus.txt`\n- Failure: exhausted epic without auto_advance -> visible stop (needs-human), no switch; with auto_advance -> switch happens and is recorded; evidence `.omo/evidence/<task-slug>/epic-exhaustion.txt`\n\n## Non-goals\n\nNo chat steering (E9-T3); no multi-epic focus (config keeps max_active_epics).\n\n## Security impact\n\nGuard-touching (focus switching changes what work runs): Risk=Critical, needs-human-review.\n\n## Testing requirements\n\nLease-safety + no-silent-switch negatives.\n\n## Documentation impact\n\n`docs/cli/` epic reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T1 (daemon surface).\n\n## Rollback implications\n\nFocus state is config/board data; revertible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "790fb0315a490f8af61c57046bd9e31f9ab47b074ee264e8d0cd6e6a4f69c636"
+  },
+  {
+   "id": "E8-T7",
+   "epic": "E8",
+   "title": "Task: daemon-restart-recovery \u2014 crash-safe restart from durable state",
+   "risk": "High",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E8-T1"
+   ],
+   "body": "## Objective\n\nRestart recovery per \u00a79.36/\u00a79.24.2: on restart the daemon resumes from\ndurable state \u2014 `paused` stays paused, `running` becomes `orphaned`, the\npoll tick resumes, and no in-flight decision is lost (campaign sessions are\nsafe by construction; workers recover per lease semantics).\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.36 (the daemon is itself crash-safe)\n- `docs/spec/10-orchestrator.md` \u00a79.24.2 (cancellation, recovery, leases, idempotency)\n- Ledger D5 (durable state homes: board + local sqlite run state)\n\n## Acceptance criteria\n\n- [ ] Kill -9 the daemon -> restart resumes: paused stays paused, running -> orphaned -> re-run, tick resumes\n- [ ] No duplicated side effects after recovery (idempotency receipts asserted)\n- [ ] `cargo nextest run --workspace` green including restart-recovery integration tests\n\n## QA scenarios\n\n- Happy: kill + restart -> state machine correct, loop continues; evidence `.omo/evidence/<task-slug>/restart-recovery.txt`\n- Failure: corrupted local run-state -> typed recovery error with guidance (no panic, no silent state loss); evidence `.omo/evidence/<task-slug>/restart-corrupt.txt`\n\n## Non-goals\n\nNo multi-machine failover; no board-state repair (E1-T5 owns reconcile).\n\n## Security impact\n\nRecovery correctness (no authority resurrection beyond lease semantics).\n\n## Testing requirements\n\nKill/restart integration tests; idempotency assertions.\n\n## Documentation impact\n\nDaemon docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E8-T1 (tick loop).\n\n## Rollback implications\n\nRecovery is the rollback path.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "fe76dda0da0c91fef80a323da6554d64613e24a4415704d4132faebe1d408541"
+  },
+  {
+   "id": "E9-T1",
+   "epic": "E9",
+   "title": "Task: chat-progress \u2014 `orc chat` progress reads from durable state (last-synced stamps)",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\n`orc chat` progress reads: conversational summaries of durable state \u2014\nboard state, campaign decisions, run state, budgets, blocked graph \u2014 read\nfrom their durable homes, never from chat-context memory. Every answer is a\nread-only view stamped with the same last-synced caveats as every other\nread.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.44 (operator chat mode \u2014 progress reads)\n- `docs/spec/10-orchestrator.md` \u00a79.43 (durable homes + last-synced)\n- `docs/spec/10-orchestrator.md` \u00a79.35 (decision records chat can summarize)\n\n## Acceptance criteria\n\n- [ ] Progress questions answer from board/run state with last-synced stamps visible in the answer\n- [ ] No chat-context memory: a fresh chat session answers identically from durable state (test)\n- [ ] `cargo nextest run --workspace` green including chat-read unit tests (simulator-backed)\n\n## QA scenarios\n\n- Happy: \"what's the loop doing?\" -> summary of active epic, in-flight tasks, budgets, blocked graph, each stamped; evidence `.omo/evidence/<task-slug>/chat-progress.txt`\n- Failure: stale board read -> the answer carries the older last-synced stamp (assert visible staleness, never fabricated freshness); evidence `.omo/evidence/<task-slug>/chat-stale.txt`\n\n## Non-goals\n\nNo drafting (E9-T2); no steering (E9-T3); no TUI.\n\n## Security impact\n\nRead-only; no authority.\n\n## Testing requirements\n\nDeterminism-from-durable-state tests; staleness-visibility tests.\n\n## Documentation impact\n\n`docs/cli/` chat reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (consumes E1/E7/E8 state at runtime).\n\n## Rollback implications\n\nAdditive surface.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P2",
+   "body_sha256": "2f5b1b1301edfb1f4ea72e1abcd5c220b83862706a4ddf33d57895dbe83d2a88"
+  },
+  {
+   "id": "E9-T2",
+   "epic": "E9",
+   "title": "Task: chat-drafting \u2014 Triage drafting (Epics/Features/Tasks land on the board, never the schedule)",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E9-T1"
+   ],
+   "body": "## Objective\n\nChat drafting: the operator can draft new Epics, Features, and Tasks through\nchat; drafts are filed at Status=Triage \u2014 the human/PM triage gate \u2014 never\nsilently scheduled. Drafting is not decomposition: decomposition into leaf\nsub-issues follows the workflow policy, and the PM selection gate stays\nintact.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.44 (drafting lands on the board, never the schedule)\n- `.agents/project/orchestraitor-workflow.md` (triage gate; decomposition policy)\n\n## Acceptance criteria\n\n- [ ] Chat-drafted items land at Status=Triage with structured bodies (never Ready, never scheduled)\n- [ ] Draft bodies are marker-wrapped untrusted content (model-generated text is data)\n- [ ] `cargo nextest run --workspace` green including drafting unit tests\n\n## QA scenarios\n\n- Happy: \"draft a task for X\" -> Triage item with structured body; queue excludes it; evidence `.omo/evidence/<task-slug>/chat-draft.txt`\n- Failure: a draft attempting Status=Ready -> refused (typed); injection payload in the draft body -> quoted data only; evidence `.omo/evidence/<task-slug>/chat-draft-refusals.txt`\n\n## Non-goals\n\nNo auto-decomposition; no scheduling; no field writes beyond Triage filing.\n\n## Security impact\n\nUntrusted-content boundary (model-generated bodies).\n\n## Testing requirements\n\nRefusal + injection negatives (reuse E3-T7 corpus).\n\n## Documentation impact\n\nChat reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E9-T1 (chat shell).\n\n## Rollback implications\n\nDrafts are Triage items \u2014 closable.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P2",
+   "body_sha256": "f27172972a974dd89780f1daacc89ae270fda5d8defc7781f40a3374ca5b9754"
+  },
+  {
+   "id": "E9-T3",
+   "epic": "E9",
+   "title": "Task: chat-steering \u2014 focus steering via the guarded controls",
+   "risk": "Medium",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E9-T1"
+   ],
+   "body": "## Objective\n\nChat steering: focus switch, pause, resume requested through chat map to\nthe same guarded controls as `orc epic focus/pause/resume` (E8-T6) \u2014 the\noperator's instruction is the command and executes through the normal\ncontrol path; model-generated text never mutates state on its own.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.44 (steering maps to the guarded controls)\n- `docs/spec/10-orchestrator.md` \u00a79.41 (the controls being mapped to)\n\n## Acceptance criteria\n\n- [ ] Steering intents execute via the E8-T6 control path (same guards, same records) \u2014 not a parallel write path\n- [ ] Model-generated text outside an operator-confirmed steering intent mutates nothing (test)\n- [ ] `cargo nextest run --workspace` green including steering unit tests\n\n## QA scenarios\n\n- Happy: \"focus E1\" -> the same effect as `orc epic focus E1` (assert identical control-path record); evidence `.omo/evidence/<task-slug>/chat-steer.txt`\n- Failure: model output containing \"focus E2\" without an operator instruction -> no state change (assert); evidence `.omo/evidence/<task-slug>/chat-no-unauthorized-steer.txt`\n\n## Non-goals\n\nNo new controls; no autonomous steering.\n\n## Security impact\n\nAuthority routing: operator principal, not model output.\n\n## Testing requirements\n\nPath-equivalence tests; unauthorized-steering negatives.\n\n## Documentation impact\n\nChat reference; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E9-T1 (chat shell); consumes E8-T6 controls at runtime.\n\n## Rollback implications\n\nSteering rides guarded controls \u2014 revertible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P2",
+   "body_sha256": "e0696af9b819645f8fc30fbafaaa4e620fab732fc75101eede86abcdc00bac3c"
+  },
+  {
+   "id": "E9-T4",
+   "epic": "E9",
+   "title": "Task: chat-authority-negatives \u2014 authority-refusal negative suite (chat carries no execution authority)",
+   "risk": "High",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E9-T2",
+    "E9-T3"
+   ],
+   "body": "## Objective\n\nThe adversarial suite proving chat's distinct authority profile: progress\nqueries are read-only; drafting writes Triage-only; chat output carries no\nexecution authority. Injection payloads addressed to the chat surface\n(instructions to spawn workers, merge PRs, bypass budgets, self-escalate)\nmust all be refused or treated as data.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.44 (distinct authority profile)\n- `docs/spec/50-contracts-data.md` \u00a721.4 (adversarial tests)\n- `docs/spec/40-arbitraitor-integration.md` \u00a76.1 (agent is always untrusted)\n\n## Acceptance criteria\n\n- [ ] A payload corpus (spawn/merge/bypass/self-assign/self-promote instructions embedded in chat turns) runs against the chat surface\n- [ ] Each case asserts the forbidden effect did not occur (no spawn, no merge, no budget change, no Ready promotion)\n- [ ] `cargo nextest run --workspace` green; the suite runs in CI\n\n## QA scenarios\n\n- Happy: all payloads refused/neutralized with typed responses; evidence `.omo/evidence/<task-slug>/chat-authority-suite.txt`\n- Failure (proof the suite bites): a weakened chat fixture that executes an embedded instruction is caught -> test fails; evidence `.omo/evidence/<task-slug>/chat-suite-detects-weakness.txt`\n\n## Non-goals\n\nNo red-teaming infrastructure beyond the corpus.\n\n## Security impact\n\nThis IS the security test surface for the chat boundary.\n\n## Testing requirements\n\nThe suite; canary detection case.\n\n## Documentation impact\n\nTest-surface docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E9-T2, E9-T3 (the surfaces exist first).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P2",
+   "body_sha256": "b063d440b71a6cbbae0b2a1b80d60886fdb3cf76e0a81c5ec09d078678d1e0fb"
+  },
+  {
+   "id": "E10-T1",
+   "epic": "E10",
+   "title": "Task: e2e-loop-smoke \u2014 hermetic self-referential loop smoke (simulator + local board)",
+   "risk": "Medium",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nThe hermetic E2E smoke per M0/\u00a721.3: board -> manager selection -> mediated\nmini-worker -> pull request -> adversarial review -> human-gated merge,\nrunning entirely on the deterministic simulator + local sqlite board with no\nlive network. This is the M0 exit-criteria proof and the regression backbone\nfor the whole loop.\n\n## References\n\n- `docs/spec/60-milestones.md` M0 (board abstraction, mediated mini-worker, hermetic simulator E2E)\n- `docs/spec/50-contracts-data.md` \u00a721.3 (deterministic simulator)\n- `docs/spec/60-milestones.md` \u00a7998 MVP-8 (headless and CI support)\n\n## Acceptance criteria\n\n- [ ] A single CI job runs the full loop hermetically: seeded sqlite board -> campaign session -> mediated worker (simulator provider) -> draft PR (fixture remote) -> review trigger -> human-gate assertion\n- [ ] Zero live network in the test process (assert via harness sandbox)\n- [ ] Reproducible from recorded fixtures (same seed -> same run)\n- [ ] `cargo nextest run --workspace` green; the smoke runs in CI on every PR\n\n## QA scenarios\n\n- Happy: full pass with all state transitions visible on the local board; evidence `.omo/evidence/<task-slug>/loop-smoke.txt`\n- Failure: any unmediated tool call, network access, or merge-without-human in the run -> the smoke fails (assert, not just error-observe); evidence `.omo/evidence/<task-slug>/loop-smoke-guards.txt`\n\n## Non-goals\n\nNo live GitHub run (that is M1, exercised with evidence captured manually); no performance benchmarks.\n\n## Security impact\n\nThe smoke asserts the containment invariants hold end-to-end.\n\n## Testing requirements\n\nThe smoke itself + guard assertions inside it.\n\n## Documentation impact\n\nCI docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (consumes E0-E7 components at runtime).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "a04dcec1e2334a313c6fbd7d3527cf5b1fac7ea5c769014e4ffb29bde2c499b8"
+  },
+  {
+   "id": "E10-T2",
+   "epic": "E10",
+   "title": "Task: e2e-injection-escape \u2014 injection/escape adversarial suite",
+   "risk": "High",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E10-T1"
+   ],
+   "body": "## Objective\n\nThe injection/escape adversarial suite per \u00a721.4: prompt injection via board\ncontent and tool results, marker-escape attempts, cross-principal content,\nand untrusted-output escape attempts against the full loop (not just single\ntools \u2014 extends E3-T7 to end-to-end).\n\n## References\n\n- `docs/spec/50-contracts-data.md` \u00a721.4 (adversarial end-to-end tests)\n- `docs/spec/10-orchestrator.md` \u00a79.39 (injection-boundary negatives)\n- `docs/spec/40-arbitraitor-integration.md` \u00a77.3 (primary attack classes)\n\n## Acceptance criteria\n\n- [ ] End-to-end fixtures inject payloads at every untrusted-content ingress (board bodies, tool results, MCP results, PR text)\n- [ ] Each case asserts the forbidden effect did not occur (no command execution, no authority grant, no field influence)\n- [ ] `cargo nextest run --workspace` green; the suite runs in CI\n\n## QA scenarios\n\n- Happy: all payloads neutralized across the loop; evidence `.omo/evidence/<task-slug>/injection-e2e.txt`\n- Failure (proof the suite bites): a weakened-loop fixture executing one payload is caught; evidence `.omo/evidence/<task-slug>/injection-e2e-detects.txt`\n\n## Non-goals\n\nNo live-model red-teaming (simulator payloads only).\n\n## Security impact\n\nThe end-to-end security test surface.\n\n## Testing requirements\n\nThe suite; canary detection case.\n\n## Documentation impact\n\nTest-surface docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E10-T1 (the loop smoke is the harness).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "200eba3009847c50662ebe4d23d22a714556398b0f4a18e26f470a03396cfd06"
+  },
+  {
+   "id": "E10-T3",
+   "epic": "E10",
+   "title": "Task: e2e-budget-stall \u2014 budget/stall adversarial suite (incl. guardrail-weakening fixture)",
+   "risk": "High",
+   "estimate": 5,
+   "labels": [],
+   "blocked_by": [
+    "E10-T1"
+   ],
+   "body": "## Objective\n\nThe budget/stall adversarial suite per \u00a721.4/\u00a79.36: budget exhaustion\nproduces needs-human (never silent success), stall reaping works under\nadversarial conditions (workers that heartbeat-then-hang, clock skew), and\nthe guardrail-weakening fixture \u2014 a change that attempts to disable or\nloosen a guard (budget, stall, concurrency, attempt bound) is detected and\nfails the gate.\n\n## References\n\n- `docs/spec/50-contracts-data.md` \u00a721.4 (adversarial tests)\n- `docs/spec/10-orchestrator.md` \u00a79.36 (budget enforcement; stall detection)\n- `docs/spec/10-orchestrator.md` \u00a79.33.5 (failure classes)\n\n## Acceptance criteria\n\n- [ ] Exhaustion fixtures (attempts, run, spend, subscription) each produce visible stops \u2014 never silent success, never weakened retry\n- [ ] Adversarial stall fixtures (heartbeat-then-hang, rapid re-spawn) are reaped correctly\n- [ ] The guardrail-weakening fixture fails CI when a guard is weakened (canary proof)\n- [ ] `cargo nextest run --workspace` green; the suite runs in CI\n\n## QA scenarios\n\n- Happy: all adversarial fixtures handled with visible states; evidence `.omo/evidence/<task-slug>/budget-stall-suite.txt`\n- Failure (proof the suite bites): deliberately weaken one guard in a fixture build -> CI fails; evidence `.omo/evidence/<task-slug>/guardrail-canary.txt`\n\n## Non-goals\n\nNo chaos infrastructure beyond fixtures.\n\n## Security impact\n\nThe loop-safety test surface (guards are what keep the loop bounded).\n\n## Testing requirements\n\nThe suite; the canary.\n\n## Documentation impact\n\nTest-surface docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E10-T1 (the loop smoke is the harness).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "8dacae97adb25e114945e979d885d5719c357393f41a21b7380893d903581f36"
+  },
+  {
+   "id": "E10-T4",
+   "epic": "E10",
+   "title": "Task: e2e-merge-safety \u2014 merge-safety suite (the loop never merges its own PRs)",
+   "risk": "High",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [
+    "E10-T1"
+   ],
+   "body": "## Objective\n\nThe merge-safety suite: prove the loop can never merge its own pull\nrequests \u2014 the human gate is structural, not configurational. Fixtures\nattempt every merge path (direct merge, admin merge, review-then-merge by\nthe loop's own identities, auto-merge labels) and each must be refused.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.33.4 (review loop; merge human-gated)\n- `docs/spec/60-milestones.md` M1 exit criteria (\"The loop never merges its own pull requests\")\n- AGENTS.md (merge invariants)\n\n## Acceptance criteria\n\n- [ ] Fixtures attempt merge via every available path under the loop's identities; all refused (assert no merged PR exists after)\n- [ ] The human gate is asserted structurally (no code path grants merge authority to loop identities)\n- [ ] `cargo nextest run --workspace` green; the suite runs in CI\n\n## QA scenarios\n\n- Happy: all merge attempts refused; PRs remain open for the human; evidence `.omo/evidence/<task-slug>/merge-safety.txt`\n- Failure (proof the suite bites): a fixture granting the loop a merge path is caught -> test fails; evidence `.omo/evidence/<task-slug>/merge-safety-canary.txt`\n\n## Non-goals\n\nNo changes to the repo's merge rulesets (they already enforce this for humans).\n\n## Security impact\n\nThe self-modification safety invariant (the loop must not approve its own work).\n\n## Testing requirements\n\nThe suite; the canary.\n\n## Documentation impact\n\nTest-surface docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\n- Blocked by E10-T1 (the loop smoke is the harness).\n\n## Rollback implications\n\nTest-only; additive.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "7604dce2c1bd566d01c0b6a4d5e71f8793e0e41abb9b3e4fd2eecffc8abdb7c2"
+  },
+  {
+   "id": "E10-T5",
+   "epic": "E10",
+   "title": "Task: ci-parity-gate \u2014 parity-gate expansion to the new orchestration crates",
+   "risk": "Low",
+   "estimate": 3,
+   "labels": [],
+   "blocked_by": [],
+   "body": "## Objective\n\nExtend the parity gate (tech-stack \u00a715) to every new orchestration crate as\nthey land: `cargo fmt --check`, `cargo clippy --workspace --all-targets\n--all-features -- -D warnings`, `cargo check --locked`, `cargo nextest run`,\n`rumdl check .`, `cargo deny check`, `cargo audit` \u2014 all green in CI for the\nfull workspace including the new crates, with the lint policy\n(`#![forbid(unsafe_code)]`, `#![deny(unwrap_used, expect_used, ...)]`)\napplied from each crate's first commit.\n\n## References\n\n- `docs/spec/tech-stack.md` \u00a715 (parity gate \u2014 the source of truth)\n- AGENTS.md (Rust conventions; pre-PR gate)\n- `.github/workflows/README.md` (check-name registry)\n\n## Acceptance criteria\n\n- [ ] Every new crate enters the workspace with the lint policy attributes from its first commit (CI-enforced)\n- [ ] The full parity gate runs on every PR and is green\n- [ ] Check names registered per `.github/workflows/README.md` conventions\n\n## QA scenarios\n\n- Happy: full gate green on a PR touching a new crate; evidence `.omo/evidence/<task-slug>/parity-green.txt`\n- Failure: a new crate missing the lint attributes -> CI fails with the missing-attribute named; evidence `.omo/evidence/<task-slug>/parity-lint-caught.txt`\n\n## Non-goals\n\nNo new checks beyond the parity gate; no coverage targets yet (workflow policy defers until wiring).\n\n## Security impact\n\nSupply-chain + lint hygiene (deny/audit are part of the gate).\n\n## Testing requirements\n\nThe gate itself; a lint-attribute canary.\n\n## Documentation impact\n\nCI docs; CHANGELOG `[Unreleased]`.\n\n## Dependencies\n\nNone upstream (rides each crate-landing PR).\n\n## Rollback implications\n\nCI config; revertible.\n",
+   "status": "Ready",
+   "target": "MVP",
+   "priority": "P1",
+   "body_sha256": "ffde449859665d71176ba8c66891fceb6b30dd5ddd87b29c1421532b1bdc062c"
+  },
+  {
+   "id": "ICE-T1",
+   "epic": "ICE",
+   "title": "Task: icebox-tui-dashboard \u2014 TUI dashboard for orchestration state (DEFERRED \u2014 C7)",
+   "risk": "Low",
+   "estimate": 8,
+   "labels": [],
+   "blocked_by": [],
+   "status": "Backlog",
+   "target": "Icebox",
+   "body": "## Objective\n\nPlaceholder recording the C7 deferral: an agent-orchestrator-style TUI\ndashboard (derived Kanban over durable facts \u2014 display status DERIVED at\nread time, never stored) for orchestration state. Deliberately deferred\nuntil the self-referential loop milestone (M1) is complete (\"similar UI\nwhen it is done\" \u2014 owner). Target=Icebox: never scheduled during MVP.\n\n## References\n\n- `docs/spec/10-orchestrator.md` \u00a79.44 (operator surfaces \u2014 TUI exposes equivalent views later)\n- Research ledger component C7 (deferred; AO derived-status pattern as reference)\n\n## Acceptance criteria\n\n- [ ] None (deferred). This item exists so the deferral is a visible board decision, not a silent drop. Revisit after M1.\n\n## QA scenarios\n\n- None (deferred).\n\n## Non-goals\n\nEverything \u2014 this is a placeholder.\n\n## Security impact\n\nNone (not built).\n\n## Testing requirements\n\nNone.\n\n## Documentation impact\n\nNone while deferred.\n\n## Dependencies\n\nNone.\n\n## Rollback implications\n\nN/A.\n",
+   "priority": "P3",
+   "body_sha256": "5c53b1bbf85e92f0390afdc757c7fa8324dfece1e419857de1ca46d12d06b0bf"
+  }
+ ],
+ "epic_edges": [
+  [
+   "E3",
+   "E1"
+  ],
+  [
+   "E3",
+   "E2"
+  ],
+  [
+   "E7",
+   "E1"
+  ],
+  [
+   "E7",
+   "E3"
+  ],
+  [
+   "E7",
+   "E4"
+  ],
+  [
+   "E7",
+   "E5"
+  ],
+  [
+   "E7",
+   "E6"
+  ],
+  [
+   "E8",
+   "E7"
+  ],
+  [
+   "E9",
+   "E8"
+  ],
+  [
+   "E10",
+   "E8"
+  ]
+ ],
+ "task_edges": [
+  [
+   "E0-T10",
+   "E0-T4"
+  ],
+  [
+   "E0-T11",
+   "E0-T6"
+  ],
+  [
+   "E0-T4",
+   "E0-T5"
+  ],
+  [
+   "E0-T7",
+   "E0-T2"
+  ],
+  [
+   "E0-T7",
+   "E0-T3"
+  ],
+  [
+   "E0-T7",
+   "E0-T4"
+  ],
+  [
+   "E0-T8",
+   "E0-T7"
+  ],
+  [
+   "E0-T9",
+   "E0-T7"
+  ],
+  [
+   "E1-T2",
+   "E1-T1"
+  ],
+  [
+   "E1-T3",
+   "E1-T1"
+  ],
+  [
+   "E1-T4",
+   "E1-T1"
+  ],
+  [
+   "E1-T5",
+   "E1-T1"
+  ],
+  [
+   "E1-T6",
+   "E1-T1"
+  ],
+  [
+   "E1-T7",
+   "E1-T6"
+  ],
+  [
+   "E1-T8",
+   "E1-T2"
+  ],
+  [
+   "E1-T8",
+   "E1-T3"
+  ],
+  [
+   "E10-T2",
+   "E10-T1"
+  ],
+  [
+   "E10-T3",
+   "E10-T1"
+  ],
+  [
+   "E10-T4",
+   "E10-T1"
+  ],
+  [
+   "E2-T2",
+   "E2-T1"
+  ],
+  [
+   "E2-T3",
+   "E2-T2"
+  ],
+  [
+   "E2-T5",
+   "E2-T4"
+  ],
+  [
+   "E2-T6",
+   "E2-T2"
+  ],
+  [
+   "E3-T2",
+   "E3-T1"
+  ],
+  [
+   "E3-T7",
+   "E3-T1"
+  ],
+  [
+   "E4-T2",
+   "E4-T1"
+  ],
+  [
+   "E4-T3",
+   "E4-T1"
+  ],
+  [
+   "E5-T2",
+   "E5-T1"
+  ],
+  [
+   "E5-T3",
+   "E5-T1"
+  ],
+  [
+   "E5-T4",
+   "E5-T1"
+  ],
+  [
+   "E5-T5",
+   "E5-T3"
+  ],
+  [
+   "E5-T7",
+   "E5-T5"
+  ],
+  [
+   "E5-T7",
+   "GAP-HEADLESS-APPROVAL"
+  ],
+  [
+   "E5-T8",
+   "GAP-STABLE-EMBEDDING"
+  ],
+  [
+   "E6-T2",
+   "E6-T1"
+  ],
+  [
+   "E6-T3",
+   "E0-T1"
+  ],
+  [
+   "E6-T4",
+   "E6-T1"
+  ],
+  [
+   "E6-T4",
+   "E6-T2"
+  ],
+  [
+   "E6-T5",
+   "E6-T4"
+  ],
+  [
+   "E7-T2",
+   "E7-T1"
+  ],
+  [
+   "E7-T3",
+   "E7-T1"
+  ],
+  [
+   "E7-T4",
+   "E7-T1"
+  ],
+  [
+   "E7-T5",
+   "E7-T1"
+  ],
+  [
+   "E8-T2",
+   "E8-T1"
+  ],
+  [
+   "E8-T3",
+   "E8-T1"
+  ],
+  [
+   "E8-T4",
+   "E8-T3"
+  ],
+  [
+   "E8-T5",
+   "E8-T1"
+  ],
+  [
+   "E8-T6",
+   "E8-T1"
+  ],
+  [
+   "E8-T7",
+   "E8-T1"
+  ],
+  [
+   "E9-T2",
+   "E9-T1"
+  ],
+  [
+   "E9-T3",
+   "E9-T1"
+  ],
+  [
+   "E9-T4",
+   "E9-T2"
+  ],
+  [
+   "E9-T4",
+   "E9-T3"
+  ]
+ ],
+ "gaps": [
+  {
+   "id": "GAP-HEADLESS-APPROVAL",
+   "title": "Headless/non-interactive ApprovalPrompt implementation (arbitraitor_mcp::ApprovalPrompt has only StdinApprovalPrompt)",
+   "repo": "arbsec/arbitraitor",
+   "labels": [
+    "enhancement",
+    "security-sensitive"
+   ]
+  },
+  {
+   "id": "GAP-STABLE-EMBEDDING",
+   "title": "Land ADR-0038 pipeline-engine extraction (arbitraitor-engine) to give embedders one stable pipeline surface",
+   "repo": "arbsec/arbitraitor",
+   "labels": [
+    "enhancement"
+   ]
+  }
+ ]
+}
