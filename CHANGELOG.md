@@ -6,6 +6,13 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `orc routing resolve` no longer dirties `git status` when run at the default store
+  path: `.orchestraitor/routing.db` and its WAL sidecars are gitignored. Routing
+  decision store errors now include the underlying cause in their `Display` output,
+  and the unused `built_in_role_ids` helper was removed (#309).
+
 ### Added
 
 - GitHub App service identity (`arbsec-agent`) token-minting path (spec

@@ -48,11 +48,11 @@ pub enum AgentCatalogError {
     Config(#[from] orchestraitor_core::OrchestraitorError),
 
     /// The `SQLite` routing decision store failed.
-    #[error("routing decision store error")]
+    #[error("routing decision store error: {0}")]
     DecisionStore(#[from] rusqlite::Error),
 
     /// A filesystem operation for the routing decision store failed.
-    #[error("routing decision store I/O error")]
+    #[error("routing decision store I/O error: {0}")]
     DecisionStoreIo(#[from] std::io::Error),
 
     /// A freshly inserted decision record could not be read back.
