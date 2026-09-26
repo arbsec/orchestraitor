@@ -317,6 +317,35 @@ When models, prompts, adapters, skills, or routing rules change, the harness MUS
 
 Routing MUST NOT be based solely on advertised metadata (models.dev or provider docs). Cost, latency observed, observed capability match, and prior task-success rates all factor in. Routing-by-price alone is rejected as a default policy.
 
+### 9.45 Role-based model routing
+
+The orchestration loop routes by ROLE. A role is a phase of work in the loop; the role registry maps each role to a `(provider, model)` resolution. Built-in roles:
+
+| Role | Phase of work |
+|---|---|
+| `explore` | Read-only context gathering over the codebase. |
+| `research` | External context gathering — documentation, upstream sources. |
+| `plan` | Producing or revising a work plan. |
+| `implement` | Producing or modifying code. |
+| `review` | Critiquing existing code or a diff. |
+| `verify` | Running and interpreting required checks. |
+
+Users MAY define custom roles; the registry is configuration, not a hardcoded taxonomy (§9.22.4). Roles compose with the §9.19.1 `(domain, role)` catalog: a role resolves through the §9.19.2 precedence chain (`roles.<id>.routing.*` sub-keys carry the same layer semantics as `agents.domains.<id>.routing.*`), and a worker never selects its own model — the control plane resolves `(provider, model, routing_reason)` and records it in the per-call event.
+
+**Heuristic table first.** The default router is a static heuristic table — role → `(provider, model)` entries resolved through layered configuration. No decision model is required for the loop to run, and the heuristic table remains the fallback chain when a `DecisionProvider` is configured but unavailable.
+
+**DecisionProvider.** Decision-model-backed selection is pluggable behind a `DecisionProvider` trait: a decision model returns typed structured outputs with calibrated confidence, not string generation. A `DecisionProvider` proposes role-to-model resolutions and the campaign session's task-selection decision ([§9.35](10-orchestrator.md#935-campaign-orchestration-session-per-decision)); the heuristic table stays the default. The TypeSafe/jev "System One" model is the reference adapter shape — typed outputs, parallel sampling, calibrated probabilities (vendor claims, not verified guarantees). It is early access with no Rust SDK, and its license is not yet allowlisted (tech-stack §17); the adapter is default-off until the license is allowlisted per the dependency policy. No hard dependency on TypeSafe/jev exists anywhere in the workspace.
+
+**Routing decision records.** Every routing resolution is persisted as a decision record: the resolved `(provider, model)`, the precedence path that produced it, the alternatives considered, and per-alternative skip reasons — including `skipped-because-quota` for subscription-exhausted candidates (§9.46). `DecisionProvider`-proposed resolutions are recorded with the same shape plus the provider's confidence. Records are replayable: given the same board state, configuration, and ledger state, a resolution is deterministic and auditable.
+
+### 9.46 Subscription-aware routing
+
+Budget enforcement is not only monetary (§9.19.5-§9.19.6). Providers may be subscription-backed with usage windows and limits; the router is subscription-aware:
+
+- **Usage state.** The cost ledger (§9.19.4) tracks per-subscription usage state — `measured`, `estimated`, or `user-configured` — as the eligibility input to routing.
+- **Eligibility gate.** The gate prefers subscription-backed provider instances with remaining usage and SKIPS exhausted subscriptions when an alternative provider offers a similar model. Skips are recorded in the routing decision record's alternatives[] with `skipped-because-quota` (§9.45).
+- **All-exhausted stop.** When ALL subscriptions offering a suitable model are exhausted, the router stops spawning that role's work and emits a needs-human signal. It NEVER silently falls through to metered paid spend: falling through to metered spend on exhaustion is an explicit configuration choice recorded in the routing decision record, never a default.
+
 ---
 
 ### 10.2 Provider transport architecture

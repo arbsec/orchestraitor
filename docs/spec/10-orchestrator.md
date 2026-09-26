@@ -151,7 +151,7 @@ Anything that could not be released cleanly is recorded in the event log with th
 
 ### 9.33 Spec-driven autonomous delivery
 
-Orchestraitor supports a configurable autonomous delivery workflow as a secondary MVP goal. The workflow converts a specification into merge-ready changes through isolated implementation, verification, and adversarial review — all within Arbitraitor's security boundary.
+Orchestraitor supports a configurable autonomous delivery workflow as its primary product axis: this workflow is the self-improving orchestration loop (see [`00-overview.md` §1](00-overview.md#1-executive-summary)), and the live loop on the shared board is the M1 delivery milestone (see [`60-milestones.md`](60-milestones.md)). The workflow converts a specification into merge-ready changes through isolated implementation, verification, and adversarial review — all within Arbitraitor's security boundary.
 
 The default workflow:
 
@@ -406,3 +406,145 @@ Reserve truly generic messages for unexpected internal faults; even those MUST i
 The error taxonomy is implemented in `orchestraitor-core` and consumed by the CLI (via `miette`'s `Diagnostic` trait), the TUI (rendered in the error panel), and the daemon (serialized as JSON-RPC error objects). Errors never contain secrets, headers, cookies, signed URLs, or approval tokens (per Arbitraitor `conventions.md:92-98` + §9.23.4 trace redaction rule).
 
 ---
+
+### 9.35 Campaign orchestration: session-per-decision
+
+The orchestration loop runs as a sequence of short-lived campaign sessions. A campaign session is a fresh, bounded manager invocation: it reads the reconciled board state (§9.43), applies the epic-focus scheduling policy (§9.41), selects at most one eligible unit of work, persists one decision record, and exits. There is no long-lived orchestrator conversation — no accumulated conversation state, no in-memory orchestration context, and no decision made outside a recorded session. This extends the §9.33.3 fresh-context rule to the orchestrator itself: the manager is as fresh as the workers it spawns, which prevents context poisoning and accidental authority leakage (§7.3).
+
+Every campaign session persists exactly ONE decision record before exiting:
+
+```text
+decision id + campaign session id
+kind                     # spawn | no-op
+selected task            # stable board item identity (§9.43)
+role                     # orchestration role from the role registry
+model + provider         # resolved per §9.19.2 precedence
+worker arguments         # task metadata, workspace spec, capability requests
+rationale                # why this task, this role, this model
+alternatives considered  # with per-alternative skip reasons
+```
+
+A spawn decision hands the record to the watch daemon (§9.36), which executes it — the campaign session never spawns workers itself. A no-op decision MUST carry a typed reason, and the reasons are distinct:
+
+```text
+empty-queue     # no eligible work exists at all
+all-blocked     # eligible work exists but every candidate is blocked; the blocked graph is attached
+epic-exhausted  # the active epic has no remaining schedulable work (§9.41)
+```
+
+Campaign sessions hold no state between invocations: everything they read is durable (board state plus local run state per §9.43) and everything they write is the decision record. A crashed campaign session is safe by construction — the next poll tick runs a fresh one; there is no partial-decision recovery to perform. Campaign sessions run under the same §9.24 lifecycle, §9.25 principal identity, and §9.27 resource governance as any other session, and every tool they use is a coordinator decision tool (§9.39) mediated by Arbitraitor.
+
+### 9.36 Watch daemon
+
+The watch daemon (`orcd watch`) is the always-running supervision loop for §9.35 campaigns and their workers. It owns no orchestration decisions — decisions come from campaign sessions — it executes and supervises them.
+
+- **Poll tick.** The daemon polls the board provider on a fixed default cadence, operator-configurable through the §9.22 layered configuration and adapted to provider rate-limit feedback (§9.43). Every tick is a reconcile pass: board-wins sync with `board-diverged` events, promotion of newly unblocked tasks (§9.40), and re-evaluation of kick-off conditions.
+- **Kick-off conditions.** The daemon spawns a campaign session when none is in flight and at least one condition holds: new eligible work appeared, a blocked task became unblocked, a lease or worker slot was released, or a budget window reset. Conditions are configurable; the daemon never nudges a human and never bypasses a budget to keep the loop moving.
+- **Stall and orphan detection.** The daemon enforces §9.24 leases and TTLs: heartbeats are local, lease expiry transitions to `orphaned` (never direct `failed`), and the reaper walks running tasks on its configured interval. A campaign session that produces no decision record within its lease is orphaned and re-run fresh; a stalled worker is detected the same way.
+- **Budget enforcement.** Before any spawn the daemon enforces three budget classes: monetary spend (§9.19.6), run/time budgets per task and per campaign, and subscription-usage budgets ([§9.46](30-model-routing.md#946-subscription-aware-routing)). Values are operator-configured; the spec fixes the classes and the failure behavior — a budget stop produces an explicit `blocked` or `needs-human` state (§9.33.4), never a silent skip and never a weakened retry.
+- **Lifecycle mapping.** Everything the daemon does maps onto §9.24 lifecycle states and §9.26 retry semantics: worker crashes are `orphaned` transitions, transient provider failures follow bounded backoff, and non-retriable classes (merge conflict, verification failure, policy denial) never loop. The daemon is itself crash-safe: on restart it resumes from durable state per §9.24.2 — `paused` stays paused, `running` becomes `orphaned`, and the poll tick resumes.
+
+The daemon runs unprivileged; foreground and systemd-user-unit supervision are documented operating modes, not requirements.
+
+### 9.37 Agent issue reporting
+
+Agents in the loop — workers, campaign sessions, reviewers, verifiers — MAY report bugs and issues they encounter. Reporting is reporting ONLY: filing an issue never grants work, schedules work, or implies that the reporter will fix it.
+
+**(a) Failure-driven auto-filing.** When a task exhausts its attempt budget on a reproducible failure, the loop files a Bug at Status=Triage with structured failure context — normalized failure class (§9.33.5), evidence pointers, task and session links — alongside the task's `blocked`/`needs-human` transition. The Bug is the durable record of the exhaustion; the task never silently retries past its budget.
+
+**(b) Discretionary reporting.** Agents have a `report_issue` coordinator tool (§9.39) for issues noticed but not task-fatal: structured content (title, class, description), evidence links, and affected paths. `report_issue` files at Status=Triage ONLY — triage is a human/PM gate. A reported issue is never auto-scheduled, never promoted to Ready by the reporting path, and never assigned to its reporter.
+
+**(c) Routing.** Reported issues follow the ownership table (workflow policy): security-relevant Arbitraitor gaps keep the `blocked:arbitraitor` upstream flow — the issue is filed in `arbsec/arbitraitor`, the Orchestraitor task stays blocked with the `blocked:arbitraitor` label, and no local workaround ships in its place (§16.2).
+
+**(d) Untrusted content.** Agent-authored issue bodies are untrusted content (§6.1): marker-wrapped and injection-hardened — the same boundary Arbitraitor's `sanitize_for_agent` applies when untrusted text is quoted to downstream agents — and they never carry instructions any agent executes without policy review.
+
+**Report ≠ self-fix.** The reporting agent does NOT pick up its own reported bug; the default is file-and-continue or end-task, and scheduling a reported Bug is the PM/human triage path. SINGLE EXCEPTION: a defect that BLOCKS the reporting agent's current task is fixed in that task's own PR with a regression test — correctness defects needed for safe completion are never deferred merely to shrink a PR. If the fix is too large for the in-flight slice, the Bug becomes a `blockedBy` dependency (§9.40) that the normal loop schedules before the blocked task resumes.
+
+### 9.38 MCP-early tool strategy and the built-in MCP proxy
+
+Worker search and code-intelligence needs are satisfied from day one by approved, fingerprinted MCP servers rather than by native indexing built first: a codegraph-style symbol/call-graph server and a codebase-memory-style knowledge-graph server cover the explore and search workload while the native indexing paths (§9.15, §9.16) mature. This pulls the knowledge-index federation originally scoped for post-MVP forward into the bootstrap.
+
+Every such server is an untrusted principal under §9.18.1 containment: fingerprinted per session (executable digest or TLS identity, per-tool schema digests, declared vs. granted capabilities), launched through Arbitraitor inspection, and contained in an Arbitraitor-reported sandbox (`arbitraitor_sandbox::SandboxMode::Restricted` minimum). MCP annotations remain advisory input to policy; authority over destructive vs. non-destructive vs. idempotent comes from Arbitraitor's analyzer, never from the server's claim.
+
+**Built-in MCP proxy.** Orchestraitor ships a first-class MCP PROXY: agents get ONE endpoint that fronts (1) the MVP-6 built-in tool surface, (2) approved external MCP servers, and (3) Arbitraitor's own MCP server. The proxy is a routing and policy-surface layer ONLY — tool namespacing, fingerprint pinning, schema-drift detection, and per-tool policy presentation. It is NEVER a security authority: it makes no allow/deny/verdict decisions, issues no capabilities, and enforces nothing Arbitraitor does not enforce (§2.2). A tool call through the proxy crosses the same Arbitraitor boundary as a direct call; proxying MUST NOT widen any grant. (mcproxy-go is a pattern-reference for transport aggregation only; the security posture is Orchestraitor's own.) Tool results surfaced to agents through the proxy are untrusted content and MUST pass Arbitraitor's `sanitize_for_agent` boundary when quoted into agent-facing context.
+
+### 9.39 Coordinator decision tools
+
+Agents get a first-class INTERNAL decision-tool surface, exposed through the same built-in tool layer as the MVP-6 coding tools but for orchestration rather than file operations:
+
+```text
+board.query        # read board state: items, statuses, fields, dependency edges, blocked graph
+board.move         # guarded board transitions (status/field writes): validated, lease-checked,
+                   # reconcile-visible — never a raw provider write
+decision.record    # persist a decision record with rationale (§9.35); append-only, replayable
+router.consult     # ask the model router for a (provider, model) resolution with alternatives
+worker.delegate    # spawn a worker with scoped authority (§9.25.2): explicit capability requests,
+                   # lease-aligned expiry — never the parent's full authority
+budget.check       # query spend, run/time, and subscription budget state (§9.36)
+capability.check   # query Arbitraitor's capability report for a requested operation shape
+```
+
+These tools are tools: every invocation is Arbitraitor-mediated like any other tool call — assembled into a `PlanContext` and authorized via `arbitraitor_mcp::ApprovalTokenIssuer` where the operation is security-sensitive (§9.25.3), evaluated by Arbitraitor's `PolicyEngine`, recorded in the event store with the §9.25.1 delegation chain — never a silent authority grant. `worker.delegate` scopes down, `board.move` refuses transitions the provider or workflow policy rejects, and `capability.check` reports Arbitraitor's answer rather than creating one. Router consultation resolves through the role registry ([§9.45](30-model-routing.md#945-role-based-model-routing)).
+
+Tool arguments are untrusted input (§6.1). Injection-boundary negatives are mandatory test surface: a tool argument containing instructions, marker-escape attempts, or content addressed to a different principal MUST be treated as data — quoted, sanitized, never executed. Classification of decision payloads (what may leave the machine, what is security-sensitive) stays Arbitraitor's job (§9.28.4); the tools carry structured, typed content only.
+
+### 9.40 Blocked-dependency semantics
+
+Native `blockedBy` edges on the board ARE the dependency graph. Orchestraitor MUST NOT maintain a mirrored second DAG: the board's edges are the truth, the ready-queue predicate is computed from them at each poll, and no shadow copy exists to drift.
+
+- **Visibility.** A blocked task is invisible to the campaign until its last blocker lands; the next poll tick promotes it (§9.36). Promotion is a reconcile effect, not an event-subscription requirement.
+- **Cycles.** A dependency cycle is board-data corruption from the loop's perspective: it produces a needs-human report naming the cycle's members. A cyclic task is never scheduled, never auto-broken, and never retried as though transient.
+- **`blocked:arbitraitor`.** A cross-repo Arbitraitor blocker is a hard wait — never retried as a transient failure (§9.26.1: Arbitraitor placement into arbitration-required or unsupported categories is not retryable). While the hard wait holds, bug-flow and other active-epic work continue (§9.41); the blocked task stays blocked with its upstream link until the Arbitraitor issue resolves (§16.2).
+- **Mid-execution blocks.** A worker that hits a block mid-execution transitions to a lifecycle state, not a failure: `approval-required` and `input-required` are stable, lease-protected states with checkpoint resume (§9.24.2). Merge conflicts and verification failures are typed non-retriable classes (§9.33.5) — fix the root cause, never blind-retry.
+- **Wholly-blocked active epic.** When every remaining task of the active epic is blocked, the loop emits a needs-human signal and continues bug-flow (§9.41); it never silently switches epics.
+- **Stale-blocker drift.** When a blocker reaches Done but the edge remains, reconcile surfaces the drift as a `board-diverged`-class event; resolution is a human/PM board action. The loop MUST NOT silently rewrite or drop dependency edges.
+
+### 9.41 Epic-focus scheduling policy
+
+The ready queue is epic-focused: exactly one Epic is active by default (`max_active_epics = 1`, configurable through the §9.22 layers). The queue promotes only tasks of the active epic, priority-ordered by the board's P0-P3 field, and only leaf Tasks and Bugs that satisfy the workflow policy's eligibility rules.
+
+- **Bug preemption.** Standalone Bugs ALWAYS preempt epic work UNLESS the Bug is epic-linked — it belongs to the active epic's sub-graph or blocks its tasks. Preemption is a queue-ordering rule, not an interruption: in-flight work finishes per its lease.
+- **Human exclusion.** The ready queue excludes items assigned to humans. The service-identity set — the GitHub App bot identity and any machine identity configured alongside it — is declared in configuration, not inferred: items assigned to a service identity are schedulable; items assigned to a human are not.
+- **Focus controls.** `orc epic focus <epic>` switches the active epic; `orc epic pause` pauses focus — in-flight work finishes per lease semantics while new spawns are blocked; `orc epic resume` lifts the pause. Chat steering (§9.44) maps to the same controls.
+- **Exhaustion and blockage.** An exhausted or wholly-blocked active epic produces a needs-human signal while bug-flow continues (§9.40). The loop NEVER silently auto-switches to another epic unless `auto_advance_epic` is explicitly configured; the default is a visible stop.
+
+### 9.42 Multi-org workspaces and cross-project epics
+
+Configuration defines a named WORKSPACE that owns multiple organizations and their projects — each project a board-provider instance (§9.43) with its own credentials, never a shared ambient token. One daemon run serves exactly one active workspace; switching workspaces is an explicit daemon-level action, not a per-request routing concern.
+
+Projects in a workspace are CONNECTABLE. An Epic lives on an anchor board and may span multiple projects: its Tasks and Sub-tasks are targeted at specific projects through cross-board membership edges — the epic's sub-graph is the union of its member items across boards, not a copy of them.
+
+Resolution is workspace-wide: epic-focus (§9.41) treats the active epic's cross-board sub-graph as one queue, `blockedBy` edges (§9.40) may cross boards within the workspace — a task in one project blocked by an issue in another — and bug-preemption applies to standalone Bugs on any board of the workspace. Credentials, rate limits, and reconcile ticks remain per provider instance (§9.43); only dependency, focus, and preemption resolution cross boards.
+
+### 9.43 Kanban board abstraction
+
+Planning and task tracking run against a pluggable `BoardProvider` contract:
+
+```text
+items            # tasks, bugs, epics, features: stable identity, type, title, body
+statuses         # board columns / status field values
+fields           # typed custom fields (priority, target, risk, size, ...)
+dependency edges # native blockedBy edges, cross-board within a workspace (§9.42)
+cross-references # links between items, including cross-repository links
+search           # filtered queries over items and fields
+```
+
+**Providers.** GitHub Projects v2 is the first provider: GraphQL-backed, with org/project/field/option node IDs resolved at runtime and cached OUTSIDE the repository (never committed), and a poll tick that adapts to rate-limit feedback. A local sqlite provider serves CI and offline operation — tests never hit the network (the deterministic-simulator rule, §21.3). Further providers implement the same contract; GitHub is not required by the loop.
+
+**Single canonical provider.** A deployment has exactly one canonical board provider per workspace — never dual-master. Work items live ON the provider: Orchestraitor keeps a local read-cache that is never authoritative, writes through, then refreshes. Runtime state — decisions, leases, heartbeats, events, receipts, budgets — is local-only, keyed by stable board item identity, and never synced to the board; the board sees only coarse status transitions.
+
+**Reconcile.** Every poll tick is a reconcile with board-wins semantics: where local and board state disagree, the board wins, the divergence is recorded as a `board-diverged` event, and stale reads are stamped with their last-synced time.
+
+**Switching.** Provider switching is an explicit `orc board import/export` migration, not a live mirror.
+
+**Evidence.** Completion evidence is published as board-item comment summaries; full artifacts stay local and are exportable on demand (§9.17).
+
+### 9.44 Operator chat mode
+
+`orc chat` is the operator's conversational surface into the loop. It does two things: reports progress and drafts new work.
+
+- **Progress reads are summaries of durable state.** Board state, campaign decisions, run state, budgets, and the blocked graph are read from their durable homes (§9.43, §9.35) — never from chat-context memory. A chat answer about state is a read-only view stamped with the same last-synced caveats as every other read.
+- **Drafting lands on the board, never the schedule.** Chat may draft new Epics, Features, and Tasks; drafts are filed at Status=Triage — the human/PM triage gate — never silently scheduled. Drafting is not decomposition: decomposition into leaf sub-issues follows the workflow policy, and the PM selection gate stays intact.
+- **Distinct authority profile.** Chat runs with a narrower write authority than a campaign session: progress queries are read-only; drafting writes board items at Triage only; chat output itself carries no execution authority. Steering — focus switch, pause, resume — maps to the same guarded controls as `orc epic focus/pause/resume` (§9.41): the operator's instruction is the command and executes through the normal control path; model-generated text never mutates state on its own.
+
+`orc chat` is a CLI session backed by the same coordinator decision tools (§9.39) under this narrower profile; TUI and daemon surfaces expose equivalent views.

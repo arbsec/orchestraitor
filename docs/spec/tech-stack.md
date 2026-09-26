@@ -537,6 +537,7 @@ Scheduled CI includes: full cross-platform matrix (Linux + macOS MVP), extended 
 - **`lsp-types` is in slow release cadence.** The wire spec is stable, but a fork may eventually be needed if upstream stops responding to PRs.
 - **TUI startup budget ≤ 150 ms warm.** Achievable with Ratatui's double-buffered render and event-driven subscriptions, but the cost ledger and live routing panels may push it. Profile in CI per spec Appendix F.
 - **Domain detection false-positives at `orc init`.** Conservative thresholds + the always-enabled `general` fallback limit blast radius; user confirmation is the backstop.
+- **TypeSafe/jev decision-model provider (System One).** Early access, no Rust SDK; license status: not yet allowlisted — the adapter behind the `DecisionProvider` trait ([`30-model-routing.md` §9.45](30-model-routing.md#945-role-based-model-routing)) stays default-off until the license is allowlisted per the §18 dependency policy.
 
 ---
 
