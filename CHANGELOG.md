@@ -208,6 +208,20 @@ All notable changes to Orchestraitor are recorded here. The format follows
   worker surface (spec `20-harness-worker.md`). Section headings and legacy `§N` anchors are
   unchanged, so existing issue and pull-request references keep resolving through the
   compatibility index; the §2.2 ownership invariant and §6 principles are unchanged.
+- Specification extended with the orchestrator-first normative sections: campaign
+  session-per-decision orchestration, watch-daemon supervision (poll tick, stall/orphan
+  detection, kick-off conditions, spend/run/subscription budget classes), agent issue
+  reporting (report ≠ self-fix, with the blocking-defect fix exception), the MCP-early tool
+  strategy with the built-in MCP proxy, coordinator decision tools, blocked-dependency
+  semantics, epic-focus scheduling with bug preemption, multi-org workspaces with
+  cross-project epics, the kanban board abstraction (`BoardProvider`), and the operator
+  chat mode (spec `10-orchestrator.md` §9.35-§9.44); plus role-based model routing with the
+  pluggable `DecisionProvider` trait and subscription-aware routing (spec
+  `30-model-routing.md` §9.45-§9.46). The TypeSafe/jev entry in the technology stack
+  records its early-access license status (not yet allowlisted; adapter default-off). The
+  §9.33 intro now states autonomous delivery as the primary product axis, matching the
+  reordered goals and the M1 milestone; section headings and legacy `§N` anchors are
+  unchanged.
 
 ### Fixed
 
