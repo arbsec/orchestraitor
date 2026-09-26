@@ -16,8 +16,9 @@
 
 ## Specification references
 
-<!-- docs/spec/spec.md §N and/or docs/spec/tech-stack.md §N that this change implements. Every
-     implementation PR traces to a spec requirement (AGENTS.md). -->
+<!-- docs/spec/<document>.md §N and/or docs/spec/tech-stack.md §N that this change implements
+     (legacy § numbers resolve via docs/spec/spec.md). Every implementation PR traces to a spec
+     requirement (AGENTS.md). -->
 
 ## Change summary
 
@@ -47,8 +48,7 @@
 
 ## Documentation impact
 
-<!-- Any change to public behavior updates human-facing docs in the same PR (spec §9.17.1,
-     §9.33). Generated API docs alone do not count. -->
+<!-- Any change to public behavior updates human-facing docs in the same PR (spec §9.33). Generated API docs alone do not count. -->
 
 - [ ] No public-behavior change
 - [ ] Public behavior changed — docs updated (README, CLI/config reference, CHANGELOG)

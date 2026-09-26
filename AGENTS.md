@@ -37,7 +37,7 @@ the [Agent Skills](.agents/skills/) and the [workflow policy](.agents/project/or
 - **Never skip adversarial review.** Every PR is reviewed by a different agent/session before
   merge (spec `50-contracts-data.md` §21.1). Implementers may not approve their own security-sensitive changes.
 - **Never ship code without updating docs.** A change to public behavior updates
-  human-facing docs in the same PR (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33). Generated API docs alone do not count.
+  human-facing docs in the same PR (spec `10-orchestrator.md` §9.33). Generated API docs alone do not count.
 - **Treat MCP annotations as advisory, not proof.** `readOnly`/`destructive`/`idempotent` are
   input to policy; authority comes from Arbitraitor's analyzer, never the server's claim
   (spec `20-harness-worker.md` §9.18.1).

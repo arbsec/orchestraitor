@@ -1,6 +1,6 @@
 # Documentation gate
 
-Any change to **public behavior** updates human-facing docs in the same PR (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33, AGENTS.md). This reference defines what counts as public behavior and how `classify-docs-impact` classifies it.
+Any change to **public behavior** updates human-facing docs in the same PR (spec `10-orchestrator.md` §9.33, AGENTS.md). This reference defines what counts as public behavior and how `classify-docs-impact` classifies it.
 
 ## Public behavior surfaces
 

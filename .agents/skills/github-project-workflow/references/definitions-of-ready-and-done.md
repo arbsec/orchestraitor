@@ -32,7 +32,7 @@ A PR may merge only when ALL of (spec `10-orchestrator.md` §9.33.4, AGENTS.md "
 - All actionable review threads are resolved.
 - All noteworthy findings (CRITICAL/HIGH/MEDIUM) are fixed or formally resolved with recorded reasoning. LOW findings may be deferred only with an explicit justification comment on the finding.
 - Adversarial review converges against the current HEAD: one full review generation finds no new noteworthy findings AND all earlier blocking findings are resolved (see the pr-lifecycle skill's `pr-convergence` reference).
-- Required documentation is updated in the same PR for any public-behavior change (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33). Generated API docs alone do not count.
+- Required documentation is updated in the same PR for any public-behavior change (spec `10-orchestrator.md` §9.33). Generated API docs alone do not count.
 - The PR checklist items (the `<!-- orc:* -->` markers) are checked based on **evidence**, not intentions.
 
 ## Limits are safety valves, not convergence

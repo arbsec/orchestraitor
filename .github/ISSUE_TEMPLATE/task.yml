@@ -20,7 +20,7 @@ body:
     attributes:
       label: Specification references
       description: "`docs/spec/spec.md` §N and/or `docs/spec/tech-stack.md` §N this implements. Required for all implementable work."
-      placeholder: "spec.md §9.19.2; tech-stack.md §3.2"
+      placeholder: "spec 30-model-routing.md §9.19.2; tech-stack.md §3.2"
     validations:
       required: true
   - type: textarea

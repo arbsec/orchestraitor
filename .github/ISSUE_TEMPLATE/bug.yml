@@ -42,7 +42,7 @@ body:
     attributes:
       label: Specification reference
       description: "Which `docs/spec/spec.md` §N does this behavior relate to? Required for triage."
-      placeholder: "spec.md §9.5"
+      placeholder: "spec 20-harness-worker.md §9.5"
     validations:
       required: true
   - type: input

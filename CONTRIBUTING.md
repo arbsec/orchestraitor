@@ -114,7 +114,7 @@ Never add a dependency without justification in the PR.
 
 Any change to **public behavior** updates human-facing docs in the same PR — README, CLI
 reference, configuration docs, `CHANGELOG.md` `[Unreleased]`. Generated `cargo doc` and code
-comments alone do not satisfy this requirement (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33).
+comments alone do not satisfy this requirement (spec `10-orchestrator.md` §9.33).
 
 ## Questions?
 

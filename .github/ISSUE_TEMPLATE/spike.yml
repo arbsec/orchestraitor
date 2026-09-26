@@ -24,7 +24,7 @@ body:
     id: spec-ref
     attributes:
       label: Specification reference
-      placeholder: "spec.md §16"
+      placeholder: "spec 40-arbitraitor-integration.md §16"
     validations:
       required: false
   - type: input

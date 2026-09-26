@@ -31,7 +31,7 @@ body:
     attributes:
       label: Specification reference
       description: "`docs/spec/spec.md` §N this implements, OR describes the spec gap. Required for triage."
-      placeholder: "spec.md §9.15"
+      placeholder: "spec 20-harness-worker.md §9.15"
     validations:
       required: true
   - type: textarea

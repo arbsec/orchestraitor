@@ -29,7 +29,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/review-findings.md`](references/review-findings.md) — severity taxonomy (CRITICAL/HIGH/MEDIUM/LOW), deduplication, tracking across loops.
   - [`references/gh-capabilities.md`](references/gh-capabilities.md) — verified `gh` CLI surface: `pr checks --json`, `pr view --json` (and its **missing** `reviewThreads`), `pr merge --squash --match-head-commit`, `pr review`.
   - [`references/graphql.md`](references/graphql.md) — the `pullRequest.reviewThreads` connection with `isResolved`/`isOutdated`/`comments`; resolve/unresolve mutations.
-  - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33).
+  - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `10-orchestrator.md` §9.33).
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
 
 ## Core procedure
@@ -79,7 +79,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   surface is touched (CLI, config, env vars, public APIs, daemon
                   protocol, built-in tools, MCP, provider support, security guarantees,
                   error behavior, install/migrate/remove), human-facing docs MUST
-                  update in this same PR (spec `20-harness-worker.md` §9.17.1, `10-orchestrator.md` §9.33). CHANGELOG [Unreleased]
+                  update in this same PR (spec `10-orchestrator.md` §9.33). CHANGELOG [Unreleased]
                   gains an entry per public-behavior change. Reconcile the checklist
                   with `reconcile-checklist`.
 
