@@ -3949,6 +3949,7 @@ dependencies = [
  "arbitraitor-receipt",
  "arbitraitor-sandbox",
  "orchestraitor-model",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

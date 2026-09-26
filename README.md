@@ -114,6 +114,20 @@ existing comments survive migration. `orc models refresh` forces an immediate mo
 catalog fetch into the local cache; `orc models rollback` returns to the previous cached
 snapshot without deleting manually configured models.
 
+## Bootstrap worker sandbox mediation
+
+The bootstrap mini-worker spawns only behind Arbitraitor (issue #311). Worker
+spawn runs a capability preflight —
+[`arbitraitor_sandbox::compute_effective_controls(SandboxMode::Restricted, platform)`](docs/spec/40-arbitraitor-integration.md#96-arbitraitor-sandbox-integration)
+— records the controls matrix + verdict (`Allowed`/`Refused`) into the run
+state, and refuses to start when any required control is unavailable (typed
+error naming the missing controls) or when the platform is not Linux
+(ADR-0024 fail closed; no non-secure mode on this path). Bash runs through
+`arbitraitor_exec::ExecutionContextBuilder` under an explicit, network-denied
+`ExecutionPolicy`; no direct `std::process` spawn exists on the worker path.
+See [docs/sandbox-mediation.md](docs/sandbox-mediation.md) for the flow,
+fail-closed semantics, and the pinned-API mapping.
+
 ## GitHub App service identity
 
 All agent-driven GitHub operations authenticate as the org-owned `arbsec-agent`
