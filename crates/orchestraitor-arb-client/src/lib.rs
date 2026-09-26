@@ -5,6 +5,8 @@
 //! not implement sandboxing, policy decisions, approvals, receipts, or workspace
 //! projection primitives.
 
+pub mod mediation;
+
 pub use arbitraitor_core as core;
 pub use arbitraitor_exec as exec;
 pub use arbitraitor_mcp as mcp;

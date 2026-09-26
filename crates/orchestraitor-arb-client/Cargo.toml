@@ -18,6 +18,7 @@ arbitraitor-policy = { workspace = true }
 arbitraitor-receipt = { workspace = true }
 arbitraitor-sandbox = { workspace = true }
 orchestraitor-model = { path = "../orchestraitor-model" }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

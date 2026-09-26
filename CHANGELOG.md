@@ -32,6 +32,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 - Repository governance and community documents: contribution guidance, security policy, code
   of conduct, and support documents, adapted from the sibling Arbitraitor repository.
 - Dual `MIT OR Apache-2.0` licensing, matching Arbitraitor.
+- Bootstrap-worker sandbox mediation (spec `40-arbitraitor-integration.md`
+  §9.6, §6.7; issue #311): new `mediation` module in
+  `orchestraitor-arbitraitor-client`. `MediatedWorker::spawn` probes
+  `arbitraitor_sandbox::compute_effective_controls(SandboxMode::Restricted, platform)`
+  as a capability preflight, records the controls matrix + verdict into
+  `WorkerPreflight` for the run state, and fails closed — typed
+  `MediationError::UnavailableControls` naming each missing control, typed
+  `UnsupportedPlatform` on non-Linux (ADR-0024; no non-secure bootstrap
+  mode) — before any execution surface exists. `MediatedWorker::run_bash`
+  routes scripts through `arbitraitor_exec`'s mediated bash
+  (`ExecutionContextBuilder` via `ScriptExecution`) under an explicit
+  network-denied `ExecutionPolicy`; errors translate Arbitraitor `ExecError`
+  into log-safe static reason codes (no command output/args leakage, spec
+  §9.23.4). Documented in `docs/sandbox-mediation.md` and README (#311).
 - GitHub App service identity (`arbsec-agent`) token-minting path (spec
   `10-orchestrator.md` §9.25.2, §9.41; issue #307). Layered config gains
   `github_app.slug` (built-in default `arbsec-agent`), `github_app.client_id`,
