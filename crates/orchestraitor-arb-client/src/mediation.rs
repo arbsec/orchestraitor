@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_on_linux_records_allowed_verdict_and_full_matrix() {
+    fn preflight_on_linux_tracks_host_landlock_probe() {
         // Given: a typed Arbitraitor adapter on the Linux reference platform.
         let client = linux_client();
 

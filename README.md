@@ -116,11 +116,9 @@ snapshot without deleting manually configured models.
 
 ## Bootstrap worker sandbox mediation
 
-The bootstrap mini-worker's execution path is gated behind Arbitraitor (issue
-
-# 311; the bootstrap loop itself wires the worker in via #310). Worker
-
-spawn runs a capability preflight —
+The bootstrap mini-worker's execution path is gated behind Arbitraitor (issue #311; the
+bootstrap loop itself wires the worker in via #310). Worker spawn runs a capability
+preflight —
 [`arbitraitor_sandbox::compute_effective_controls(SandboxMode::Restricted, platform)`](docs/spec/40-arbitraitor-integration.md#96-arbitraitor-sandbox-integration)
 — records the controls matrix + verdict (`Allowed`/`Refused`) into the run
 state, and refuses to start when any required control is unavailable (typed
