@@ -61,6 +61,11 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 4. CLAIM        Assign the issue to @me and advance Status to "In Progress".
                 Use `claim-issue` (supports --dry-run).
                 One active claim per agent; release before claiming another.
+                An orchestrator may instead hold up to 4 parallel claims for leaf
+                tasks whose scopes are file-disjoint — one worktree + branch per
+                claim, claimed deliberately with `claim-issue --allow-parallel`.
+                Merge order onto main stays serialized (rebase onto updated
+                origin/main); review stays fresh-context per PR.
 
 5. BLOCK        If work discovers a blocker (Arbitraitor upstream, conflicting PR,
                 missing spec), set the issue's Blocked-By edge and Status="Blocked".
@@ -103,7 +108,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 | `0` | Success (or `--dry-run` preview rendered) |
 | `1` | Unrecoverable error (network, auth, unexpected `gh` output) |
 | `2` | Config/state error (missing project config, unknown field name, issue not found, field value not in allowed options) |
-| `3` | Policy violation (would mutate a Post-MVP issue during MVP, would block on a non-existent issue, would claim a second active issue) |
+| `3` | Policy violation (would mutate a Post-MVP issue during MVP, would block on a non-existent issue, would claim a second active issue without `--allow-parallel`) |
 | `4` | Concurrent edit detected (issue's `updatedAt` changed since read — re-read and retry) |
 
 ## Safety conditions (non-negotiable)

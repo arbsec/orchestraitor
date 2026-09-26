@@ -27,6 +27,24 @@ During the MVP phase, only issues that satisfy **all** of the following may be i
 Post-MVP items (`Target = Post-MVP`, spec `60-milestones.md` §999) are never scheduled during the MVP phase, even
 if they look easy. Open them; do not implement them.
 
+## Parallel delivery lanes
+
+The orchestrator runs independent leaf work in parallel lanes instead of serializing it behind
+the one-claim guard:
+
+- Only leaf Tasks/Bugs with **file-disjoint** scopes run in parallel. Lanes that touch the same
+  spec section, crate, or invariant stay serialized, in which case the orchestrator keeps the
+  default one-claim behavior.
+- One worktree and one branch per lane (`git worktree add -b <type>/<slug>
+  ../orchestraitor-<slug> origin/main`); lanes never share a checkout and never write to
+  `main`. Claims are taken deliberately with `claim-issue --allow-parallel` (up to 4 concurrent
+  claims), which keeps the one-claim guard active for every caller that omits the flag.
+- Each lane rebases onto the updated `origin/main` before its PR opens, and merge order onto
+  `main` is serialized by the orchestrator — never by whichever lane happens to finish first.
+- Claims are reconciled through the project-workflow skill when a lane stalls or its PR merges:
+  a merged or abandoned lane releases its claim (`release-issue`, then `reconcile` for board
+  state) before another lane claims that issue.
+
 ## GitHub service identity
 
 All agent-driven GitHub operations — board writes, issue lifecycle, PRs, reviews — run as
