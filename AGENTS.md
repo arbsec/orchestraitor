@@ -122,7 +122,12 @@ Any change to **public behavior** updates human-facing docs in the same PR. Publ
 includes: CLI/TUI behavior, configuration, environment variables, public APIs, daemon
 protocols, built-in tools, MCP behavior, provider support, security guarantees, error
 behavior, and installation/migration/upgrade/removal. Generated API docs and code comments
-alone do not satisfy this requirement. Keep `CHANGELOG.md` `[Unreleased]` current.
+alone do not satisfy this requirement. Keep `CHANGELOG.md` `[Unreleased]` current with
+**consumer-visible changes only** — it is a release-notes file for people who use
+Orchestraitor, not a development log: internal development notes (spec-section bookkeeping,
+code-structure internals, review process, issue/task tracking) stay in PR descriptions,
+spec documents, and evidence files. A spec-only change without shipped behavior carries no
+CHANGELOG entry.
 
 ## Testing
 

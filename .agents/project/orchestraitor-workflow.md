@@ -120,7 +120,10 @@ policy). For Orchestraitor "public behavior" includes: `orc`/`orcd` commands and
 flags, `orchestraitor.toml` schema, environment variables (`ORCHESTRATOR_*`,
 `NEURALWATT_API_KEY`, `ZHIPU_API_KEY`), the daemon protocol, built-in tools, MCP/ACP behavior,
 provider support, security guarantees, error behavior, and installation/migration/removal.
-`CHANGELOG.md` `[Unreleased]` carries an entry per public-behavior change.
+`CHANGELOG.md` `[Unreleased]` carries an entry per public-behavior change and serves
+consumers of Orchestraitor only — it is release notes, not a development log. Internal
+development notes (spec-section bookkeeping, repository tooling, agent workflows, review
+process, issue/task tracking) stay in PR descriptions, spec documents, and evidence files.
 
 ## Testing expectations
 
