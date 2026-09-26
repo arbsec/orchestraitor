@@ -6,6 +6,9 @@
 //!   overrides an authoritative non-leaf native type — review finding on
 //!   issue 254); while org-level native types are unset, the lowercase
 //!   `task`/`bug` labels are the fallback;
+//! - the issue itself is `OPEN`, with closed items excluded in
+//!   [`crate::item`] conversion and surfaced through the warning channel
+//!   regardless of their board field values;
 //! - no `blockedBy` node with state != `CLOSED`, with truncated windows
 //!   failing closed upstream in [`crate::item`] conversion;
 //! - `Target == MVP` and `Status == Ready` by exact option-name equality,
@@ -93,6 +96,9 @@ pub(crate) fn skip_warning(raw: &crate::item::RawItem, skip: &ItemSkip) -> SkipW
     let reason = match skip {
         ItemSkip::Malformed(reason) => format!("malformed item: {reason}"),
         ItemSkip::Truncated(window) => format!("truncated `{window}` window; failing closed"),
+        ItemSkip::NotOpen => {
+            "issue is not OPEN; closed issues never enter the ready queue".to_string()
+        }
     };
     SkipWarning { number, reason }
 }

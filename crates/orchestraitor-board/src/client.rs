@@ -58,6 +58,7 @@ const ITEMS_QUERY: &str = r"query($id: ID!, $after: String) {
             __typename
             ... on Issue {
               number
+              state
               title
               url
               repository { nameWithOwner }
@@ -85,7 +86,7 @@ const FIND_ITEM_QUERY: &str = r"query($owner: String!, $name: String!, $number: 
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       id
-      projectItems(first: 20) { nodes { id project { id } } }
+      projectItems(first: 20) { totalCount nodes { id project { id } } }
     }
   }
 }";
@@ -208,7 +209,10 @@ impl BoardClient {
             if !page_info.has_next_page {
                 break;
             }
-            after = page_info.end_cursor;
+            let Some(cursor) = page_info.end_cursor else {
+                return Err(BoardError::TruncatedConnection { window: "items" });
+            };
+            after = Some(cursor);
         }
         Ok((queue::ready_queue(&all_facts, config), warnings))
     }
@@ -354,12 +358,18 @@ impl BoardClient {
         })
     }
 
+    /// Resolves the board item for `issue_number` across ALL configured
+    /// repositories: a same-numbered issue in an earlier repo without a board
+    /// item never shadows later repos, and matches under multiple repos are
+    /// rejected instead of guessed.
     async fn find_item(
         &self,
         config: &BoardProjectConfig,
         ids: &ProjectNodeIds,
         issue_number: u64,
     ) -> Result<String, BoardError> {
+        let mut matches: Vec<(String, String)> = Vec::new();
+        let mut issue_seen = false;
         for repo in &config.repos {
             let Some((owner, name)) = repo.split_once('/') else {
                 continue;
@@ -378,11 +388,31 @@ impl BoardClient {
             let Some(issue) = response.repository.and_then(|repo| repo.issue) else {
                 continue;
             };
+            issue_seen = true;
+            if crate::item::truncated(
+                issue.project_items.nodes.len(),
+                issue.project_items.total_count,
+            ) {
+                return Err(BoardError::TruncatedConnection {
+                    window: "projectItems",
+                });
+            }
             for project_item in issue.project_items.nodes {
                 if project_item.project.id == ids.project_id {
-                    return Ok(project_item.id);
+                    matches.push((repo.clone(), project_item.id));
                 }
             }
+        }
+        if matches.len() > 1 {
+            return Err(BoardError::AmbiguousItemReference {
+                number: issue_number,
+                repos: matches.iter().map(|(repo, _id)| repo.clone()).collect(),
+            });
+        }
+        if let Some((_repo, item_id)) = matches.pop() {
+            return Ok(item_id);
+        }
+        if issue_seen {
             return Err(BoardError::ItemNotOnBoard {
                 number: issue_number,
             });
@@ -549,8 +579,10 @@ struct IssueRef {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectItemConnection {
     nodes: Vec<ProjectItemRef>,
+    total_count: u64,
 }
 
 #[derive(Debug, Deserialize)]

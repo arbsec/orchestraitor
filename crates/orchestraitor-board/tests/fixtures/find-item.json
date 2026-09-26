@@ -4,6 +4,7 @@
       "issue": {
         "id": "I_fixture_42",
         "projectItems": {
+          "totalCount": 1,
           "nodes": [
             { "id": "PVTI_F_42", "project": { "id": "PVT_fixture_project" } }
           ]

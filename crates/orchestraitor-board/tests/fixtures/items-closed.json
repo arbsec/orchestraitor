@@ -1,0 +1,32 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "id": "PVTI_C_7",
+            "content": {
+              "__typename": "Issue",
+              "number": 7,
+              "state": "CLOSED",
+              "title": "Closed task still carrying ready board values",
+              "url": "https://github.com/arbsec/orchestraitor/issues/7",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
