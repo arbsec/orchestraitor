@@ -28,6 +28,17 @@ the [Agent Skills](.agents/skills/) and the [workflow policy](.agents/project/or
   from [tech-stack.md §2.2](docs/spec/tech-stack.md) — never conceptual names like
   `EffectiveSandboxControls`, `ActionPlan`, or `ApprovalToken` (those do not compile).
 - **Never commit to `main`.** Work in a worktree branch (see Workflow below).
+- **Never operate on GitHub as a personal account.** Agent-driven GitHub operations
+  (issues, PRs, Projects v2 board writes, reviews, releases) MUST authenticate as the
+  Orchestraitor GitHub App service identity (`arbsec-agent` — org-owned,
+  installation-scoped), never a personal account. Installation tokens are minted from the
+  App's private key, expire within ~1 hour, and carry only the installation's
+  least-privilege permissions (repos/issues/projects/PRs); no long-lived PAT lives in
+  configuration. Until the E0 backlog task registers the App (planning runbook
+  `.omo/drafts/github-app-setup.md`), personal owner auth is an explicitly **labelled
+  fallback only** — never an equal option. Assignee fields accept user accounts only, so
+  ownership semantics ride board Status + run-state: service-identity items stay
+  schedulable, human-assigned items are excluded.
 - **Never merge with failing CI.** No admin overrides on red, no re-running flaky checks
   until they pass by chance. Investigate the root cause (spec `50-contracts-data.md` §21.10).
 - **Never suppress errors.** No `unwrap()`/`expect()` in production code, no `as any` /

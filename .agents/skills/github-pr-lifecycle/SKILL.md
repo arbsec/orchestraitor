@@ -102,7 +102,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 - **PR identifier**: number, URL, branch, or JSON from stdin (for piping).
 - **Project config**: `.agents/project/github-project.local.toml` for review-loop limits, required reviewer domains, merge strategy. If absent, scripts exit `2`.
-- **`gh` auth**: requires GraphQL access (default `gh auth` scope is sufficient for read; mutations on review threads use the same scope).
+- **`gh` auth**: requires GraphQL access (default `gh auth` scope is sufficient for read; mutations on review threads use the same scope). Agent-driven operations authenticate as the GitHub App service identity (see Safety conditions), not a personal account.
 
 ## Outputs
 
@@ -129,6 +129,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.
+- **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity; commits are authored with the bot identity and DCO sign-off. For Orchestraitor that is the `arbsec-agent` App (org-owned, installation-scoped; planning runbook `.omo/drafts/github-app-setup.md`). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option.
 
 ## How this skill relates to project policy
 

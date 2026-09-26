@@ -61,3 +61,4 @@ Node IDs from Projects queries are stable (`PVT_` items, `PVTF_` fields, `PVTSSF
 - Default `gh auth login` scopes are sufficient for read.
 - Setting Project single-select fields requires the **`project`** OAuth scope: `gh auth refresh -s project`.
 - Creating cross-org issues requires normal repo write access to the target repo.
+- Agent-driven board/issue operations MUST run as the GitHub App service identity, not a personal account (see SKILL.md "Safety conditions"). The personal-account scope notes above describe the explicitly labelled owner fallback only.

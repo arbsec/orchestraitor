@@ -194,6 +194,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Changed
 
+- Agent operating docs now mandate the GitHub App service identity (`arbsec-agent`) for
+  agent-driven GitHub operations (issues, PRs, Projects v2 board writes, reviews, releases):
+  `AGENTS.md` gains a critical rule, the project workflow policy and both GitHub skills
+  carry the mandate, and personal owner auth is an explicitly labelled fallback only until
+  the E0 App-registration backlog task lands.
 - Specification reordered orchestrator-first: the split document set under `docs/spec/` now
   leads with the self-improving orchestration loop — backlog → manager selection → worker →
   pull request → adversarial review → human-gated merge, with every state transition tracked
