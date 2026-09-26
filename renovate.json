@@ -1,6 +1,22 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate policy for arbsec/orchestraitor",
   "extends": [
     "config:recommended"
+  ],
+  "schedule": [
+    "* 0-3 * * *"
+  ],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
+  "branchConcurrentLimit": 0,
+  "packageRules": [
+    {
+      "description": "All arbitraitor-* crates pin one Arbitraitor workspace snapshot; piecemeal digest bumps leave mixed revs that fail cargo resolution (hakari workspace-hack conflicts). Update them together in one PR.",
+      "groupName": "arbitraitor",
+      "matchDepNames": [
+        "/^arbitraitor-/"
+      ]
+    }
   ]
 }
