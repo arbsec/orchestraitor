@@ -23,6 +23,7 @@ orchestraitor-board = { path = "../orchestraitor-board" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }
+orchestraitor-worker = { path = "../orchestraitor-worker" }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -32,5 +33,7 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+orchestraitor-testkit = { path = "../orchestraitor-testkit" }
 tempfile = { workspace = true }
 time = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

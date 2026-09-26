@@ -38,5 +38,6 @@ pub fn run_with_writer<W: Write>(cli: Cli, writer: &mut W) -> miette::Result<()>
         Commands::GitHub(command) => commands::github::run(&cli.paths, command, writer),
         Commands::Routing(command) => commands::routing::run(&cli.paths, command, writer),
         Commands::Board(command) => commands::board::run(&cli.paths, command, writer),
+        Commands::Worker(command) => commands::worker::run(&cli.paths, command, writer),
     }
 }

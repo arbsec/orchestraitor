@@ -98,6 +98,9 @@ pub enum Commands {
     /// Read and update the shared GitHub Projects v2 board.
     #[command(subcommand)]
     Board(BoardCommand),
+    /// Run the headless one-shot bootstrap worker.
+    #[command(subcommand)]
+    Worker(WorkerCommand),
 }
 
 /// `orc github` subcommands.
@@ -246,4 +249,29 @@ pub struct BoardMoveArgs {
     /// Target Status option name, e.g. "In Progress".
     #[arg(long)]
     pub status: String,
+}
+
+/// `orc worker` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum WorkerCommand {
+    /// Run one leaf task through the headless bootstrap worker loop.
+    Run(WorkerRunArgs),
+}
+
+/// Arguments for `orc worker run`.
+#[derive(Debug, Clone, Args)]
+pub struct WorkerRunArgs {
+    /// Task id resolved through the fixture task source
+    /// (`<config-dir>/worker-tasks/<id>.json`).
+    #[arg(long)]
+    pub task: String,
+    /// Emit the structured worker result as stable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Alternate fixture task directory for tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_TASKS_DIR", hide = true)]
+    pub worker_tasks_dir: Option<PathBuf>,
+    /// Alternate provider base URL for simulator-backed tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
+    pub worker_provider_endpoint: Option<String>,
 }
