@@ -48,6 +48,7 @@ book/src/adr/
 .orchestraitor/sessions/
 .orchestraitor/cache/
 .orchestraitor/*.bak.*
+.orchestraitor/routing.db*
 
 # Local GitHub Project config (contains real org/project number once the Project exists) — NOT checked in.
 # Copy the example: cp .agents/project/github-project.example.toml .agents/project/github-project.local.toml

@@ -24,6 +24,34 @@ backoff_ms = 250
 
 [github_app]
 slug = "arbsec-agent"
+
+# Static heuristic role routing table for the bootstrap (spec
+# 30-model-routing.md §9.45): every built-in orchestration role routes to the
+# single-provider default from spec §10.3 unless a higher layer overrides
+# `roles.<id>.routing.*`.
+[roles.explore.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
+
+[roles.research.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
+
+[roles.plan.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
+
+[roles.implement.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
+
+[roles.review.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
+
+[roles.verify.routing]
+provider = "neuralwatt"
+model = "glm-5.2"
 "#;
 
 #[derive(Debug, Clone)]
@@ -267,4 +295,36 @@ fn format_config_layer(layer: ConfigLayer) -> String {
         ConfigLayer::CliFlag => "cli-flag",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use orchestraitor_agent_catalog::{
+        BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, BUILT_IN_ORCHESTRATION_ROLES,
+    };
+    use orchestraitor_core::OrchestraitorError;
+
+    use super::*;
+
+    #[test]
+    fn built_in_defaults_ship_the_bootstrap_route_for_every_orchestration_role()
+    -> Result<(), OrchestraitorError> {
+        let report = orchestraitor_core::config::parse_toml_config(BUILT_IN_DEFAULTS)?;
+        assert!(
+            report.unknown_keys.is_empty(),
+            "built-in defaults must use known keys: {:?}",
+            report.unknown_keys
+        );
+        let roles = report.config.roles.ok_or(OrchestraitorError::Internal)?;
+        assert_eq!(roles.len(), BUILT_IN_ORCHESTRATION_ROLES.len());
+        for role in BUILT_IN_ORCHESTRATION_ROLES {
+            let routing = roles
+                .get(role.id)
+                .and_then(|role_config| role_config.routing.as_ref())
+                .ok_or(OrchestraitorError::Internal)?;
+            assert_eq!(routing.provider.as_deref(), Some(BOOTSTRAP_PROVIDER));
+            assert_eq!(routing.model.as_deref(), Some(BOOTSTRAP_MODEL));
+        }
+        Ok(())
+    }
 }

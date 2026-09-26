@@ -97,3 +97,34 @@ pub const BUILT_IN_ROLES: [RoleDefinition; 5] = [
         description: "Gathering context from a local codebase or external docs.",
     },
 ];
+
+/// The six built-in orchestration-loop roles from spec `30-model-routing.md` §9.45.
+///
+/// These are the routing roles of the orchestration loop — distinct from the
+/// §9.19.1 domain-catalog roles above.
+pub const BUILT_IN_ORCHESTRATION_ROLES: [RoleDefinition; 6] = [
+    RoleDefinition {
+        id: "explore",
+        description: "Read-only context gathering over the codebase.",
+    },
+    RoleDefinition {
+        id: "research",
+        description: "External context gathering — documentation, upstream sources.",
+    },
+    RoleDefinition {
+        id: "plan",
+        description: "Producing or revising a work plan.",
+    },
+    RoleDefinition {
+        id: "implement",
+        description: "Producing or modifying code.",
+    },
+    RoleDefinition {
+        id: "review",
+        description: "Critiquing existing code or a diff.",
+    },
+    RoleDefinition {
+        id: "verify",
+        description: "Running and interpreting required checks.",
+    },
+];

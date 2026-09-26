@@ -76,6 +76,9 @@ pub enum Commands {
     /// GitHub App service-identity operations.
     #[command(subcommand, name = "github")]
     GitHub(GitHubCommand),
+    /// Resolve role model routing and inspect decision records.
+    #[command(subcommand)]
+    Routing(RoutingCommand),
 }
 
 /// `orc github` subcommands.
@@ -177,4 +180,24 @@ pub enum ModelsCommand {
     Refresh,
     /// Roll back to the previous cached models.dev catalog.
     Rollback,
+}
+
+/// `orc routing` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum RoutingCommand {
+    /// Resolve one built-in role to its `(provider, model)` route and persist
+    /// the decision record.
+    Resolve(ResolveArgs),
+}
+
+/// Arguments for `orc routing resolve`.
+#[derive(Debug, Clone, Args)]
+pub struct ResolveArgs {
+    /// Built-in orchestration role id (explore, research, plan, implement,
+    /// review, verify).
+    #[arg(long)]
+    pub role: String,
+    /// Emit stable JSON.
+    #[arg(long)]
+    pub json: bool,
 }

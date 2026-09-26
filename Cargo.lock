@@ -3931,7 +3931,9 @@ version = "0.0.0"
 dependencies = [
  "orchestraitor-core",
  "orchestraitor-model",
+ "rusqlite",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
 ]
