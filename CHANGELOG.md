@@ -87,6 +87,24 @@ All notable changes to Orchestraitor are recorded here. The format follows
   validation rejecting a zero base or a cap below the base. The gate is bookkeeping only:
   classification proposes, the gate re-asserts, and Arbitraitor owns every security verdict
   and enforcement decision (§2.2, §9.33.7) (#207).
+- Backlog runner execution loop on `orchestraitor-delivery` (spec §9.33.3): a
+  deterministic, synchronous, I/O-free `BacklogRunner` state machine that drives the
+  validated backlog DAG over injectable per-attempt `AttemptOutcome` values, continuing
+  until `BacklogEmpty`, `NoEligibleTasks`, `BudgetExhausted` (one budget unit per started
+  attempt), `ApprovalRequired`, `FailuresBlocked`, `SecurityBlock`, or `Paused` — with
+  `pause`/`resume` controls (§9.33.6) and an append-only `RunnerEvent` journal as the
+  durable decision record. Every failed attempt runs `failures::classify` and then
+  `retry_rules::RetryGate::evaluate` before any retry executes, so unproven
+  side-effecting tool failures are overridden to `FixRootCause` and policy denials,
+  approvals, and non-retriable security failures can never be laundered into a retry
+  (§9.26.3, §9.33.5). Transient retries honor bounded `RetrySchedule` backoff and
+  rate-limit `RetryHeld` retry-after holds; invalid output reprompts with fresh context
+  within a bounded budget; and repeated failures walk
+  `escalation::EscalationState` one ladder step per exhausted step budget to the terminal
+  `HumanEscalation`, which blocks the task and stops the run with `FailuresBlocked` —
+  the explicit blocked/needs-human state §9.33.4 mandates, never silent approval. The
+  runner proposes, schedules, and stops only; promotion and verdicts stay with
+  Arbitraitor and the policy layer (§2.2, §9.33.7) (#202).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional
