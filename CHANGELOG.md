@@ -25,22 +25,6 @@ All notable changes to Orchestraitor are recorded here. The format follows
   feature). New CLI subcommand `orc github mint-token` prints only non-secret
   metadata (installation id, expiry, SHA-256 fingerprint prefix). Documented
   in `docs/cli/orc-github.md` and README (#307).
-- `ready-queue` (github-project-workflow skill) now enforces the §9.41
-  assignee rule: items assigned to humans are excluded while items assigned to
-  a declared service identity (`<slug>` or `<slug>[bot]`, case-insensitive)
-  stay schedulable. The service set comes from
-  `[service_identities].slugs` in the project config, overridable via
-  `$ORC_SERVICE_IDENTITIES`, defaulting to `arbsec-agent`; regression-tested
-  by `scripts/tests/ready-queue-filter.bash` (#307).
-- Documented the hidden test/debug override `ORCHESTRAITOR_GITHUB_API_ENDPOINT`
-  (`--github-api-endpoint`) for `orc github mint-token`, including the security
-  note that it redirects where the App JWT bearer is sent
-  (`docs/cli/orc-github.md`) (#307).
-- `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
-  workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
-  resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference
-  resolution through the index, and intra-spec markdown links. 14 unit tests including
-  failure injections; replaces the previous stub.
 - `orchestraitor-delivery` crate (spec §9.33) with validated `TaskMetadata` for the
   autonomous-delivery backlog: stable deterministic task ID, spec-requirement refs, acceptance
   criteria, DAG dependency edges, agent-catalog domain + board `RiskClass` + §9.28
@@ -199,73 +183,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
   Arbitraitor-compatible SHA-256 filesystem CAS for spec §9.17 and tech-stack §11.
 - `orchestraitor-context` crate with a content-addressed tree-sitter baseline indexer,
   Appendix E context query API, and spec §9.15.1 provenance envelopes on every emitted item.
-- Initial repository governance, contribution guidance, security policy, code of conduct, and
-  support documents, adapted from the sibling Arbitraitor repository for Orchestraitor's
-  spec-driven, security-first workflow.
-- Root [`AGENTS.md`](AGENTS.md) with always-active project rules: Arbitraitor as the exclusive
-  security authority (spec §2.2, §16), spec as source of truth, engineering priorities, scope
-  and GitHub workflow, review/merge invariants, documentation, testing, and Rust conventions.
 - Dual `MIT OR Apache-2.0` licensing, matching Arbitraitor.
-- `.github/` scaffolding: `CODEOWNERS`, `dependabot.yml`, issue templates
-  (`bug.yml`, `feature.yml`, `task.yml`, `spike.yml`, `config.yml`), a pull-request template
-  with stable machine-readable checklist markers, and a workflows `README.md` documenting the
-  intended CI layout once application code exists.
-- `.agents/project/orchestraitor-workflow.md` project workflow policy: MVP-only scheduling,
-  security-first review requirements, Arbitraitor ownership boundaries, cross-repository
-  blocker handling, required review domains, documentation and testing expectations, and PR
-  convergence requirements.
-- `.agents/project/github-project.example.toml` example GitHub Project configuration
-  (resolves mutable node IDs at runtime; commits only human-readable names).
-- Two reusable Agent Skills under `.agents/skills/`:
-  `github-project-workflow` (triage, decomposition, ready-queue, claims, reconciliation) and
-  `github-pr-lifecycle` (draft PR, CI inspection, adversarial review convergence, merge
-  eligibility, post-merge reconciliation), each with `references/` and composable `scripts/`.
 - `orchestraitor-provider-proxy` crate with OpenAI Chat Completions, OpenAI Responses,
   Anthropic Messages, `/v1/models`, short-lived local tokens, upstream BYOK credential
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
-
-### Changed
-
-- Crate-path drift fix from the specification split: path-form references to the
-  nonexistent `crates/orchestraitor-arbitraitor-client/` directory now name the real
-  `crates/orchestraitor-arb-client/` in the project workflow policy, the tech-stack tree
-  diagram, and the spec tree diagram. The crate's package name
-  `orchestraitor-arbitraitor-client` remains correct in prose; only path-form references
-  were wrong.
-- Agent operating docs now mandate the GitHub App service identity (`arbsec-agent`) for
-  agent-driven GitHub operations (issues, PRs, Projects v2 board writes, reviews, releases):
-  `AGENTS.md` gains a critical rule, the project workflow policy and both GitHub skills
-  carry the mandate, and personal owner auth is an explicitly labelled fallback only until
-  the E0 App-registration backlog task lands.
-- Specification reordered orchestrator-first: the split document set under `docs/spec/` now
-  leads with the self-improving orchestration loop — backlog → manager selection → worker →
-  pull request → adversarial review → human-gated merge, with every state transition tracked
-  on the kanban board — and presents the harness golden path as the loop's worker surface and
-  a first-class standalone tool (spec `00-overview.md` §1). Goals are reordered: orchestration
-  and self-hosting are the primary goals and the harness golden path moves to secondary goals
-  (spec `00-overview.md` §3.1, §3.2). The "autonomous agent swarms" MVP non-goal is re-scoped
-  from a blanket exclusion to the bounded, budgeted, board-tracked, human-gated loop;
-  unbounded or unbudgeted swarms, autonomy that bypasses the Arbitraitor security boundary,
-  and self-modification outside the reviewed loop remain out of scope (spec
-  `00-overview.md` §3.3). The harness document frames the harness as the orchestrator's
-  worker surface (spec `20-harness-worker.md`). Section headings and legacy `§N` anchors are
-  unchanged, so existing issue and pull-request references keep resolving through the
-  compatibility index; the §2.2 ownership invariant and §6 principles are unchanged.
-- Specification extended with the orchestrator-first normative sections: campaign
-  session-per-decision orchestration, watch-daemon supervision (poll tick, stall/orphan
-  detection, kick-off conditions, spend/run/subscription budget classes), agent issue
-  reporting (report ≠ self-fix, with the blocking-defect fix exception), the MCP-early tool
-  strategy with the built-in MCP proxy, coordinator decision tools, blocked-dependency
-  semantics, epic-focus scheduling with bug preemption, multi-org workspaces with
-  cross-project epics, the kanban board abstraction (`BoardProvider`), and the operator
-  chat mode (spec `10-orchestrator.md` §9.35-§9.44); plus role-based model routing with the
-  pluggable `DecisionProvider` trait and subscription-aware routing (spec
-  `30-model-routing.md` §9.45-§9.46). The TypeSafe/jev entry in the technology stack
-  records its early-access license status (not yet allowlisted; adapter default-off). The
-  §9.33 intro now states autonomous delivery as the primary product axis, matching the
-  reordered goals and the M1 milestone; section headings and legacy `§N` anchors are
-  unchanged.
 
 ### Fixed
 
@@ -276,27 +198,6 @@ All notable changes to Orchestraitor are recorded here. The format follows
 - `GitHubAppAuth` token cache: a panic mid-mint now resets the single-flight
   slot and wakes waiters instead of leaving the cache wedged in the
   `Minting` state (#307).
-- Lockfile refresh for yanked and advisory-flagged crates so `cargo deny check` and
-  `cargo audit` pass again: `chacha20 0.10.1 → 0.10.2` (yanked), `h2 0.4.15 → 0.4.19`
-  (RUSTSEC-2026-0258), `rustls 0.23.43 → 0.23.45` (RUSTSEC-2026-0285, with
-  `rustls-webpki 0.103.15`), `faster-hex 0.10.0 → 0.10.1` (RUSTSEC-2026-0306 warning).
-  All bumps stay inside the existing semver ranges; no manifest changes (#255).
-- Restored `crates/orchestraitor-workspace/`, which the provider-proxy squash merge (b96657f, PR
-  #223) had deleted after PR #219 merged it (spec §9.4, MVP-4). `orchestraitor-tui` and
-  `orchestraitor-provider-neuralwatt` were likewise absent from `[workspace].members`. All crates
-  are now listed explicitly so `cargo --workspace` parity-gate commands cover every crate
-  regardless of the dependency graph. During verification, `orchestraitor-workspace`
-  `tests::snapshot_has_no_dot_git` failed once on a cold cache and then passed in one isolated
-  and four consecutive full-suite runs; per spec §21.10 this flake must be root-caused if it
-  recurs in CI.
-- `ready-queue` (github-project-workflow skill) never produced output: the jq filter closed
-  `select(` early (stray `)`), leaf detection relied on null `issueType` (org-level native types
-  unset), and `blockedBy.totalCount` counted resolved blockers. The filter now lives in
-  `ready-queue.jq`, treats `task`/`bug` labels as leaf, filters only unresolved blockedBy edges,
-  and is regression-tested by `scripts/tests/ready-queue-filter.bash`, now run in CI (#251).
-  The output is a candidate queue: Project v2 `Status`/`Target` cannot be read by
-  `gh issue list`, so the project-manager still verifies those on the board before
-  claiming (documented in SKILL.md).
 - `orchestraitor-context` index is now keyed by blob digest instead of path: a file move to a
   new path with unchanged content is recognised as reuse, not reparse. Paths present in the
   previous index but absent from the new traversal are also evicted on reindex, so deleted
