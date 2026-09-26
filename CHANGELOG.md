@@ -192,6 +192,23 @@ All notable changes to Orchestraitor are recorded here. The format follows
   isolation for child processes, per-completion cost attribution, and explicit Mode D
   trust-boundary reporting per spec §10.1.
 
+### Changed
+
+- Specification reordered orchestrator-first: the split document set under `docs/spec/` now
+  leads with the self-improving orchestration loop — backlog → manager selection → worker →
+  pull request → adversarial review → human-gated merge, with every state transition tracked
+  on the kanban board — and presents the harness golden path as the loop's worker surface and
+  a first-class standalone tool (spec `00-overview.md` §1). Goals are reordered: orchestration
+  and self-hosting are the primary goals and the harness golden path moves to secondary goals
+  (spec `00-overview.md` §3.1, §3.2). The "autonomous agent swarms" MVP non-goal is re-scoped
+  from a blanket exclusion to the bounded, budgeted, board-tracked, human-gated loop;
+  unbounded or unbudgeted swarms, autonomy that bypasses the Arbitraitor security boundary,
+  and self-modification outside the reviewed loop remain out of scope (spec
+  `00-overview.md` §3.3). The harness document frames the harness as the orchestrator's
+  worker surface (spec `20-harness-worker.md`). Section headings and legacy `§N` anchors are
+  unchanged, so existing issue and pull-request references keep resolving through the
+  compatibility index; the §2.2 ownership invariant and §6 principles are unchanged.
+
 ### Fixed
 
 - Lockfile refresh for yanked and advisory-flagged crates so `cargo deny check` and
