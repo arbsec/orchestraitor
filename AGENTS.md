@@ -122,7 +122,10 @@ Any change to **public behavior** updates human-facing docs in the same PR. Publ
 includes: CLI/TUI behavior, configuration, environment variables, public APIs, daemon
 protocols, built-in tools, MCP behavior, provider support, security guarantees, error
 behavior, and installation/migration/upgrade/removal. Generated API docs and code comments
-alone do not satisfy this requirement. Keep `CHANGELOG.md` `[Unreleased]` current.
+alone do not satisfy this requirement. Keep `CHANGELOG.md` `[Unreleased]` current. The
+changelog documents **product behavior only** — internal development and process notes
+(agent tooling, skill scripts, workflow governance, spec-set restructuring) are tracked in
+`docs/spec` (source of truth) and `.agents/` (operational policy), never in the changelog.
 
 ## Testing
 
