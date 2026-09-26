@@ -66,7 +66,7 @@ arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", re
 arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-receipt    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
 arbitraitor-mcp        = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
-arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "4ebebb3ad492d68548c4e2ff4aff98d20c8d5b1f" }
+arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "8037545eafeda2bec7bebe98ef79b3a35f5fc85a" }
 
 # Core async + serialization (tech-stack.md §1)
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net", "process", "io-util", "signal"] }
