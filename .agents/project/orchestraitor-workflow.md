@@ -136,3 +136,15 @@ enforces):
   (spec `10-orchestrator.md` §9.33.2).
 - No committing a `Cargo.toml` workspace without simultaneously adding the parity-gate
   workflows (see [`.github/workflows/README.md`](../../.github/workflows/README.md)).
+
+## Housekeeping
+
+- After a PR merges (or is closed/handed off): delete the branch (local + remote if
+  present) and remove the task worktree — `git worktree remove <path>` +
+  `git worktree prune`; never leave merged worktrees on disk.
+- Reclaim build artifacts regularly: `cargo clean` in the main checkout and any
+  long-lived worktree; stale `target/` directories are pure build cache and must not
+  accumulate across worktrees.
+- Before removing a worktree, verify it is clean (`git status --porcelain` empty) and its
+  work is landed (merged PR or explicit handoff); a dirty or unmerged worktree is kept
+  and reported, never force-removed.

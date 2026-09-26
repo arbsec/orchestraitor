@@ -84,6 +84,11 @@ convenience
 - **One independently testable, revertible concern per PR.** Prefer thin vertical slices.
 - **Worktree-first.** `git worktree add -b <type>/<slug> ../orchestraitor-<slug> origin/main`
   — never commit directly to `main` (matches Arbitraitor).
+- **Worktree and build hygiene.** A task worktree is temporary: once its PR merges (or the
+  work is closed or handed off), delete the branch and remove the worktree from disk —
+  merged worktrees and their `target/` build artifacts never linger. Reclaim build
+  artifacts regularly (`cargo clean`, stale `target/` dirs across worktrees); build output
+  is always regenerable and must not accumulate to fill the disk.
 - **Conventional Commits** PR titles (`feat(...)`, `fix(...)`, `security(...)`, `docs(...)`,
   `refactor(...)`, `test(...)`, `ci(...)`, `chore(...)`, `build(...)`, `perf(...)`). Squash merge.
 - **Check for conflicting in-flight work** before starting: scan open issues/PRs touching the
