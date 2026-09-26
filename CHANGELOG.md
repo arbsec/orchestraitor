@@ -105,6 +105,26 @@ All notable changes to Orchestraitor are recorded here. The format follows
   the explicit blocked/needs-human state §9.33.4 mandates, never silent approval. The
   runner proposes, schedules, and stops only; promotion and verdicts stay with
   Arbitraitor and the policy layer (§2.2, §9.33.7) (#202).
+- Change-set review pipeline on `orchestraitor-delivery` (spec §9.33.4): a deterministic,
+  synchronous, I/O-free `ReviewPipeline` that triggers on change-set completion, selects
+  reviewers once per trigger through `select_reviewers` (#195), and runs the generation-
+  bounded adversarial review loop over an injectable per-generation `ReviewOutcome`
+  producer (fresh context per generation is the invocation site's §9.33.1 duty; one
+  `GenerationStarted` journal event accounts for every generation boundary). Each
+  generation records reviewer findings into the `FindingLedger` so identical findings
+  deduplicate and unresolved-but-unreported findings resolve across loops (#196), then
+  `convergence::evaluate` (#197) renders the stop/continue/blocked decision. The
+  terminal `ReviewVerdict` is `StopNoBlockingFindings` when a full generation at the
+  current head leaves no finding at or above `minimum_severity_to_block`,
+  `MaxLoopsBlocked { reason }` when `max_review_loops` or the hard loop ceiling is
+  reached — the explicit `blocked`/`needs-human` state §9.33.4 mandates, never a silent
+  approval — `Failed` when reviewer output misses the spec-mandated finding payload,
+  and `SkippedEmptyChangeSet` when the trigger named no changed files. The append-only
+  `ReviewPipelineEvent` journal (`Triggered` / `GenerationStarted` /
+  `GenerationRecorded` / `ConvergenceEvaluated` / `Terminated`) is the §9.33.6 durable
+  decision record with snake_case serde. The pipeline proposes loop control only —
+  promotion and verdicts stay with Arbitraitor and the policy layer per the §9.33.7
+  security boundary (#50).
 - Review-finding ledger on `orchestraitor-delivery` for spec §9.33.4 finding deduplication
   and cross-loop tracking: `ReviewFinding` carries the spec-mandated payload (severity,
   evidence, affected paths, violated requirement or rule, proposed remediation, optional

@@ -14,6 +14,7 @@ pub mod findings;
 pub mod metadata;
 pub mod retry_rules;
 pub mod review_loop;
+pub mod review_pipeline;
 pub mod reviewer_selection;
 pub mod runner;
 pub mod schedule;
@@ -44,6 +45,10 @@ pub use retry_rules::{
     RetryScheduleError,
 };
 pub use review_loop::{ReviewLoopConfig, ReviewLoopConfigError, Severity};
+pub use review_pipeline::{
+    ReviewFailureReason, ReviewOutcome, ReviewPipeline, ReviewPipelineError, ReviewPipelineEvent,
+    ReviewRequest, ReviewVerdict,
+};
 pub use reviewer_selection::{
     ChangeSetProfile, GENERAL_DOMAIN, Language, ROLE_REVIEWING, ReviewerSelectionError,
     ReviewerSet, ReviewerSlot, SECURITY_DOMAIN, SelectionReason, TESTING_DOMAIN, select_reviewers,
