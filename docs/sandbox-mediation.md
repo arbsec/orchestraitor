@@ -59,6 +59,19 @@ pinned Arbitraitor revision the real surface is:
   (`crates/arbitraitor-exec/src/lib.rs:1104-1228`). The builder has no
   `configure_command`/`apply_sandbox` methods; no invented names are used.
 
+## Recorded deferrals and ownership
+
+- The exec-side receipt-matrix probe — spec
+  `40-arbitraitor-integration.md` §9.6's second authoritative probe,
+  realized upstream as `ExecutionContextBuilder::from_operation` — is
+  deferred to E5/`Contained` assurance. At `Mediated` assurance the pinned
+  revision defaults the exec effective-controls matrix
+  (`crates/arbitraitor-exec/src/lib.rs:1278-1281`), so there is no real
+  exec matrix for Orchestraitor to consume on this path.
+- Run-state wiring of the preflight record (controls matrix + verdict) and
+  any `orc doctor` surface for it are owned by the consumer task #310; this
+  task ships the probe/gate/record value only.
+
 ## Known upstream gap (recorded, owned by Arbitraitor)
 
 On hosts with the Landlock LSM active, the pinned revision applies its
@@ -72,3 +85,13 @@ path) and skip on affected hosts instead of weakening the enforcement
 posture; missing-control refusals are host-independent and always run. The
 fix belongs in `arbsec/arbitraitor` (Landlock rules vs. wrapper composition),
 not in Orchestraitor (spec `40-arbitraitor-integration.md` §16.2).
+
+Disclosure: until the upstream fix lands
+([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754)),
+network-isolated script execution is fail-closed-inoperative on
+Landlock-active hosts, and the full negative-test suite (network and
+filesystem canaries) silently skips its live portion on such hosts — the skip
+convention is `mediated_stack_or_skip`, whose doc comment documents the
+cause. Orchestraitor-side tracking lives in issue
+[#400](https://github.com/arbsec/orchestraitor/issues/400) (blocked by
+`arbsec/arbitraitor#754`).

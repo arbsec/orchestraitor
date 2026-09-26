@@ -769,6 +769,46 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn filesystem_denied_exec_leaves_no_canary_write() -> TestResult {
+        // spec 50-contracts-data.md §21.4 negative: assert the forbidden
+        // filesystem effect did NOT happen — the canary file must not exist,
+        // not merely a failed exit code.
+        //
+        // Given: a canary path directly under /tmp. The pinned Arbitraitor
+        // revision's Landlock ruleset grants /tmp read/execute only
+        // (`landlock_rules_for_script_execution`: `PathRule::read_execute`);
+        // write rights exist solely under the per-execution working and HOME
+        // directories (`arbitraitor-exec-<pid>-*`), so this write must be
+        // denied by the sandbox itself. Any pre-existing canary is removed
+        // first, so the assertion below observes only this run's effect.
+        const CANARY: &str = "/tmp/orc-311-canary-write";
+        let canary = Path::new(CANARY);
+        let Some(worker) = mediated_stack_or_skip() else {
+            return Ok(());
+        };
+        if canary.exists() {
+            std::fs::remove_file(canary)?;
+        }
+
+        // When: the mediated child attempts the forbidden write.
+        let run = worker.run_bash(b"echo x > /tmp/orc-311-canary-write\n")?;
+
+        // Then: the child could not write (non-zero exit) AND the canary
+        // does not exist — observable absence, not error attribution.
+        assert_ne!(
+            run.exit_code,
+            Some(0),
+            "filesystem-denied exec unexpectedly exited 0 attempting a /tmp write"
+        );
+        assert!(
+            !canary.exists(),
+            "forbidden write materialized {CANARY} despite read-execute-only /tmp"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn mediated_bash_nonzero_exit_is_a_script_result_not_a_refusal() -> TestResult {
         // Given: a gated worker.
         let Some(worker) = mediated_stack_or_skip() else {
