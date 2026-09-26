@@ -93,7 +93,7 @@ A `blockedBy` edge from an Orchestraitor issue to an Arbitraitor issue is NOT su
 
 ## Auth
 
-`gh api graphql` uses the same auth as the `gh` CLI default scope. No extra scope is required for read mutations on Projects, but setting Project fields still needs the `project` scope (`gh auth refresh -s project`).
+`gh api graphql` uses the same auth as the `gh` CLI default scope. No extra scope is required for read mutations on Projects, but setting Project fields still needs the `project` scope (`gh auth refresh -s project`). Agent-driven operations authenticate as the GitHub App service identity (see SKILL.md "Safety conditions"); these personal-account scope notes describe the labelled owner fallback only.
 
 ## Schema drift
 

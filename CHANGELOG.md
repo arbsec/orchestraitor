@@ -8,6 +8,11 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
+  workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
+  resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference
+  resolution through the index, and intra-spec markdown links. 14 unit tests including
+  failure injections; replaces the previous stub.
 - `orchestraitor-delivery` crate (spec §9.33) with validated `TaskMetadata` for the
   autonomous-delivery backlog: stable deterministic task ID, spec-requirement refs, acceptance
   criteria, DAG dependency edges, agent-catalog domain + board `RiskClass` + §9.28
@@ -194,6 +199,17 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Changed
 
+- Crate-path drift fix from the specification split: path-form references to the
+  nonexistent `crates/orchestraitor-arbitraitor-client/` directory now name the real
+  `crates/orchestraitor-arb-client/` in the project workflow policy, the tech-stack tree
+  diagram, and the spec tree diagram. The crate's package name
+  `orchestraitor-arbitraitor-client` remains correct in prose; only path-form references
+  were wrong.
+- Agent operating docs now mandate the GitHub App service identity (`arbsec-agent`) for
+  agent-driven GitHub operations (issues, PRs, Projects v2 board writes, reviews, releases):
+  `AGENTS.md` gains a critical rule, the project workflow policy and both GitHub skills
+  carry the mandate, and personal owner auth is an explicitly labelled fallback only until
+  the E0 App-registration backlog task lands.
 - Specification reordered orchestrator-first: the split document set under `docs/spec/` now
   leads with the self-improving orchestration loop — backlog → manager selection → worker →
   pull request → adversarial review → human-gated merge, with every state transition tracked

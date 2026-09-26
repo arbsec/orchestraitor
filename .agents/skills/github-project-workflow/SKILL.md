@@ -88,7 +88,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 
 - **Issue identifier**: number, URL, or JSON from stdin (for piping).
 - **Project config**: `.agents/project/github-project.local.toml` (copy of the example). If absent, scripts exit `2` with an actionable message — **never guess** org/project/field/option identity.
-- **`gh` auth**: `gh auth status` must report logged-in with the `project` scope for field writes (`gh auth refresh -s project` if missing).
+- **`gh` auth**: `gh auth status` must report logged-in with the `project` scope for field writes (`gh auth refresh -s project` if missing). Agent-driven operations authenticate as the GitHub App service identity (see Safety conditions), not a personal account.
 
 ## Outputs
 
@@ -114,6 +114,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 - **Preserve concurrent human edits.** Scripts compare `updatedAt` before and after; a mismatch exits `4` with "re-read and retry" rather than silently overwriting.
 - **No admin bypasses.** This skill never force-pushes, never bypasses review, never edits issues the caller cannot see.
 - **Cross-repo Arbitraitor blockers are linked, not duplicated.** Open the canonical issue in `arbsec/arbitraitor`, then create a `Blocked-By` edge from the Orchestraitor issue (spec `40-arbitraitor-integration.md` §16.2).
+- **Service identity, not personal accounts.** Agent-driven board and issue operations MUST authenticate as the project's GitHub App service identity — never a personal account. For Orchestraitor that is the `arbsec-agent` App (org-owned, installation-scoped; registration via the manifest flow with minimal permissions including org `projects: write`, installed on the arbsec repos only, installation ID resolved at runtime, tokens minted from the App private key — planning runbook `.omo/drafts/github-app-setup.md`). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option. Assignee fields accept user accounts only, so ownership rides board Status + run-state, not assignees.
 
 ## How this skill relates to project policy
 

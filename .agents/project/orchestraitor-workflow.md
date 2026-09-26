@@ -27,6 +27,14 @@ During the MVP phase, only issues that satisfy **all** of the following may be i
 Post-MVP items (`Target = Post-MVP`, spec `60-milestones.md` §999) are never scheduled during the MVP phase, even
 if they look easy. Open them; do not implement them.
 
+## GitHub service identity
+
+All agent-driven GitHub operations — board writes, issue lifecycle, PRs, reviews — run as
+the Orchestraitor GitHub App service identity (`arbsec-agent`), never a personal account
+(`AGENTS.md` critical rules; planning runbook `.omo/drafts/github-app-setup.md`). Until the
+E0 backlog task registers the App, personal owner auth is an explicitly labelled fallback
+only, never an equal option.
+
 ## Security-first review
 
 - **Orchestraitor implements no security primitive** (spec `40-arbitraitor-integration.md` §2.2, §16). A Task that needs new

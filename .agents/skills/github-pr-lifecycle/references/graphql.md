@@ -82,4 +82,4 @@ An **outdated, unresolved** thread indicates the diff changed since the comment.
 
 ## Auth
 
-`gh api graphql` uses the same OAuth token as the `gh` CLI. No additional scope is required for reading review threads. Resolving threads requires repo write access (default scope).
+`gh api graphql` uses the same OAuth token as the `gh` CLI. No additional scope is required for reading review threads. Resolving threads requires repo write access (default scope). Agent-driven operations authenticate as the GitHub App service identity (see SKILL.md "Safety conditions"); these personal-account scope notes describe the labelled owner fallback only.
