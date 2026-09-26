@@ -36,5 +36,6 @@ pub fn run_with_writer<W: Write>(cli: Cli, writer: &mut W) -> miette::Result<()>
         Commands::Config(command) => commands::config::run(&cli.paths, command, writer),
         Commands::Models(command) => commands::models::run(&cli.paths, command, writer),
         Commands::GitHub(command) => commands::github::run(&cli.paths, command, writer),
+        Commands::Board(command) => commands::board::run(&cli.paths, command, writer),
     }
 }
