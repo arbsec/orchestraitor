@@ -6,7 +6,7 @@ use crate::config::parse::flatten_config;
 use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
-    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     SubscriptionConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
@@ -117,6 +117,7 @@ impl OrchestraitorConfig {
         );
         merge_map(&mut self.providers, next.providers, ProviderConfig::merge);
         merge_option(&mut self.agents, next.agents, AgentsConfig::merge);
+        merge_map(&mut self.roles, next.roles, RoleConfig::merge);
         merge_map(
             &mut self.subscriptions,
             next.subscriptions,
@@ -188,6 +189,12 @@ impl DomainConfig {
     fn merge(&mut self, next: Self) {
         merge_scalar(&mut self.description, next.description);
         merge_scalar(&mut self.roles, next.roles);
+        merge_option(&mut self.routing, next.routing, RoutingConfig::merge);
+    }
+}
+
+impl RoleConfig {
+    fn merge(&mut self, next: Self) {
         merge_option(&mut self.routing, next.routing, RoutingConfig::merge);
     }
 }

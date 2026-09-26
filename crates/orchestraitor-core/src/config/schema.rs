@@ -16,6 +16,8 @@ pub struct OrchestraitorConfig {
     pub providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Agent domain routing and role templates.
     pub agents: Option<AgentsConfig>,
+    /// Role routing table keyed by role id (spec `30-model-routing.md` §9.45).
+    pub roles: Option<BTreeMap<String, RoleConfig>>,
     /// Subscription definitions keyed by subscription id.
     pub subscriptions: Option<BTreeMap<String, SubscriptionConfig>>,
     /// Budget definitions keyed by budget id.
@@ -93,6 +95,13 @@ pub struct DomainConfig {
     /// Roles available inside this domain.
     pub roles: Option<Vec<String>>,
     /// Routing defaults for this domain.
+    pub routing: Option<RoutingConfig>,
+}
+
+/// Role configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleConfig {
+    /// Routing defaults for this role.
     pub routing: Option<RoutingConfig>,
 }
 

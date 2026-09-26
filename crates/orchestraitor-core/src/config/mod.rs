@@ -9,7 +9,7 @@ pub use resolver::ConfigResolver;
 pub use schema::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
-    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     SubscriptionConfig,
 };
 
