@@ -155,6 +155,22 @@ enforces):
 5. required documentation is updated;
 6. the managed PR-checklist items are checked based on evidence.
 
+## Merge authority
+
+- **Autonomous merge (owner directive, 2026-09-26):** once all convergence requirements above
+  hold, the orchestrator merges the PR itself as the `arbsec-agent` service identity — no
+  standing human gate on non-security PRs. The ruleset (`required_signatures`,
+  extension-approval for unattributed changes, CodeQL/coverage thresholds) remains the
+  independent technical gate.
+- **Human review exception:** changes in the spec `50-contracts-data.md` §21.1
+  security-sensitive classes (privilege boundaries, sandboxing, policy, capability issuance,
+  filesystem projection, network/secret handling, `unsafe`) get the `needs-human-review`
+  label and stay open for the owner. Dependency updates are handled by the agent
+  security-reviewer domain, not the human exception.
+- Convergence that cannot be reached within the configured loop/cost/time budget produces
+  `blocked` / `needs-human` state — never an automatic merge (spec `10-orchestrator.md`
+  §9.24, §9.33.4).
+
 ## Forbidden administrative shortcuts
 
 - No merge on red. No admin-merge bypass.
