@@ -12,6 +12,11 @@
 //!    + verdict, the run-state seam) and refuses to construct the worker when
 //!      any required control is [`ControlState::Unavailable`] — the typed
 //!      [`MediationError::UnavailableControls`] names each missing control.
+//!      Controls that Arbitraitor reports as
+//!      [`ControlState::Degraded`](crate::sandbox::ControlState::Degraded) are
+//!      recorded in [`WorkerPreflight::degraded_controls`] (spec §6.7: record
+//!      the degradation) without refusing, mirroring the daemon capability
+//!      report's distinct `degraded` status.
 //! 2. The bootstrap loop is Linux-only per ADR-0024: any other platform fails
 //!    closed with [`MediationError::UnsupportedPlatform`] — no explicit
 //!    non-secure mode exists for the bootstrap worker.
@@ -20,14 +25,36 @@
 //!    `ScriptExecution::bash()`) with an explicit
 //!    [`ExecutionPolicy`](crate::exec::ExecutionPolicy) whose network policy is
 //!    [`NetworkPolicy::Denied`](crate::exec::NetworkPolicy::Denied). No direct
-//!    `std::process` spawn exists on the worker path; Landlock, seccomp,
-//!    `no_new_privs`, fd closure, and resource limits are applied by
+//!    `std::process` spawn exists on the worker path; Landlock filesystem
+//!    rules (where the kernel actually delivers Landlock — see the
+//!    probe-vs-enforcement note below), `no_new_privs`, fd closure, network
+//!    namespace isolation, and fenced resource limits are applied by
 //!    Arbitraitor (`configure_command` / `configure_filesystem_isolation` /
-//!    fenced `prlimit` inside `arbitraitor-exec`).
+//!    fenced `prlimit` inside `arbitraitor-exec`). seccomp-based syscall
+//!    filtering is **not** installed on this path at the pinned revision; the
+//!    matrix's `syscall_filtering` field is a platform classification, not an
+//!    enforcement claim, until the Contained-assurance exec matrix lands (E5).
 //!
 //! This module implements no security primitive: it probes Arbitraitor,
 //! records the probe, and gates on Arbitraitor's report. E5 scope (leases,
 //! receipts, approval-required handling, Disposable mode) is deliberately out.
+//!
+//! # Probe-vs-enforcement (known upstream gaps)
+//!
+//! The preflight consumes Arbitraitor's classification matrix plus its live
+//! probe metadata; two upstream divergences are disclosed rather than hidden:
+//!
+//! - Landlock **active** (arbsec/arbitraitor#754, tracked via #400): the
+//!   network wrapper dies under its own ruleset, so `run_bash` fails closed
+//!   on such hosts (the script never runs). See `docs/sandbox-mediation.md`.
+//! - Landlock **absent on Linux** (arbsec/arbitraitor#755, tracked via #401):
+//!   the classification reports
+//!   [`Available`](crate::sandbox::ControlState::Available) but upstream's
+//!   enforcement hook installs no ruleset when the kernel probe reports no
+//!   Landlock ABI. Until upstream reports this natively, the verdict
+//!   derivation treats `landlock_abi_version: None` on the supported Linux
+//!   platform as a missing `filesystem_isolation` control and refuses —
+//!   consuming Arbitraitor's own probe datum, not inferring a control state.
 //!
 //! Spec-narrative mapping (spec `40-arbitraitor-integration.md` §9.6 names
 //! `configure_command` / `apply_sandbox` conceptually): the pinned Arbitraitor
@@ -61,41 +88,44 @@ pub const WORKER_SANDBOX_MODE: SandboxMode = SandboxMode::Restricted;
 /// labelled non-secure fallback for the bootstrap loop.
 pub const WORKER_PLATFORM: &str = "linux";
 
-/// Names of the required sandbox controls that came back unavailable.
+/// Names of required sandbox controls with a non-`Available` state.
 ///
-/// Kept as a typed, displayable list so the refusal is both machine-testable
-/// (exact control identifiers) and log-safe (control names only — never
-/// command lines, arguments, or output).
+/// Kept as a typed, displayable list so refusal and degradation records are
+/// both machine-testable (exact control identifiers) and log-safe (control
+/// names only — never command lines, arguments, or output). It backs
+/// `missing_controls` ([`ControlState::Unavailable`] entries) and
+/// `degraded_controls` ([`ControlState::Degraded`](crate::sandbox::ControlState::Degraded)
+/// entries) on [`WorkerPreflight`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MissingControls(Vec<&'static str>);
+pub struct ControlNames(Vec<&'static str>);
 
-impl MissingControls {
-    /// Returns the unavailable control identifiers in stable order.
+impl ControlNames {
+    /// Returns the control identifiers in stable order.
     #[must_use]
     pub fn as_slice(&self) -> &[&'static str] {
         &self.0
     }
 
-    /// Returns true when no required control is unavailable.
+    /// Returns true when the list is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of unavailable required controls.
+    /// Returns the number of listed controls.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-impl fmt::Display for MissingControls {
+impl fmt::Display for ControlNames {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0.join(", "))
     }
 }
 
-impl IntoIterator for MissingControls {
+impl IntoIterator for ControlNames {
     type Item = &'static str;
     type IntoIter = std::vec::IntoIter<&'static str>;
 
@@ -134,7 +164,7 @@ pub enum MediationError {
         /// Probed platform string.
         platform: String,
         /// Required controls that Arbitraitor reports as unavailable.
-        missing: MissingControls,
+        missing: ControlNames,
     },
     /// Building the mediated execution context failed.
     #[error("mediated execution context construction failed: {reason}")]
@@ -154,7 +184,9 @@ pub enum MediationError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreflightVerdict {
     /// Every required control is available on a supported platform; the
-    /// worker may start mediated.
+    /// worker may start mediated. Controls Arbitraitor reports as
+    /// [`Degraded`](crate::sandbox::ControlState::Degraded) do not refuse —
+    /// they are recorded in [`WorkerPreflight::degraded_controls`].
     Allowed,
     /// At least one required control is unavailable, or the platform is
     /// unsupported; the worker must not start.
@@ -178,7 +210,15 @@ pub struct WorkerPreflight {
     pub verdict: PreflightVerdict,
     /// Required controls Arbitraitor reports as unavailable (empty iff the
     /// matrix is fully contained).
-    pub missing_controls: MissingControls,
+    pub missing_controls: ControlNames,
+    /// Required controls Arbitraitor reports as
+    /// [`Degraded`](crate::sandbox::ControlState::Degraded). Degradation is
+    /// recorded (spec §6.7) but does not refuse — this mirrors the daemon
+    /// capability report's distinct `degraded` status. Always empty today:
+    /// the pinned Arbitraitor revision never emits `Degraded` (the field
+    /// exists so the run-state record survives upstream introducing it —
+    /// arbsec/arbitraitor#755 will add the first real degraded case).
+    pub degraded_controls: ControlNames,
     /// The Arbitraitor-owned effective-controls matrix for this run.
     pub controls: EffectiveControls,
 }
@@ -204,7 +244,8 @@ pub fn probe_worker_preflight(client: &ArbitraitorClient, platform: &str) -> Wor
 /// with fixture matrices (mirrors the `build_report` seam in
 /// `orchestraitor-daemon`'s startup capability probe).
 fn build_preflight(platform: &str, controls: EffectiveControls) -> WorkerPreflight {
-    let missing_controls = unavailable_controls(&controls);
+    let missing_controls = unavailable_controls(platform, &controls);
+    let degraded_controls = degraded_controls(&controls);
     let verdict = if is_supported_platform(platform) && missing_controls.is_empty() {
         PreflightVerdict::Allowed
     } else {
@@ -215,6 +256,7 @@ fn build_preflight(platform: &str, controls: EffectiveControls) -> WorkerPreflig
         mode: WORKER_SANDBOX_MODE,
         verdict,
         missing_controls,
+        degraded_controls,
         controls,
     }
 }
@@ -222,6 +264,11 @@ fn build_preflight(platform: &str, controls: EffectiveControls) -> WorkerPreflig
 /// Returns true when `platform` is the supported bootstrap-worker platform.
 fn is_supported_platform(platform: &str) -> bool {
     platform.eq_ignore_ascii_case(WORKER_PLATFORM)
+}
+
+/// Returns true when `platform` names the platform the binary is running on.
+fn platform_matches_host(platform: &str) -> bool {
+    platform.eq_ignore_ascii_case(std::env::consts::OS)
 }
 
 /// Applies the fail-closed spawn decision to a recorded preflight.
@@ -252,7 +299,58 @@ fn gate_preflight(preflight: WorkerPreflight) -> Result<WorkerPreflight, Mediati
 /// (Arbitraitor's sandbox spec section 27.7) and match the daemon
 /// health-report identifiers so run-state records and health RPCs name
 /// controls identically.
-fn unavailable_controls(controls: &EffectiveControls) -> MissingControls {
+///
+/// Fail-closed stopgap (arbsec/arbitraitor#755, tracked via #401): on the
+/// supported Linux platform, a missing Landlock ABI probe means upstream's
+/// filesystem-isolation hook installs no ruleset at all, yet the matrix still
+/// classifies `filesystem_isolation` as `Available`. Until upstream reports
+/// the divergence, the probe datum itself (`landlock_abi_version: None`) is
+/// consumed here — treating that control as missing, never inferring states.
+fn unavailable_controls(platform: &str, controls: &EffectiveControls) -> ControlNames {
+    let landlock_abi_absent =
+        is_supported_platform(platform) && controls.landlock_abi_version.is_none();
+    let states = [
+        (
+            "filesystem_isolation",
+            controls.filesystem_isolation,
+            landlock_abi_absent,
+        ),
+        ("network_isolation", controls.network_isolation, false),
+        (
+            "process_tree_containment",
+            controls.process_tree_containment,
+            false,
+        ),
+        (
+            "privilege_suppression",
+            controls.privilege_suppression,
+            false,
+        ),
+        ("syscall_filtering", controls.syscall_filtering, false),
+        (
+            "platform_settings_isolation",
+            controls.platform_settings_isolation,
+            false,
+        ),
+        ("resource_limits", controls.resource_limits, false),
+    ];
+    ControlNames(
+        states
+            .into_iter()
+            .filter(|(_, state, treat_as_unavailable)| {
+                matches!(state, ControlState::Unavailable) || *treat_as_unavailable
+            })
+            .map(|(identifier, _, _)| identifier)
+            .collect(),
+    )
+}
+
+/// Names the required controls that are [`ControlState::Degraded`].
+///
+/// Degradation is recorded, not refused (spec §6.7; mirrors the daemon
+/// capability report's `degraded` status). No identifier is inferred beyond
+/// what Arbitraitor reported.
+fn degraded_controls(controls: &EffectiveControls) -> ControlNames {
     let states = [
         ("filesystem_isolation", controls.filesystem_isolation),
         ("network_isolation", controls.network_isolation),
@@ -268,16 +366,24 @@ fn unavailable_controls(controls: &EffectiveControls) -> MissingControls {
         ),
         ("resource_limits", controls.resource_limits),
     ];
-    MissingControls(
+    ControlNames(
         states
             .into_iter()
-            .filter(|(_, state)| matches!(state, ControlState::Unavailable))
+            .filter(|(_, state)| matches!(state, ControlState::Degraded))
             .map(|(identifier, _)| identifier)
             .collect(),
     )
 }
 
 /// Captured result of a mediated bash run.
+///
+/// Host-shape note (arbsec/arbitraitor#754, tracked via #400): on hosts where
+/// the mediated wrapper cannot start at all (Landlock-active hosts), the
+/// failure surfaces as `Ok` with the wrapper's non-zero exit code and its
+/// diagnostic in `stderr` — the script did **not** run, and there is no
+/// isolation-off fallback on this path. Treat a non-zero `exit_code` with an
+/// empty `stdout` as "the mediated stack may not have started"; see
+/// `docs/sandbox-mediation.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediatedRun {
     /// Exit code reported by the interpreter. `None` when the interpreter was
@@ -311,7 +417,10 @@ impl MediatedWorker {
     /// # Errors
     ///
     /// - [`MediationError::UnsupportedPlatform`] when `platform` is not Linux
-    ///   (ADR-0024 fail closed; no non-secure bootstrap mode).
+    ///   (ADR-0024 fail closed; no non-secure bootstrap mode), or when
+    ///   `platform` names a different platform than the actual host
+    ///   (`std::env::consts::OS`) — a mislabelled probe must not seed a
+    ///   run-state record claiming controls the host cannot deliver.
     /// - [`MediationError::UnavailableControls`] naming each required control
     ///   Arbitraitor reports as [`ControlState::Unavailable`].
     ///
@@ -319,6 +428,11 @@ impl MediatedWorker {
     /// process, no temporary execution directory, no environment filtering —
     /// fail closed with zero side effects.
     pub fn spawn(client: &ArbitraitorClient, platform: &str) -> Result<Self, MediationError> {
+        if !platform_matches_host(platform) {
+            return Err(MediationError::UnsupportedPlatform {
+                platform: platform.to_owned(),
+            });
+        }
         let preflight = gate_preflight(probe_worker_preflight(client, platform))?;
         debug_assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
         Ok(Self { preflight })
@@ -338,8 +452,10 @@ impl MediatedWorker {
     /// with an explicitly network-denied
     /// [`ExecutionPolicy`](crate::exec::ExecutionPolicy), the allowlisted
     /// environment, controlled PATH, temporary HOME/working directories,
-    /// privilege-elevation rejection, Landlock filesystem rules, and fenced
-    /// resource limits — all enforced by the pinned Arbitraitor revision.
+    /// privilege-elevation rejection, Landlock filesystem rules (wherever the
+    /// kernel actually delivers Landlock — see `docs/sandbox-mediation.md`),
+    /// and fenced resource limits — all enforced by the pinned Arbitraitor
+    /// revision.
     ///
     /// # Errors
     ///
@@ -349,6 +465,11 @@ impl MediatedWorker {
     ///   mediated context (e.g. running as root, unsafe PATH entry).
     /// - [`MediationError::Bash`] when spawn, script piping, or output
     ///   collection fails at the Arbitraitor exec layer.
+    ///
+    /// A wrapper that dies before the interpreter starts is **not** an error
+    /// by upstream contract: it yields `Ok` with a non-zero
+    /// [`MediatedRun::exit_code`] and the wrapper diagnostic in
+    /// [`MediatedRun::stderr`] — see the [`MediatedRun`] host-shape note.
     pub fn run_bash(&self, script: &[u8]) -> Result<MediatedRun, MediationError> {
         linux_exec::run_bash(script)
     }
@@ -455,6 +576,7 @@ mod linux_exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::LandlockAbiVersion;
     use std::path::Path;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -467,6 +589,16 @@ mod tests {
     // Preflight recording + gating (unit seam, no process spawn)
     // -------------------------------------------------------------------
 
+    /// Returns a fully-available fixture matrix whose Landlock probe datum
+    /// matches a kernel that delivers the ABI (so the probe-vs-enforcement
+    /// stopgap for arbsec/arbitraitor#755 stays inert unless a test targets
+    /// it explicitly).
+    fn available_controls_with_landlock_abi() -> EffectiveControls {
+        let mut controls = EffectiveControls::all_available();
+        controls.landlock_abi_version = Some(LandlockAbiVersion::V1);
+        controls
+    }
+
     #[test]
     fn preflight_on_linux_records_allowed_verdict_and_full_matrix() {
         // Given: a typed Arbitraitor adapter on the Linux reference platform.
@@ -475,20 +607,33 @@ mod tests {
         // When: probing the bootstrap-worker preflight.
         let preflight = probe_worker_preflight(&client, "linux");
 
-        // Then: the run-state record carries the Restricted mode, the
-        // Arbitraitor controls matrix, an Allowed verdict, and no gaps.
+        // Then: the record always carries the Restricted mode and the
+        // Arbitraitor controls matrix verbatim.
         assert_eq!(preflight.mode, SandboxMode::Restricted);
-        assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
-        assert!(preflight.missing_controls.is_empty());
-        assert!(preflight.controls.is_fully_contained());
         assert!(!preflight.controls.has_unavailable());
+        // And: the verdict tracks the Landlock probe datum (see the #755
+        // stopgap in `unavailable_controls`). On hosts that deliver Landlock
+        // the verdict is Allowed with no gaps; on hosts that do not, the
+        // record refuses with exactly `filesystem_isolation` missing.
+        if preflight.controls.landlock_abi_version.is_some() {
+            assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
+            assert!(preflight.missing_controls.is_empty());
+            assert!(preflight.controls.is_fully_contained());
+            assert!(preflight.degraded_controls.is_empty());
+        } else {
+            assert_eq!(preflight.verdict, PreflightVerdict::Refused);
+            assert_eq!(
+                preflight.missing_controls.as_slice(),
+                ["filesystem_isolation"]
+            );
+        }
     }
 
     #[test]
     fn preflight_records_refused_verdict_with_missing_controls_listed() {
         // Given: a fixture controls matrix with exactly one unavailable
         // control (simulated missing-capability probe result).
-        let mut controls = EffectiveControls::all_available();
+        let mut controls = available_controls_with_landlock_abi();
         controls.network_isolation = ControlState::Unavailable;
 
         // When: building the preflight record.
@@ -500,9 +645,64 @@ mod tests {
     }
 
     #[test]
+    fn preflight_records_degraded_controls_without_refusing() {
+        // Given: a matrix where one control is degraded (simulated future
+        // upstream report — arbsec/arbitraitor#755) and none unavailable.
+        let mut controls = available_controls_with_landlock_abi();
+        controls.syscall_filtering = ControlState::Degraded;
+
+        // When: building the preflight record.
+        let preflight = build_preflight("linux", controls);
+
+        // Then: the verdict mirrors the daemon capability report's semantics
+        // — degraded does not fail closed, it is recorded for the run state.
+        assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
+        assert!(preflight.missing_controls.is_empty());
+        assert_eq!(
+            preflight.degraded_controls.as_slice(),
+            ["syscall_filtering"]
+        );
+    }
+
+    #[test]
+    fn landlock_absent_linux_preflight_refuses_filesystem_isolation() -> TestResult {
+        // gen-2 finding F1 stopgap regression test (arbsec/arbitraitor#755,
+        // tracked via #401): the classification claims Available while the
+        // kernel probe datum reveals the enforcement hook installs no
+        // ruleset. The verdict must refuse that host class.
+        //
+        // Given: an all-available matrix on linux with no Landlock ABI.
+        let controls = EffectiveControls::all_available();
+        assert!(controls.landlock_abi_version.is_none());
+        assert_eq!(controls.filesystem_isolation, ControlState::Available);
+
+        // When: building the preflight record for the supported platform.
+        let preflight = build_preflight("linux", controls);
+
+        // Then: the record refuses and names filesystem_isolation — the
+        // false Available classification is not trusted.
+        assert_eq!(preflight.verdict, PreflightVerdict::Refused);
+        assert_eq!(
+            preflight.missing_controls.as_slice(),
+            ["filesystem_isolation"]
+        );
+
+        // And: the spawn gate surfaces the typed refusal, so no worker can
+        // exist on this host class.
+        let Err(error) = gate_preflight(preflight) else {
+            return Err("gate allowed spawn on a Landlock-absent Linux host".into());
+        };
+        let MediationError::UnavailableControls { missing, .. } = &error else {
+            return Err(format!("expected UnavailableControls, got: {error}").into());
+        };
+        assert_eq!(missing.as_slice(), ["filesystem_isolation"]);
+        Ok(())
+    }
+
+    #[test]
     fn gate_refuses_spawn_with_typed_error_naming_the_missing_control() -> TestResult {
         // Given: a fixture preflight with one unavailable control.
-        let mut controls = EffectiveControls::all_available();
+        let mut controls = available_controls_with_landlock_abi();
         controls.filesystem_isolation = ControlState::Unavailable;
         let preflight = build_preflight("linux", controls);
 
@@ -628,6 +828,37 @@ mod tests {
             text.contains("no non-secure mode"),
             "missing no-fallback semantics: {text}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_refuses_platform_label_mismatching_the_host() -> TestResult {
+        // gen-2 finding F6 regression: a platform label that names a
+        // different platform than the actual host must be refused — it would
+        // otherwise seed a run-state record claiming controls from another
+        // platform's classification.
+        //
+        // On the supported Linux host the only mismatching labels are
+        // non-Linux ones (already covered by the unsupported-platform tests
+        // above); on any other host the lying label is `linux` itself.
+        // Run whichever half of the check this host can exercise.
+        if std::env::consts::OS == WORKER_PLATFORM {
+            return Ok(());
+        }
+
+        let client = linux_client();
+        let Err(error) = MediatedWorker::spawn(&client, WORKER_PLATFORM) else {
+            return Err(format!(
+                "bootstrap worker spawned with platform label {:?} on host {:?}",
+                WORKER_PLATFORM,
+                std::env::consts::OS
+            )
+            .into());
+        };
+        let MediationError::UnsupportedPlatform { platform } = &error else {
+            return Err(format!("expected UnsupportedPlatform, got: {error}").into());
+        };
+        assert_eq!(platform, WORKER_PLATFORM);
         Ok(())
     }
 

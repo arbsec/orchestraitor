@@ -13,14 +13,20 @@ MediatedWorker::spawn(client, platform)
   └─ probe_worker_preflight            arbitraitor_sandbox::compute_effective_controls
        (SandboxMode::Restricted, platform) → WorkerPreflight { controls matrix, verdict }
   └─ gate_preflight                    fail-closed decision on Arbitraitor's report
-       ├─ platform != linux   → Err(UnsupportedPlatform)   (ADR-0024; no non-secure mode)
-       └─ any control Unavailable → Err(UnavailableControls { missing })
-                                           naming every missing control
+        ├─ platform != linux   → Err(UnsupportedPlatform)   (ADR-0024; no non-secure mode)
+        ├─ any control Unavailable → Err(UnavailableControls { missing })
+        │                          naming every missing control
+        └─ landlock_abi_version: None on linux → filesystem_isolation treated as
+                                           missing (see the Landlock-absent gap below)
+      Degraded controls never refuse; they are recorded in
+      WorkerPreflight::degraded_controls for the run state.
 MediatedWorker::run_bash(script)
   └─ arbitraitor_exec ExecutionContextBuilder (via ScriptExecution::bash) with an
      explicit ExecutionPolicy { network_policy: NetworkPolicy::Denied, ..default() }
-     → /bin/bash --noprofile --norc over stdin, network namespace, Landlock,
-       no_new_privs, fd closure, fenced resource limits
+      → /bin/bash --noprofile --norc over stdin, network namespace, Landlock
+        (where the kernel delivers it), no_new_privs, fd closure, fenced
+        resource limits; no seccomp filter is installed on this path at the
+        pinned revision (syscall_filtering is classification, not enforcement)
 ```
 
 ## Fail-closed semantics
@@ -43,6 +49,24 @@ MediatedWorker::run_bash(script)
   `40-arbitraitor-integration.md` §9.23.4).
 - Bash script failures (non-zero exit) are script results, not mediation
   refusals: `MediatedRun` carries the real exit code and captured output.
+- Wrapper-start failures are not refusals either (upstream early-close
+  contract): on hosts where the mediated wrapper cannot start (see the
+  Landlock-active gap below), `run_bash` returns `Ok` with the wrapper's
+  non-zero exit code and its diagnostic in `stderr` — the script did **not**
+  run, and no isolation-off fallback exists on the worker path.
+- Landlock probe consumption (#755 stopgap): Arbitraitor classifies
+  `filesystem_isolation` as `Available` on any Linux platform, but its
+  enforcement hook installs no ruleset when the kernel probe reports no
+  Landlock ABI. Until upstream reports the divergence, the verdict consumes
+  the probe datum itself: `landlock_abi_version: None` on linux ⇒
+  `filesystem_isolation` is recorded as missing and the gate refuses. No
+  control state is inferred beyond what Arbitraitor reported.
+- Degraded controls are recorded, not refused: a
+  `ControlState::Degraded` entry lands in `WorkerPreflight::degraded_controls`
+  (spec `40-arbitraitor-integration.md` §6.7), mirroring the daemon
+  capability report's distinct `degraded` status. The pinned Arbitraitor
+  revision never emits `Degraded` today; the field exists so run-state
+  records already carry it when upstream starts reporting it.
 
 ## Spec-narrative mapping (pinned revision `4ebebb3`)
 
@@ -72,7 +96,7 @@ pinned Arbitraitor revision the real surface is:
   any `orc doctor` surface for it are owned by the consumer task #310; this
   task ships the probe/gate/record value only.
 
-## Known upstream gap (recorded, owned by Arbitraitor)
+## Known upstream gap: Landlock-active wrapper (recorded, owned by Arbitraitor)
 
 On hosts with the Landlock LSM active, the pinned revision applies its
 Landlock ruleset to the `unshare` network-namespace wrapper process, which
@@ -95,3 +119,30 @@ convention is `mediated_stack_or_skip`, whose doc comment documents the
 cause. Orchestraitor-side tracking lives in issue
 [#400](https://github.com/arbsec/orchestraitor/issues/400) (blocked by
 `arbsec/arbitraitor#754`).
+
+## Known upstream gap: Landlock-absent classification (discovered in review, owned by Arbitraitor)
+
+On Linux hosts **without** a working Landlock probe (kernel < 5.13 or LSM
+disabled), Arbitraitor's classification matrix still reports
+`filesystem_isolation: Available`, while its enforcement hook silently
+installs no ruleset at all (`let Some(abi) = abi else { return Ok(()) }` in
+the `pre_exec` hook). A consumer that trusts the classification alone would
+run mediated workers with **zero filesystem confinement** while its run-state
+records claim isolation — the inverse direction of the gap above, and more
+dangerous for containment.
+
+Until upstream reports the divergence, the preflight verdict consumes
+Arbitraitor's own probe datum: `landlock_abi_version: None` on the supported
+Linux platform records `filesystem_isolation` as missing and the gate refuses
+(fail closed). No control state is inferred beyond the probe; when upstream
+reports the divergence natively (degraded or unavailable), the stopgap is
+replaced by the upstream truth. The fix belongs in `arbsec/arbitraitor`
+([arbsec/arbitraitor#755](https://github.com/arbsec/arbitraitor/issues/755)),
+not in Orchestraitor (spec `40-arbitraitor-integration.md` §16.2).
+
+Disclosure: the stopgap means mediated workers **do not start** on
+Landlock-absent Linux hosts (typed
+`UnavailableControls { filesystem_isolation }` refusal), and the
+positive-matrix preflight test adapts to its host's actual probe. Tracking
+lives in issue [#401](https://github.com/arbsec/orchestraitor/issues/401)
+(blocked by `arbsec/arbitraitor#755`).
