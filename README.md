@@ -104,6 +104,7 @@ orc config migrate
 orc models refresh
 orc models rollback
 orc github mint-token
+orc routing resolve --role <id> [--json]
 ```
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
@@ -112,7 +113,10 @@ conflicts (two shards under the same layer both defining the same key) and repor
 keys. `orc config migrate` is forward-only, writes a `.bak.*` backup, and uses `toml_edit` so
 existing comments survive migration. `orc models refresh` forces an immediate models.dev
 catalog fetch into the local cache; `orc models rollback` returns to the previous cached
-snapshot without deleting manually configured models.
+snapshot without deleting manually configured models. `orc routing resolve` resolves one of
+the six built-in orchestration roles (`explore`, `research`, `plan`, `implement`, `review`,
+`verify`) to its configured `(provider, model)` pair and persists the routing decision
+record — see [docs/cli/orc-routing.md](docs/cli/orc-routing.md).
 
 ## GitHub App service identity
 

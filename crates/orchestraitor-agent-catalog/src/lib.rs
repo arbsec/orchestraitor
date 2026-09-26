@@ -6,14 +6,24 @@
 
 #![forbid(unsafe_code)]
 
+pub mod decision_store;
 pub mod detection;
 pub mod error;
 pub mod registry;
+pub mod role_routing;
 pub mod routing;
 
+pub use decision_store::{
+    LATEST_SCHEMA_VERSION as DECISION_STORE_SCHEMA_VERSION, RoleRoutingDecisionStore,
+    StoredRoleRoutingDecision,
+};
 pub use detection::{DetectedDomain, DetectionArtifact, DetectionRuleSet, Detector};
-pub use error::AgentCatalogError;
-pub use registry::{BUILT_IN_DOMAINS, BUILT_IN_ROLES, DomainDefinition, RoleDefinition};
+pub use error::{AgentCatalogError, AgentCatalogResult};
+pub use registry::{
+    BUILT_IN_DOMAINS, BUILT_IN_ORCHESTRATION_ROLES, BUILT_IN_ROLES, DomainDefinition,
+    RoleDefinition,
+};
+pub use role_routing::{BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, RoleRouter, RoleRoutingDecision};
 pub use routing::{
     MatchedStep, ResolvedRoute, Route, RoutingRequest, RoutingResolver, RoutingTable,
 };
