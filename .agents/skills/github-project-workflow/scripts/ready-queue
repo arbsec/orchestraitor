@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ready-queue: list issues that are eligible for implementation during MVP delivery.
-# Eligible = leaf Type (Task/Bug), Target=MVP, Status=Ready, no unresolved blockedBy.
+# Eligible = leaf Type (Task/Bug), Target=MVP, Status=Ready, no unresolved blockedBy,
+# and every assignee is a declared service identity (spec 10-orchestrator.md §9.41).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -9,13 +10,34 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "ready-queue" "List MVP-ready leaf issues (Type=Task/Bug, Target=MVP, Status=Ready, no unresolved blockers)."
+  orc_lib_print_help "ready-queue" "List MVP-ready leaf issues (Type=Task/Bug, Target=MVP, Status=Ready, no unresolved blockers, no human assignees)."
   exit "$ORC_OK"
 fi
 
 orc_lib_require_gh_scope
 orc_lib_load_project_config
 REPO="$(orc_lib_resolve_repo)"
+
+# --- Service identities for the assignee exclusion (spec §9.41) --------------
+# Items assigned to humans are excluded; items assigned to a declared service
+# identity (the GitHub App bot) stay schedulable. Precedence:
+# $ORC_SERVICE_IDENTITIES (comma-separated) > [service_identities].slugs in the
+# project config > built-in default "arbsec-agent".
+SERVICE_SLUGS="${ORC_SERVICE_IDENTITIES:-}"
+if [ -z "$SERVICE_SLUGS" ]; then
+  SERVICE_SLUGS="$(awk '
+    /^\[service_identities\]/ { in_section = 1; next }
+    /^\[/ { in_section = 0 }
+    in_section && /^[[:space:]]*slugs[[:space:]]*=/ {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*/, "", line)
+      gsub(/[][ \t"]/, "", line)
+      print line
+      exit
+    }' "$ORC_PROJECT_CONFIG")"
+fi
+SERVICE_SLUGS="${SERVICE_SLUGS:-arbsec-agent}"
+SERVICE_JSON="$(printf '%s' "$SERVICE_SLUGS" | tr ',' '\n' | sed '/^$/d' | jq -R . | jq -s .)"
 
 # Fetch open issues with the fields we need for filtering.
 # gh issue list --json returns blockedBy/subIssues as {nodes:[...],totalCount:N}.
@@ -42,7 +64,7 @@ fi
 # read Project v2 field values yet.
 MVP_LABEL="${ORC_MVP_LABEL:-MVP}"
 
-FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" -f "$SCRIPT_DIR/ready-queue.jq")"
+FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" --argjson service "$SERVICE_JSON" -f "$SCRIPT_DIR/ready-queue.jq")"
 
 COUNT="$(echo "$FILTERED" | jq 'length')"
 

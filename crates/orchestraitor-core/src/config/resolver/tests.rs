@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::error::OrchestraitorError;
+use crate::secret::SecretUri;
 
 fn source(layer: ConfigLayer, name: &str) -> ConfigSource {
     ConfigSource {
@@ -180,6 +181,70 @@ fn dynamic_domain_entries_merge_nested_fields_across_layers() -> Result<(), Orch
             .and_then(|domain| domain.routing.as_ref())
             .and_then(|routing| routing.model.as_deref()),
         Some("glm-4.5")
+    );
+    Ok(())
+}
+
+#[test]
+fn github_app_fields_merge_across_layers() -> Result<(), OrchestraitorError> {
+    let defaults = OrchestraitorConfig {
+        github_app: Some(GitHubAppConfig {
+            slug: Some(String::from("arbsec-agent")),
+            client_id: None,
+            installation_id: None,
+            private_key_uri: None,
+        }),
+        service_identities: Some(vec![String::from("arbsec-agent")]),
+        ..OrchestraitorConfig::default()
+    };
+    let user = OrchestraitorConfig {
+        github_app: Some(GitHubAppConfig {
+            slug: None,
+            client_id: Some(String::from("Iv23linxUDbcc53QbFVK")),
+            installation_id: Some(165_043_398),
+            private_key_uri: Some("secret://keyring/orchestraitor-app-pem".parse()?),
+        }),
+        service_identities: None,
+        ..OrchestraitorConfig::default()
+    };
+
+    let resolver = ConfigResolver::new()
+        .with_config(source(ConfigLayer::BuiltInDefaults, "built-in"), defaults)
+        .with_config(source(ConfigLayer::GlobalUser, "user"), user);
+    let config = resolver.resolve_config()?;
+    let github_app = config.github_app;
+
+    assert_eq!(
+        github_app.as_ref().and_then(|app| app.slug.as_deref()),
+        Some("arbsec-agent")
+    );
+    assert_eq!(
+        github_app.as_ref().and_then(|app| app.client_id.as_deref()),
+        Some("Iv23linxUDbcc53QbFVK")
+    );
+    assert_eq!(
+        github_app.as_ref().and_then(|app| app.installation_id),
+        Some(165_043_398)
+    );
+    assert_eq!(
+        github_app
+            .as_ref()
+            .and_then(|app| app.private_key_uri.as_ref())
+            .map(SecretUri::as_uri)
+            .as_deref(),
+        Some("secret://keyring/orchestraitor-app-pem")
+    );
+    assert_eq!(
+        config.service_identities.as_deref(),
+        Some([String::from("arbsec-agent")].as_slice())
+    );
+
+    let value = resolver.resolve_value("github_app.client_id", |config| {
+        config.github_app.as_ref()?.client_id.clone()
+    })?;
+    assert_eq!(
+        value.map(|value| (value.value, value.source.name)),
+        Some((String::from("Iv23linxUDbcc53QbFVK"), String::from("user")))
     );
     Ok(())
 }

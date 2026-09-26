@@ -65,6 +65,103 @@ pub enum ConfigError {
     SecretUri,
 }
 
+/// Secret resolution failures (spec `40-arbitraitor-integration.md` §9.23).
+///
+/// No variant ever carries the resolved secret value; identifiers such as
+/// environment-variable names and keyring ids are configuration references,
+/// not secret material.
+#[derive(Debug, Error)]
+pub enum SecretResolveError {
+    /// The environment variable holding the secret is not set or is not valid
+    /// Unicode; the underlying value is never inspected or reported.
+    #[error("environment variable `{id}` is not set or is not valid unicode")]
+    EnvMissing {
+        /// Environment variable name, never its value.
+        id: String,
+    },
+    /// The resolved secret value is empty.
+    #[error("secret source `{label}` resolved to an empty value")]
+    Empty {
+        /// Non-secret source label (env var name or keyring entry reference).
+        label: String,
+    },
+    /// Keyring support was compiled out (`secrets-keyring` feature disabled).
+    #[error("keyring secret resolution is unavailable (enable the `secrets-keyring` feature)")]
+    KeyringDisabled,
+    /// The platform keyring lookup failed (store locked, entry absent, or
+    /// storage backend unavailable).
+    #[cfg(feature = "secrets-keyring")]
+    #[error("keyring entry `{service}/{id}` is unavailable")]
+    KeyringLookup {
+        /// Keyring service label (`[secrets].keyring_service`, default `orchestraitor`).
+        service: String,
+        /// Store-specific secret identifier.
+        id: String,
+        /// Keyring backend error; never carries stored secret values.
+        #[source]
+        source: Box<keyring::Error>,
+    },
+}
+
+/// GitHub App service-identity authentication failures (spec
+/// `10-orchestrator.md` §9.25.2).
+///
+/// No variant ever carries the App private key PEM, a minted JWT, or an
+/// installation token.
+#[derive(Debug, Error)]
+pub enum GitHubAppError {
+    /// A required `github_app.*` configuration key is not set.
+    #[error("github app configuration key `github_app.{key}` is not set")]
+    MissingConfig {
+        /// Leaf key name under `github_app`.
+        key: String,
+    },
+    /// The App private key could not be resolved from its `secret://` URI;
+    /// resolution failure is fail-closed with no ambient-credential fallback.
+    #[error("github app private key resolution failed for `{uri}`")]
+    PrivateKeyResolution {
+        /// The non-secret `secret://` URI reference.
+        uri: String,
+        /// Resolution failure detail.
+        #[source]
+        source: Box<SecretResolveError>,
+    },
+    /// The resolved private key is not a valid RSA PEM.
+    #[error("github app private key is not a valid RSA PEM")]
+    InvalidPrivateKeyPem,
+    /// RS256 JWT signing failed.
+    #[error("github app JWT signing failed")]
+    JwtSigning,
+    /// The token-mint HTTP transport failed before a complete response was
+    /// received; request and response bodies are never captured.
+    #[error("github app installation token request transport failed ({kind})")]
+    Transport {
+        /// Static failure classification (e.g. `connect`, `timeout`, `decode`).
+        kind: &'static str,
+    },
+    /// GitHub rejected the token-mint request.
+    #[error("github app installation token request failed with HTTP status {status}")]
+    MintRequest {
+        /// HTTP status code; response bodies are never captured.
+        status: u16,
+    },
+    /// The token-mint response payload was malformed.
+    #[error("github app installation token response is malformed: {detail}")]
+    MalformedResponse {
+        /// Static detail label, never response content.
+        detail: &'static str,
+    },
+    /// The minted token expiry could not be parsed as RFC 3339.
+    #[error("github app installation token expiry timestamp is not RFC 3339")]
+    ExpiryUnparseable,
+    /// The minted token expiry exceeds the accepted 1h maximum lifetime.
+    #[error("github app installation token expiry exceeds the 1 hour maximum")]
+    ExpiryExceedsMaximum,
+    /// The token cache mutex was poisoned by a panic during a previous mint.
+    #[error("github app installation token cache is unavailable after a panic")]
+    CachePoisoned,
+}
+
 /// Tracing initialization failures.
 #[derive(Debug, Error)]
 pub enum TracingError {

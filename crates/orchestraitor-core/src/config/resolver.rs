@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::parse::flatten_config;
 use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
-    DataGovernanceConfig, DomainConfig, NormalizationConfig, OrchestraitorConfig, ProviderConfig,
-    ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig, SubscriptionConfig,
-    parse_toml_config,
+    DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoutingConfig,
+    SubscriptionConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -139,6 +139,21 @@ impl OrchestraitorConfig {
             next.data_classification,
             DataClassificationConfig::merge,
         );
+        merge_option(
+            &mut self.github_app,
+            next.github_app,
+            GitHubAppConfig::merge,
+        );
+        merge_scalar(&mut self.service_identities, next.service_identities);
+    }
+}
+
+impl GitHubAppConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.slug, next.slug);
+        merge_scalar(&mut self.client_id, next.client_id);
+        merge_scalar(&mut self.installation_id, next.installation_id);
+        merge_scalar(&mut self.private_key_uri, next.private_key_uri);
     }
 }
 

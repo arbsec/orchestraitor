@@ -102,6 +102,14 @@ fn is_known_key(key: &str) -> bool {
         )
         || matches_dynamic_key(key, "data_governance", &["retention", "provenance"])
         || matches_dynamic_key(key, "data_classification", &["label", "exportable"])
+        || matches!(
+            key,
+            "github_app.slug"
+                | "github_app.client_id"
+                | "github_app.installation_id"
+                | "github_app.private_key_uri"
+        )
+        || key == "service_identities"
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {
@@ -168,6 +176,47 @@ backoff_ms = 250
     fn unknown_keys_are_reported() -> Result<(), OrchestraitorError> {
         let report = parse_toml_config("[retry]\nmax_attempts = 1\nunknown = true\n")?;
         assert_eq!(report.unknown_keys, vec!["retry.unknown".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn github_app_and_service_identities_keys_are_known_and_roundtrip()
+    -> Result<(), OrchestraitorError> {
+        let toml = r#"
+service_identities = ["arbsec-agent"]
+
+[github_app]
+slug = "arbsec-agent"
+client_id = "Iv23linxUDbcc53QbFVK"
+installation_id = 165043398
+private_key_uri = "secret://keyring/orchestraitor-app-pem"
+"#;
+        let report = parse_toml_config(toml)?;
+        assert!(report.unknown_keys.is_empty());
+        let github_app = report.config.github_app.as_ref();
+        assert_eq!(
+            github_app.and_then(|app| app.slug.as_deref()),
+            Some("arbsec-agent")
+        );
+        assert_eq!(
+            github_app.and_then(|app| app.client_id.as_deref()),
+            Some("Iv23linxUDbcc53QbFVK")
+        );
+        assert_eq!(
+            github_app.and_then(|app| app.installation_id),
+            Some(165_043_398)
+        );
+        assert_eq!(
+            github_app
+                .and_then(|app| app.private_key_uri.as_ref())
+                .map(crate::secret::SecretUri::as_uri)
+                .as_deref(),
+            Some("secret://keyring/orchestraitor-app-pem")
+        );
+        assert_eq!(
+            report.config.service_identities.as_deref(),
+            Some(["arbsec-agent".to_string()].as_slice())
+        );
         Ok(())
     }
 }

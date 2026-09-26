@@ -8,6 +8,30 @@ All notable changes to Orchestraitor are recorded here. The format follows
 
 ### Added
 
+- GitHub App service identity (`arbsec-agent`) token-minting path (spec
+  `10-orchestrator.md` §9.25.2, §9.41; issue #307). Layered config gains
+  `github_app.slug` (built-in default `arbsec-agent`), `github_app.client_id`,
+  `github_app.installation_id`, `github_app.private_key_uri` (`secret://` URI,
+  fail-closed resolution — no ambient-credential fallback), and top-level
+  `service_identities` (default `["arbsec-agent"]`). `orchestraitor-core`
+  gains `GitHubAppAuth`: RS256 JWT minting with `iss = <client_id>` (GitHub
+  rejects the numeric app ID with 401) and `exp = iat + 10min`, an
+  installation-token cache re-minting at `expiry − 5min` behind a
+  single-flight mutex+condvar so concurrent requests never duplicate mints,
+  response-contract validation (1h lifetime cap, parsable RFC 3339 expiry),
+  and redacted `Debug`/error output (no PEM/JWT/token material, spec
+  `40-arbitraitor-integration.md` §9.23.4). `secret.rs` gains exact-store
+  `SecretUri::resolve` (env + OS keyring behind the default `secrets-keyring`
+  feature). New CLI subcommand `orc github mint-token` prints only non-secret
+  metadata (installation id, expiry, SHA-256 fingerprint prefix). Documented
+  in `docs/cli/orc-github.md` and README (#307).
+- `ready-queue` (github-project-workflow skill) now enforces the §9.41
+  assignee rule: items assigned to humans are excluded while items assigned to
+  a declared service identity (`<slug>` or `<slug>[bot]`, case-insensitive)
+  stay schedulable. The service set comes from
+  `[service_identities].slugs` in the project config, overridable via
+  `$ORC_SERVICE_IDENTITIES`, defaulting to `arbsec-agent`; regression-tested
+  by `scripts/tests/ready-queue-filter.bash` (#307).
 - `xtask docs-check` subcommand validating the spec-split invariants the disabled docs
   workflow used to guard: compatibility-index integrity (duplicate identifiers, anchor
   resolution via the GitHub slug algorithm), repo-wide legacy `spec §N` reference

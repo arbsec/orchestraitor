@@ -11,6 +11,8 @@ use crate::cli::{CliLayer, ConfigPaths};
 use crate::commands::config::values::{flatten_json, read_value_map_from_str};
 
 pub(crate) const BUILT_IN_DEFAULTS: &str = r#"
+service_identities = ["arbsec-agent"]
+
 [normalization]
 format_on_write = true
 max_passes = 2
@@ -19,6 +21,9 @@ safe_fix_classifications = ["format", "organize-imports"]
 [retry]
 max_attempts = 3
 backoff_ms = 250
+
+[github_app]
+slug = "arbsec-agent"
 "#;
 
 #[derive(Debug, Clone)]

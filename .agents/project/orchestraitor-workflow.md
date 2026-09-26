@@ -31,9 +31,18 @@ if they look easy. Open them; do not implement them.
 
 All agent-driven GitHub operations — board writes, issue lifecycle, PRs, reviews — run as
 the Orchestraitor GitHub App service identity (`arbsec-agent`), never a personal account
-(`AGENTS.md` critical rules; planning runbook `.omo/drafts/github-app-setup.md`). Until the
-E0 backlog task registers the App, personal owner auth is an explicitly labelled fallback
-only, never an equal option.
+(`AGENTS.md` critical rules; runbook `.omo/drafts/github-app-setup.md`). The App is
+registered and installed (issue #307): installation tokens are minted from the App private
+key by `orc github mint-token` / `orchestraitor-core` `GitHubAppAuth` (config block
+`github_app` + `service_identities`; private key via `secret://` URIs, fail-closed, ~1h
+tokens). Personal owner auth remains an explicitly labelled fallback only when the App
+identity is unavailable, never an equal option.
+
+Assignee fields accept user accounts only, so the bot cannot carry ownership: board Status +
+Orchestraitor run-state do. The ready queue excludes items assigned to humans and keeps
+items assigned to a declared service identity schedulable
+(spec `10-orchestrator.md` §9.41; the declared set is `service_identities` in layered config
+and `[service_identities].slugs` in the project config, default `arbsec-agent`).
 
 ## Security-first review
 

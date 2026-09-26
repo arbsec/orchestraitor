@@ -1,7 +1,10 @@
 # Eligibility filter for ready-queue (single source; regression-tested by
 # scripts/tests/ready-queue-filter.bash, regression: arbsec/orchestraitor#251).
 # Input: gh issue list JSON array with fields
-#   number, title, url, issueType{name}|null, labels[{name}], blockedBy{nodes[{state}],totalCount}
+#   number, title, url, issueType{name}|null, labels[{name}],
+#   assignees[{login}]|null, blockedBy{nodes[{state}],totalCount}
+# Args: $mvp (label name), $service (array of service-identity slugs; a login
+#   matches a slug case-insensitively in both `<slug>` and `<slug>[bot]` forms).
 # Output: the eligible subset, sorted by issue number.
 map(
   select(
@@ -21,6 +24,15 @@ map(
     # may still be open, so the issue is NOT eligible.
     and (.blockedBy as $b | ((($b.nodes // []) | length) == ($b.totalCount // 0)))
     and (any(.labels[]?.name; . == $mvp))
+    # Assignee exclusion (spec 10-orchestrator.md §9.41): every assignee must
+    # be a declared service identity; any human assignee excludes the item.
+    # Unassigned items and service-identity assigns stay schedulable.
+    and ((.assignees // []) | all(
+      .login as $login
+      | any($service[]?;
+          ((. | ascii_downcase) == ($login | ascii_downcase))
+          or (((. + "[bot]") | ascii_downcase) == ($login | ascii_downcase)))
+    ))
   )
 )
 | sort_by(.number)
