@@ -9,6 +9,7 @@
             "content": {
               "__typename": "Issue",
               "number": 130,
+            "state": "OPEN",
               "title": "Eligible native task",
               "url": "https://github.com/arbsec/orchestraitor/issues/130",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -30,6 +31,7 @@
             "content": {
               "__typename": "Issue",
               "number": 131,
+            "state": "OPEN",
               "title": "Blocked bug",
               "url": "https://github.com/arbsec/orchestraitor/issues/131",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -50,6 +52,7 @@
             "content": {
               "__typename": "Issue",
               "number": 132,
+            "state": "OPEN",
               "title": "Epic mislabeled as task",
               "url": "https://github.com/arbsec/orchestraitor/issues/132",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -70,6 +73,7 @@
             "content": {
               "__typename": "Issue",
               "number": 133,
+            "state": "OPEN",
               "title": "Truncated blocker window",
               "url": "https://github.com/arbsec/orchestraitor/issues/133",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -90,6 +94,7 @@
             "content": {
               "__typename": "Issue",
               "number": 134,
+            "state": "OPEN",
               "title": "Next-target task",
               "url": "https://github.com/arbsec/orchestraitor/issues/134",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -110,6 +115,7 @@
             "content": {
               "__typename": "Issue",
               "number": 135,
+            "state": "OPEN",
               "title": "In-progress task",
               "url": "https://github.com/arbsec/orchestraitor/issues/135",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -135,6 +141,7 @@
             "content": {
               "__typename": "Issue",
               "number": 137,
+            "state": "OPEN",
               "title": "Sibling-repo issue",
               "url": "https://github.com/arbsec/arbitraitor/issues/137",
               "repository": { "nameWithOwner": "arbsec/arbitraitor" },
@@ -155,6 +162,7 @@
             "content": {
               "__typename": "Issue",
               "number": 138,
+            "state": "OPEN",
               "title": "Label-fallback bug with closed blocker",
               "url": "https://github.com/arbsec/orchestraitor/issues/138",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },
@@ -180,6 +188,7 @@
             "content": {
               "__typename": "Issue",
               "number": 140,
+            "state": "OPEN",
               "title": "Truncated field-values window",
               "url": "https://github.com/arbsec/orchestraitor/issues/140",
               "repository": { "nameWithOwner": "arbsec/orchestraitor" },

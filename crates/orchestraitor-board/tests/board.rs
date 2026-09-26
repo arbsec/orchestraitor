@@ -19,6 +19,8 @@ use secrecy::SecretString;
 const RESOLVE_PROJECT: &str = include_str!("fixtures/resolve-project.json");
 const RESOLVE_FIELDS: &str = include_str!("fixtures/resolve-fields.json");
 const ITEMS: &str = include_str!("fixtures/items.json");
+const ITEMS_CLOSED: &str = include_str!("fixtures/items-closed.json");
+const ITEMS_STUCK_CURSOR: &str = include_str!("fixtures/items-stuck-cursor.json");
 const FIND_ITEM: &str = include_str!("fixtures/find-item.json");
 
 const TOKEN: &str = "fixture-token-value";
@@ -478,7 +480,7 @@ async fn issue_not_on_board_is_typed() -> Result<(), BoardError> {
         Rule {
             needle: "projectItems(first",
             response: RuleResponse::Json(
-                r#"{"data":{"repository":{"issue":{"id":"I_fixture_42","projectItems":{"nodes":[]}}}}}"#,
+                r#"{"data":{"repository":{"issue":{"id":"I_fixture_42","projectItems":{"totalCount":0,"nodes":[]}}}}}"#,
             ),
         },
     ])
@@ -492,5 +494,249 @@ async fn issue_not_on_board_is_typed() -> Result<(), BoardError> {
         result,
         Err(BoardError::ItemNotOnBoard { number: 42 })
     ));
+    Ok(())
+}
+
+fn two_repo_config() -> BoardProjectConfig {
+    let mut config = config_fixture();
+    config.repos = vec![
+        "arbsec/orchestraitor".to_string(),
+        "arbsec/arbitraitor".to_string(),
+    ];
+    config
+}
+
+fn no_mutation_recorded(server: &ScriptServer) -> bool {
+    server
+        .recorded()
+        .iter()
+        .all(|(_headers, body)| !body.contains("updateProjectV2ItemFieldValue"))
+}
+
+#[tokio::test]
+async fn closed_issue_is_excluded_with_warning() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "items(first",
+            response: RuleResponse::Json(ITEMS_CLOSED),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let (items, warnings) = client.ready_items(&config_fixture()).await?;
+
+    assert!(
+        items.is_empty(),
+        "a closed issue carrying Ready/MVP board values must not be emitted as ready"
+    );
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].number, Some(7));
+    assert!(
+        warnings[0].reason.contains("not OPEN"),
+        "the warning must name the closed-state exclusion, got: {}",
+        warnings[0].reason
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn next_page_without_cursor_fails_closed() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "items(first",
+            response: RuleResponse::Json(ITEMS_STUCK_CURSOR),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let result = client.ready_items(&config_fixture()).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(BoardError::TruncatedConnection { window: "items" })
+        ),
+        "a next page without a cursor must fail closed with the typed truncation error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_project_items_window_fails_without_mutation() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"issue":{"id":"I_fixture_42","projectItems":{"totalCount":2,"nodes":[{"id":"PVTI_F_42","project":{"id":"PVT_fixture_project"}}]}}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_F_42"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let result = client.move_item(&config_fixture(), 42, "In Progress").await;
+
+    assert!(
+        matches!(
+            result,
+            Err(BoardError::TruncatedConnection {
+                window: "projectItems"
+            })
+        ),
+        "got: {result:?}"
+    );
+    assert!(
+        no_mutation_recorded(&server),
+        "no mutation may be issued when the projectItems window is truncated"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ambiguous_same_number_items_fail_without_mutation() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: r#""name":"arbitraitor","number""#,
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"issue":{"id":"I_ARB_42","projectItems":{"totalCount":1,"nodes":[{"id":"PVTI_ARB_42","project":{"id":"PVT_fixture_project"}}]}}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(FIND_ITEM),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_F_42"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let result = client
+        .move_item(&two_repo_config(), 42, "In Progress")
+        .await;
+
+    let Err(BoardError::AmbiguousItemReference { number, repos }) = result else {
+        let unexpected = matches!(result, Err(BoardError::AmbiguousItemReference { .. }));
+        assert!(unexpected, "same-numbered board items must be rejected");
+        return Ok(());
+    };
+    assert_eq!(number, 42);
+    assert_eq!(
+        repos,
+        [
+            "arbsec/orchestraitor".to_string(),
+            "arbsec/arbitraitor".to_string()
+        ]
+    );
+    assert!(
+        no_mutation_recorded(&server),
+        "no mutation may be issued for an ambiguous reference"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn move_item_falls_through_to_second_repo() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: r#""name":"arbitraitor","number""#,
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"issue":{"id":"I_ARB_42","projectItems":{"totalCount":1,"nodes":[{"id":"PVTI_ARB_42","project":{"id":"PVT_fixture_project"}}]}}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"issue":{"id":"I_fixture_42","projectItems":{"totalCount":0,"nodes":[]}}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_ARB_42"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "fieldValueByName",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"In Progress"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let outcome = client
+        .move_item(&two_repo_config(), 42, "In Progress")
+        .await?;
+
+    assert_eq!(outcome.item_id, "PVTI_ARB_42");
+    let mutations: Vec<(Option<String>, String)> = server
+        .recorded()
+        .into_iter()
+        .filter(|(_h, body)| body.contains("updateProjectV2ItemFieldValue"))
+        .collect();
+    assert_eq!(mutations.len(), 1, "exactly one mutation must be issued");
+    let Some((_headers, body)) = mutations.into_iter().next() else {
+        return Ok(());
+    };
+    assert!(body.contains("PVTI_ARB_42"));
     Ok(())
 }
