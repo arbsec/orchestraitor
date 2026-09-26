@@ -1,5 +1,9 @@
 # Orchestraitor specification: Harness, worker, and agent integration
 
+This document specifies Orchestraitor's harness: the agent-execution surface on which the orchestration loop runs its workers. The orchestrator (see [10-orchestrator.md](10-orchestrator.md)) selects work and spawns workers onto this surface, and every worker runs inside the Arbitraitor security boundary regardless of how it was started. The same surface is also a first-class standalone tool: a single operator can drive `orc` interactively with no orchestration loop above it, so the harness golden path and the worker surface are one surface, specified once here.
+
+The subsystems below are described from the harness's own perspective. Orchestration-specific behavior — autonomous delivery, task and session lifecycle, retry and failure semantics, and resource governance — is specified in [10-orchestrator.md](10-orchestrator.md); model and role routing in [30-model-routing.md](30-model-routing.md); the security boundary itself in [40-arbitraitor-integration.md](40-arbitraitor-integration.md).
+
 ## 9. Major subsystems
 
 ### 9.1 Core daemon

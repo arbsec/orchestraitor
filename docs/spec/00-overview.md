@@ -8,7 +8,7 @@
 **Repository:** `arbsec/orchestraitor`
 **CLI:** `orc` (canonical) and `orchestraitor` (long form)
 **Daemon:** `orcd`
-**Relationship to Arbitraitor:** Sibling coding-agent harness whose complete security implementation and enforcement boundary are provided by Arbitraitor (`arbsec/arbitraitor`).
+**Relationship to Arbitraitor:** Sibling coding-agent orchestrator and harness whose complete security implementation and enforcement boundary are provided by Arbitraitor (`arbsec/arbitraitor`).
 **Companion documents:**
 - [`docs/spec/tech-stack.md`](tech-stack.md) — concrete crates, versions, license compatibility, runtime dependencies, platform support, and rejected alternatives. Every dependency and architectural claim there is verified against crates.io, GitHub, or primary docs.
 - Arbitraitor internal baseline (private): [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). Used as structural inspiration only; not assumed up to date.
@@ -19,22 +19,27 @@
 
 ## 1. Executive summary
 
-This document specifies Orchestraitor, a safety-first, low-footprint harness and control plane for AI coding agents.
+This document specifies Orchestraitor, a safety-first, low-footprint orchestrator, harness, and control plane for AI coding agents.
 
-The system provides its own trusted TUI and optional desktop GUI while integrating with existing coding-agent harnesses such as Claude Code, Codex CLI, Gemini CLI, OpenCode, Pi, and other Agent Client Protocol (ACP) compatible agents. It also supports direct model/provider integrations where the provider exposes a suitable API or SDK.
+Orchestraitor's first axis is a self-improving orchestration loop. Work items live on a kanban board; a fresh manager session selects the next eligible task; a worker implements it in an isolated workspace and opens a pull request; adversarial review runs against the result; and a human gates the merge. Every state transition in the loop is tracked on the board. The loop is bounded — autonomous operation is always constrained by explicit budgets for attempts, re-plans, timeouts, concurrency, spend, and subscription usage — and it never bypasses the Arbitraitor security boundary. The system is self-hosting: Orchestraitor's own development backlog is the loop's first and continuous workload.
 
-The product is a first-class coding-agent harness, not merely a wrapper or security add-on. Its defensible purpose is to combine capabilities that existing tools generally provide only separately:
+The expected operating scale is a single operator with one or two workspaces, at most four boards, on the order of 10² items per board, and a concurrency of two workers. The architecture optimizes for correctness, containment, and auditability at that scale, not for fleet-size throughput.
 
-1. A complete native agent loop plus adapters for existing harnesses
-2. Enforced runtime isolation across native and wrapped agents
-3. Static, plan-bound authorization before side effects
-4. Transactional filesystem tools with project-aware format-on-write and safe lint fixing
-5. A trusted output boundary for files that host tools may later execute
-6. A provider-independent context compiler that reduces token usage
-7. First-class MCP, Agent Skills, AGENTS.md, ACP, and IDE interoperability
-8. Direct OpenAI, Anthropic, Gemini, and compatible endpoint support with BYOK
-9. A low-overhead native control plane for TUI, GUI, IDE, and headless clients
-10. Auditable execution, policy, context, normalization, and promotion receipts
+The harness is the loop's worker surface, and it is also a first-class standalone tool. It provides its own trusted TUI and optional desktop GUI while integrating with existing coding-agent harnesses such as Claude Code, Codex CLI, Gemini CLI, OpenCode, Pi, and other Agent Client Protocol (ACP) compatible agents. It also supports direct model/provider integrations where the provider exposes a suitable API or SDK.
+
+The product is a first-class coding-agent orchestrator and harness, not merely a wrapper or security add-on. Its defensible purpose is to combine capabilities that existing tools generally provide only separately:
+
+1. A bounded, board-tracked, self-improving orchestration loop with human-gated merges
+2. A complete native agent loop plus adapters for existing harnesses
+3. Enforced runtime isolation across native and wrapped agents
+4. Static, plan-bound authorization before side effects
+5. Transactional filesystem tools with project-aware format-on-write and safe lint fixing
+6. A trusted output boundary for files that host tools may later execute
+7. A provider-independent context compiler that reduces token usage
+8. First-class MCP, Agent Skills, AGENTS.md, ACP, and IDE interoperability
+9. Direct OpenAI, Anthropic, Gemini, and compatible endpoint support with BYOK
+10. A low-overhead native control plane for TUI, GUI, IDE, and headless clients
+11. Auditable execution, policy, context, normalization, and promotion receipts
 
 A coding agent should normally run in an isolated workspace and sandbox by default. The user may explicitly weaken those guarantees, but weakening must be visible, scoped, recorded, and never silently inferred.
 
@@ -150,7 +155,7 @@ The control plane must therefore mediate:
 
 The product should be described as:
 
-> Orchestraitor is a local-first coding-agent harness and control plane, secured by Arbitraitor, with provider-independent context optimization and native developer-tool integrations.
+> Orchestraitor is a local-first, self-improving coding-agent orchestrator, harness, and control plane, secured by Arbitraitor, with provider-independent context optimization and native developer-tool integrations.
 
 It should not lead with:
 
@@ -186,27 +191,34 @@ Baseline coding-agent features (multi-agent TUI, many agents in one UI, provider
 
 ### 3.1 Primary goals
 
-1. Run existing and custom coding agents with a consistent security boundary.
-2. Sandbox every new session by default.
-3. Create an isolated workspace for every new session by default.
-4. Keep the original checkout and shared Git metadata outside the worker trust boundary.
-5. Allow users to bring their own provider, model, API key, subscription-backed CLI, or custom agent.
-6. Integrate natively with JetBrains IDEs, VS Code, Zed, Neovim, and other popular development environments.
-7. Provide a fast native TUI and an optional low-footprint GUI.
-8. Reduce input tokens and tool round trips without materially reducing task success.
-9. Provide deterministic, explainable, reviewable policy decisions.
-10. Record what was requested, permitted, enforced, executed, normalized, changed, and promoted.
-11. Make extension possible without allowing extensions to silently inherit full host authority.
-12. Preserve acceptable performance on large monorepos and long-running sessions.
-13. Detect and apply the project's configured formatter automatically after agent-authored writes unless the project opts out.
-14. Return compact normalization deltas so the agent does not need to reread files after formatting or safe fixes.
-15. Import common agent instructions, skills, hooks, and MCP configurations while recommending vendor-neutral canonical formats.
-16. Support JetBrains, OpenAI, Google Gemini, OpenAI-compatible, and Anthropic-compatible provider paths without coupling provider metadata to one client library.
-17. Use Arbitraitor as the exclusive implementation and authority for every security-related capability.
-18. Allow incremental adoption through a machine-friendly CLI, MCP tool gateway, managed process wrapper, and OpenAI/Anthropic-compatible local proxy.
+Orchestraitor's primary goals are orchestration and self-hosting: the product's first axis is the bounded, board-tracked, human-gated delivery loop that runs the system's own backlog. The trust-model goals the loop depends on remain primary; the harness golden path is a secondary goal (§3.2).
+
+1. Run the self-improving delivery loop end to end: backlog → manager selection → worker → pull request → adversarial review → human-gated merge, with every state transition tracked on the kanban board.
+2. Self-host the loop: Orchestraitor's own development backlog is the loop's first and continuous workload, so orchestration capabilities are dogfooded before they are generalized.
+3. Keep autonomous operation bounded: explicit budgets (attempts, re-plan, timeout, concurrency, spend, and subscription usage) constrain every autonomous run, and merges and security-sensitive changes always require human review.
+4. Sandbox every new session by default.
+5. Create an isolated workspace for every new session by default.
+6. Keep the original checkout and shared Git metadata outside the worker trust boundary.
+7. Provide deterministic, explainable, reviewable policy decisions.
+8. Record what was requested, permitted, enforced, executed, normalized, changed, and promoted.
+9. Make extension possible without allowing extensions to silently inherit full host authority.
+10. Use Arbitraitor as the exclusive implementation and authority for every security-related capability.
 
 ### 3.2 Secondary goals
 
+The harness golden path — interactive, single-operator use of the harness — is a secondary goal: the harness is the orchestration loop's worker surface and a first-class standalone tool, but it no longer defines the product's primary axis.
+
+- Run existing and custom coding agents with a consistent security boundary
+- Allow users to bring their own provider, model, API key, subscription-backed CLI, or custom agent
+- Integrate natively with JetBrains IDEs, VS Code, Zed, Neovim, and other popular development environments
+- Provide a fast native TUI and an optional low-footprint GUI
+- Reduce input tokens and tool round trips without materially reducing task success
+- Preserve acceptable performance on large monorepos and long-running sessions
+- Detect and apply the project's configured formatter automatically after agent-authored writes unless the project opts out
+- Return compact normalization deltas so the agent does not need to reread files after formatting or safe fixes
+- Import common agent instructions, skills, hooks, and MCP configurations while recommending vendor-neutral canonical formats
+- Support JetBrains, OpenAI, Google Gemini, OpenAI-compatible, and Anthropic-compatible provider paths without coupling provider metadata to one client library
+- Allow incremental adoption through a machine-friendly CLI, MCP tool gateway, managed process wrapper, and OpenAI/Anthropic-compatible local proxy
 - Parallel isolated sessions
 - Multi-agent coordination
 - Remote workers
@@ -230,7 +242,7 @@ The following are explicitly out of scope for the initial MVP. Some may be revis
 - Full native Windows support (WSL2 is the Windows path; native Windows backend is a future Arbitraitor-owned effort, see §9.32.3.4)
 - Sophisticated GUI (the TUI is the first-class reference client; the GUI is optional and architecturally present but not MVP-blocking, see §9.3)
 - Remote multi-user agent fleets (local-first operation is the MVP target; remote workers are a secondary goal)
-- Autonomous agent swarms (single-agent security and observability must be solid before multi-agent autonomy; the MVP ships a domain-agent catalog, not uncontrolled swarms, see §10.9)
+- Unbounded or unbudgeted autonomous agent swarms (autonomous orchestration is in MVP scope when it is bounded by explicit budgets — attempts, re-plan, timeout, concurrency, spend, and subscription usage — board-tracked, with every state transition recorded on the kanban board, and human-gated, with merges and security-sensitive changes always human-reviewed; autonomy that bypasses the Arbitraitor security boundary and self-modification outside the reviewed loop remain out of scope, see §10.9)
 - Proprietary MCP marketplace (MCP servers are untrusted principals, not products Orchestraitor hosts or sells)
 - Universal synthetic-filesystem compatibility (the workspace projection is a mediation layer, not a universal filesystem emulator; some tools will detect non-standard semantics and fail, see §9.4.2)
 - Broad privileged system administration (privileged operations are brokered through Arbitraitor on supported platforms; Orchestraitor does not become a general-purpose system administration tool)
@@ -246,7 +258,7 @@ The following are explicitly out of scope for the initial MVP. Some may be revis
 - Supporting unrestricted native execution safely on every operating system
 - Transparent compatibility with every terminal application
 - Building a cloud service before the local trust model works
-- Shipping complex multi-agent autonomy before single-agent security and observability are solid
+- Shipping autonomy that bypasses the Arbitraitor security boundary or self-modification outside the reviewed loop (the bounded, budgeted, board-tracked, human-gated orchestration loop is in scope; unbounded multi-agent autonomy is not)
 - Implementing security primitives or security decision logic independently inside Orchestraitor
 
 ---
