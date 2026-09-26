@@ -50,6 +50,14 @@ pub enum DeliveryError {
         /// Why the name was rejected.
         reason: &'static str,
     },
+    /// Base revision failed option-safety validation.
+    #[error("invalid base revision {base_revision:?}: {reason}")]
+    InvalidBaseRevision {
+        /// Rejected revision string.
+        base_revision: String,
+        /// Why the revision was rejected.
+        reason: &'static str,
+    },
     /// Commit identity failed DCO-safe validation.
     #[error("invalid commit identity: {reason}")]
     InvalidIdentity {

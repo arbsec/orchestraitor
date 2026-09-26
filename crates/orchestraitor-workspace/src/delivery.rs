@@ -57,7 +57,9 @@ impl Delivery {
     ///
     /// # Errors
     ///
-    /// Returns [`DeliveryError::InvalidBranch`] for malformed branch names and
+    /// Returns [`DeliveryError::InvalidBranch`] for malformed branch names,
+    /// [`DeliveryError::InvalidBaseRevision`] when `base_revision` could be
+    /// misread as a git option or is empty, and
     /// [`DeliveryError::ProvisionWorktree`] when `git worktree add` fails.
     pub fn provision_worktree(
         &self,
@@ -66,6 +68,7 @@ impl Delivery {
         dest: &Path,
     ) -> Result<TaskWorktree, DeliveryError> {
         validate_task_branch(branch)?;
+        validate_base_revision(base_revision)?;
         Git::new(&self.repo_path)
             .worktree_add(branch, dest, base_revision)
             .map_err(|source| DeliveryError::ProvisionWorktree {
@@ -213,6 +216,19 @@ impl Delivery {
             pull_request,
         })
     }
+}
+
+fn validate_base_revision(base_revision: &str) -> Result<(), DeliveryError> {
+    if base_revision.is_empty()
+        || base_revision.starts_with('-')
+        || base_revision.chars().any(char::is_whitespace)
+    {
+        return Err(DeliveryError::InvalidBaseRevision {
+            base_revision: base_revision.to_owned(),
+            reason: "must be non-empty, option-free, whitespace-free",
+        });
+    }
+    Ok(())
 }
 
 fn validate_task_branch(branch: &str) -> Result<(), DeliveryError> {

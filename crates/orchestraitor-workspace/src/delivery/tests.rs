@@ -9,10 +9,10 @@ use std::sync::Mutex;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use super::git::scrubbed_git_env;
+use super::git::{PushFailure, classify_push_failure, scrubbed_git_env};
 use super::{
     CommitIdentity, CredentialError, Delivery, DeliveryError, DeliveryRequest,
-    DraftPullRequestSpec, NewPullRequest, PullRequestHandle, PullRequestTransport,
+    DraftPullRequestSpec, GitError, NewPullRequest, PullRequestHandle, PullRequestTransport,
     PushCredentialProvider,
 };
 
@@ -149,6 +149,10 @@ impl Fixture {
 
     fn ls_remote(&self, reference: &str) -> io::Result<String> {
         run_git(&self.repo_path, &["ls-remote", "origin", reference])
+    }
+
+    fn commit_message(&self, commit: &str) -> io::Result<String> {
+        run_git(&self.repo_path, &["log", "-1", "--format=%B", commit])
     }
 }
 
@@ -380,4 +384,130 @@ fn scrubbed_env_disables_ambient_config_and_prompts() {
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     assert_eq!(value_of("GIT_CONFIG_GLOBAL").as_deref(), Some(null_device));
     assert_eq!(value_of("GIT_CONFIG_SYSTEM").as_deref(), Some(null_device));
+}
+
+#[test]
+fn scrubbed_env_is_the_complete_child_environment() {
+    // Given/When/Then: env_clear + this set = the complete child environment;
+    // the key set must stay exactly this so ambient config cannot sneak in.
+    let env = scrubbed_git_env();
+    let mut keys: Vec<String> = env
+        .iter()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    keys.sort();
+    let mut expected: Vec<String> = [
+        "GIT_ASKPASS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_RSH",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_TERMINAL_PROMPT",
+        "PATH",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .chain((0..16).flat_map(|index| {
+        [
+            format!("GIT_CONFIG_KEY_{index}"),
+            format!("GIT_CONFIG_VALUE_{index}"),
+        ]
+    }))
+    .collect();
+    expected.sort();
+    assert_eq!(keys, expected, "child env keys drifted; audit the scrub");
+}
+
+#[test]
+fn push_failure_classification_matches_anchored_patterns_only() {
+    // Given/When/Then: branch names echoed in push stderr must not flip the
+    // failure class; only anchored git auth markers do.
+    let branch_echo = GitError {
+        operation: "push",
+        exit_code: Some(1),
+        stderr: "failed to push some refs to 'refs/heads/feat/http-401-retry'".into(),
+    };
+    assert!(matches!(
+        classify_push_failure(&branch_echo),
+        PushFailure::Other(_)
+    ));
+    let auth = GitError {
+        operation: "push",
+        exit_code: Some(128),
+        stderr: "fatal: Authentication failed for 'https://github.invalid/o/r'".into(),
+    };
+    assert!(matches!(classify_push_failure(&auth), PushFailure::Auth));
+    let http_403 = GitError {
+        operation: "push",
+        exit_code: Some(128),
+        stderr: "The requested URL returned error: 403".into(),
+    };
+    assert!(matches!(
+        classify_push_failure(&http_403),
+        PushFailure::Auth
+    ));
+    let rejected = GitError {
+        operation: "push",
+        exit_code: Some(1),
+        stderr: "hint: Updates were rejected because the tip ... non-fast-forward".into(),
+    };
+    assert!(matches!(
+        classify_push_failure(&rejected),
+        PushFailure::Rejected
+    ));
+}
+
+#[test]
+fn forged_signoff_in_message_cannot_displace_the_dco_trailer()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given/When/Then: a crafted commit message containing its own
+    // Signed-off-by line must not displace the appended DCO trailer.
+    let fixture = Fixture::new()?;
+    let identity = identity()?;
+    let worktree = fixture.delivery().provision_worktree(
+        "feat/dco-injection",
+        "main",
+        &fixture.worktree_dest(),
+    )?;
+    fs::write(worktree.path().join("out.txt"), "payload\n")?;
+    let hostile_message = "subject\n\nSigned-off-by: Attacker <attacker@arbsec.invalid>";
+    let commit = fixture
+        .delivery()
+        .commit_all(&worktree, hostile_message, &identity)?;
+    let message = fixture.commit_message(&commit)?;
+    let last_signoff = message
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("Signed-off-by:"))
+        .ok_or_else(|| io::Error::other("no sign-off line found"))?;
+    assert_eq!(
+        last_signoff,
+        format!("Signed-off-by: {} <{}>", identity.name(), identity.email())
+    );
+    Ok(())
+}
+
+#[test]
+fn option_like_base_revision_is_rejected_before_any_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given/When/Then: a base revision that git would parse as an option is
+    // rejected typed, before worktree provisioning touches the filesystem.
+    let fixture = Fixture::new()?;
+    let dest = fixture.worktree_dest();
+    let result =
+        fixture
+            .delivery()
+            .provision_worktree("feat/base-guard", "--template=/attacker", &dest);
+    assert!(matches!(
+        result,
+        Err(DeliveryError::InvalidBaseRevision { .. })
+    ));
+    assert!(!dest.exists(), "no worktree may be created");
+    Ok(())
 }

@@ -2,11 +2,14 @@
 //!
 //! Linked-worktree creation and push are not covered by the `gix` 0.85 API
 //! surface, so the trusted controller drives the `git` binary directly. Every
-//! invocation runs with a scrubbed environment (system/global config
-//! redirected to the null device, terminal prompts disabled, `GIT_DIR` /
-//! `GIT_WORK_TREE` removed) so ambient user configuration — credential
-//! helpers included — can never influence the delivery path. The scoped push
-//! credential is injected through `GIT_CONFIG_COUNT`-keyed environment config
+//! invocation runs with a CLEARED environment rebuilt from
+//! [`scrubbed_git_env`] — system/global config redirected to the null device,
+//! terminal prompts and askpass disabled, `GIT_DIR` / `GIT_WORK_TREE` removed,
+//! ambient `GIT_CONFIG_*` env config neutralized — so ambient user
+//! configuration, credential helpers included, can never influence the
+//! delivery path. Repo-local configuration of the trusted controller checkout
+//! remains a documented trusted surface. The scoped push credential is
+//! injected through `GIT_CONFIG_COUNT`-keyed environment config
 //! (`http.extraHeader`), keeping the token out of argv and off disk.
 
 use std::ffi::OsString;
@@ -109,6 +112,7 @@ impl Git {
         command
             .args(args)
             .current_dir(&self.dir)
+            .env_clear()
             .envs(scrubbed_git_env())
             .envs(extra_env.iter().cloned())
             .env_remove("GIT_DIR")
@@ -129,12 +133,18 @@ impl Git {
     }
 }
 
-/// Environment entries every delivery `git` invocation runs with: no system
-/// or global config (which could carry ambient credential helpers), no
-/// interactive prompts.
-pub(crate) fn scrubbed_git_env() -> [(OsString, OsString); 4] {
+/// Environment entries every delivery `git` invocation runs with. The child
+/// environment is cleared first (`env_clear` in [`Git::run`]), so this set is
+/// the COMPLETE child environment: `PATH` is passed through so the binary
+/// resolves, system and global config are redirected to the null device (no
+/// ambient credential helpers), and interactive prompts (terminal and
+/// askpass) are disabled. Repo-local configuration of the trusted controller
+/// checkout is intentionally not neutralized here — it is documented as a
+/// trusted surface (spec `40-arbitraitor-integration.md` §6.2).
+pub(crate) fn scrubbed_git_env() -> Vec<(OsString, OsString)> {
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    [
+    let mut env = vec![
+        (OsString::from("PATH"), OsString::from(default_path())),
         (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
         (
             OsString::from("GIT_CONFIG_GLOBAL"),
@@ -145,7 +155,36 @@ pub(crate) fn scrubbed_git_env() -> [(OsString, OsString); 4] {
             OsString::from(null_device),
         ),
         (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
-    ]
+    ];
+    for key in [
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_RSH",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
+        env.push((OsString::from(key), OsString::new()));
+    }
+    for index in 0..16 {
+        env.push((
+            OsString::from(format!("GIT_CONFIG_KEY_{index}")),
+            OsString::new(),
+        ));
+        env.push((
+            OsString::from(format!("GIT_CONFIG_VALUE_{index}")),
+            OsString::new(),
+        ));
+    }
+    env
+}
+
+/// Parent `PATH` passthrough so the child can resolve sub-command helpers;
+/// read from the trusted controller process, never from artifact content.
+fn default_path() -> String {
+    std::env::var("PATH").unwrap_or_default()
 }
 
 fn identity_env(name: &str, email: &str) -> [(OsString, OsString); 4] {
@@ -157,7 +196,7 @@ fn identity_env(name: &str, email: &str) -> [(OsString, OsString); 4] {
     ]
 }
 
-fn classify_push_failure(error: &GitError) -> PushFailure {
+pub(crate) fn classify_push_failure(error: &GitError) -> PushFailure {
     let stderr = error.stderr.as_str();
     if stderr.contains("non-fast-forward")
         || stderr.contains("fetch first")
@@ -165,9 +204,8 @@ fn classify_push_failure(error: &GitError) -> PushFailure {
     {
         PushFailure::Rejected
     } else if stderr.contains("Authentication failed")
-        || stderr.contains("403")
-        || stderr.contains("401")
-        || stderr.contains("Permission denied")
+        || stderr.contains("returned error: 401")
+        || stderr.contains("returned error: 403")
     {
         PushFailure::Auth
     } else {
