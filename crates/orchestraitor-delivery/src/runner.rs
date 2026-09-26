@@ -60,6 +60,32 @@
 //! dependency outputs — never accumulated conversation (§7.3 context
 //! poisoning). This module threads no conversation state anywhere.
 //!
+//! Concurrency wiring (spec §9.33.3: "Parallel execution MUST respect
+//! configurable concurrency, repository conflicts, resource budgets
+//! (§9.27), provider limits (§9.19.5-§9.19.6), and review capacity."):
+//! [`RunnerInput::scheduler_config`] is validated at construction (a zero
+//! cap can never dispatch, so construction fails closed) and every
+//! [`BacklogRunner::tick`] dispatch intersects its startable set with the
+//! cap-constrained [`crate::schedule::ParallelScheduler::select`].
+//! Enforced here: global `max_concurrent` (in-flight = the `running` set of
+//! dispatched attempts whose outcomes have not been consumed; a slot is
+//! free while `running.len()` < `max_concurrent`), per-domain
+//! `max_per_domain` (every DAG task carries a [`crate::metadata::DomainId`]),
+//! expected-file repository-conflict exclusion, and running
+//! implementations' share of `review_capacity` (every running attempt is a
+//! change set on its way to review). Deferred to the runtime layer: the
+//! under-review change-set count `review_capacity` also bounds (owned by
+//! the change-set review pipeline of §9.33.4 — the runner passes 0 and the
+//! pipeline applies it when wiring), provider limits (§9.19.5–§9.19.6,
+//! surfaced through outcomes such as [`FailureClass::RateLimit`]), and
+//! resource budgets beyond the attempt budget (§9.27). Cap exhaustion is
+//! never a stop reason: skipped tasks stay eligible and re-compete on the
+//! next tick in stable task-ID order, so a full cap stalls neither the run
+//! nor its event stream. A slot the scheduler reserves for a retry
+//! scheduled during the same tick's outcome consumption idles for that
+//! tick — the tick-boundary rule (a retry never re-fires within its own
+//! tick) outranks slot utilization.
+//!
 //! Security boundary (spec §2.2, §9.33.7): the runner proposes, schedules,
 //! and stops — it makes no security decisions (allow/deny/verdict), bypasses
 //! no approval requirement, and owns no enforcement. Promotion remains with
@@ -77,6 +103,7 @@ use crate::failures::{FailureClass, RetryDecision, classify};
 use crate::metadata::BacklogTaskId;
 use crate::retry_rules::{IdempotencyProof, RetryGate, RetrySchedule};
 use crate::review_loop::{ReviewLoopConfig, ReviewLoopConfigError};
+use crate::schedule::{ParallelScheduler, SchedulerConfig, SchedulerConfigError};
 
 /// What the environment reports for one spawned task attempt
 /// (§9.33.3–§9.33.5).
@@ -292,6 +319,10 @@ pub enum RunnerError {
     /// The review-loop configuration is structurally invalid (§9.33.4).
     #[error("invalid review loop configuration: {0}")]
     InvalidReviewLoopConfig(#[from] ReviewLoopConfigError),
+    /// The scheduler configuration is structurally invalid (§9.33.3): a
+    /// zero cap can never dispatch anything, so construction fails closed.
+    #[error("invalid scheduler configuration: {0}")]
+    InvalidSchedulerConfig(#[from] SchedulerConfigError),
     /// The escalation policy is structurally invalid (§9.33.5).
     #[error("invalid escalation policy: {0}")]
     InvalidEscalationPolicy(#[from] EscalationPolicyError),
@@ -301,8 +332,9 @@ pub enum RunnerError {
 /// configurable through §9.22").
 ///
 /// Everything the runner needs is injected here: the validated backlog DAG,
-/// the review-loop configuration, and the budget knobs. There are no tokio,
-/// clock, provider, or agent inputs — effects stay in the runtime layer.
+/// the review-loop configuration, the scheduler configuration, and the
+/// budget knobs. There are no tokio, clock, provider, or agent inputs —
+/// effects stay in the runtime layer.
 #[derive(Debug)]
 pub struct RunnerInput<'a> {
     /// Validated backlog DAG (§9.33.2). Eligibility derives from
@@ -313,6 +345,17 @@ pub struct RunnerInput<'a> {
     /// blocked/needs-human states. Review-loop execution itself belongs to
     /// the change-set review pipeline, not this runner.
     pub config: &'a ReviewLoopConfig,
+    /// Scheduler configuration (§9.33.3 "configurable concurrency"): the
+    /// [`ParallelScheduler`] the runner clones into its dispatch loop and
+    /// consults on every tick. Validated at construction — a zero cap can
+    /// never schedule anything, so [`BacklogRunner::new`] fails closed with
+    /// [`RunnerError::InvalidSchedulerConfig`]. The runner enforces the
+    /// global and per-domain concurrency caps, expected-file
+    /// repository-conflict exclusion, and running implementations' share of
+    /// `review_capacity`; the under-review change-set count the capacity
+    /// also bounds is owned by the change-set review pipeline (runtime
+    /// layer), which applies it on top when wiring the runner.
+    pub scheduler_config: SchedulerConfig,
     /// Total attempt budget (§9.33.3 "a configured budget or time limit is
     /// reached"): every [`RunnerEvent::Started`] attempt costs one unit, so
     /// `attempt_budget` bounds the maximum number of spawned attempts.
@@ -351,6 +394,8 @@ pub struct BacklogRunner<'a> {
     dag: &'a TaskDag,
     /// Validated review-loop configuration (§9.33.4).
     config: &'a ReviewLoopConfig,
+    /// Deterministic scheduler consulted on every dispatch (§9.33.3).
+    scheduler: ParallelScheduler,
     /// Remaining attempt budget; each started attempt spends one unit.
     budget_remaining: u32,
     /// Bounded reprompt limit for [`FailureClass::InvalidAgentOutput`].
@@ -386,6 +431,7 @@ impl std::fmt::Debug for BacklogRunner<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BacklogRunner")
             .field("budget_remaining", &self.budget_remaining)
+            .field("scheduler", &self.scheduler)
             .field("completed", &self.completed)
             .field("blocked", &self.blocked)
             .field("running", &self.running)
@@ -398,17 +444,21 @@ impl std::fmt::Debug for BacklogRunner<'_> {
 
 impl<'a> BacklogRunner<'a> {
     /// Creates a runner over `input`, validating the review-loop
-    /// configuration and the per-task escalation states it derives from the
-    /// escalation policy (§9.33.4, §9.33.5).
+    /// configuration, the scheduler configuration, and the per-task
+    /// escalation states it derives from the escalation policy (§9.33.3,
+    /// §9.33.4, §9.33.5).
     ///
     /// # Errors
     ///
     /// Returns [`RunnerError::InvalidReviewLoopConfig`] when the review-loop
-    /// configuration is structurally invalid, or
+    /// configuration is structurally invalid,
+    /// [`RunnerError::InvalidSchedulerConfig`] when the scheduler
+    /// configuration could never dispatch anything, or
     /// [`RunnerError::InvalidEscalationPolicy`] when the escalation policy
     /// cannot produce valid per-task ladder states.
     pub fn new(input: &RunnerInput<'a>) -> Result<Self, RunnerError> {
         input.config.validate()?;
+        input.scheduler_config.validate()?;
         input.escalation_policy.validate()?;
         let mut escalation = BTreeMap::new();
         for (id, _) in input.dag.iter() {
@@ -420,6 +470,7 @@ impl<'a> BacklogRunner<'a> {
         Ok(Self {
             dag: input.dag,
             config: input.config,
+            scheduler: ParallelScheduler::new(input.scheduler_config.clone()),
             budget_remaining: input.attempt_budget,
             max_reprompt_attempts: input.max_reprompt_attempts,
             max_attempts_per_step: input.max_attempts_per_step,
@@ -441,6 +492,12 @@ impl<'a> BacklogRunner<'a> {
     #[must_use]
     pub const fn config(&self) -> &ReviewLoopConfig {
         self.config
+    }
+
+    /// The scheduler configuration this runner dispatches under (§9.33.3).
+    #[must_use]
+    pub const fn scheduler_config(&self) -> &SchedulerConfig {
+        self.scheduler.config()
     }
 
     /// The append-only ordered journal of everything the runner did and
@@ -516,7 +573,9 @@ impl<'a> BacklogRunner<'a> {
     /// 2. stop immediately when a run-level condition fired;
     /// 3. dispatch due retries and newly dependency-satisfied tasks
     ///    (eligibility = [`TaskDag::eligible`] minus blocked, running, and
-    ///    pending tasks), spending one budget unit per [`RunnerEvent::Started`];
+    ///    pending tasks), intersected with the scheduler's cap-constrained
+    ///    selection per §9.33.3 and spending one budget unit per
+    ///    [`RunnerEvent::Started`];
     /// 4. fire [`StopReason::BacklogEmpty`] / [`StopReason::NoEligibleTasks`]
     ///    when nothing can ever start again.
     ///
@@ -569,7 +628,25 @@ impl<'a> BacklogRunner<'a> {
                 startable.insert(id);
             }
         }
+        // §9.33.3: "Parallel execution MUST respect configurable concurrency,
+        // repository conflicts, resource budgets (§9.27), provider limits
+        // (§9.19.5-§9.19.6), and review capacity." The scheduler's selection
+        // caps this tick's starts against the running set; a task the caps
+        // skip is neither dropped nor blocked — it stays eligible and
+        // re-competes on the next tick. The under-review change-set count
+        // that ParallelScheduler::select also bounds is runtime state owned
+        // by the change-set review pipeline (§9.33.4), so the runner passes
+        // 0 here (see module docs for the enforced/deferred split).
+        let running: Vec<BacklogTaskId> = self.running.iter().cloned().collect();
+        let selection: BTreeSet<BacklogTaskId> = self
+            .scheduler
+            .select(self.dag, &self.completed, &running, 0)
+            .into_iter()
+            .collect();
         for task in &startable {
+            if !selection.contains(task) {
+                continue;
+            }
             if self.budget_remaining == 0 {
                 self.push_event(RunnerEvent::BudgetExhausted);
                 self.set_stop(StopReason::BudgetExhausted);
@@ -887,6 +964,7 @@ mod tests {
             max_reprompt_attempts: 3,
             max_attempts_per_step: 2,
             escalation_policy: EscalationPolicy::default(),
+            scheduler_config: SchedulerConfig::default(),
         }
     }
 
@@ -896,6 +974,25 @@ mod tests {
     ) -> Result<BacklogRunner<'a>, RunnerError> {
         BacklogRunner::new(&RunnerInput {
             escalation_policy: EscalationPolicy::default(),
+            ..input(dag, config)
+        })
+    }
+
+    fn caps(max_concurrent: usize) -> SchedulerConfig {
+        SchedulerConfig {
+            max_concurrent,
+            max_per_domain: None,
+            review_capacity: 8,
+        }
+    }
+
+    fn capped_runner<'a>(
+        dag: &'a TaskDag,
+        config: &'a ReviewLoopConfig,
+        scheduler_config: SchedulerConfig,
+    ) -> Result<BacklogRunner<'a>, RunnerError> {
+        BacklogRunner::new(&RunnerInput {
+            scheduler_config,
             ..input(dag, config)
         })
     }
@@ -1783,6 +1880,246 @@ mod tests {
             "\"budget_exhausted\""
         );
         assert_eq!(serde_json::to_string(&RunnerEvent::Paused)?, "\"paused\"");
+        Ok(())
+    }
+
+    #[test]
+    fn concurrency_cap_respected_on_wide_dag() -> TestResult {
+        let dag = dag(&[("a", &[]), ("b", &[]), ("c", &[]), ("d", &[]), ("e", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut runner = capped_runner(&dag, &config, caps(2))?;
+
+        // Tick 1: exactly cap-sized dispatch; c/d/e stay eligible.
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a", "b"]);
+        // Tick 2: the running set is full — no starts, and the full cap is
+        // NOT a stop reason.
+        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.stop_reason(), None);
+        // Draining the running set releases the next cap-sized batch.
+        let events = runner.tick(&BTreeMap::from([
+            completed_outcome("a"),
+            completed_outcome("b"),
+        ]));
+        assert_eq!(started_events(&events), ["c", "d"]);
+        let events = runner.tick(&BTreeMap::from([
+            completed_outcome("c"),
+            completed_outcome("d"),
+        ]));
+        assert_eq!(started_events(&events), ["e"]);
+        let events = runner.tick(&BTreeMap::from([completed_outcome("e")]));
+        assert_eq!(
+            events.last(),
+            Some(&RunnerEvent::Stopped {
+                reason: StopReason::BacklogEmpty,
+            })
+        );
+        // Dispatch order across the whole run is the stable task-ID order.
+        assert_eq!(started_events(runner.journal()), ["a", "b", "c", "d", "e"]);
+        Ok(())
+    }
+
+    #[test]
+    fn cap_competition_between_pending_retry_and_newly_eligible_is_deterministic() -> TestResult {
+        let dag = dag(&[("a", &[]), ("b", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut runner = capped_runner(&dag, &config, caps(1))?;
+
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a"]);
+        // The transient failure schedules a retry due on the NEXT tick; the
+        // slot the scheduler may reserve for it idles this tick (the
+        // tick-boundary rule outranks slot utilization), so b waits.
+        let events = runner.tick(&BTreeMap::from([(
+            tid("a"),
+            failed(FailureClass::TransientProviderOrNetwork, None, None),
+        )]));
+        assert!(events.contains(&RunnerEvent::RetryScheduled {
+            task: tid("a"),
+            delay_ms: 200,
+        }));
+        assert!(started_events(&events).is_empty());
+        // Pending retry a competes with newly eligible b for the single
+        // slot; stable task-ID order decides, and b is never dropped or
+        // blocked while it waits.
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a"]);
+        assert!(runner.blocked().is_empty());
+        let events = runner.tick(&BTreeMap::from([completed_outcome("a")]));
+        assert_eq!(started_events(&events), ["b"]);
+        let events = runner.tick(&BTreeMap::from([completed_outcome("b")]));
+        assert_eq!(
+            events.last(),
+            Some(&RunnerEvent::Stopped {
+                reason: StopReason::BacklogEmpty,
+            })
+        );
+        assert_eq!(started_events(runner.journal()), ["a", "a", "b"]);
+        assert_eq!(runner.completed(), &BTreeSet::from([tid("a"), tid("b")]));
+        Ok(())
+    }
+
+    #[test]
+    fn running_set_drain_releases_dispatch_slots() -> TestResult {
+        let dag = dag(&[("a", &[]), ("b", &[]), ("c", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut runner = capped_runner(&dag, &config, caps(2))?;
+
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a", "b"]);
+        // A full running set yields an empty-but-alive tick.
+        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.stop_reason(), None);
+        // Consuming one outcome frees exactly one slot.
+        let events = runner.tick(&BTreeMap::from([completed_outcome("a")]));
+        assert_eq!(started_events(&events), ["c"]);
+        // c joined the running set: b completing frees a slot with nothing
+        // left to start — no starts, no stop.
+        let events = runner.tick(&BTreeMap::from([completed_outcome("b")]));
+        assert!(started_events(&events).is_empty());
+        assert_eq!(runner.stop_reason(), None);
+        let events = runner.tick(&BTreeMap::from([completed_outcome("c")]));
+        assert_eq!(
+            events.last(),
+            Some(&RunnerEvent::Stopped {
+                reason: StopReason::BacklogEmpty,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn construction_rejects_invalid_scheduler_config() {
+        let dag = TaskDag::default();
+        let config = ReviewLoopConfig::default();
+
+        for (scheduler_config, error) in [
+            (
+                SchedulerConfig {
+                    max_concurrent: 0,
+                    max_per_domain: None,
+                    review_capacity: 8,
+                },
+                SchedulerConfigError::ZeroMaxConcurrent,
+            ),
+            (
+                SchedulerConfig {
+                    max_concurrent: 2,
+                    max_per_domain: Some(0),
+                    review_capacity: 8,
+                },
+                SchedulerConfigError::ZeroMaxPerDomain,
+            ),
+            (
+                SchedulerConfig {
+                    max_concurrent: 2,
+                    max_per_domain: None,
+                    review_capacity: 0,
+                },
+                SchedulerConfigError::ZeroReviewCapacity,
+            ),
+        ] {
+            let result = BacklogRunner::new(&RunnerInput {
+                scheduler_config,
+                ..input(&dag, &config)
+            });
+            assert_eq!(
+                result.map(|_| ()),
+                Err(RunnerError::InvalidSchedulerConfig(error))
+            );
+        }
+    }
+
+    #[test]
+    fn in_flight_tasks_are_never_dropped_or_blocked_by_the_cap() -> TestResult {
+        let dag = dag(&[("a", &[]), ("b", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut runner = capped_runner(&dag, &config, caps(1))?;
+
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a"]);
+        // With the running set full, b waits on the cap: repeated ticks
+        // neither drop a from the running set nor turn the wait into a
+        // block, a stop, or a false event stream.
+        for _ in 0..3 {
+            assert!(runner.tick(&no_outcomes()).is_empty());
+            assert_eq!(runner.stop_reason(), None);
+        }
+        assert!(runner.blocked().is_empty());
+        assert!(runner.completed().is_empty());
+        // a is still in flight: its outcome is consumed and recorded, then b
+        // immediately takes the released slot.
+        let events = runner.tick(&BTreeMap::from([completed_outcome("a")]));
+        assert!(events.contains(&RunnerEvent::AttemptRecorded {
+            task: tid("a"),
+            attempt: 1,
+            outcome: AttemptOutcome::Completed,
+        }));
+        assert_eq!(started_events(&events), ["b"]);
+        let _ = runner.tick(&BTreeMap::from([completed_outcome("b")]));
+        assert_eq!(runner.completed(), &BTreeSet::from([tid("a"), tid("b")]));
+        assert!(runner.blocked().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn budget_and_cap_both_bound_dispatch_and_the_smaller_wins() -> TestResult {
+        let dag = dag(&[("a", &[]), ("b", &[]), ("c", &[]), ("d", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut runner = BacklogRunner::new(&RunnerInput {
+            attempt_budget: 3,
+            scheduler_config: caps(2),
+            ..input(&dag, &config)
+        })?;
+
+        // Cap smaller than budget: the cap binds, spending two of three
+        // units. Cap exhaustion produces no stop reason.
+        assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a", "b"]);
+        assert_eq!(runner.budget_remaining(), 1);
+        assert_eq!(runner.stop_reason(), None);
+        // Budget smaller than the released slots: the budget binds and the
+        // BudgetExhausted stop is unchanged by the cap wiring.
+        let events = runner.tick(&BTreeMap::from([
+            completed_outcome("a"),
+            completed_outcome("b"),
+        ]));
+        assert_eq!(started_events(&events), ["c"]);
+        assert!(events.contains(&RunnerEvent::BudgetExhausted));
+        assert_eq!(
+            events.last(),
+            Some(&RunnerEvent::Stopped {
+                reason: StopReason::BudgetExhausted,
+            })
+        );
+        // d never started and never will on its own.
+        assert!(
+            !runner
+                .journal()
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::Started { task } if task == &tid("d")))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capped_run_produces_identical_journals_for_identical_inputs() -> TestResult {
+        let script = |runner: &mut BacklogRunner<'_>| {
+            let _ = runner.tick(&no_outcomes());
+            let _ = runner.tick(&BTreeMap::from([(
+                tid("a"),
+                failed(FailureClass::TransientProviderOrNetwork, None, None),
+            )]));
+            let _ = runner.tick(&no_outcomes());
+            let _ = runner.tick(&BTreeMap::from([
+                completed_outcome("a"),
+                completed_outcome("b"),
+            ]));
+            let _ = runner.tick(&BTreeMap::from([completed_outcome("c")]));
+        };
+        let dag = dag(&[("a", &[]), ("b", &[]), ("c", &[])])?;
+        let config = ReviewLoopConfig::default();
+        let mut first = capped_runner(&dag, &config, caps(2))?;
+        let mut second = capped_runner(&dag, &config, caps(2))?;
+        script(&mut first);
+        script(&mut second);
+        assert_eq!(first.stop_reason(), Some(StopReason::BacklogEmpty));
+        assert_eq!(first.journal(), second.journal());
+        assert_eq!(first.stop_reason(), second.stop_reason());
         Ok(())
     }
 }

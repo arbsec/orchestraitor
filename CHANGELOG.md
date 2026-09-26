@@ -105,6 +105,20 @@ All notable changes to Orchestraitor are recorded here. The format follows
   the explicit blocked/needs-human state §9.33.4 mandates, never silent approval. The
   runner proposes, schedules, and stops only; promotion and verdicts stay with
   Arbitraitor and the policy layer (§2.2, §9.33.7) (#202).
+- Configurable concurrency wiring on `orchestraitor-delivery` (spec §9.33.3 "Parallel
+  execution MUST respect configurable concurrency, repository conflicts, resource budgets
+  (§9.27), provider limits, and review capacity"): `RunnerInput` gains a validated
+  `SchedulerConfig` knob — construction fails closed with
+  `RunnerError::InvalidSchedulerConfig` on a zero cap — and `BacklogRunner::tick`
+  intersects its dispatch set with `ParallelScheduler::select`, so a tick never starts
+  more attempts than global `max_concurrent` (in-flight = the running set awaiting
+  outcomes), per-domain `max_per_domain`, expected-file repository-conflict exclusion,
+  and running implementations' share of `review_capacity` allow. Cap exhaustion is not a
+  stop reason: skipped tasks stay eligible and re-compete on the next tick in stable
+  task-ID order, and the under-review change-set count stays with the change-set review
+  pipeline (runtime layer) which applies it when wiring. Budget interplay is unchanged —
+  one attempt budget unit per `Started`, `BudgetExhausted` stop unchanged — and the
+  runner still only proposes, schedules, and stops (§2.2, §9.33.7) (#286).
 - Change-set review pipeline on `orchestraitor-delivery` (spec §9.33.4): a deterministic,
   synchronous, I/O-free `ReviewPipeline` that triggers on change-set completion, selects
   reviewers once per trigger through `select_reviewers` (#195), and runs the generation-
