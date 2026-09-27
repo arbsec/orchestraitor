@@ -14,8 +14,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CampaignError;
 
-/// One open board item that is not eligible under the ready predicate,
-/// attached to `AllBlocked` no-op records (the "blocked graph").
+/// A board item the conversion could not safely evaluate, carried on every
+/// decision record so fail-closed data-quality signals survive the pass
+/// (spec §9.43 warning channel).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipRecord {
+    /// Issue number when one could be read.
+    pub number: Option<u64>,
+    /// Machine-readable class (`not-open` | `malformed` | `truncated`).
+    pub kind: String,
+    /// Human-readable, log-safe reason.
+    pub reason: String,
+}
+
+/// One candidate blocked by unresolved dependencies, attached to `AllBlocked`
+/// no-op records (the "blocked graph").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockedNode {
     /// `org/name` of the issue's repository.
@@ -97,10 +110,14 @@ pub struct CampaignDecision {
     pub worker_args: Vec<String>,
     /// Deterministic human-readable rationale for the selection or no-op.
     pub rationale: String,
-    /// Ready items that were not selected, in P0-first order.
+    /// Ready items that were not selected, in priority-first order.
     pub alternatives: Vec<BlockedNode>,
-    /// Open items that were not eligible (attached on `AllBlocked`).
+    /// Eligible candidates blocked by unresolved dependencies (the
+    /// "blocked graph", attached on `AllBlocked`).
     pub blocked_graph: Vec<BlockedNode>,
+    /// Board items the read could not safely evaluate, carried on every
+    /// record (fail-closed data-quality channel, spec §9.43).
+    pub skipped: Vec<SkipRecord>,
 }
 
 /// A persisted decision row: the payload plus store-assigned identity.

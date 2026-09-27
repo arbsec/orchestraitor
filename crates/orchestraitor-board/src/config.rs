@@ -38,6 +38,10 @@ pub struct BoardProjectConfig {
     pub ready_value: String,
     /// Auth token reference, when configured.
     pub token_uri: Option<SecretUri>,
+    /// Single-select field carrying the P0-P3 priority (spec §9.41); defaults
+    /// to `Priority` when unset. Values are read-only inputs — the board
+    /// crate never writes this field.
+    pub priority_field: String,
 }
 
 impl BoardProjectConfig {
@@ -129,6 +133,7 @@ struct RawMvp {
     target_value: Option<String>,
     ready_field: Option<String>,
     ready_value: Option<String>,
+    priority_field: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +209,10 @@ impl RawConfig {
             ready_field,
             ready_value,
             token_uri,
+            priority_field: mvp
+                .priority_field
+                .filter(|field| !field.trim().is_empty())
+                .unwrap_or_else(|| "Priority".to_string()),
         })
     }
 }

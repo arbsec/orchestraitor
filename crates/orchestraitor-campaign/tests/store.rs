@@ -67,7 +67,9 @@ fn ready_snapshot(number: u64) -> BoardSnapshot {
             open_blockers: 0,
             target: Some("MVP".to_string()),
             status: Some("Ready".to_string()),
+            priority: None,
         }],
+        blocked_candidates: Vec::new(),
         ready: vec![orchestraitor_board::ReadyItem {
             number,
             title: format!("task {number}"),
@@ -93,6 +95,7 @@ fn noop_decision() -> CampaignDecision {
         rationale: "empty board".to_string(),
         alternatives: Vec::new(),
         blocked_graph: Vec::new(),
+        skipped: Vec::new(),
     }
 }
 
@@ -121,7 +124,7 @@ fn records_survive_reopen_and_append_in_order() -> TestResult {
         .as_ref()
         .ok_or("selected row must carry a task")?;
     assert_eq!(selected.number, 42);
-    assert_eq!(selected.task_id, format!("board-{}", 42));
+    assert_eq!(selected.task_id, "board-arbsec-orchestraitor-42");
     assert!(records[0].id < records[1].id, "append-only ids");
     assert_eq!(
         reopened.by_id(records[1].id)?.decision,

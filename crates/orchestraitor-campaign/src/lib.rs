@@ -27,7 +27,7 @@ mod session;
 
 pub use decision::{
     BlockedNode, CampaignDecision, CampaignDecisionStore, DecisionKind, NoOpReason, SelectedTask,
-    StoredCampaignDecision,
+    SkipRecord, StoredCampaignDecision,
 };
 pub use error::CampaignError;
 pub use session::{

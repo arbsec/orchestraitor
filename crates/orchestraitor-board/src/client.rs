@@ -205,6 +205,7 @@ impl BoardClient {
                     &config.repos,
                     config.target_field.as_str(),
                     config.ready_field.as_str(),
+                    config.priority_field.as_str(),
                 ) {
                     Ok(Some(facts)) => all_facts.push(facts),
                     Ok(None) => {}

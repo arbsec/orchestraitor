@@ -1,6 +1,10 @@
 //! `orc campaign run` CLI tests: hermetic — the board is an in-process
 //! scripted GraphQL server, and the no-op path never spawns a worker.
 
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+// Test-only allowances mirror `tests/worker.rs`: the harness runs the real
+// binary as a subprocess where failure means the test fails loudly.
+
 use std::io::{Read, Write as IoWrite};
 use std::net::TcpListener;
 use std::process::{Command, Output};
@@ -16,6 +20,7 @@ const RESOLVE_PROJECT: &str = r#"{"data":{"organization":{"projectV2":{"id":"PVT
 const RESOLVE_FIELDS: &str = r#"{"data":{"node":{"fields":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#;
 const EMPTY_ITEMS: &str =
     r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#;
+const ONE_P0_READY_ITEM: &str = r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PVTI_H_42","content":{"__typename":"Issue","number":42,"state":"OPEN","title":"P0 eligible task","url":"https://github.com/arbsec/orchestraitor/issues/42","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0}},"fieldValues":{"nodes":[{"field":{"name":"Target"},"name":"MVP"},{"field":{"name":"Status"},"name":"Ready"},{"field":{"name":"Priority"},"name":"P0"}],"totalCount":3}}]}}}}"#;
 
 enum RuleResponse {
     Json(&'static str),
@@ -135,7 +140,26 @@ fn run_orc(args: &[String]) -> Result<Output, io::Error> {
     Command::new(env!("CARGO_BIN_EXE_orc"))
         .args(args)
         .env("ORCHESTRAITOR_CAMPAIGN_TEST_TOKEN", "fixture-token")
+        .env("NEURALWATT_API_KEY", "cli-test-dummy-key")
         .output()
+}
+
+/// Spawns the deterministic `OpenAI` simulator (spec §21.3) and returns its
+/// base URL. The server lives until the test process exits.
+fn spawn_simulator(script: Vec<orchestraitor_testkit::PlannedResponse>) -> miette::Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("simulator runtime");
+        runtime.block_on(async move {
+            let server = orchestraitor_testkit::OpenAiMockServer::serve(script)
+                .await
+                .expect("simulator serve");
+            let _ignore = tx.send(server.base_url().to_string());
+            std::future::pending::<()>().await;
+        });
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .map_err(|error| miette::miette!("simulator did not start: {error}"))
 }
 
 #[test]
@@ -198,6 +222,103 @@ fn empty_board_pass_is_a_no_op_with_typed_reason_and_one_record() -> miette::Res
     assert!(json["worker"].is_null());
     assert_eq!(json["provider"], "neuralwatt");
     // Exactly one append-only record persisted.
+    let db = rusqlite::Connection::open(config_dir.join("campaign.db")).into_diagnostic()?;
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM campaign_decisions", [], |row| {
+            row.get(0)
+        })
+        .into_diagnostic()?;
+    assert_eq!(count, 1);
+    Ok(())
+}
+
+#[test]
+fn selected_pass_spawns_the_worker_via_the_direct_path() -> miette::Result<()> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "items(first",
+            response: RuleResponse::Json(ONE_P0_READY_ITEM),
+        },
+    ])
+    .into_diagnostic()?;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let project_dir = temp.path().join("project");
+    let config_dir = temp.path().join("config");
+    let tasks_dir = temp.path().join("tasks");
+    fs::create_dir_all(project_dir.join(".agents").join("project")).into_diagnostic()?;
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::create_dir_all(&tasks_dir).into_diagnostic()?;
+    fs::write(
+        project_dir
+            .join(".agents")
+            .join("project")
+            .join("github-project.local.toml"),
+        board_config(),
+    )
+    .into_diagnostic()?;
+    fs::write(
+        tasks_dir.join("board-arbsec-orchestraitor-42.json"),
+        r#"{"id": "board-arbsec-orchestraitor-42", "slug": "board-arbsec-orchestraitor-42", "description": "write the output file"}"#,
+    )
+    .into_diagnostic()?;
+
+    let endpoint = spawn_simulator(vec![
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"write_file\", \"path\": \"campaign.txt\", \"content\": \"campaign-ok\"}\n```"
+                .to_string(),
+        },
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content:
+                "```json\n{\"tool\": \"finish\", \"summary\": \"wrote it\", \"success\": true}\n```"
+                    .to_string(),
+        },
+    ])?;
+
+    let args = vec![
+        "--config-dir".to_string(),
+        config_dir.display().to_string(),
+        "--project-dir".to_string(),
+        project_dir.display().to_string(),
+        "--github-graphql-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--board-cache-path".to_string(),
+        temp.path().join("cache").display().to_string(),
+        "campaign".to_string(),
+        "run".to_string(),
+        "--once".to_string(),
+        "--json".to_string(),
+        "--worker-tasks-dir".to_string(),
+        tasks_dir.display().to_string(),
+        "--worker-provider-endpoint".to_string(),
+        endpoint,
+    ];
+    let output = run_orc(&args).into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "happy pass exits 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let json: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(json["kind"], "selected");
+    assert_eq!(json["selected"]["repo"], "arbsec/orchestraitor");
+    assert_eq!(json["selected"]["number"], 42);
+    assert_eq!(json["selected"]["task_id"], "board-arbsec-orchestraitor-42");
+    let worker = json["worker"]
+        .as_object()
+        .ok_or_else(|| miette::miette!("selected pass carries the worker result"))?;
+    assert_eq!(worker["status"], "completed");
+    assert_eq!(worker["exit_code"], 0);
+    assert_eq!(worker["untrusted_writes"][0], "campaign.txt");
     let db = rusqlite::Connection::open(config_dir.join("campaign.db")).into_diagnostic()?;
     let count: i64 = db
         .query_row("SELECT COUNT(*) FROM campaign_decisions", [], |row| {

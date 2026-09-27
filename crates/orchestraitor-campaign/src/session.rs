@@ -8,7 +8,7 @@ use orchestraitor_worker::WorkerRun;
 
 use crate::decision::{
     BlockedNode, CampaignDecision, CampaignDecisionStore, DecisionKind, NoOpReason, SelectedTask,
-    StoredCampaignDecision,
+    SkipRecord, StoredCampaignDecision,
 };
 use crate::error::CampaignError;
 
@@ -32,15 +32,19 @@ pub trait WorkerSpawner {
 }
 
 /// The reconciled board state one pass reads: every open item in the
-/// configured repositories, the ready queue over it, and the warning channel
-/// (closed items surface as `NotOpen` warnings).
+/// configured repositories, the ready queue over it, the eligible candidates
+/// blocked by unresolved dependencies, and the warning channel (closed items
+/// surface as `NotOpen` warnings).
 #[derive(Debug, Clone)]
 pub struct BoardSnapshot {
     /// All open items in scope.
     pub open: Vec<ItemFacts>,
     /// Ready-queue items (leaf, MVP, Ready, no unresolved blockers), already
-    /// sorted by issue number.
+    /// sorted by `(repo, issue number)`.
     pub ready: Vec<ReadyItem>,
+    /// Eligible candidates whose only disqualifier is unresolved blockers
+    /// (spec §9.35 "all-blocked"), sorted like `ready`.
+    pub blocked_candidates: Vec<ReadyItem>,
     /// Warnings for items that could not be evaluated; `NotOpen` entries are
     /// what separates [`NoOpReason::EpicExhausted`] from
     /// [`NoOpReason::EmptyQueue`].
@@ -58,17 +62,37 @@ pub struct CampaignOutcome {
     pub worker: Option<WorkerRun>,
 }
 
-/// Deterministic worker task id for a selected board item: `board-<number>`
-/// (alphanumeric-led, fixture-file safe per the worker's id rules).
+/// Worker-task-id charset limit from `orchestraitor-worker`'s id validation
+/// (`task.rs`): the id becomes a file name, so it is capped at 64 bytes.
+const TASK_ID_MAX_LEN: usize = 64;
+
+/// Deterministic worker task id for a selected board item:
+/// `board-<owner-repo>-<number>` (repo slug restricted to the worker id
+/// charset, truncated to fit the 64-byte file-name bound). Issue numbers are
+/// per-repo, so the identity must carry the repo — two configured repos with
+/// the same issue number must never load the same fixture.
 #[must_use]
 pub fn task_id_for(repo: &str, number: u64) -> String {
-    let _ = repo;
-    format!("board-{number}")
+    let prefix = format!("board--{number}");
+    let budget = TASK_ID_MAX_LEN.saturating_sub(prefix.len());
+    let slug: String = repo
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug: String = slug.chars().take(budget).collect();
+    format!("board-{slug}-{number}")
 }
 
-/// Applies the minimal epic-focus rule: `P0`-labelled items first, stable
-/// issue-number order within each group, cross-repo by `(repo, number)` for
-/// determinism.
+/// Applies the minimal epic-focus rule (spec §9.41): candidates whose
+/// configured priority-field value is `P0` first, stable `(repo, issue
+/// number)` order within each group. The priority field is authoritative —
+/// labels are advisory per the board config.
 #[must_use]
 pub fn compute_selection(ready: &[ReadyItem], open: &[ItemFacts]) -> Vec<ReadyItem> {
     let mut ordered: Vec<&ReadyItem> = ready.iter().collect();
@@ -78,9 +102,9 @@ pub fn compute_selection(ready: &[ReadyItem], open: &[ItemFacts]) -> Vec<ReadyIt
             .find(|facts| facts.repo == item.repo && facts.number == item.number);
         let p0 = facts.is_some_and(|facts| {
             facts
-                .labels
-                .iter()
-                .any(|label| label.eq_ignore_ascii_case("p0"))
+                .priority
+                .as_deref()
+                .is_some_and(|priority| priority.eq_ignore_ascii_case("p0"))
         });
         (u8::from(!p0), item.repo.clone(), item.number)
     });
@@ -102,19 +126,22 @@ pub fn run_once(
     spawner: &dyn WorkerSpawner,
 ) -> Result<CampaignOutcome, CampaignError> {
     let ordered = compute_selection(&snapshot.ready, &snapshot.open);
-    let blocked_graph = blocked_nodes(snapshot);
+    let skipped = skipped_records(snapshot);
     let decision = if let Some(selected) = ordered.first() {
         let task_id = task_id_for(&selected.repo, selected.number);
         let alternatives = ordered
             .iter()
             .skip(1)
-            .map(|item| BlockedNode {
-                repo: item.repo.clone(),
-                number: item.number,
-                title: item.title.clone(),
-                open_blockers: blockers_for(snapshot, &item.repo, item.number),
-                target: None,
-                status: None,
+            .map(|item| {
+                let facts = facts_for(snapshot, &item.repo, item.number);
+                BlockedNode {
+                    repo: item.repo.clone(),
+                    number: item.number,
+                    title: item.title.clone(),
+                    open_blockers: facts.map_or(0, |facts| facts.open_blockers),
+                    target: facts.and_then(|facts| facts.target.clone()),
+                    status: facts.and_then(|facts| facts.status.clone()),
+                }
             })
             .collect();
         CampaignDecision {
@@ -138,7 +165,8 @@ pub fn run_once(
                 "first eligible item in P0-first ready order (spec 10-orchestrator.md §9.35)"
                     .to_string(),
             alternatives,
-            blocked_graph,
+            blocked_graph: Vec::new(),
+            skipped,
         }
     } else {
         let (reason, rationale) = no_op_classification(snapshot);
@@ -151,10 +179,11 @@ pub fn run_once(
             model: routing.model.clone(),
             precedence_path: routing.precedence_path.clone(),
             fallback_reason: routing.fallback_reason.clone(),
-            worker_args: worker_args(""),
+            worker_args: Vec::new(),
             rationale,
             alternatives: Vec::new(),
-            blocked_graph,
+            blocked_graph: blocked_candidate_nodes(snapshot),
+            skipped,
         }
     };
     let stored = store.record(&decision)?;
@@ -169,53 +198,61 @@ pub fn run_once(
 }
 
 fn worker_args(task_id: &str) -> Vec<String> {
-    let mut args = vec![
+    vec![
         "worker".to_string(),
         "run".to_string(),
         "--task".to_string(),
-    ];
-    if !task_id.is_empty() {
-        args.push(task_id.to_string());
-        args.push("--json".to_string());
-    }
-    args
+        task_id.to_string(),
+        "--json".to_string(),
+    ]
 }
 
-fn blockers_for(snapshot: &BoardSnapshot, repo: &str, number: u64) -> u64 {
+fn facts_for<'a>(snapshot: &'a BoardSnapshot, repo: &str, number: u64) -> Option<&'a ItemFacts> {
     snapshot
         .open
         .iter()
         .find(|facts| facts.repo == repo && facts.number == number)
-        .map_or(0, |facts| facts.open_blockers)
 }
 
-fn blocked_nodes(snapshot: &BoardSnapshot) -> Vec<BlockedNode> {
-    let ready_keys: Vec<(&str, u64)> = snapshot
-        .ready
+fn skipped_records(snapshot: &BoardSnapshot) -> Vec<SkipRecord> {
+    let mut records: Vec<SkipRecord> = snapshot
+        .warnings
         .iter()
-        .map(|item| (item.repo.as_str(), item.number))
-        .collect();
-    let mut nodes: Vec<BlockedNode> = snapshot
-        .open
-        .iter()
-        .filter(|facts| {
-            !ready_keys
-                .iter()
-                .any(|(repo, number)| *repo == facts.repo && *number == facts.number)
-        })
-        .map(|facts| BlockedNode {
-            repo: facts.repo.clone(),
-            number: facts.number,
-            title: facts.title.clone(),
-            open_blockers: facts.open_blockers,
-            target: facts.target.clone(),
-            status: facts.status.clone(),
+        .map(|warning| SkipRecord {
+            number: warning.number,
+            kind: match warning.kind {
+                WarningKind::NotOpen => "not-open".to_string(),
+                WarningKind::Malformed => "malformed".to_string(),
+                WarningKind::Truncated => "truncated".to_string(),
+            },
+            reason: warning.reason.clone(),
         })
         .collect();
-    nodes.sort_by(|left, right| (&left.repo, left.number).cmp(&(&right.repo, right.number)));
-    nodes
+    records.sort_by(|left, right| (left.number, &left.kind).cmp(&(right.number, &right.kind)));
+    records
 }
 
+fn blocked_candidate_nodes(snapshot: &BoardSnapshot) -> Vec<BlockedNode> {
+    snapshot
+        .blocked_candidates
+        .iter()
+        .map(|item| {
+            let facts = facts_for(snapshot, &item.repo, item.number);
+            BlockedNode {
+                repo: item.repo.clone(),
+                number: item.number,
+                title: item.title.clone(),
+                open_blockers: facts.map_or(0, |facts| facts.open_blockers),
+                target: facts.and_then(|facts| facts.target.clone()),
+                status: facts.and_then(|facts| facts.status.clone()),
+            }
+        })
+        .collect()
+}
+
+/// Spec §9.35 discrimination: `all-blocked` only when eligible work exists
+/// and every candidate is blocked; open items that merely are not Ready (no
+/// blocked candidates) are `empty-queue` — "no eligible work exists at all".
 fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
     if snapshot.open.is_empty() {
         let epic_exhausted = snapshot
@@ -228,16 +265,42 @@ fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
                 "every tracked item is closed; nothing open remains".to_string(),
             );
         }
+        let skipped_note = if snapshot.warnings.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} item(s) skipped as unevaluable (fail-closed)",
+                snapshot.warnings.len()
+            )
+        };
         return (
             NoOpReason::EmptyQueue,
-            "no open board items in the configured repositories".to_string(),
+            format!("no open board items in the configured repositories{skipped_note}"),
+        );
+    }
+    if snapshot.blocked_candidates.is_empty() {
+        let skipped_note = if snapshot.warnings.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} item(s) skipped as unevaluable (fail-closed)",
+                snapshot.warnings.len()
+            )
+        };
+        return (
+            NoOpReason::EmptyQueue,
+            format!(
+                "{} open item(s), none eligible under the ready predicate and none blocked{}",
+                snapshot.open.len(),
+                skipped_note
+            ),
         );
     }
     (
         NoOpReason::AllBlocked,
         format!(
-            "{} open item(s), none eligible under the ready predicate; blocked graph attached",
-            snapshot.open.len()
+            "{} eligible candidate(s) blocked by unresolved dependencies; blocked graph attached",
+            snapshot.blocked_candidates.len()
         ),
     )
 }

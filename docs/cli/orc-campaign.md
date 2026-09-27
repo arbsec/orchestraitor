@@ -16,8 +16,10 @@ orc campaign run --once [--json]
 ```
 
 Without `--once` the command fails with a typed error naming the loop lane. Exit code:
-`0` on a no-op pass or a completed worker run; non-zero on a typed failure (board,
-routing, store, or worker), with the decision record still persisted.
+`0` on a no-op pass or a completed worker run. Non-zero on a typed failure: board,
+routing, and store failures persist no record; a post-selection worker failure (typed
+failure inside the run, or a spawn that produced no run at all) exits non-zero with the
+decision record already persisted.
 
 ## Selection
 
@@ -27,9 +29,14 @@ truncated windows) and orders it P0-first. The first item is selected; every oth
 ready item is recorded as an alternative. Selection is deterministic: the same board
 yields the same record fields.
 
-The worker task id is derived deterministically from the issue number as
-`board-<number>` and resolves a fixture task from
-`<config-dir>/worker-tasks/<id>.json` (see [orc worker](orc-worker.md)).
+The worker task id is derived deterministically from the board identity as
+`board-<owner-repo>-<number>` (issue numbers are per-repo, so the id carries the repo)
+and resolves a fixture task from `<config-dir>/worker-tasks/<id>.json` (see
+[orc worker](orc-worker.md)).
+
+One invocation at a time: single-flight is owned by the loop runner / watch daemon
+(later bootstrap lanes), so concurrent `orc campaign run` invocations may select the
+same first item and each dispatch its own worker against the same worktree.
 
 ## No-op passes
 
@@ -37,8 +44,8 @@ A pass that cannot select still persists its one record with a typed reason:
 
 | Reason | Meaning | Worker |
 | --- | --- | --- |
-| `empty-queue` | No open board items in the configured repositories. | not spawned |
-| `all-blocked` | Open items exist but none satisfy the ready predicate; the record carries the blocked graph (each open item with its unresolved-blocker count and board field values). | not spawned |
+| `empty-queue` | No eligible work exists: no open items, or open items that are not Ready-status candidates. The record discloses unevaluable (fail-closed) items. | not spawned |
+| `all-blocked` | Eligible candidates exist whose only disqualifier is unresolved blockers; the record carries the blocked graph (each candidate with its unresolved-blocker count and board field values). | not spawned |
 | `epic-exhausted` | Every tracked item is closed. | not spawned |
 
 ## Decision records

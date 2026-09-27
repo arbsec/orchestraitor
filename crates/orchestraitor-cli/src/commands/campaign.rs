@@ -111,7 +111,7 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
     if !args.once {
         return Err(miette!(
             "only `--once` exists in this slice; the cron-shaped loop runner lands with the \
-             bootstrap-loop task (E0-T8)"
+             bootstrap loop"
         ));
     }
     let (config, _path) = BoardProjectConfig::load(&paths.project_dir).into_diagnostic()?;
@@ -135,9 +135,11 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
         .block_on(client.item_facts(&config))
         .into_diagnostic()?;
     let ready = orchestraitor_board::ready_queue(&open, &config);
+    let blocked_candidates = orchestraitor_board::blocked_candidates(&open, &config);
     let snapshot = BoardSnapshot {
         open,
         ready,
+        blocked_candidates,
         warnings,
     };
 
@@ -180,6 +182,7 @@ fn render_json<W: Write>(writer: &mut W, outcome: &CampaignOutcome) -> Result<()
         "rationale": decision.rationale,
         "alternatives": decision.alternatives,
         "blocked_graph": decision.blocked_graph,
+        "skipped": decision.skipped,
         "worker": outcome.worker,
     });
     serde_json::to_writer_pretty(&mut *writer, &payload).into_diagnostic()?;
@@ -214,6 +217,14 @@ fn render_text<W: Write>(writer: &mut W, outcome: &CampaignOutcome) -> Result<()
     )
     .into_diagnostic()?;
     writeln!(writer, "rationale = {}", decision.rationale).into_diagnostic()?;
+    if !decision.skipped.is_empty() {
+        writeln!(
+            writer,
+            "skipped = {} item(s) unevaluable (fail-closed)",
+            decision.skipped.len()
+        )
+        .into_diagnostic()?;
+    }
     if let Some(worker) = &outcome.worker {
         writeln!(writer, "worker_status = {:?}", worker.status).into_diagnostic()?;
         writeln!(writer, "worker_exit = {}", worker.exit_code).into_diagnostic()?;
@@ -240,4 +251,46 @@ fn check_exit(outcome: &CampaignOutcome) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchestraitor_agent_catalog::RoleRoutingDecision;
+
+    #[test]
+    fn non_neuralwatt_provider_is_a_typed_spawn_refusal() -> Result<()> {
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let paths = ConfigPaths {
+            config_dir: temp.path().to_path_buf(),
+            project_dir: temp.path().to_path_buf(),
+            models_dev_endpoint: None,
+            github_api_endpoint: None,
+            github_graphql_endpoint: None,
+            board_cache_path: None,
+        };
+        let spawner = DirectSpawner {
+            paths: &paths,
+            tasks_dir: None,
+            provider_endpoint: None,
+        };
+        let routing = RoleRoutingDecision {
+            role: "implement".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5".to_string(),
+            precedence_path: "test".to_string(),
+            fallback_reason: None,
+        };
+        match spawner.spawn("board-x-1", &routing) {
+            Ok(_) => Err(miette!("non-neuralwatt provider must be refused")),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("neuralwatt"),
+                    "refusal must name the supported provider: {message}"
+                );
+                Ok(())
+            }
+        }
+    }
 }

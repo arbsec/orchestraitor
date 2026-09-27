@@ -54,6 +54,26 @@ pub enum WarningKind {
     Truncated,
 }
 
+/// Open items that satisfy every ready-predicate clause except unresolved
+/// blockers: eligible work whose candidates are all blocked (spec §9.35
+/// "all-blocked"). Sorted by `(repo, issue number)` like [`ready_queue`].
+#[must_use]
+pub fn blocked_candidates(facts: &[ItemFacts], config: &BoardProjectConfig) -> Vec<ReadyItem> {
+    let mut blocked: Vec<ReadyItem> = facts
+        .iter()
+        .filter(|facts| matches_leaf_mvp_ready(facts, config) && facts.open_blockers > 0)
+        .map(|facts| ReadyItem {
+            number: facts.number,
+            title: facts.title.clone(),
+            url: facts.url.clone(),
+            repo: facts.repo.clone(),
+            item_id: facts.item_node_id.clone(),
+        })
+        .collect();
+    blocked.sort_by(|left, right| (&left.repo, left.number).cmp(&(&right.repo, right.number)));
+    blocked
+}
+
 /// An item the predicate could not safely evaluate; reported as a warning,
 /// never a crash (issue 308 QA failure scenario).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +110,10 @@ pub fn ready_queue(facts: &[ItemFacts], config: &BoardProjectConfig) -> Vec<Read
     ready
 }
 
-fn is_eligible(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
+/// Leaf + `Target` + `Status` parts of the ready predicate, without the
+/// blocker clause — the campaign pass uses this to classify open items that
+/// are eligible except for unresolved blockers (spec §9.35 "all-blocked").
+fn matches_leaf_mvp_ready(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
     let leaf = match &facts.issue_type {
         Some(native) => config.leaf_types.iter().any(|leaf| leaf == native),
         None => facts.labels.iter().any(|label| {
@@ -99,9 +122,12 @@ fn is_eligible(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
                 .any(|fallback| label == fallback)
         }),
     };
-    leaf && facts.open_blockers == 0
-        && facts.target.as_deref() == Some(config.target_value.as_str())
+    leaf && facts.target.as_deref() == Some(config.target_value.as_str())
         && facts.status.as_deref() == Some(config.ready_value.as_str())
+}
+
+fn is_eligible(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
+    matches_leaf_mvp_ready(facts, config) && facts.open_blockers == 0
 }
 
 /// Renders a skip decision into a warning carrying the issue number when the
@@ -143,6 +169,7 @@ mod tests {
             ready_field: "Status".to_string(),
             ready_value: "Ready".to_string(),
             token_uri: None,
+            priority_field: "Priority".to_string(),
         }
     }
 
@@ -158,6 +185,7 @@ mod tests {
             open_blockers: 0,
             target: Some("MVP".to_string()),
             status: Some("Ready".to_string()),
+            priority: None,
         }
     }
 
