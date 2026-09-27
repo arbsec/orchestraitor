@@ -46,7 +46,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                     flake                                     → identify + file issue; do NOT
                                                               rerun until green (spec `50-contracts-data.md` §21.10)
                   Required AND non-optional checks must ALL pass. A missing/skipped
-                  check is a failure, not a pass.
+                  check is a failure, not a pass — except workflow jobs deliberately
+                  disabled repo-side (the `KNOWN_DISABLED_JOBS` allowlist in
+                  `pr-checks`), which are not-applicable and excluded from the gate.
 
 3. REVIEW         Select reviewers by changed area (spec `10-orchestrator.md` §9.33.4):
                     general, security, backend, frontend, data, devops, testing,

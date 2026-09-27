@@ -38,8 +38,25 @@ if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
   exit 0
 fi
 
-# Classify checks.
-echo "$RAW" | jq '{
+# Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if: false`
+# (state SKIPPED, conclusion skipped). They are classified "not-applicable" and
+# excluded from the all_passed gate — they can never report pass. Genuinely
+# skipped-but-optioned checks are NOT in this list and still fail the gate.
+#   - "Docs Consistency": replaced by `xtask docs-check` (manual evidence).
+#   - "Documentation":    event-gated in code.yml (`if: github.event_name ==
+#     'push'`), so it never runs on pull-request events; excluded only while
+#     it reports the skipped state — a failing or pending run still fails the
+#     gate. Re-enabling on PRs means removing the name from this list.
+# See arbsec/orchestraitor#404.
+KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
+
+# Classify checks. The not-applicable exemption requires BOTH the known-disabled
+# name AND the skipped state: a known-disabled job that actually ran and failed
+# is a failure, never a pass (state-blind exemption would launder real failures).
+echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
+  def disabled($name): ($known_disabled | index($name)) != null;
+  def exempt: disabled(.name) and .bucket == "skipping";
+  {
   checks: map({
     name: .name,
     state: .state,
@@ -47,7 +64,8 @@ echo "$RAW" | jq '{
     workflow: .workflow,
     link: .link,
     classification: (
-      if .bucket == "pass" then "pass"
+      if exempt then "not-applicable"
+      elif .bucket == "pass" then "pass"
       elif .bucket == "fail" then "fail"
       elif .bucket == "pending" then "pending"
       elif .bucket == "skipping" then "skip"
@@ -56,7 +74,7 @@ echo "$RAW" | jq '{
       end
     )
   }),
-  all_passed: all(.[]; .bucket == "pass"),
+  all_passed: all(.[]; .bucket == "pass" or exempt),
   any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
   any_pending: any(.[]; .bucket == "pending")
 }'

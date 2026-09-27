@@ -31,7 +31,10 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
 # Extract each checklist line with its orc marker.
 # Pattern: - [ ] <!-- orc:XXX --> description  OR  - [x] <!-- orc:XXX --> description
-RESULT="$(echo "$BODY" | grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:(\w+)\s*-->\s*(.*)$' | while IFS= read -r line; do
+# A body with zero markers is legitimate (custom PR bodies): grep matches nothing
+# and would abort under pipefail, so guard it — empty means an empty checklist
+# (all_checked is vacuously true).
+RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:(\w+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
   CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
   MARKER="$(echo "$line" | grep -oP '(?<=orc:)\w+')"
   DESC="$(echo "$line" | sed 's/.*orc:\w*\s*-->\s*//' || true)"
