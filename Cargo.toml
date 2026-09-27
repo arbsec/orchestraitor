@@ -140,7 +140,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
-tree-sitter-bash = "0.23"
+tree-sitter-bash = "0.25"
 
 # MCP + ACP (tech-stack.md §1, §4)
 rmcp = { version = "2.2.0", features = ["server", "client", "macros", "schemars", "auth", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "reqwest"] }
