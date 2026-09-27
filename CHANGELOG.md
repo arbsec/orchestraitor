@@ -20,6 +20,23 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orc worker run --task <id> [--json]` and the `orchestraitor-worker` crate: the headless
+  one-shot bootstrap mini-worker (spec `10-orchestrator.md` §9.38, `60-milestones.md` MVP-6;
+  #310). The worker resolves a fixture task, routes through the control plane's `implement`
+  role decision, and runs a bounded mini-agent loop over the `ProviderTransport` boundary
+  with exactly four tools — worktree-confined file read and write (symlink-escape-safe,
+  size-capped; writes recorded as untrusted output per spec §9.14), minimal local content
+  search, and bash that crosses the Arbitraitor #311 mediation boundary
+  (`MediatedWorker::spawn` preflight + `run_bash`) on every call. Capability requests
+  outside the four tools are refused, recorded, and fed back; every tool call produces a
+  receipt with static reason codes (spec §9.23.4). Budgets are enforced as typed
+  failures, never infinite retries: attempts 3, re-plan 2, worker timeout 45m,
+  concurrency 2 (scheduler-facing), stall 10m, provider backoff 10s·2^n capped at 5m,
+  $10/day spend soft cap (recorded, not a hard stop), run budget 4h. Delivery is a seam
+  (`DeliverySink`): the bootstrap reports `delivery.kind = "pending"` and the PR delivery
+  path wires in a later lane. The worker loop is tested against the deterministic
+  simulator, never a live provider (spec §21.3). Documented in
+  [docs/cli/orc-worker.md](docs/cli/orc-worker.md) and the README.
 - `orchestraitor-provider-neuralwatt` crate implementing `ProviderTransport` against the
   Neuralwatt OpenAI Chat Completions-compatible API for GLM-5.2 BYOK (spec §10.3). Default
   base URL `https://api.neuralwatt.com/v1` (overridable via config); API key resolved from

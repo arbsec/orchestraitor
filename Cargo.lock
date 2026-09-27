@@ -3967,6 +3967,8 @@ dependencies = [
  "orchestraitor-core",
  "orchestraitor-model",
  "orchestraitor-provider-meta",
+ "orchestraitor-testkit",
+ "orchestraitor-worker",
  "reqwest",
  "secrecy",
  "serde",
@@ -4235,6 +4237,25 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "orchestraitor-worker"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "orchestraitor-arbitraitor-client",
+ "orchestraitor-model",
+ "orchestraitor-provider-api",
+ "orchestraitor-provider-neuralwatt",
+ "orchestraitor-testkit",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
