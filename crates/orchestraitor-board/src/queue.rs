@@ -41,6 +41,19 @@ pub struct ReadyItem {
     pub item_id: String,
 }
 
+/// The machine-readable class of a [`SkipWarning`], letting consumers
+/// (the campaign pass) distinguish closed items from broken data without
+/// parsing the human-readable reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningKind {
+    /// The item's issue state is not `OPEN`.
+    NotOpen,
+    /// The item's content is missing or malformed.
+    Malformed,
+    /// A connection window was truncated; the item failed closed.
+    Truncated,
+}
+
 /// An item the predicate could not safely evaluate; reported as a warning,
 /// never a crash (issue 308 QA failure scenario).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +62,8 @@ pub struct SkipWarning {
     pub number: Option<u64>,
     /// Why the item could not be evaluated.
     pub reason: String,
+    /// Machine-readable class of the warning.
+    pub kind: WarningKind,
 }
 
 /// Evaluates the ready-queue predicate over parsed item facts.
@@ -93,14 +108,24 @@ fn is_eligible(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
 /// malformed content still exposed one.
 pub(crate) fn skip_warning(raw: &crate::item::RawItem, skip: &ItemSkip) -> SkipWarning {
     let number = raw.content.as_ref().and_then(|content| content.number);
-    let reason = match skip {
-        ItemSkip::Malformed(reason) => format!("malformed item: {reason}"),
-        ItemSkip::Truncated(window) => format!("truncated `{window}` window; failing closed"),
-        ItemSkip::NotOpen => {
-            "issue is not OPEN; closed issues never enter the ready queue".to_string()
+    let (reason, kind) = match skip {
+        ItemSkip::Malformed(reason) => {
+            (format!("malformed item: {reason}"), WarningKind::Malformed)
         }
+        ItemSkip::Truncated(window) => (
+            format!("truncated `{window}` window; failing closed"),
+            WarningKind::Truncated,
+        ),
+        ItemSkip::NotOpen => (
+            "issue is not OPEN; closed issues never enter the ready queue".to_string(),
+            WarningKind::NotOpen,
+        ),
     };
-    SkipWarning { number, reason }
+    SkipWarning {
+        number,
+        reason,
+        kind,
+    }
 }
 
 #[cfg(test)]

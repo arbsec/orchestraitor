@@ -28,4 +28,4 @@ pub use client::{BoardClient, MoveOutcome};
 pub use config::BoardProjectConfig;
 pub use error::BoardError;
 pub use item::{ItemFacts, ItemSkip};
-pub use queue::{ReadyItem, SkipWarning, ready_queue};
+pub use queue::{ReadyItem, SkipWarning, WarningKind, ready_queue};

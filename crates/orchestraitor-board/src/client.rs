@@ -19,7 +19,7 @@ use crate::auth::BoardAuth;
 use crate::cache::{FieldNodeIds, NodeIdCacheFile, ProjectNodeIds};
 use crate::config::BoardProjectConfig;
 use crate::error::BoardError;
-use crate::item::{GraphQlEnvelope, ItemPage};
+use crate::item::{GraphQlEnvelope, ItemFacts, ItemPage};
 use crate::queue::{self, ReadyItem, SkipWarning};
 
 const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
@@ -168,16 +168,21 @@ impl BoardClient {
         self
     }
 
-    /// Lists the ready queue: leaf Task/Bug items with the configured target
-    /// and ready values and no unresolved blockers (spec §9.40).
+    /// Fetches the validated facts for every open board item in the
+    /// configured repositories, plus the warning channel for items the
+    /// conversion could not safely evaluate (closed issues surface as
+    /// `NotOpen` warnings; malformed or truncated items fail closed).
+    ///
+    /// This is the reconciled board state the campaign pass reads (spec
+    /// §9.35); `ready_items` applies the ready-queue predicate on top of it.
     ///
     /// # Errors
     ///
     /// Returns a typed error for auth, transport, GraphQL, or cache failures.
-    pub async fn ready_items(
+    pub async fn item_facts(
         &self,
         config: &BoardProjectConfig,
-    ) -> Result<(Vec<ReadyItem>, Vec<SkipWarning>), BoardError> {
+    ) -> Result<(Vec<ItemFacts>, Vec<SkipWarning>), BoardError> {
         let ids = self.resolved_ids(config).await?;
         let mut after: Option<String> = None;
         let mut all_facts = Vec::new();
@@ -212,8 +217,22 @@ impl BoardClient {
             let Some(cursor) = page_info.end_cursor else {
                 return Err(BoardError::TruncatedConnection { window: "items" });
             };
-            after = Some(cursor);
+            after = cursor.into();
         }
+        Ok((all_facts, warnings))
+    }
+
+    /// Lists the ready queue: leaf Task/Bug items with the configured target
+    /// and ready values and no unresolved blockers (spec §9.40).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for auth, transport, GraphQL, or cache failures.
+    pub async fn ready_items(
+        &self,
+        config: &BoardProjectConfig,
+    ) -> Result<(Vec<ReadyItem>, Vec<SkipWarning>), BoardError> {
+        let (all_facts, warnings) = self.item_facts(config).await?;
         Ok((queue::ready_queue(&all_facts, config), warnings))
     }
 

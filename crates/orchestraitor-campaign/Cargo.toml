@@ -1,0 +1,26 @@
+[package]
+name = "orchestraitor-campaign"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "One-shot campaign pass: reads the reconciled board, selects at most one eligible task, and persists exactly one append-only decision record (spec 10-orchestrator.md §9.35, issue #313)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# rusqlite (MIT): append-only SQLite decision-store, mirroring the
+# agent-catalog RoleRoutingDecisionStore pattern (schema_migrations-versioned).
+rusqlite = { workspace = true }
+orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
+orchestraitor-board = { path = "../orchestraitor-board" }
+orchestraitor-worker = { path = "../orchestraitor-worker" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

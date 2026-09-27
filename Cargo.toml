@@ -12,6 +12,7 @@ members = [
     "crates/orchestraitor-cli",
     "crates/orchestraitor-context",
     "crates/orchestraitor-core",
+    "crates/orchestraitor-campaign",
     "crates/orchestraitor-cost-ledger",
     "crates/orchestraitor-daemon",
     "crates/orchestraitor-delivery",
