@@ -160,7 +160,7 @@ impl DaemonStore {
             EVENT_SQL,
             params![
                 u64_to_i64(record.envelope.monotonic_seq)?,
-                u64::from(record.envelope.schema_version),
+                i64::from(record.envelope.schema_version),
                 category_text(record.envelope.category),
                 record.envelope.correlation_id.as_str(),
                 record
