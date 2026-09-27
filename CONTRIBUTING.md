@@ -10,7 +10,10 @@ All contributions must be signed off with the [Developer Certificate of
 Origin](https://developercertificate.org/). Use `git commit -s`, or add
 `Signed-off-by: Your Name <your.email@example.com>` to your commit. AI-generated contributions
 are attributed to the human submitter, who remains responsible for the change regardless of
-which tool produced it.
+which tool produced it. The one exception is a registered `service_identities` slug: commits
+authored as `<slug>[bot]` (`<slug>[bot]` noreply address) satisfy the DCO via the bot's own
+sign-off, and human accountability rides the launch facts and attribution labels (spec
+`10-orchestrator.md` §9.47(c)) plus the human-reviewed PR.
 
 ## Before contributing: where does the work belong?
 
