@@ -42,7 +42,7 @@ if ! echo "$CONVERGENCE" | jq -e . >/dev/null 2>&1; then
 fi
 rm -f "$CONV_ERR_FILE"
 if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
-  REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons | join(", ")')"
+  REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons // [] | join(", ")')"
   echo "error: PR has not converged. Reasons: $REASONS" >&2
   if [ "$OPT_DRY_RUN" = true ]; then
     echo "[dry-run] Would NOT merge: convergence check failed." >&2
