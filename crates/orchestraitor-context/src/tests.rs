@@ -216,6 +216,71 @@ fn expand_context_resolves_by_path_and_digest() {
     let _: LanguageKind = LanguageKind::Rust;
 }
 
+#[cfg(feature = "grammar-javascript")]
+#[test]
+fn javascript_symbols_are_extracted_with_expected_kinds() {
+    let repo = js_fixture_repo();
+    let mut indexer = Indexer::default();
+
+    let report = indexer.index_repository(repo.path()).unwrap();
+    let query = ContextQuery::new(indexer.index());
+
+    assert_eq!(report.observed_blobs, 1);
+    // The fixture yields exactly five definitions; an unexpected extra
+    // match means the grammar changed a queried node's tree shape.
+    assert_eq!(indexer.index().symbols().len(), 5);
+
+    let digest = indexer
+        .index()
+        .paths()
+        .get(Path::new("src/index.js"))
+        .cloned()
+        .unwrap();
+    let blob = indexer.index().blob_for_digest(&digest).unwrap();
+    assert_eq!(blob.language, Some(LanguageKind::JavaScript));
+
+    let function = query
+        .find_symbol("formatName", Some(SymbolKind::Function), None)
+        .pop()
+        .unwrap();
+    assert_eq!(function.path, Path::new("src/index.js"));
+    assert_eq!(function.range.start_line, 5);
+    assert_eq!(function.signature, "function formatName(name) {");
+
+    let class = query
+        .find_symbol("Greeter", Some(SymbolKind::Type), None)
+        .pop()
+        .unwrap();
+    assert_eq!(class.range.start_line, 9);
+    assert_eq!(class.signature, "class Greeter {");
+
+    let method = query
+        .find_symbol("greet", Some(SymbolKind::Method), None)
+        .pop()
+        .unwrap();
+    assert_eq!(method.range.start_line, 10);
+    assert_eq!(method.signature, "greet(name) {");
+
+    let constant = query
+        .find_symbol("LIMIT", Some(SymbolKind::Variable), None)
+        .pop()
+        .unwrap();
+    assert_eq!(constant.range.start_line, 2);
+    assert_eq!(constant.signature, "const LIMIT = 10;");
+
+    let counter = query
+        .find_symbol("counter", Some(SymbolKind::Variable), None)
+        .pop()
+        .unwrap();
+    assert_eq!(counter.range.start_line, 3);
+    assert_eq!(counter.signature, "let counter = 0;");
+
+    // Property accesses and comment content are not definitions and must
+    // never be extracted as symbols.
+    assert!(query.find_symbol("prefix", None, None).is_empty());
+    assert!(query.find_symbol("ghostSymbol", None, None).is_empty());
+}
+
 fn blob_path(blob: &BlobRecord) -> PathBuf {
     blob.path.clone()
 }
@@ -227,6 +292,19 @@ fn fixture_repo() -> TempDir {
     fs::write(
         src.join("lib.rs"),
         "pub fn add(left: i32, right: i32) -> i32 {\n    left + right\n}\n\npub fn twice(value: i32) -> i32 {\n    add(value, value)\n}\n",
+    )
+    .unwrap();
+    repo
+}
+
+#[cfg(feature = "grammar-javascript")]
+fn js_fixture_repo() -> TempDir {
+    let repo = TempDir::new().unwrap();
+    let src = repo.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(
+        src.join("index.js"),
+        "// ghostSymbol must never be extracted from this comment.\nconst LIMIT = 10;\nlet counter = 0;\n\nfunction formatName(name) {\n    return name.trim();\n}\n\nclass Greeter {\n    greet(name) {\n        counter += 1;\n        return this.prefix + formatName(name);\n    }\n}\n",
     )
     .unwrap();
     repo
