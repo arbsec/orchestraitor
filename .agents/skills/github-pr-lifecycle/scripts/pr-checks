@@ -38,8 +38,19 @@ if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
   exit 0
 fi
 
+# Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if: false`
+# (state SKIPPED, conclusion skipped). They are classified "not-applicable" and
+# excluded from the all_passed gate — they can never report pass. Genuinely
+# skipped-but-optioned checks are NOT in this list and still fail the gate.
+#   - "Docs Consistency": replaced by `xtask docs-check` (manual evidence).
+#   - "Documentation":    disabled repo-side.
+# See arbsec/orchestraitor#404.
+KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
+
 # Classify checks.
-echo "$RAW" | jq '{
+echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
+  def disabled($name): ($known_disabled | index($name)) != null;
+  {
   checks: map({
     name: .name,
     state: .state,
@@ -47,7 +58,8 @@ echo "$RAW" | jq '{
     workflow: .workflow,
     link: .link,
     classification: (
-      if .bucket == "pass" then "pass"
+      if disabled(.name) then "not-applicable"
+      elif .bucket == "pass" then "pass"
       elif .bucket == "fail" then "fail"
       elif .bucket == "pending" then "pending"
       elif .bucket == "skipping" then "skip"
@@ -56,7 +68,7 @@ echo "$RAW" | jq '{
       end
     )
   }),
-  all_passed: all(.[]; .bucket == "pass"),
+  all_passed: all(.[]; .bucket == "pass" or disabled(.name)),
   any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
   any_pending: any(.[]; .bucket == "pending")
 }'

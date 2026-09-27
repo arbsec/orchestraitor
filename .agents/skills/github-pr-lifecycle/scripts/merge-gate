@@ -23,14 +23,26 @@ fi
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
-# Run convergence-status first.
+# Run convergence-status first (once; stderr captured for diagnostics).
 # NOTE: convergence-status is a first-pass proxy — it checks available GitHub
 # signals but cannot prove review-generation evidence on its own. The caller
 # (the pr-lifecycle skill's session) must confirm a full review generation ran
 # against the current HEAD and found no new noteworthy findings.
-if ! "$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>/dev/null | jq -e '.mergeable == true' >/dev/null 2>&1; then
-  CONVERGENCE="$("$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>/dev/null || true)"
-  REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons | join(", ")' 2>/dev/null || echo 'unknown')"
+CONV_ERR_FILE="$(mktemp)"
+CONVERGENCE=""
+CONV_EXIT=0
+CONVERGENCE="$("$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>"$CONV_ERR_FILE")" || CONV_EXIT=$?
+if ! echo "$CONVERGENCE" | jq -e . >/dev/null 2>&1; then
+  # convergence-status hard-failed (no usable JSON) — surface the sub-check's
+  # name and stderr instead of reporting an empty reason list.
+  echo "error: sub-check 'convergence-status' failed (exit $CONV_EXIT):" >&2
+  sed 's/^/  /' "$CONV_ERR_FILE" >&2
+  rm -f "$CONV_ERR_FILE"
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+rm -f "$CONV_ERR_FILE"
+if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
+  REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons | join(", ")')"
   echo "error: PR has not converged. Reasons: $REASONS" >&2
   if [ "$OPT_DRY_RUN" = true ]; then
     echo "[dry-run] Would NOT merge: convergence check failed." >&2
