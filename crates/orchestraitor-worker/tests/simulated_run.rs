@@ -65,6 +65,22 @@ impl BashMediator for FixtureBash {
     }
 }
 
+/// Fixture mediator that yields inside the dispatch, mirroring the real
+/// mediated path (a subprocess boundary always suspends the worker task).
+struct FixtureSlowBash;
+
+#[async_trait]
+impl BashMediator for FixtureSlowBash {
+    async fn run_bash(&self, _script: &str) -> Result<MediatedRun, MediationError> {
+        tokio::task::yield_now().await;
+        Ok(MediatedRun {
+            exit_code: Some(0),
+            stdout: b"fixture-bash-ok\n".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
 /// Fixture delivery sink: completes with a deterministic PR reference.
 struct FixtureDelivery;
 
@@ -312,4 +328,58 @@ fn fixture_task_source_loads_the_cli_shape() {
         .load("leaf-1")
         .unwrap();
     assert_eq!(task.id, "leaf-1");
+}
+
+#[tokio::test]
+async fn progress_beats_fire_per_turn_and_per_dispatch() {
+    // Script: turn 1 dispatches bash (through the yielding fixture), turn 2
+    // finishes. Expected beats: turn-1 boundary, pre-dispatch, turn-2
+    // boundary (finish dispatches nothing) — three beats, increasing.
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "bash",
+                "script": "echo fixture-beat"
+            })),
+        },
+        finish_action(true),
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-beat");
+    let (tx, mut rx) = tokio::sync::watch::channel(0_u64);
+    let counter = tokio::spawn(async move {
+        let mut beats = Vec::new();
+        // The channel closes when the test drops the sender after the run;
+        // each beat lands between worker awaits, so none is overwritten.
+        while rx.changed().await.is_ok() {
+            beats.push(*rx.borrow_and_update());
+        }
+        beats
+    });
+    let config = WorkerConfig::new(
+        ProviderId::from_string("neuralwatt".to_string()),
+        ModelId::from_string("glm-5.2".to_string()),
+        fast_budgets(),
+    )
+    .with_progress(tx);
+    let run = run_worker(&task, worktree.path(), &transport, &FixtureSlowBash, &FixtureDelivery, &config)
+        .await
+        .unwrap();
+    drop(config);
+
+    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.turns, 2);
+    assert_eq!(counter.await.unwrap(), vec![1, 2, 3], "one beat per turn + one per dispatch");
+}
+
+#[tokio::test]
+async fn no_progress_channel_still_completes() {
+    // Default config emits nothing; the beat path must be inert.
+    let script = vec![finish_action(true)];
+    let (run, sim, worktree, _bash) = drive(script, BashMode::Ok).await;
+    assert_eq!(run.status, RunStatus::Completed);
+    drop(sim);
+    drop(worktree);
 }
