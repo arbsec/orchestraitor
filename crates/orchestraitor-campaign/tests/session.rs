@@ -278,7 +278,8 @@ fn same_board_produces_identical_selection_records() -> TestResult {
             .map(|task| task.number)
             .unwrap_or_default(),
         9,
-        "P0 first; the P0 item carries the HIGHER number, so plain number-order would          select 2 and this pin independently backstops the priority rule"
+        "P0 first; the P0 item carries the HIGHER number, so plain number-order would \
+         select 2 and this pin independently backstops the priority rule"
     );
     assert_eq!(store.list()?.len(), 2);
     Ok(())
