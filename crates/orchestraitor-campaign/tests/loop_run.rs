@@ -100,6 +100,8 @@ fn fixture_run(task_id: &str, turns: u32, tokens: u64) -> WorkerRun {
 enum Behavior {
     /// Completes immediately with the given turn/token totals.
     Complete { turns: u32, tokens: u64 },
+    /// Sleeps the duration, then completes.
+    CompleteAfter(Duration),
     /// Beats every interval forever; only the worker timeout can kill it.
     BeatEvery(Duration),
     /// Beats n times, then hangs silently (stall-killed).
@@ -112,7 +114,9 @@ enum Behavior {
 
 #[derive(Clone)]
 struct FakeStarter {
-    behavior: Behavior,
+    /// One behavior per spawn (cycled); a single-behavior starter repeats
+    /// the same behavior.
+    behaviors: Vec<Behavior>,
     /// Captured `(task_id, prior_daily_spend_usd)` per spawn — the spend
     /// feed-through surface. Shared through an `Arc` so the test can read
     /// it after the runner consumes a clone.
@@ -124,8 +128,12 @@ struct FakeStarter {
 
 impl FakeStarter {
     fn new(behavior: Behavior) -> Self {
+        Self::with_behaviors(vec![behavior])
+    }
+
+    fn with_behaviors(behaviors: Vec<Behavior>) -> Self {
         Self {
-            behavior,
+            behaviors,
             spawns: Arc::new(std::sync::Mutex::new(Vec::new())),
             beats_observed: Arc::new(AtomicUsize::new(0)),
         }
@@ -150,11 +158,16 @@ impl LoopWorkerStarter for FakeStarter {
             .push((task_id.to_string(), prior_daily_spend_usd));
         let (tx, rx) = tokio::sync::watch::channel(0_u64);
         let beats = self.beats_observed.clone();
-        let behavior = self.behavior.clone();
+        let spawn_index = self.spawns.lock().unwrap().len() - 1;
+        let behavior = self.behaviors[spawn_index % self.behaviors.len()].clone();
         let id = task_id.to_string();
         let run = tokio::spawn(async move {
             match behavior {
-                Behavior::Complete { turns, tokens } => fixture_run(&id, turns, tokens),
+                Behavior::Complete { turns, tokens } => Ok(fixture_run(&id, turns, tokens)),
+                Behavior::CompleteAfter(delay) => {
+                    tokio::time::sleep(delay).await;
+                    Ok(fixture_run(&id, 1, 0))
+                }
                 Behavior::BeatEvery(interval) => {
                     let mut tick = 0_u64;
                     loop {
@@ -202,7 +215,7 @@ async fn run_loop(
     snapshot: BoardSnapshot,
     starter: FakeStarter,
     invocation: &str,
-    shutdown: impl std::future::Future<Output = ()> + Send + Unpin,
+    shutdown: tokio::sync::watch::Receiver<u64>,
 ) -> (
     orchestraitor_campaign::LoopSummary,
     CampaignDecisionStore,
@@ -225,8 +238,12 @@ async fn run_loop(
     (summary, decisions, runs)
 }
 
-fn never() -> impl std::future::Future<Output = ()> + Send + Unpin {
-    std::future::pending()
+/// A shutdown channel that never signals: the sender is leaked (not
+/// dropped) so `changed()` stays pending — the runner waits on timers.
+fn never() -> tokio::sync::watch::Receiver<u64> {
+    let (tx, rx) = tokio::sync::watch::channel(0_u64);
+    std::mem::forget(tx);
+    rx
 }
 
 #[tokio::test(start_paused = true)]
@@ -457,7 +474,10 @@ async fn spend_soft_cap_seals_intake_and_drains() {
     let feed = starter.spend_feed();
     assert_eq!(feed.len(), 2);
     assert!(feed[0].1.abs() < 1e-9);
-    assert!((feed[1].1 - 6.0).abs() < 1e-9, "prior spend is fed through");
+    assert!(
+        (feed[1].1 - 6.0).abs() < 1e-9,
+        "prior spend is fed through; feed: {feed:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -522,9 +542,13 @@ async fn shutdown_stops_cleanly_within_the_daemon_budget() {
     };
     let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
     // Synthetic SIGTERM 2s in; grace window 5s; abort at 7s.
-    let sigterm = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+    });
     let (summary, _decisions, runs) =
-        run_loop(config, snapshot_with(&[1]), starter, "inv", sigterm).await;
+        run_loop(config, snapshot_with(&[1]), starter, "inv", signal_rx).await;
 
     assert_eq!(summary.stop_reason, StopReason::Shutdown);
     assert_eq!(summary.aborted_on_stop, 1);
@@ -614,3 +638,138 @@ async fn stale_running_rows_sweep_and_the_task_reruns() {
         )
     }));
 }
+
+// Q5(b) race arbitration: a run that completes INSIDE the stall window is
+// naturally completed — the kill never fires (Ok(run) wins; abort-after-
+// completion would be a no-op anyway, but here no abort is even declared).
+#[tokio::test(start_paused = true)]
+async fn natural_completion_inside_the_stall_window_wins_the_arbitration() {
+    let starter = FakeStarter::new(Behavior::CompleteAfter(Duration::from_millis(
+        9 * 60_000 + 59_500,
+    )));
+    // The bound must outlive the completion: no-op passes run at backoff
+    // pace during the wait (0, 1, 11, 31, 71, 151, 311, 611 seconds), so a
+    // tight bound would drain-abort the in-flight worker instead.
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(8),
+    )
+    .unwrap();
+    let (summary, _decisions, runs) =
+        run_loop(config, snapshot_with(&[1]), starter, "inv", never()).await;
+
+    assert_eq!(summary.completed, 1);
+    assert_eq!(
+        summary.stalled, 0,
+        "an in-window completion is never killed"
+    );
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::Completed
+    );
+    let span = rows[0].finished_at_secs.unwrap() - rows[0].started_at_secs;
+    assert!(span >= 9 * 60 + 59, "the row reflects the fake's own delay");
+}
+
+// Q5(c) subscribe race: a beat that lands before the supervisor's first
+// tick still counts as liveness — the stall clock runs from the observed
+// beat, never from a silent zero baseline.
+#[tokio::test(start_paused = true)]
+async fn an_early_beat_before_the_first_tick_resets_the_stall_clock() {
+    // Beat at 0s (before any tick can observe it fresh), then park. The
+    // kill must fire at >= 10m from the OBSERVED beat, i.e. the span stays
+    // below 11m despite the pre-tick beat.
+    let starter = FakeStarter::new(Behavior::BeatThenPark {
+        beats: 1,
+        interval: Duration::from_secs(0),
+    });
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(10),
+    )
+    .unwrap();
+    let (summary, _decisions, runs) =
+        run_loop(config, snapshot_with(&[1]), starter, "inv", never()).await;
+
+    assert_eq!(summary.stalled, 1);
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    let span = rows[0].finished_at_secs.unwrap() - rows[0].started_at_secs;
+    assert!(span >= 10 * 60, "the stall window is honored in full");
+    assert!(
+        span <= 11 * 60,
+        "the early beat resets the clock (no double-count)"
+    );
+}
+
+// Q5(k) interplay: the spend cap trips while a long run is still in
+// flight — the intake is sealed and the in-flight run drains NATURALLY
+// (no abort), then the loop exits. The cap crosses at run 1's finish
+// (pre-seeded $5 + run 1's $6); run 2 is the busy slot.
+#[tokio::test(start_paused = true)]
+async fn spend_cap_with_a_busy_slot_drains_without_aborting() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    // Prior spend today from an earlier invocation: $5.
+    let prior = runs
+        .start(&orchestraitor_campaign::StartRun {
+            invocation_id: "inv-dead".to_string(),
+            decision_id: 1,
+            task_id: "prior-task".to_string(),
+            repo: REPO.to_string(),
+            number: 0,
+            started_at_secs: START_UNIX,
+        })
+        .unwrap();
+    runs.finish(
+        prior.id,
+        orchestraitor_campaign::RunRowStatus::Completed,
+        START_UNIX + 1,
+        5.0,
+        "prior",
+    )
+    .unwrap();
+
+    let starter = FakeStarter::with_behaviors(vec![
+        // Run 1 is the slow busy slot (in flight when the cap trips); run 2
+        // is fast and crosses the cap at its finish ($5 prior + $6).
+        Behavior::CompleteAfter(Duration::from_millis(59_500)),
+        Behavior::Complete {
+            turns: 1,
+            tokens: 3_000_000,
+        },
+    ]);
+    let budgets = WorkerBudgets {
+        usd_per_token_estimate: 2e-6,
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1, 2]),
+        },
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::SpendSoftCap);
+    assert_eq!(summary.spawns, 2);
+    assert_eq!(summary.completed, 2, "the busy slot drains to completion");
+    assert_eq!(summary.aborted_on_stop, 0, "the soft cap never aborts");
+    assert!(
+        runs.runs_for_invocation("inv")
+            .unwrap()
+            .iter()
+            .all(|row| row.status.is_terminal())
+    );
+}
+// paste into a scratch test
