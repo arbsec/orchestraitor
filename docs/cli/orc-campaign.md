@@ -27,17 +27,19 @@ The pass consumes the ready queue exactly as `orc board ready` computes it (leaf
 Task/Bug, `Target=MVP`, `Status=Ready`, no unresolved blockers, fail-closed on
 truncated windows). It then orders the queue: items whose configured priority field
 (board config `priority_field`, default `Priority`) carries `P0` come first, and the
-rest keep stable `(repo, issue-number)` order. The first item is selected; every other
+rest keep stable `(repo, issue-number)` order. Tiering across P1–P3 deepens in E7;
+this slice is P0-versus-rest. The first item is selected; every other
 ready item is recorded as an alternative. Selection is deterministic: the same board
 yields the same record fields.
 
 The worker task id is derived deterministically from the board identity as
-`board-<owner-repo>-<number>` (issue numbers are per-repo, so the id carries the
-repo). Repos whose name does not fold losslessly into the worker id charset
-(punctuation variants such as `foo.bar` vs `foo-bar`) or whose slug would overflow
-the worker's 64-byte file-name bound carry an 8-hex digest suffix of the full repo
-name instead, keeping ids distinct. The id resolves a fixture task from
-`<config-dir>/worker-tasks/<id>.json` (see
+`board-<owner>_<repo>-<number>` — the `_` separator cannot occur inside a
+charset-clean owner or name, so dash-position variants (`foo/bar-baz` vs
+`foo-bar/baz`) stay distinct; issue numbers are per-repo, so the id carries the
+repo. Repos whose owner or name falls outside the worker id charset (punctuation
+such as `.` or `_`), or whose slug would overflow the worker's 64-byte file-name
+bound, carry an 8-hex digest suffix of the full repo name instead. The id resolves
+a fixture task from `<config-dir>/worker-tasks/<id>.json` (see
 [orc worker](orc-worker.md)). The worker always runs in the invoking project
 directory, regardless of the selected item's repository — the bootstrap slice is
 single-workspace (spec §9.42 multi-org deepens later).

@@ -124,7 +124,7 @@ fn records_survive_reopen_and_append_in_order() -> TestResult {
         .as_ref()
         .ok_or("selected row must carry a task")?;
     assert_eq!(selected.number, 42);
-    assert_eq!(selected.task_id, "board-arbsec-orchestraitor-42");
+    assert_eq!(selected.task_id, "board-arbsec_orchestraitor-42");
     assert!(records[0].id < records[1].id, "append-only ids");
     assert_eq!(
         reopened.by_id(records[1].id)?.decision,

@@ -492,8 +492,63 @@ fn long_repos_truncating_to_the_same_slug_do_not_collide() {
     // Short repos keep the plain readable form.
     assert_eq!(
         task_id_for("arbsec/orchestraitor", 42),
-        "board-arbsec-orchestraitor-42"
+        "board-arbsec_orchestraitor-42"
     );
+}
+
+#[test]
+fn dash_position_repo_variants_do_not_fold_to_the_same_task_id() {
+    assert_ne!(
+        task_id_for("foo/bar-baz", 42),
+        task_id_for("foo-bar/baz", 42),
+        "the owner/repo separator must stay distinguishable from a literal '-'"
+    );
+    assert_ne!(task_id_for("x-y/z", 7), task_id_for("x/y-z", 7));
+    assert_ne!(
+        task_id_for("arbsec/some-repo", 3),
+        task_id_for("arbsec-some/repo", 3)
+    );
+    assert_eq!(
+        task_id_for("foo/bar-baz", 42),
+        "board-foo_bar-baz-42",
+        "hyphenated names stay readable with '_' as the separator"
+    );
+    assert_eq!(task_id_for("foo-bar/baz", 42), "board-foo-bar_baz-42");
+}
+
+#[test]
+fn readable_form_is_injective_over_a_small_alphabet() {
+    // Owner/name over {a, b, -} up to length 3: every pair must yield a
+    // distinct task id. Catches any fold that merges the '/' with a legal
+    // owner/name character (the gen-3/gen-4 collision class).
+    fn all_parts(alphabet: [&str; 3], max_len: usize) -> Vec<String> {
+        let mut parts = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for base in &frontier {
+                for piece in alphabet {
+                    next.push(format!("{base}{piece}"));
+                }
+            }
+            parts.extend(next.iter().cloned());
+            frontier = next;
+        }
+        parts.retain(|part| !part.is_empty());
+        parts
+    }
+
+    let parts = all_parts(["a", "b", "-"], 3);
+    let mut ids = std::collections::HashSet::new();
+    for owner in &parts {
+        for name in &parts {
+            let repo = format!("{owner}/{name}");
+            assert!(
+                ids.insert(task_id_for(&repo, 42)),
+                "task-id collision for repo {repo}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -506,8 +561,8 @@ fn punctuation_variant_repos_do_not_fold_to_the_same_task_id() {
     assert_ne!(dashed, underscored);
     assert_eq!(
         task_id_for("arbsec/orchestraitor", 7),
-        "board-arbsec-orchestraitor-7",
-        "lossless folds keep the readable short form"
+        "board-arbsec_orchestraitor-7",
+        "charset-clean folds keep the readable short form"
     );
 }
 

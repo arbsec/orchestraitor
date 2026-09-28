@@ -70,17 +70,35 @@ const TASK_ID_MAX_LEN: usize = 64;
 /// Deterministic worker task id for a selected board item. Issue numbers
 /// are per-repo, so the identity must carry the repo — two configured repos
 /// with the same issue number must never load the same fixture. The
-/// readable `board-<owner-repo>-<number>` form requires a lossless fold
-/// (repo exactly `owner/name` over the worker id charset); punctuation
-/// variants (`foo.bar` vs `foo-bar`), extra slashes, and repos overflowing
-/// the 64-byte file-name bound instead truncate the slug and append an
-/// 8-hex FNV-1a digest of the full repo — 32-bit collision resistance is
-/// ample for operator-configured repo counts (birthday bound ~2^16 repos),
-/// and the input is configuration, never attacker-controlled content.
+/// readable `board-<owner>_<repo>-<number>` form exists only for
+/// charset-clean `owner/name` repos: `_` cannot occur inside either part,
+/// so the id decomposes uniquely back into `(owner, name, number)` and
+/// dash-position variants (`foo/bar-baz` vs `foo-bar/baz`) stay distinct.
+/// Any other repo (punctuation, extra slashes, bare names) and any slug
+/// overflowing the 64-byte file-name bound falls back to a truncated slug
+/// plus an 8-hex FNV-1a digest of the full repo; that digest path never
+/// emits `_`, so it cannot collide with the readable form, and 32-bit
+/// collision resistance is ample for operator-configured repo counts
+/// (birthday bound ~2^16 repos) on configuration, never attacker content.
 #[must_use]
 pub fn task_id_for(repo: &str, number: u64) -> String {
     let prefix = format!("board--{number}");
     let budget = TASK_ID_MAX_LEN.saturating_sub(prefix.len());
+    let charset_clean = |part: &str| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    if let Some((owner, name)) = repo.split_once('/')
+        && charset_clean(owner)
+        && charset_clean(name)
+    {
+        let owner_name: String = repo
+            .chars()
+            .map(|c| if c == '/' { '_' } else { c })
+            .collect();
+        if owner_name.len() <= budget {
+            return format!("board-{owner_name}-{number}");
+        }
+    }
     let slug: String = repo
         .chars()
         .map(|c| {
@@ -91,18 +109,6 @@ pub fn task_id_for(repo: &str, number: u64) -> String {
             }
         })
         .collect();
-    let lossless = match repo.split_once('/') {
-        Some((owner, name)) => {
-            !owner.is_empty()
-                && !name.is_empty()
-                && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        }
-        None => false,
-    };
-    if lossless && slug.len() <= budget {
-        return format!("board-{slug}-{number}");
-    }
     let digest = format!("{:08x}", fnv1a(repo));
     let truncated: String = slug.chars().take(budget.saturating_sub(9)).collect();
     format!("board-{truncated}-{digest}-{number}")
@@ -287,56 +293,60 @@ fn blocked_candidate_nodes(snapshot: &BoardSnapshot) -> Vec<BlockedNode> {
 /// malformed or truncated item's open-state is unknown, so claiming "every
 /// tracked item is closed" would be fail-open.
 fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
+    let note = warning_note(&snapshot.warnings);
     if snapshot.open.is_empty() {
         let all_known_closed = !snapshot.warnings.is_empty()
             && snapshot
                 .warnings
                 .iter()
                 .all(|warning| warning.kind == WarningKind::NotOpen);
-        let skipped_note = if snapshot.warnings.is_empty() {
-            String::new()
-        } else if all_known_closed {
-            format!("; {} item(s) recorded as closed", snapshot.warnings.len())
-        } else {
-            format!(
-                "; {} item(s) skipped as unevaluable (fail-closed)",
-                snapshot.warnings.len()
-            )
-        };
         if all_known_closed {
             return (
                 NoOpReason::EpicExhausted,
-                format!("every tracked item is closed; nothing open remains{skipped_note}"),
+                format!("every tracked item is closed; nothing open remains{note}"),
             );
         }
         return (
             NoOpReason::EmptyQueue,
-            format!("no open board items in the configured repositories{skipped_note}"),
+            format!("no open board items in the configured repositories{note}"),
         );
     }
     if snapshot.blocked_candidates.is_empty() {
-        let skipped_note = if snapshot.warnings.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "; {} item(s) skipped as unevaluable (fail-closed)",
-                snapshot.warnings.len()
-            )
-        };
         return (
             NoOpReason::EmptyQueue,
             format!(
                 "{} open item(s), none eligible under the ready predicate and none blocked{}",
                 snapshot.open.len(),
-                skipped_note
+                note
             ),
         );
     }
     (
         NoOpReason::AllBlocked,
         format!(
-            "{} eligible candidate(s) blocked by unresolved dependencies; blocked graph attached",
-            snapshot.blocked_candidates.len()
+            "{} eligible candidate(s) blocked by unresolved dependencies; blocked graph attached{}",
+            snapshot.blocked_candidates.len(),
+            note
         ),
     )
+}
+
+/// Renders the warning channel into the rationale note shared by the no-op
+/// branches: known-closed items are "recorded as closed"; any
+/// malformed/truncated read turns the channel into a fail-closed disclosure.
+fn warning_note(warnings: &[SkipWarning]) -> String {
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let all_known_closed = warnings
+        .iter()
+        .all(|warning| warning.kind == WarningKind::NotOpen);
+    if all_known_closed {
+        format!("; {} item(s) recorded as closed", warnings.len())
+    } else {
+        format!(
+            "; {} item(s) skipped as unevaluable (fail-closed)",
+            warnings.len()
+        )
+    }
 }

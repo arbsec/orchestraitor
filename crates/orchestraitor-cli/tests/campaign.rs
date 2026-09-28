@@ -265,8 +265,8 @@ fn selected_pass_spawns_the_worker_via_the_direct_path() -> miette::Result<()> {
     )
     .into_diagnostic()?;
     fs::write(
-        tasks_dir.join("board-arbsec-orchestraitor-42.json"),
-        r#"{"id": "board-arbsec-orchestraitor-42", "slug": "board-arbsec-orchestraitor-42", "description": "write the output file"}"#,
+        tasks_dir.join("board-arbsec_orchestraitor-42.json"),
+        r#"{"id": "board-arbsec_orchestraitor-42", "slug": "board-arbsec_orchestraitor-42", "description": "write the output file"}"#,
     )
     .into_diagnostic()?;
 
@@ -312,7 +312,7 @@ fn selected_pass_spawns_the_worker_via_the_direct_path() -> miette::Result<()> {
     assert_eq!(json["kind"], "selected");
     assert_eq!(json["selected"]["repo"], "arbsec/orchestraitor");
     assert_eq!(json["selected"]["number"], 42);
-    assert_eq!(json["selected"]["task_id"], "board-arbsec-orchestraitor-42");
+    assert_eq!(json["selected"]["task_id"], "board-arbsec_orchestraitor-42");
     let worker = json["worker"]
         .as_object()
         .ok_or_else(|| miette::miette!("selected pass carries the worker result"))?;

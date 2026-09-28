@@ -28,8 +28,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   at most one eligible task, persists exactly one append-only decision record to the
   local SQLite store (`<config-dir>/campaign.db`, `schema_migrations`-versioned), and —
   for a selection — spawns the worker via the daemon-less direct path (deterministic
-  repo-scoped `board-<owner-repo>-<number>` task id; folding-ambiguous or over-long
-  repo names carry an 8-hex digest suffix to stay collision-resistant). No-op passes
+  repo-scoped `board-<owner>_<repo>-<number>` task id; charset-violating or
+  over-long repo names carry an 8-hex digest suffix to stay collision-resistant).
+  No-op passes
   persist typed reasons
   (`empty-queue`, `all-blocked` with the blocked graph attached, `epic-exhausted`) and
   spawn nothing; unevaluable board items (fail-closed reads) are disclosed on every
