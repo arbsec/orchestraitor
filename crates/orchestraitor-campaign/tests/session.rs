@@ -497,6 +497,21 @@ fn long_repos_truncating_to_the_same_slug_do_not_collide() {
 }
 
 #[test]
+fn punctuation_variant_repos_do_not_fold_to_the_same_task_id() {
+    let dotted = task_id_for("arbsec/foo.bar", 7);
+    let dashed = task_id_for("arbsec/foo-bar", 7);
+    let underscored = task_id_for("arbsec/foo_bar", 7);
+    assert_ne!(dotted, dashed, "fold must not merge punctuation variants");
+    assert_ne!(dotted, underscored);
+    assert_ne!(dashed, underscored);
+    assert_eq!(
+        task_id_for("arbsec/orchestraitor", 7),
+        "board-arbsec-orchestraitor-7",
+        "lossless folds keep the readable short form"
+    );
+}
+
+#[test]
 fn unevaluable_items_are_carried_on_the_record() -> TestResult {
     // Fail-closed data-quality signals (truncated windows, malformed items)
     // must survive onto the durable record, not vanish.

@@ -125,6 +125,9 @@ target_field = "Target"
 target_value = "MVP"
 ready_field  = "Status"
 ready_value  = "Ready"
+# Board field carrying the P0-P3 priority used by the epic-focus rule
+# (spec §9.41); defaults to "Priority" when unset.
+# priority_field = "Priority"
 
 # --- Board auth (bootstrap) ---------------------------------------------------
 # `orc board` never sniffs ambient credentials: the token source is declared here as a secret

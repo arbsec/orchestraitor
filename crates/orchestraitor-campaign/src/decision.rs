@@ -5,7 +5,9 @@
 //! Mirrors the `RoleRoutingDecisionStore` pattern in `orchestraitor-agent-catalog`:
 //! `schema_migrations`-versioned, WAL-mode defaults, an in-memory variant for
 //! tests. The full decision payload is stored as JSON for replay; the common
-//! columns are queryable directly.
+//! `kind`/`no_op_reason` columns carry JSON-quoted enum names (query with the
+//! quotes included), so the typed API (`by_id`, `list`) is the consumption
+//! path.
 
 use std::path::Path;
 

@@ -67,13 +67,16 @@ pub struct CampaignOutcome {
 /// (`task.rs`): the id becomes a file name, so it is capped at 64 bytes.
 const TASK_ID_MAX_LEN: usize = 64;
 
-/// Deterministic worker task id for a selected board item:
-/// `board-<owner-repo>-<number>` (repo slug restricted to the worker id
-/// charset). Issue numbers are per-repo, so the identity must carry the
-/// repo — two configured repos with the same issue number must never load
-/// the same fixture. When the slug would overflow the 64-byte file-name
-/// bound, it is truncated AND suffixed with a stable 8-hex FNV-1a digest of
-/// the full repo, keeping distinct repos collision-free.
+/// Deterministic worker task id for a selected board item. Issue numbers
+/// are per-repo, so the identity must carry the repo — two configured repos
+/// with the same issue number must never load the same fixture. The
+/// readable `board-<owner-repo>-<number>` form requires a lossless fold
+/// (repo exactly `owner/name` over the worker id charset); punctuation
+/// variants (`foo.bar` vs `foo-bar`), extra slashes, and repos overflowing
+/// the 64-byte file-name bound instead truncate the slug and append an
+/// 8-hex FNV-1a digest of the full repo — 32-bit collision resistance is
+/// ample for operator-configured repo counts (birthday bound ~2^16 repos),
+/// and the input is configuration, never attacker-controlled content.
 #[must_use]
 pub fn task_id_for(repo: &str, number: u64) -> String {
     let prefix = format!("board--{number}");
@@ -88,7 +91,16 @@ pub fn task_id_for(repo: &str, number: u64) -> String {
             }
         })
         .collect();
-    if slug.len() <= budget {
+    let lossless = match repo.split_once('/') {
+        Some((owner, name)) => {
+            !owner.is_empty()
+                && !name.is_empty()
+                && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        }
+        None => false,
+    };
+    if lossless && slug.len() <= budget {
         return format!("board-{slug}-{number}");
     }
     let digest = format!("{:08x}", fnv1a(repo));
@@ -276,19 +288,21 @@ fn blocked_candidate_nodes(snapshot: &BoardSnapshot) -> Vec<BlockedNode> {
 /// tracked item is closed" would be fail-open.
 fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
     if snapshot.open.is_empty() {
+        let all_known_closed = !snapshot.warnings.is_empty()
+            && snapshot
+                .warnings
+                .iter()
+                .all(|warning| warning.kind == WarningKind::NotOpen);
         let skipped_note = if snapshot.warnings.is_empty() {
             String::new()
+        } else if all_known_closed {
+            format!("; {} item(s) recorded as closed", snapshot.warnings.len())
         } else {
             format!(
                 "; {} item(s) skipped as unevaluable (fail-closed)",
                 snapshot.warnings.len()
             )
         };
-        let all_known_closed = !snapshot.warnings.is_empty()
-            && snapshot
-                .warnings
-                .iter()
-                .all(|warning| warning.kind == WarningKind::NotOpen);
         if all_known_closed {
             return (
                 NoOpReason::EpicExhausted,
