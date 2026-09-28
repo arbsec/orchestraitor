@@ -384,7 +384,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tree-sitter",
- "tree-sitter-bash 0.25.1",
+ "tree-sitter-bash",
  "xz2",
 ]
 
@@ -4010,7 +4010,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tree-sitter",
- "tree-sitter-bash 0.23.3",
+ "tree-sitter-bash",
  "tree-sitter-go",
  "tree-sitter-javascript",
  "tree-sitter-python",
@@ -6451,16 +6451,6 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-bash"
-version = "0.23.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "329a4d48623ac337d42b1df84e81a1c9dbb2946907c102ca72db158c1964a52e"
-dependencies = [
- "cc",
  "tree-sitter-language",
 ]
 
