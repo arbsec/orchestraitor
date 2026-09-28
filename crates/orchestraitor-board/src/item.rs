@@ -153,6 +153,9 @@ pub struct ItemFacts {
     pub target: Option<String>,
     /// Single-select value for the configured status field, when set.
     pub status: Option<String>,
+    /// Single-select value for the configured priority field (P0-P3, spec
+    /// §9.41), when set.
+    pub priority: Option<String>,
 }
 
 impl RawItem {
@@ -166,6 +169,7 @@ impl RawItem {
         repos: &[String],
         target_field: &str,
         ready_field: &str,
+        priority_field: &str,
     ) -> Result<Option<ItemFacts>, ItemSkip> {
         if truncated(self.field_values.nodes.len(), self.field_values.total_count) {
             return Err(ItemSkip::Truncated("fieldValues"));
@@ -223,8 +227,12 @@ impl RawItem {
             .unwrap_or(u64::MAX),
             None => 0,
         };
-        let (target, status) =
-            single_select_values(&self.field_values.nodes, target_field, ready_field);
+        let (target, status, priority) = single_select_values(
+            &self.field_values.nodes,
+            target_field,
+            ready_field,
+            priority_field,
+        );
         Ok(Some(ItemFacts {
             item_node_id: self.id.clone(),
             repo,
@@ -239,6 +247,7 @@ impl RawItem {
             open_blockers,
             target,
             status,
+            priority,
         }))
     }
 }
@@ -255,9 +264,11 @@ fn single_select_values(
     nodes: &[FieldValue],
     target_field: &str,
     ready_field: &str,
-) -> (Option<String>, Option<String>) {
+    priority_field: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut target = None;
     let mut status = None;
+    let mut priority = None;
     for node in nodes {
         let Some(field_name) = node.field.as_ref().and_then(|field| field.name.as_deref()) else {
             continue;
@@ -269,7 +280,9 @@ fn single_select_values(
             target = Some(value_name);
         } else if field_name == ready_field {
             status = Some(value_name);
+        } else if field_name == priority_field {
+            priority = Some(value_name);
         }
     }
-    (target, status)
+    (target, status, priority)
 }

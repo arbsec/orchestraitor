@@ -9,6 +9,7 @@ members = [
     "crates/orchestraitor-agent-catalog",
     "crates/orchestraitor-arb-client",
     "crates/orchestraitor-board",
+    "crates/orchestraitor-campaign",
     "crates/orchestraitor-cli",
     "crates/orchestraitor-context",
     "crates/orchestraitor-core",

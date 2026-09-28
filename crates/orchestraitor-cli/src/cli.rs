@@ -101,6 +101,35 @@ pub enum Commands {
     /// Run the headless one-shot bootstrap worker.
     #[command(subcommand)]
     Worker(WorkerCommand),
+    /// Run one campaign pass: select at most one task and record the decision.
+    #[command(subcommand)]
+    Campaign(CampaignCommand),
+}
+
+/// `orc campaign` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum CampaignCommand {
+    /// Run exactly one campaign pass and exit (the loop runner lands with the
+    /// bootstrap-loop task; only `--once` exists in this slice).
+    Run(CampaignRunArgs),
+}
+
+/// Arguments for `orc campaign run`.
+#[derive(Debug, Clone, Args)]
+pub struct CampaignRunArgs {
+    /// One-shot pass (the only mode in this slice; the cron-shaped loop
+    /// runner arrives with the bootstrap loop).
+    #[arg(long)]
+    pub once: bool,
+    /// Emit the decision record (and worker result, when one ran) as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Alternate fixture task directory for tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_TASKS_DIR", hide = true)]
+    pub worker_tasks_dir: Option<PathBuf>,
+    /// Alternate provider base URL for simulator-backed tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
+    pub worker_provider_endpoint: Option<String>,
 }
 
 /// `orc github` subcommands.

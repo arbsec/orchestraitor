@@ -93,6 +93,10 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
   leaf task through the bounded mini-agent loop with exactly four tools (file read,
   local content search, Arbitraitor-mediated bash, path-confined worktree write) and
   prints a structured result (spec `10-orchestrator.md` §9.38, `60-milestones.md` MVP-6).
+- [`orc campaign`](docs/cli/orc-campaign.md) — one-shot campaign pass: reads the
+  reconciled board, applies the P0-first epic-focus rule, selects at most one eligible
+  task, persists exactly one append-only decision record, and spawns the worker via the
+  daemon-less direct path (spec `10-orchestrator.md` §9.35).
 
 ## CLI configuration surface
 
@@ -111,6 +115,7 @@ orc models refresh
 orc models rollback
 orc github mint-token
 orc routing resolve --role <id> [--json]
+orc campaign run --once [--json]
 ```
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,

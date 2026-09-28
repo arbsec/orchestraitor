@@ -434,6 +434,12 @@ epic-exhausted  # the active epic has no remaining schedulable work (§9.41)
 
 Campaign sessions hold no state between invocations: everything they read is durable (board state plus local run state per §9.43) and everything they write is the decision record. A crashed campaign session is safe by construction — the next poll tick runs a fresh one; there is no partial-decision recovery to perform. Campaign sessions run under the same §9.24 lifecycle, §9.25 principal identity, and §9.27 resource governance as any other session, and every tool they use is a coordinator decision tool (§9.39) mediated by Arbitraitor.
 
+> **Bootstrap deviation (E0, issue #313):** until the §9.36 watch daemon exists, the
+> bootstrap campaign pass (`orc campaign run --once`) executes its own spawn decision on
+> the daemon-less direct path. Single-flight and supervision move to the loop runner /
+> watch daemon in later bootstrap lanes; until then, concurrent campaign invocations may
+> select the same item.
+
 ### 9.36 Watch daemon
 
 The watch daemon (`orcd watch`) is the always-running supervision loop for §9.35 campaigns and their workers. It owns no orchestration decisions — decisions come from campaign sessions — it executes and supervises them.

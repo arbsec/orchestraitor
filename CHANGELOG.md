@@ -20,6 +20,22 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orc campaign run --once [--json]` and the `orchestraitor-campaign` crate: the one-shot
+  campaign pass (spec `10-orchestrator.md` §9.35, `60-milestones.md` M1; #313). Each
+  pass reads the reconciled board through the #308 provider, applies the minimal
+  epic-focus rule (items whose configured priority field carries `P0` first, stable
+  `(repo, issue-number)` order), selects
+  at most one eligible task, persists exactly one append-only decision record to the
+  local SQLite store (`<config-dir>/campaign.db`, `schema_migrations`-versioned), and —
+  for a selection — spawns the worker via the daemon-less direct path (deterministic
+  repo-scoped `board-<owner>_<repo>-<number>` task id; charset-violating or
+  over-long repo names carry an 8-hex digest suffix to stay collision-resistant).
+  No-op passes
+  persist typed reasons
+  (`empty-queue`, `all-blocked` with the blocked graph attached, `epic-exhausted`) and
+  spawn nothing; unevaluable board items (fail-closed reads) are disclosed on every
+  record.
+  Documented in [docs/cli/orc-campaign.md](docs/cli/orc-campaign.md) and the README.
 - `orc worker run --task <id> [--json]` and the `orchestraitor-worker` crate: the headless
   one-shot bootstrap mini-worker (spec `10-orchestrator.md` §9.38, `60-milestones.md` MVP-6;
   #310). The worker resolves a fixture task, routes through the control plane's `implement`

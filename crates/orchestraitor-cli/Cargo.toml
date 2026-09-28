@@ -20,6 +20,7 @@ clap = { workspace = true }
 miette = { workspace = true }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-board = { path = "../orchestraitor-board" }
+orchestraitor-campaign = { path = "../orchestraitor-campaign" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-meta = { path = "../orchestraitor-provider-meta" }
@@ -33,6 +34,8 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+# rusqlite (MIT): asserting the persisted decision rows in the campaign.db.
+rusqlite = { workspace = true }
 orchestraitor-testkit = { path = "../orchestraitor-testkit" }
 tempfile = { workspace = true }
 time = { workspace = true }
