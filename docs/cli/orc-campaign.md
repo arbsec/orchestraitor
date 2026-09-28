@@ -2,10 +2,10 @@
 
 The manager half of the bootstrap self-improvement loop (spec
 [§9.35](../spec/10-orchestrator.md) campaign orchestration: session-per-decision,
-[MVP-1](../spec/60-milestones.md) live self-referential loop). One campaign pass is a
+[M1](../spec/60-milestones.md) live self-referential loop). One campaign pass is a
 fresh, short-lived invocation: it reads the reconciled board state, applies the minimal
-epic-focus rule (P0-labelled items first, stable `(repo, issue-number)` order
-otherwise), selects at most one eligible task, persists exactly one append-only decision
+epic-focus rule (items whose configured priority field carries `P0` first, stable
+`(repo, issue-number)` order otherwise), selects at most one eligible task, persists exactly one append-only decision
 record, and — for a selection — spawns the worker on the daemon-less direct path (the
 same seams as [orc worker](orc-worker.md)). One-shot only in this slice: the cron-shaped
 loop runner (`orc loop`) arrives with the bootstrap-loop task; the always-running watch
@@ -25,7 +25,9 @@ decision record already persisted.
 
 The pass consumes the ready queue exactly as `orc board ready` computes it (leaf
 Task/Bug, `Target=MVP`, `Status=Ready`, no unresolved blockers, fail-closed on
-truncated windows) and orders it P0-first. The first item is selected; every other
+truncated windows). It then orders the queue: items whose configured priority field
+(board config `priority_field`, default `Priority`) carries `P0` come first, and the
+rest keep stable issue-number order. The first item is selected; every other
 ready item is recorded as an alternative. Selection is deterministic: the same board
 yields the same record fields.
 

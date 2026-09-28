@@ -40,10 +40,11 @@ pub struct BoardSnapshot {
     /// All open items in scope.
     pub open: Vec<ItemFacts>,
     /// Ready-queue items (leaf, MVP, Ready, no unresolved blockers), already
-    /// sorted by `(repo, issue number)`.
+    /// sorted by issue number (as [`ready_queue`] produces them); the
+    /// selection pass applies the P0-first epic-focus order on top.
     pub ready: Vec<ReadyItem>,
     /// Eligible candidates whose only disqualifier is unresolved blockers
-    /// (spec §9.35 "all-blocked"), sorted like `ready`.
+    /// (spec §9.35 "all-blocked"), sorted by `(repo, issue number)`.
     pub blocked_candidates: Vec<ReadyItem>,
     /// Warnings for items that could not be evaluated; `NotOpen` entries are
     /// what separates [`NoOpReason::EpicExhausted`] from
@@ -68,9 +69,11 @@ const TASK_ID_MAX_LEN: usize = 64;
 
 /// Deterministic worker task id for a selected board item:
 /// `board-<owner-repo>-<number>` (repo slug restricted to the worker id
-/// charset, truncated to fit the 64-byte file-name bound). Issue numbers are
-/// per-repo, so the identity must carry the repo — two configured repos with
-/// the same issue number must never load the same fixture.
+/// charset). Issue numbers are per-repo, so the identity must carry the
+/// repo — two configured repos with the same issue number must never load
+/// the same fixture. When the slug would overflow the 64-byte file-name
+/// bound, it is truncated AND suffixed with a stable 8-hex FNV-1a digest of
+/// the full repo, keeping distinct repos collision-free.
 #[must_use]
 pub fn task_id_for(repo: &str, number: u64) -> String {
     let prefix = format!("board--{number}");
@@ -85,8 +88,23 @@ pub fn task_id_for(repo: &str, number: u64) -> String {
             }
         })
         .collect();
-    let slug: String = slug.chars().take(budget).collect();
-    format!("board-{slug}-{number}")
+    if slug.len() <= budget {
+        return format!("board-{slug}-{number}");
+    }
+    let digest = format!("{:08x}", fnv1a(repo));
+    let truncated: String = slug.chars().take(budget.saturating_sub(9)).collect();
+    format!("board-{truncated}-{digest}-{number}")
+}
+
+/// Stable 32-bit FNV-1a digest over the full repo string; pure ASCII output
+/// keeps ids byte- and char-length identical.
+fn fnv1a(value: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 /// Applies the minimal epic-focus rule (spec §9.41): candidates whose
@@ -253,18 +271,11 @@ fn blocked_candidate_nodes(snapshot: &BoardSnapshot) -> Vec<BlockedNode> {
 /// Spec §9.35 discrimination: `all-blocked` only when eligible work exists
 /// and every candidate is blocked; open items that merely are not Ready (no
 /// blocked candidates) are `empty-queue` — "no eligible work exists at all".
+/// `epic-exhausted` requires EVERY unevaluable item to be known-closed: a
+/// malformed or truncated item's open-state is unknown, so claiming "every
+/// tracked item is closed" would be fail-open.
 fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
     if snapshot.open.is_empty() {
-        let epic_exhausted = snapshot
-            .warnings
-            .iter()
-            .any(|warning| warning.kind == WarningKind::NotOpen);
-        if epic_exhausted {
-            return (
-                NoOpReason::EpicExhausted,
-                "every tracked item is closed; nothing open remains".to_string(),
-            );
-        }
         let skipped_note = if snapshot.warnings.is_empty() {
             String::new()
         } else {
@@ -273,6 +284,17 @@ fn no_op_classification(snapshot: &BoardSnapshot) -> (NoOpReason, String) {
                 snapshot.warnings.len()
             )
         };
+        let all_known_closed = !snapshot.warnings.is_empty()
+            && snapshot
+                .warnings
+                .iter()
+                .all(|warning| warning.kind == WarningKind::NotOpen);
+        if all_known_closed {
+            return (
+                NoOpReason::EpicExhausted,
+                format!("every tracked item is closed; nothing open remains{skipped_note}"),
+            );
+        }
         return (
             NoOpReason::EmptyQueue,
             format!("no open board items in the configured repositories{skipped_note}"),

@@ -4,7 +4,7 @@
 //! A campaign session is a fresh, short-lived manager invocation that reads
 //! the reconciled board state (open items + ready queue, supplied by the
 //! caller from [`orchestraitor_board`]), applies the minimal epic-focus rule
-//! (P0-labelled items first, stable issue-number order otherwise), selects at
+//! (items whose configured priority-field value is P0 first, stable issue-number order otherwise), selects at
 //! most one eligible task, persists exactly ONE append-only decision record,
 //! and — when a task was selected — spawns the worker through an injected
 //! [`WorkerSpawner`] (the daemon-less direct path; tests inject a fake).

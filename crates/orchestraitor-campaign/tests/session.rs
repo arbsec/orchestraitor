@@ -252,12 +252,12 @@ fn same_board_produces_identical_selection_records() -> TestResult {
     let make = || {
         snapshot(
             vec![
-                self_item("arbsec/orchestraitor", 7, &[], 0, None),
-                self_item("arbsec/orchestraitor", 3, &[], 0, Some("P0")),
+                self_item("arbsec/orchestraitor", 2, &[], 0, None),
+                self_item("arbsec/orchestraitor", 9, &[], 0, Some("P0")),
             ],
             vec![
-                ready("arbsec/orchestraitor", 3),
-                ready("arbsec/orchestraitor", 7),
+                ready("arbsec/orchestraitor", 2),
+                ready("arbsec/orchestraitor", 9),
             ],
             Vec::new(),
         )
@@ -277,8 +277,8 @@ fn same_board_produces_identical_selection_records() -> TestResult {
             .as_ref()
             .map(|task| task.number)
             .unwrap_or_default(),
-        3,
-        "P0 first, and the P0 item carries a HIGHER number so this pin needs the priority"
+        9,
+        "P0 first; the P0 item carries the HIGHER number, so plain number-order would          select 2 and this pin independently backstops the priority rule"
     );
     assert_eq!(store.list()?.len(), 2);
     Ok(())
@@ -441,6 +441,58 @@ fn all_items_closed_is_epic_exhausted_no_op() -> TestResult {
     );
     assert!(outcome.worker.is_none());
     Ok(())
+}
+
+#[test]
+fn mixed_closed_and_unevaluable_items_are_not_epic_exhausted() -> TestResult {
+    // Regression: a malformed item's open-state is unknown, so closed+malformed
+    // must conservatively report empty-queue (with disclosure), never
+    // epic-exhausted — spec §9.35 + fail-closed warning channel.
+    let store = CampaignDecisionStore::open_in_memory()?;
+    let (spawner, _calls) = FakeSpawner::completed();
+    let warnings = vec![
+        SkipWarning {
+            number: Some(11),
+            reason: "closed".to_string(),
+            kind: WarningKind::NotOpen,
+        },
+        SkipWarning {
+            number: Some(12),
+            reason: "malformed item: missing content".to_string(),
+            kind: WarningKind::Malformed,
+        },
+    ];
+    let outcome = run_once(
+        &snapshot(Vec::new(), Vec::new(), warnings),
+        &routing(),
+        &store,
+        &spawner,
+    )?;
+
+    assert_eq!(outcome.decision.decision.kind, DecisionKind::NoOp);
+    assert_eq!(
+        outcome.decision.decision.no_op_reason,
+        Some(NoOpReason::EmptyQueue),
+        "unknown-state items must not allow an epic-exhausted claim"
+    );
+    assert!(outcome.worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn long_repos_truncating_to_the_same_slug_do_not_collide() {
+    let long_a = "arbsec/some-very-long-repository-name-that-exceeds-the-budget-A";
+    let long_b = "arbsec/some-very-long-repository-name-that-exceeds-the-budget-B";
+    assert_ne!(
+        task_id_for(long_a, 42),
+        task_id_for(long_b, 42),
+        "truncated slugs must stay collision-free via the digest suffix"
+    );
+    // Short repos keep the plain readable form.
+    assert_eq!(
+        task_id_for("arbsec/orchestraitor", 42),
+        "board-arbsec-orchestraitor-42"
+    );
 }
 
 #[test]

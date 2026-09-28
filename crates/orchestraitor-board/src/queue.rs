@@ -56,7 +56,9 @@ pub enum WarningKind {
 
 /// Open items that satisfy every ready-predicate clause except unresolved
 /// blockers: eligible work whose candidates are all blocked (spec §9.35
-/// "all-blocked"). Sorted by `(repo, issue number)` like [`ready_queue`].
+/// "all-blocked"). Sorted by `(repo, issue number)` — issue numbers are
+/// per-repo, so the repo participates in the order (unlike [`ready_queue`],
+/// which sorts by bare issue number).
 #[must_use]
 pub fn blocked_candidates(facts: &[ItemFacts], config: &BoardProjectConfig) -> Vec<ReadyItem> {
     let mut blocked: Vec<ReadyItem> = facts
