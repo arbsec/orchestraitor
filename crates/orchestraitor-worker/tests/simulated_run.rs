@@ -364,14 +364,25 @@ async fn progress_beats_fire_per_turn_and_per_dispatch() {
         fast_budgets(),
     )
     .with_progress(tx);
-    let run = run_worker(&task, worktree.path(), &transport, &FixtureSlowBash, &FixtureDelivery, &config)
-        .await
-        .unwrap();
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
     drop(config);
 
     assert_eq!(run.status, RunStatus::Completed);
     assert_eq!(run.turns, 2);
-    assert_eq!(counter.await.unwrap(), vec![1, 2, 3], "one beat per turn + one per dispatch");
+    assert_eq!(
+        counter.await.unwrap(),
+        vec![1, 2, 3],
+        "one beat per turn + one per dispatch"
+    );
 }
 
 #[tokio::test]

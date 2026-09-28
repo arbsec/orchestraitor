@@ -27,4 +27,10 @@ pub enum CampaignError {
     /// The worker role could not be resolved for the pass.
     #[error("worker role resolution failed: {0}")]
     Role(String),
+
+    /// A loop-runner invariant was violated: an invalid guard configuration
+    /// (a weakened guard is a runaway loop, so rejection is fail-closed) or
+    /// a supervision-state bug. Messages are static or store-assigned.
+    #[error("loop runner: {0}")]
+    Loop(String),
 }
