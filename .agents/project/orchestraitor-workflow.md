@@ -155,6 +155,31 @@ enforces):
 5. required documentation is updated;
 6. the managed PR-checklist items are checked based on evidence.
 
+## Merge authority
+
+- **Autonomous merge (owner directive, 2026-09-26, ratified in PR #405):** once all
+  convergence requirements above hold **and the PR is not merge-blocked by the human-review
+  exception below**, the orchestrator merges the PR itself as the `arbsec-agent` service
+  identity. The ruleset (`required_signatures`, extension-approval for unattributed changes,
+  CodeQL/coverage thresholds) remains the independent technical gate. Required reviewer
+  domains — including maintainer review for governance changes (e.g. `docs/spec/**`,
+  `AGENTS.md`, `.agents/**`, `.github/**` policy) — remain convergence preconditions; "no
+  standing human gate" removes no domain requirement, only the separate human merge-approval
+  step.
+- **Human review exception:** changes in the spec `50-contracts-data.md` §21.1
+  security-sensitive classes (privilege boundaries, sandboxing, policy, capability issuance,
+  filesystem projection, network/secret handling, `unsafe`) — including any dependency
+  update or refactor that touches those classes or the areas enumerated under
+  **Security-first review** above — get the `needs-human-review` label (the GitHub projection
+  of the `blocked` / `needs-human` escalation state, spec `10-orchestrator.md` §9.24,
+  §9.33.4) and stay open for the owner. The orchestrator MUST NOT autonomously merge a PR
+  carrying that label or touching those classes or areas; classification is by path and diff
+  content, not by intent. Dependency updates that do not touch those classes or areas are
+  reviewed by the agent security-reviewer domain and follow the autonomous path.
+- Convergence that cannot be reached within the configured loop/cost/time budget produces
+  `blocked` / `needs-human` state — never an automatic merge (spec `10-orchestrator.md`
+  §9.24, §9.33.4).
+
 ## Forbidden administrative shortcuts
 
 - No merge on red. No admin-merge bypass.
