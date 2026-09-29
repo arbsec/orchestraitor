@@ -23,8 +23,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   the same trait per Ledger D5: single canonical provider, writes reach the
   provider before the cache, cached reads carry a `last_synced` stamp, and a
   board-wins reconcile emits a typed `board-diverged` event whenever provider
-  state diverges from a write's assumption.
-
+  state diverges from a write's assumption. A reusable conformance suite
+  ships as the crate's default-on `conformance` cargo feature.
 - `orc campaign run --once [--json]` and the `orchestraitor-campaign` crate: the one-shot
   campaign pass (spec `10-orchestrator.md` §9.35, `60-milestones.md` M1; #313). Each
   pass reads the reconciled board through the #308 provider, applies the minimal

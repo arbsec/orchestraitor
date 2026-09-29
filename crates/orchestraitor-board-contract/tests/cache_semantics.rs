@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+#[cfg(feature = "conformance")]
 use orchestraitor_board_contract::conformance::run_conformance;
 use orchestraitor_board_contract::{
     BoardContractError, BoardFieldKind, BoardFieldValue, BoardItem, BoardItemId, BoardItemType,
@@ -19,6 +20,7 @@ use orchestraitor_board_contract::{
 
 /// A canonical board shaped for the conformance suite: two statuses and
 /// three typed fields (priority single-select, points number, notes text).
+#[cfg(feature = "conformance")]
 fn conformance_board() -> InMemoryBoardProvider {
     InMemoryBoardProvider::new(|setup: &mut BoardSetup<'_>| {
         setup
@@ -60,6 +62,7 @@ fn conformance_board() -> InMemoryBoardProvider {
     })
 }
 
+#[cfg(feature = "conformance")]
 #[tokio::test]
 async fn in_memory_provider_passes_full_conformance() {
     let provider = conformance_board();
@@ -100,6 +103,9 @@ struct DivergentBoard {
     /// When set, the next read of this item reports this BODY instead of
     /// the real one (board-side body edit between write and read-back).
     body_drift: Mutex<Option<(BoardItemId, String)>>,
+    /// When set, the next read of this item reports this TITLE instead of
+    /// the real one (board-side title edit between write and read-back).
+    title_drift: Mutex<Option<(BoardItemId, String)>>,
 }
 
 impl DivergentBoard {
@@ -108,6 +114,7 @@ impl DivergentBoard {
             inner: InMemoryBoardProvider::new(setup),
             drift: Mutex::new(None),
             body_drift: Mutex::new(None),
+            title_drift: Mutex::new(None),
         }
     }
 
@@ -117,6 +124,10 @@ impl DivergentBoard {
 
     fn inject_body_drift(&self, id: &BoardItemId, body: &str) {
         *self.body_drift.lock().unwrap() = Some((id.clone(), body.to_string()));
+    }
+
+    fn inject_title_drift(&self, id: &BoardItemId, title: &str) {
+        *self.title_drift.lock().unwrap() = Some((id.clone(), title.to_string()));
     }
 }
 
@@ -141,6 +152,15 @@ impl BoardProvider for DivergentBoard {
         });
         if let Some(body) = drifted_body {
             item.body = body;
+        }
+        let drifted_title = self.title_drift.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|(drift_id, _)| drift_id == id)
+                .map(|(_, title)| title.clone())
+        });
+        if let Some(title) = drifted_title {
+            item.title = title;
         }
         Ok(item)
     }
@@ -687,19 +707,23 @@ async fn body_drift_between_write_and_read_back_emits_one_event() {
             panic!("divergence for the wrong item, got {events:?}")
         }
     };
-    // expected: the previously observed body ("body-v1", 7 bytes) replaced
-    // by the written body ("body-v2", 7 bytes) → version 7.
+    // expected: the written body's content digest ("body-v2" → FNV-1a 64 =
+    // 14_055_596_590_272_022_168).
     assert_eq!(
         expected,
-        &Divergence::Body { version: 7 },
-        "expected side must derive from the observed baseline plus the write"
+        &Divergence::Body {
+            version: 14_055_596_590_272_022_168
+        },
+        "expected side must be the written body's content digest"
     );
     // actual: the drifted body read back from the provider ("board-edited
-    // body", 17 bytes).
+    // body" → FNV-1a 64 = 5_640_472_972_141_716_605).
     assert_eq!(
         actual,
-        &Divergence::Body { version: 17 },
-        "actual side must be the provider's observed post-drift state"
+        &Divergence::Body {
+            version: 5_640_472_972_141_716_605
+        },
+        "actual side must be the provider's observed post-drift digest"
     );
     // Board wins: the cache refreshed to the drifted provider state.
     let cached = cache
@@ -864,5 +888,110 @@ async fn cleared_field_emits_unset_actual_not_written_value() {
             field: "points".to_string(),
         },
         "actual side must be the UNSET representation, never the written value"
+    );
+}
+
+/// N-1 regression (probe c2): a same-length CONTENT change on the board
+/// side must emit exactly one event — the FNV-1a content-digest proxy
+/// distinguishes content drift a byte-length proxy would miss.
+#[tokio::test]
+async fn same_length_content_drift_emits_one_event() {
+    let board = drifted_board();
+    let item = BoardItemId::new("task-1").unwrap();
+    let cache = CachedBoard::new(&board);
+    cache.cached_item(&item).await.expect("seed cache");
+
+    // The write lands "bbb2222" (7 bytes); the read-back reports "aaa1111"
+    // (also 7 bytes, different content) — same length, different content.
+    board.inject_body_drift(&item, "aaa1111");
+    cache
+        .update_item_body(&item, "Drift probe", "bbb2222")
+        .await
+        .expect("write-through with same-length drift");
+
+    let events = cache.drain_events().expect("drain events");
+    assert_eq!(
+        events.len(),
+        1,
+        "same-length content drift must emit exactly one event, got {events:?}"
+    );
+    let (expected, actual) = match &events[0] {
+        CacheEvent::BoardDiverged {
+            item: diverged,
+            expected,
+            actual,
+        } if *diverged == item => (expected, actual),
+        CacheEvent::BoardDiverged { .. } => {
+            panic!("divergence for the wrong item, got {events:?}")
+        }
+    };
+    assert_eq!(
+        expected,
+        &Divergence::Body {
+            version: 9_552_689_407_862_081_637
+        },
+        "expected side must be the written body's content digest"
+    );
+    assert_eq!(
+        actual,
+        &Divergence::Body {
+            version: 12_820_585_722_560_774_910
+        },
+        "actual side must be the drifted content's digest — same length,
+         different content must NOT be a false negative"
+    );
+}
+
+/// N-3: a board-side title edit between write and read-back emits exactly
+/// one `Divergence::Title` event with the written vs provider title.
+#[tokio::test]
+async fn title_drift_between_write_and_read_back_emits_title_event() {
+    let board = drifted_board();
+    let item = BoardItemId::new("task-1").unwrap();
+    let cache = CachedBoard::new(&board);
+    cache.cached_item(&item).await.expect("seed cache");
+
+    // Board-side drift: the read-back reports a title the write did not
+    // produce.
+    board.inject_title_drift(&item, "Board-Edited Title");
+    cache
+        .update_item_body(&item, "Cache-Written Title", "body-v2")
+        .await
+        .expect("write-through with title drift");
+
+    let events = cache.drain_events().expect("drain events");
+    let diverged = events
+        .iter()
+        .find_map(|event| match event {
+            CacheEvent::BoardDiverged {
+                item: diverged,
+                expected,
+                actual,
+            } if *diverged == item => Some((expected, actual)),
+            CacheEvent::BoardDiverged { .. } => None,
+        })
+        .unwrap_or_else(|| panic!("board-diverged event missing, got {events:?}"));
+    assert_eq!(
+        diverged.0,
+        &Divergence::Title {
+            title: "Cache-Written Title".to_string(),
+        },
+        "expected side must record the title the write assumed"
+    );
+    assert_eq!(
+        diverged.1,
+        &Divergence::Title {
+            title: "Board-Edited Title".to_string(),
+        },
+        "actual side must record the provider's divergent title"
+    );
+    // Board wins: the cache refreshed to the provider's title.
+    let cached = cache
+        .cached_item(&item)
+        .await
+        .expect("cached read after reconcile");
+    assert_eq!(
+        cached.item.title, "Board-Edited Title",
+        "cache must refresh to provider state (board wins)"
     );
 }

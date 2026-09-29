@@ -91,11 +91,18 @@ pub enum Divergence {
         /// The field name.
         field: String,
     },
-    /// Body version: the body version proxy one side holds (content itself
-    /// is never embedded).
+    /// Body version: the body content digest (FNV-1a 64, stability-noted)
+    /// one side holds — content itself is never embedded.
     Body {
-        /// The body version proxy.
+        /// The body content digest.
         version: u64,
+    },
+    /// Title: the title text one side holds (untrusted board content,
+    /// spec §6.1, but plain data — safe to carry verbatim for reconcile
+    /// bookkeeping).
+    Title {
+        /// The title text.
+        title: String,
     },
 }
 
@@ -280,39 +287,35 @@ impl<P: BoardProvider> CachedBoard<P> {
 
 /// Structural body version: bodies are untrusted content (spec §6.1), so
 /// divergence is described by a version proxy, never by embedding content.
+///
+/// The proxy is the FNV-1a 64-bit content digest of the body bytes. It is a
+/// STABILITY-NOTED value, not a cross-run identity: it distinguishes content
+/// changes (including same-length edits, which a byte-length proxy would
+/// miss) but makes no collision-resistance claim — two different bodies can
+/// theoretically share a digest. It must never be persisted across releases
+/// or compared against values computed by another algorithm.
 fn body_version(item: &BoardItem) -> u64 {
-    body_len_version(item.body.len())
+    fnv1a64(item.body.as_bytes())
 }
 
-/// The observed-version proxy for a body of `length` bytes.
-fn body_len_version(length: usize) -> u64 {
-    u64::try_from(length).unwrap_or(u64::MAX)
-}
-
-/// The version the write assumes: the previously OBSERVED body version
-/// adjusted by the write's own content delta. A clean write lands exactly
-/// here; board-side drift between write and read-back moves the version
-/// anywhere else.
-fn expected_body_version(observed_before: u64, written_body: &str) -> u64 {
-    // observed_before proxies the pre-write body length in bytes; the write
-    // replaces that body with `written_body`.
-    let before_len = usize::try_from(observed_before).unwrap_or(usize::MAX);
-    let delta = isize::try_from(written_body.len())
-        .ok()
-        .and_then(|written| {
-            isize::try_from(before_len)
-                .ok()
-                .map(|before| written - before)
-        });
-    match delta {
-        Some(delta) if delta >= 0 => {
-            observed_before.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX))
-        }
-        Some(delta) => {
-            observed_before.saturating_sub(u64::try_from(delta.unsigned_abs()).unwrap_or(u64::MAX))
-        }
-        None => body_len_version(written_body.len()),
+/// FNV-1a 64-bit: the offset basis and prime are public constants of the
+/// algorithm (public domain), not copied crate code.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
     }
+    hash
+}
+
+/// The version the write assumes: the content digest of the written body.
+/// A clean write lands exactly here; board-side drift between write and
+/// read-back moves the version anywhere else.
+fn expected_body_version(written_body: &str) -> u64 {
+    fnv1a64(written_body.as_bytes())
 }
 
 #[async_trait]
@@ -356,10 +359,11 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
         // side drift between write and read-back changes it differently.
         let actual = self.refresh(id).await?;
         let observed_after = body_version(&actual);
-        if let Some(before) = observed_before {
-            // What the write assumed: the old observed body replaced by the
-            // written body (version proxy over opaque content, spec §6.1).
-            let expected_version = expected_body_version(before, body);
+        if observed_before.is_some() {
+            // What the write assumed: the written body's content digest.
+            // (The observed baseline gates reconciliation: without a prior
+            // observation there is nothing to reconcile against.)
+            let expected_version = expected_body_version(body);
             if observed_after != expected_version {
                 self.record_divergence(
                     CacheEvent::BoardDiverged {
@@ -374,6 +378,22 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
                     &actual,
                 )?;
             }
+        }
+        // Title axis: the write also assumes its title lands; board-side
+        // title edits between write and read-back diverge the same way.
+        if actual.title != title {
+            self.record_divergence(
+                CacheEvent::BoardDiverged {
+                    item: id.clone(),
+                    expected: Divergence::Title {
+                        title: title.to_string(),
+                    },
+                    actual: Divergence::Title {
+                        title: actual.title.clone(),
+                    },
+                },
+                &actual,
+            )?;
         }
         Ok(())
     }
