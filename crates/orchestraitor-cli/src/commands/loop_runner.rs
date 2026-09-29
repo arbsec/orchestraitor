@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use miette::{IntoDiagnostic, Result, miette};
+use miette::{Diagnostic, IntoDiagnostic, Result, miette};
 use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecision};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth};
 use orchestraitor_campaign::{
@@ -142,6 +142,18 @@ struct InstanceLock {
     _file: std::fs::File,
 }
 
+/// A second concurrent `orc loop` invocation refused the instance lock.
+///
+/// The rejection carries the machine-readable `loop-already-running` code as
+/// a structured miette diagnostic code — rendered on its own report header,
+/// independent of terminal width and message wrapping.
+#[derive(Debug, thiserror::Error, Diagnostic)]
+#[error("another `orc loop` instance already holds the lock at {path}")]
+#[diagnostic(code("loop-already-running"))]
+struct LoopAlreadyRunning {
+    path: PathBuf,
+}
+
 /// Acquires the advisory lock or rejects with `loop-already-running`.
 ///
 /// # Errors
@@ -156,12 +168,8 @@ fn acquire_instance_lock(config_dir: &std::path::Path) -> Result<InstanceLock> {
         .truncate(false)
         .open(&path)
         .into_diagnostic()?;
-    file.try_lock().map_err(|_| {
-        miette!(
-            "another `orc loop` instance already holds the lock at {} (loop-already-running)",
-            path.display()
-        )
-    })?;
+    file.try_lock()
+        .map_err(|_| LoopAlreadyRunning { path: path.clone() })?;
     Ok(InstanceLock { _file: file })
 }
 
