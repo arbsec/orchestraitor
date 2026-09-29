@@ -49,7 +49,11 @@ fn unix_millis() -> u64 {
 /// Events emitted by the write-through cache (Ledger D5).
 ///
 /// Typed and observable: tests and the local event store match on the
-/// variant and payload; board content is never embedded (spec §6.1).
+/// variant and payload. Consistent with the crate's untrusted-input posture
+/// (spec §6.1): status names and titles are plain operator-authored data
+/// carried verbatim for reconcile bookkeeping, while opaque bodies and field
+/// values are never embedded — bodies are compared by content digest, and
+/// field divergence is described by its typed value representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CacheEvent {
