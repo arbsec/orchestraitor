@@ -11,14 +11,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ## [Unreleased]
 
-### Fixed
-
-- `orc routing resolve` no longer dirties `git status` when run at the default store
-  path: `.orchestraitor/routing.db` and its WAL sidecars are gitignored. Routing
-  decision store errors now include the underlying cause in their `Display`
-  output (#309).
-
 ### Added
+
+- `orchestraitor-board-contract` crate: the pluggable `BoardProvider` contract
+  (spec `10-orchestrator.md` §9.43, #318) covering all six contract areas —
+  items (stable `BoardItemId` identity, type, title, opaque body), statuses,
+  typed custom fields, native `blockedBy` dependency edges, cross-references,
+  and typed conjunctive search — with a typed error per failure class. Ships a
+  deterministic in-memory reference provider (the conformance target for all
+  future providers) and a write-through read-cache (`CachedBoard`) implementing
+  the same trait per Ledger D5: single canonical provider, writes reach the
+  provider before the cache, cached reads carry a `last_synced` stamp, and a
+  board-wins reconcile emits a typed `board-diverged` event whenever provider
+  state diverges from a write's assumption.
 
 - `orc campaign run --once [--json]` and the `orchestraitor-campaign` crate: the one-shot
   campaign pass (spec `10-orchestrator.md` §9.35, `60-milestones.md` M1; #313). Each
@@ -136,3 +141,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `BoardAuth` trait; the bootstrap `SecretUriAuth` stub resolves the configured
   `secret://` URI (env-backed) and never sniffs ambient credentials; a hidden
   `--github-graphql-endpoint` override serves GHES instances.
+
+### Fixed
+
+- `orc routing resolve` no longer dirties `git status` when run at the default store
+  path: `.orchestraitor/routing.db` and its WAL sidecars are gitignored. Routing
+  decision store errors now include the underlying cause in their `Display`
+  output (#309).

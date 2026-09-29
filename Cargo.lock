@@ -3958,6 +3958,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-board-contract"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "orchestraitor-campaign"
 version = "0.0.0"
 dependencies = [
