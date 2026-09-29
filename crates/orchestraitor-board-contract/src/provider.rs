@@ -31,9 +31,13 @@ use crate::types::{
 ///    query language).
 ///
 /// A workspace has exactly one canonical provider; switching is an explicit
-/// `orc board import/export` migration, not a live mirror. Implementations
-/// must be deterministic or honestly I/O-backed, but always provider-side
-/// authoritative: a local read-cache never becomes a second master.
+/// `orc board import/export` migration, not a live mirror. A provider
+/// instance is scoped to ONE board (or workspace): identity (`BoardItemId`),
+/// statuses, and fields are namespaced per instance, and cross-board edges
+/// (§9.42) resolve through the workspace-level composition of instances.
+/// Implementations must be deterministic or honestly I/O-backed, but always
+/// provider-side authoritative: a local read-cache never becomes a second
+/// master.
 #[async_trait]
 pub trait BoardProvider: Send + Sync {
     /// Returns one item by stable id.
@@ -197,6 +201,11 @@ pub trait BoardProvider: Send + Sync {
 
     /// Runs a typed, conjunctive search over items and fields (§9.43
     /// `search`).
+    ///
+    /// The filter matches on item type, status, and typed field values
+    /// ONLY — there is no free-text title/body search: titles and bodies
+    /// are opaque untrusted content (§6.1) and are never indexed or
+    /// interpreted.
     ///
     /// # Errors
     ///

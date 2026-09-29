@@ -42,9 +42,11 @@
 //! # Conformance
 //!
 //! [`InMemoryBoardProvider`] is the deterministic, no-I/O reference
-//! implementation. `tests/conformance.rs` runs ANY `BoardProvider` through
-//! the full contract; future providers (GitHub, sqlite — follow-ups, not in
-//! this crate) must pass the same suite.
+//! implementation. The feature-gated `conformance` module (default-on)
+//! exposes `conformance::run_conformance`, which runs ANY `BoardProvider`
+//! through the full contract; future providers (GitHub, sqlite — follow-ups,
+//! not in this crate) must pass the same suite via a dev-dependency on this
+//! crate.
 //!
 //! # Security posture
 //!
@@ -56,6 +58,8 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod error;
 pub mod in_memory;
 pub mod provider;

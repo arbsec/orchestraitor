@@ -11,6 +11,14 @@ description = "BoardProvider contract and write-through read-cache semantics (sp
 [lints]
 workspace = true
 
+[features]
+# Default-on conformance suite (testkit-style): a public module exercising
+# ANY BoardProvider through the full §9.43 contract. Follow-up providers
+# (GitHub, sqlite) reuse it via a dev-dependency on this crate. Disable with
+# `default-features = false` to exclude the suite from the build.
+default = ["conformance"]
+conformance = []
+
 [dependencies]
 # async-trait (MIT OR Apache-2.0): object-safe async trait for BoardProvider,
 # matching the BoardAuth / ProviderTransport convention in sibling crates.

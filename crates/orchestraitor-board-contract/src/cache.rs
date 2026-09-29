@@ -85,6 +85,12 @@ pub enum Divergence {
         /// The typed value.
         value: BoardFieldValue,
     },
+    /// Field cleared: one side holds no value for the field (an UNSET
+    /// field is never substituted with the written value).
+    FieldCleared {
+        /// The field name.
+        field: String,
+    },
     /// Body version: the body version proxy one side holds (content itself
     /// is never embedded).
     Body {
@@ -109,10 +115,8 @@ pub struct CachedItem {
 #[derive(Default)]
 struct CacheState {
     items: BTreeMap<BoardItemId, CachedItem>,
-    /// Monotonic per-item body versions, bumped on every cached body write;
-    /// the reconcile step compares these with the provider's own version.
-    body_versions: BTreeMap<BoardItemId, u64>,
-    /// Provider-side body versions observed at the last refresh.
+    /// Provider-observed body version per item, captured at the last
+    /// refresh (the only version source: never an internal write counter).
     provider_body_versions: BTreeMap<BoardItemId, u64>,
     pending_events: Vec<CacheEvent>,
 }
@@ -143,7 +147,10 @@ impl<P: BoardProvider> CachedBoard<P> {
 
     /// Returns the cache's view of one item with its last-synced stamp.
     /// The cache re-reads the provider on every call (refresh-on-read), so
-    /// the stamp always reflects the most recent provider contact.
+    /// the returned state is fresh and the stamp always reflects the most
+    /// recent provider contact; consumers should still treat the stamp as
+    /// the read's authority provenance (Ledger D5: the cache is never
+    /// authoritative).
     ///
     /// # Errors
     ///
@@ -153,16 +160,19 @@ impl<P: BoardProvider> CachedBoard<P> {
         let item = self.provider.item(id).await?;
         let stamp = unix_millis();
         self.refresh_generation.fetch_add(1, Ordering::Relaxed);
-        self.lock("cache read")?.items.insert(
-            id.clone(),
-            CachedItem {
-                item: item.clone(),
-                last_synced_ms: stamp,
-            },
-        );
-        self.lock("cache version note")?
-            .provider_body_versions
-            .insert(id.clone(), body_version(&item));
+        {
+            let mut state = self.lock("cache read")?;
+            state.items.insert(
+                id.clone(),
+                CachedItem {
+                    item: item.clone(),
+                    last_synced_ms: stamp,
+                },
+            );
+            state
+                .provider_body_versions
+                .insert(id.clone(), body_version(&item));
+        }
         Ok(CachedItem {
             item,
             last_synced_ms: stamp,
@@ -231,10 +241,17 @@ impl<P: BoardProvider> CachedBoard<P> {
     }
 
     /// Records one divergence event and refreshes the cache to provider
-    /// state (board wins).
-    fn record_divergence(&self, event: CacheEvent, actual: &BoardItem) {
+    /// state (board wins). Lock poison maps to the same typed Transport
+    /// error every other lock site uses — the event and the refresh are
+    /// never silently dropped.
+    fn record_divergence(
+        &self,
+        event: CacheEvent,
+        actual: &BoardItem,
+    ) -> Result<(), BoardContractError> {
         let stamp = unix_millis();
-        if let Ok(mut state) = self.state.lock() {
+        {
+            let mut state = self.lock("cache reconcile")?;
             state.pending_events.push(event);
             state.items.insert(
                 actual.id.clone(),
@@ -248,22 +265,54 @@ impl<P: BoardProvider> CachedBoard<P> {
                 .insert(actual.id.clone(), body_version(actual));
         }
         self.refresh_generation.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
-    /// Bumps and returns the local body-version assumption for `id`.
-    fn bump_body_version(&self, id: &BoardItemId) -> u64 {
-        self.state.lock().map_or(0, |mut state| {
-            let version = state.body_versions.entry(id.clone()).or_insert(0);
-            *version += 1;
-            *version
-        })
+    /// The provider-observed body version for `id`, if the cache has
+    /// observed one.
+    fn observed_body_version(&self, id: &BoardItemId) -> Option<u64> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.provider_body_versions.get(id).copied())
     }
 }
 
 /// Structural body version: bodies are untrusted content (spec §6.1), so
 /// divergence is described by a version proxy, never by embedding content.
 fn body_version(item: &BoardItem) -> u64 {
-    u64::try_from(item.body.len()).unwrap_or(u64::MAX)
+    body_len_version(item.body.len())
+}
+
+/// The observed-version proxy for a body of `length` bytes.
+fn body_len_version(length: usize) -> u64 {
+    u64::try_from(length).unwrap_or(u64::MAX)
+}
+
+/// The version the write assumes: the previously OBSERVED body version
+/// adjusted by the write's own content delta. A clean write lands exactly
+/// here; board-side drift between write and read-back moves the version
+/// anywhere else.
+fn expected_body_version(observed_before: u64, written_body: &str) -> u64 {
+    // observed_before proxies the pre-write body length in bytes; the write
+    // replaces that body with `written_body`.
+    let before_len = usize::try_from(observed_before).unwrap_or(usize::MAX);
+    let delta = isize::try_from(written_body.len())
+        .ok()
+        .and_then(|written| {
+            isize::try_from(before_len)
+                .ok()
+                .map(|before| written - before)
+        });
+    match delta {
+        Some(delta) if delta >= 0 => {
+            observed_before.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX))
+        }
+        Some(delta) => {
+            observed_before.saturating_sub(u64::try_from(delta.unsigned_abs()).unwrap_or(u64::MAX))
+        }
+        None => body_len_version(written_body.len()),
+    }
 }
 
 #[async_trait]
@@ -293,27 +342,38 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
         title: &str,
         body: &str,
     ) -> Result<(), BoardContractError> {
+        // The baseline is the provider-observed body version from the last
+        // refresh — an observed provider state, never an internal write
+        // counter. Without a prior observation there is nothing to
+        // reconcile against.
+        let observed_before = self.observed_body_version(id);
         // Write-through FIRST: the provider write must succeed before the
         // cache changes (write-through, never write-behind — Ledger D5).
         self.provider.update_item_body(id, title, body).await?;
-        // Refresh from provider state, then reconcile board-wins: compare
-        // the provider's body version with the version the write assumed.
+        // Refresh from provider state, then reconcile board-wins by
+        // comparing the two OBSERVED provider states (before vs after the
+        // write): a clean write changes the body exactly as written; board-
+        // side drift between write and read-back changes it differently.
         let actual = self.refresh(id).await?;
-        let expected_version = self.bump_body_version(id);
-        let actual_version = body_version(&actual);
-        if actual_version != expected_version {
-            self.record_divergence(
-                CacheEvent::BoardDiverged {
-                    item: id.clone(),
-                    expected: Divergence::Body {
-                        version: expected_version,
+        let observed_after = body_version(&actual);
+        if let Some(before) = observed_before {
+            // What the write assumed: the old observed body replaced by the
+            // written body (version proxy over opaque content, spec §6.1).
+            let expected_version = expected_body_version(before, body);
+            if observed_after != expected_version {
+                self.record_divergence(
+                    CacheEvent::BoardDiverged {
+                        item: id.clone(),
+                        expected: Divergence::Body {
+                            version: expected_version,
+                        },
+                        actual: Divergence::Body {
+                            version: observed_after,
+                        },
                     },
-                    actual: Divergence::Body {
-                        version: actual_version,
-                    },
-                },
-                &actual,
-            );
+                    &actual,
+                )?;
+            }
         }
         Ok(())
     }
@@ -344,7 +404,7 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
                     },
                 },
                 &actual,
-            );
+            )?;
         }
         Ok(())
     }
@@ -373,7 +433,18 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
         let actual = self.refresh(id).await?;
         let provider_value = self.provider.field_value(id, field).await?;
         if provider_value.as_ref() != Some(&value) {
-            let actual_value = provider_value.unwrap_or_else(|| value.clone());
+            // Report the provider's actual state honestly: a cleared field
+            // is UNSET (FieldCleared), never substituted with the written
+            // value.
+            let actual_divergence = match provider_value {
+                Some(actual_value) => Divergence::Field {
+                    field: field.to_string(),
+                    value: actual_value,
+                },
+                None => Divergence::FieldCleared {
+                    field: field.to_string(),
+                },
+            };
             self.record_divergence(
                 CacheEvent::BoardDiverged {
                     item: id.clone(),
@@ -381,13 +452,10 @@ impl<P: BoardProvider> BoardProvider for CachedBoard<P> {
                         field: field.to_string(),
                         value,
                     },
-                    actual: Divergence::Field {
-                        field: field.to_string(),
-                        value: actual_value,
-                    },
+                    actual: actual_divergence,
                 },
                 &actual,
-            );
+            )?;
         }
         Ok(())
     }

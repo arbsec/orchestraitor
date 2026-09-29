@@ -26,10 +26,11 @@ impl BoardItemId {
     /// # Errors
     ///
     /// Returns [`BoardContractError::InvalidItemId`] when the id is empty
-    /// (ids are provider-assigned and must be non-empty to remain keyable).
+    /// or whitespace-only (ids are provider-assigned and must be non-empty
+    /// to key runtime state and search results).
     pub fn new(raw: impl Into<String>) -> Result<Self, BoardContractError> {
         let raw = raw.into();
-        if raw.is_empty() {
+        if raw.trim().is_empty() {
             return Err(BoardContractError::InvalidItemId);
         }
         Ok(Self(raw))

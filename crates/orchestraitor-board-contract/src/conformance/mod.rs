@@ -2,14 +2,16 @@
 //!
 //! [`run_conformance`] exercises ANY [`BoardProvider`] through the full
 //! six-area contract. The in-memory reference provider passes it; future
-//! providers (GitHub, sqlite — follow-ups) must pass the same suite by
-//! calling [`run_conformance`] with their instance. No network, no clock
-//! dependence beyond monotonic-comparable stamps (spec §21.3).
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-// Test-only allowances mirror the CLI test harness: a failed assertion must
-// fail the test loudly.
-
-use orchestraitor_board_contract::{
+//! providers (GitHub, sqlite — follow-ups) pass the same suite by calling
+//! [`run_conformance`] with their instance as a dev-dependency usage of
+//! this crate. No network, no clock dependence beyond monotonic-comparable
+//! stamps (spec §21.3).
+//!
+//! Gated behind the default-on `conformance` cargo feature so the suite
+//! ships with the crate (testkit-style) without being part of the runtime
+//! contract API; disable the feature with `default-features = false` to
+//! exclude it.
+use crate::{
     BoardContractError, BoardFieldKind, BoardFieldValue, BoardItem, BoardItemId, BoardItemType,
     BoardProvider, BoardSearch, DependencyEdge,
 };
@@ -17,8 +19,9 @@ use orchestraitor_board_contract::{
 /// Failure surface of the conformance suite: the failing area plus detail.
 pub type ConformanceResult = Result<(), String>;
 
-fn id(raw: &str) -> BoardItemId {
-    BoardItemId::new(raw).unwrap()
+/// Builds a conformance item id; the suite's own literals, validated.
+fn id(raw: &str) -> Result<BoardItemId, BoardContractError> {
+    BoardItemId::new(raw)
 }
 
 /// Runs the full contract conformance suite against `provider`.
@@ -40,6 +43,10 @@ pub async fn run_conformance(provider: &dyn BoardProvider) -> ConformanceResult 
 }
 
 /// Area 1 — items: stable identity, type, title, body; opaque bodies.
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn items_area(provider: &dyn BoardProvider) -> ConformanceResult {
     let created = provider
         .create_item(BoardItemType::Task, "conformance item", "body-payload")
@@ -79,7 +86,10 @@ pub async fn items_area(provider: &dyn BoardProvider) -> ConformanceResult {
     if !all.iter().any(|item| item.id == created) {
         return Err("items/list: created item missing from listing".to_string());
     }
-    let missing = provider.item(&id("nonexistent-item")).await;
+    let missing = match id("nonexistent-item") {
+        Ok(missing_id) => provider.item(&missing_id).await,
+        Err(error) => return Err(format!("items/id: {error}")),
+    };
     match missing {
         Err(BoardContractError::ItemNotFound { .. }) => {}
         other => {
@@ -92,6 +102,10 @@ pub async fn items_area(provider: &dyn BoardProvider) -> ConformanceResult {
 }
 
 /// Area 2 — statuses: board columns / status field values.
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn statuses_area(provider: &dyn BoardProvider) -> Result<(), String> {
     let statuses = provider
         .statuses()
@@ -131,6 +145,10 @@ pub async fn statuses_area(provider: &dyn BoardProvider) -> Result<(), String> {
 }
 
 /// Area 3 — fields: typed custom fields, typed values, not stringly.
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn fields_area(provider: &dyn BoardProvider) -> ConformanceResult {
     let fields = provider
         .fields()
@@ -196,6 +214,10 @@ pub async fn fields_area(provider: &dyn BoardProvider) -> ConformanceResult {
 }
 
 /// Area 4 — dependency edges: native `blockedBy`, the graph itself (§9.40).
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn edges_area(provider: &dyn BoardProvider) -> ConformanceResult {
     let a = provider
         .create_item(BoardItemType::Task, "blocked probe", "")
@@ -240,10 +262,11 @@ pub async fn edges_area(provider: &dyn BoardProvider) -> ConformanceResult {
     if after.contains(&want) {
         return Err("edges/remove: edge still present after removal".to_string());
     }
-    match provider
-        .add_dependency_edge(&a, &id("nonexistent-item"))
-        .await
-    {
+    let ghost = match id("nonexistent-item") {
+        Ok(ghost_id) => ghost_id,
+        Err(error) => return Err(format!("edges/id: {error}")),
+    };
+    match provider.add_dependency_edge(&a, &ghost).await {
         Err(BoardContractError::ItemNotFound { .. }) => {}
         other => {
             return Err(format!(
@@ -255,6 +278,10 @@ pub async fn edges_area(provider: &dyn BoardProvider) -> ConformanceResult {
 }
 
 /// Area 5 — cross-references: links between items, cross-repository too.
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn cross_references_area(provider: &dyn BoardProvider) -> ConformanceResult {
     let from = provider
         .create_item(BoardItemType::Bug, "xref source", "")
@@ -277,7 +304,11 @@ pub async fn cross_references_area(provider: &dyn BoardProvider) -> ConformanceR
     if references[0].from != from {
         return Err("cross-refs/from: reference source id mismatch".to_string());
     }
-    match provider.cross_references(&id("nonexistent-item")).await {
+    let ghost = match id("nonexistent-item") {
+        Ok(ghost_id) => ghost_id,
+        Err(error) => return Err(format!("cross-refs/id: {error}")),
+    };
+    match provider.cross_references(&ghost).await {
         Err(BoardContractError::ItemNotFound { .. }) => {}
         other => {
             return Err(format!(
@@ -289,6 +320,10 @@ pub async fn cross_references_area(provider: &dyn BoardProvider) -> ConformanceR
 }
 
 /// Area 6 — search: typed, conjunctive filters over items and fields.
+///
+/// # Errors
+///
+/// Reports the failing check as `Err(area: detail)`.
 pub async fn search_area(provider: &dyn BoardProvider) -> ConformanceResult {
     let probe = provider
         .create_item(BoardItemType::Bug, "search probe", "")
