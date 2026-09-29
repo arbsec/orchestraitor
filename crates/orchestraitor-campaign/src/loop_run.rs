@@ -647,16 +647,25 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     drain_reason = stop;
                     drain_deadline = elapsed + self.config.shutdown_budget;
                 } else {
-                    self.pass(
-                        &mut counters,
-                        &mut events,
-                        elapsed,
-                        now,
-                        &mut stop,
-                        &mut drain_reason,
-                        &mut drain_deadline,
-                    )
-                    .await?;
+                    let signal_consumed = self
+                        .pass(
+                            &mut counters,
+                            &mut events,
+                            elapsed,
+                            now,
+                            &mut stop,
+                            &mut drain_reason,
+                            &mut drain_deadline,
+                        )
+                        .await?;
+                    if signal_consumed {
+                        // The pass consumed the send through the clone;
+                        // advance the MAIN receiver's seen version too, or
+                        // `wait_tick` re-observes the same send and applies
+                        // the second-signal short-circuit to a first signal
+                        // (grace collapsing to one tick).
+                        shutdown.borrow_and_update();
+                    }
                 }
             }
 
@@ -819,6 +828,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// future (`poll` takes `&self` and owns no kill-capable state) and
     /// declares the shutdown right here — the signal is never swallowed,
     /// and the pass never spawns work on a stale snapshot.
+    ///
+    /// Returns whether the pass consumed a signal (the interrupt arm fired):
+    /// the caller must then advance the MAIN receiver's seen version, or the
+    /// same send is re-observed by `wait_tick` and misread as a second
+    /// signal (collapsing the grace window to one tick).
     #[expect(
         clippy::too_many_arguments,
         reason = "the stop cells are the run loop's drain state, threaded through so a poll-time signal preempts the pass in place; bundling them into a struct would hide which cell the pass may write"
@@ -832,11 +846,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         stop: &mut Option<StopReason>,
         drain_reason: &mut Option<StopReason>,
         drain_deadline: &mut Duration,
-    ) -> Result<(), CampaignError> {
+    ) -> Result<bool, CampaignError> {
         if self.slots.len() >= self.config.budgets.max_concurrent_workers as usize
             || elapsed < self.next_pass_allowed_at
         {
-            return Ok(());
+            return Ok(false);
         }
         counters.cycles += 1;
 
@@ -867,18 +881,19 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     message: error.to_string(),
                 });
                 self.pace_no_spawn(events, elapsed);
-                return Ok(());
+                return Ok(false);
             }
             None => {
                 // The poll future is dropped mid-request; the signal that
-                // won the race declares the shutdown. The main loop's own
-                // `changed()` arm observes the same send on its next wait,
-                // converging to the same stop — this assignment makes the
-                // interruption immediate instead of one tick late.
+                // won the race declares the shutdown. The pass-time clone's
+                // version is advanced here; the caller advances the MAIN
+                // receiver too (`true` below), so the same send is never
+                // re-observed as a second signal.
+                self.mark_signal_seen();
                 *stop = Some(StopReason::Shutdown);
                 *drain_reason = Some(StopReason::Shutdown);
                 *drain_deadline = self.elapsed() + self.config.shutdown_budget;
-                return Ok(());
+                return Ok(true);
             }
         };
         let excluded = self.excluded_tasks()?;
@@ -925,7 +940,16 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         } else {
             self.pace_no_spawn(events, elapsed);
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// Advances the pass-time shutdown clone's seen version after the pass
+    /// consumed a signal, keeping the clone's marker aligned with the main
+    /// receiver (which the run loop advances separately).
+    fn mark_signal_seen(&mut self) {
+        if let Some(receiver) = self.shutdown.as_mut() {
+            receiver.borrow_and_update();
+        }
     }
 
     /// Tasks this invocation already ran or is running (the

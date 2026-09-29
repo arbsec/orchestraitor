@@ -172,12 +172,24 @@ fn acquire_instance_lock(config_dir: &std::path::Path) -> Result<InstanceLock> {
         .truncate(false)
         .open(&path)
         .into_diagnostic()?;
-    file.try_lock()
-        .map_err(|_| LoopAlreadyRunning { path: path.clone() })?;
-    Ok(InstanceLock { _file: file })
+    match file.try_lock() {
+        Ok(()) => Ok(InstanceLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LoopAlreadyRunning { path }.into()),
+        // A permission or OS-level failure is NOT another instance —
+        // reporting it as `loop-already-running` would misdirect the
+        // operator; surface the underlying error instead.
+        Err(error) => Err(miette!(
+            "instance lock at {} could not be acquired: {error}",
+            path.display()
+        )),
+    }
 }
 
 /// Spawns the SIGTERM/SIGINT fan-in task: one channel increment per signal.
+/// The unix-specific path is `#[cfg(unix)]`; other platforms fall back to
+/// `ctrl_c()` (SIGINT only). Registration failure is reported and degrades
+/// the channel set — never silently swallowed.
+#[cfg(unix)]
 fn spawn_signal_task() -> (
     tokio::sync::watch::Receiver<u64>,
     tokio::task::JoinHandle<()>,
@@ -185,27 +197,92 @@ fn spawn_signal_task() -> (
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     let signals = tokio::spawn(async move {
         let count_rx = signal_tx.subscribe();
-        let Ok(mut terminate) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        else {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    report_signal_failure(&format!(
+                        "SIGTERM handler registration failed: {error}; \
+                         SIGTERM will use the process default action"
+                    ));
+                    None
+                }
+            };
+        let mut interrupt =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    report_signal_failure(&format!(
+                        "SIGINT handler registration failed: {error}; \
+                         SIGINT will use the process default action"
+                    ));
+                    None
+                }
+            };
+        if terminate.is_none() && interrupt.is_none() {
+            // No channel registered: signals take the process default
+            // action (terminate) — fail loudly, never run unkillable.
+            report_signal_failure(
+                "no signal handlers could be installed; shutdown signals \
+                 will terminate the process abruptly",
+            );
             return;
-        };
-        let Ok(mut interrupt) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        else {
-            return;
-        };
+        }
         loop {
             let mut count = *count_rx.borrow();
             tokio::select! {
-                _ = terminate.recv() => {}
-                _ = interrupt.recv() => {}
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(stream) => stream.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
+                _ = async {
+                    match interrupt.as_mut() {
+                        Some(stream) => stream.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
             count += 1;
             let _ignore = signal_tx.send(count);
         }
     });
     (signal_rx, signals)
+}
+
+/// Non-unix fallback: `ctrl_c()` only (SIGINT-equivalent console event).
+#[cfg(not(unix))]
+fn spawn_signal_task() -> (
+    tokio::sync::watch::Receiver<u64>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    let signals = tokio::spawn(async move {
+        let count_rx = signal_tx.subscribe();
+        let mut interrupt = match tokio::signal::ctrl_c() {
+            Ok(stream) => stream,
+            Err(error) => {
+                report_signal_failure(&format!("ctrl-c handler registration failed: {error}"));
+                return;
+            }
+        };
+        loop {
+            let mut count = *count_rx.borrow();
+            interrupt.recv().await;
+            count += 1;
+            let _ignore = signal_tx.send(count);
+        }
+    });
+    (signal_rx, signals)
+}
+
+/// Writes a signal-handling warning to stderr (the crate's stderr idiom —
+/// the lint denies `eprintln!`; write failures are best-effort diagnostics).
+fn report_signal_failure(message: &str) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ignore = writeln!(lock, "orc loop: {message}");
 }
 
 /// Runs an `orc loop` invocation.
