@@ -772,4 +772,197 @@ async fn spend_cap_with_a_busy_slot_drains_without_aborting() {
             .all(|row| row.status.is_terminal())
     );
 }
-// paste into a scratch test
+
+// Shutdown preempts the spend cap's natural drain: without a signal the
+// busy slot drains to completion indefinitely; a signal during that drain
+// bounds it to the shutdown budget, kills the straggler, records it as a
+// shutdown-abort (the drain reason converged to Shutdown), and keeps the
+// summary's stop reason as the budget cause.
+#[tokio::test(start_paused = true)]
+async fn shutdown_preempts_the_spend_cap_drain_within_the_budget() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    // Prior spend today from an earlier invocation: $5 — the cap crosses at
+    // run 1's finish, while run 2 (the busy slot) is still in flight.
+    let prior = runs
+        .start(&orchestraitor_campaign::StartRun {
+            invocation_id: "inv-dead".to_string(),
+            decision_id: 1,
+            task_id: "prior-task".to_string(),
+            repo: REPO.to_string(),
+            number: 0,
+            started_at_secs: START_UNIX,
+        })
+        .unwrap();
+    runs.finish(
+        prior.id,
+        orchestraitor_campaign::RunRowStatus::Completed,
+        START_UNIX + 1,
+        5.0,
+        "prior",
+    )
+    .unwrap();
+
+    let starter = FakeStarter::with_behaviors(vec![
+        // Run 1 is the busy slot: it beats forever, so without the shutdown
+        // only its 45m worker timeout would end the natural drain.
+        Behavior::BeatEvery(Duration::from_mins(1)),
+        // Run 2 is fast and crosses the cap at its finish ($5 prior + $6)
+        // while run 1 is still in flight.
+        Behavior::Complete {
+            turns: 1,
+            tokens: 3_000_000,
+        },
+    ]);
+    let budgets = WorkerBudgets {
+        usd_per_token_estimate: 2e-6,
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // Synthetic SIGTERM 2s after the cap trips (the cap trips at ~0s in
+    // this scenario — run 1 completes on the first pass).
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+    });
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1, 2]),
+        },
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(signal_rx).await.unwrap();
+
+    // The summary keeps the budget cause; the drain reason converged.
+    assert_eq!(summary.stop_reason, StopReason::SpendSoftCap);
+    assert_eq!(
+        summary.aborted_on_stop, 1,
+        "the shutdown killed the straggler"
+    );
+    // Cap tripped ~0s + signal at 2s + 5s grace + tick slop; WITHOUT the
+    // preemption this would be 2 hours (the busy slot's worker timeout).
+    assert!(
+        summary.elapsed_secs <= 12,
+        "shutdown must bound the spend-cap drain to the daemon budget: {}",
+        summary.elapsed_secs
+    );
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    let aborted = rows
+        .iter()
+        .find(|row| row.status == orchestraitor_campaign::RunRowStatus::AbortedShutdown)
+        .expect("the straggler is recorded");
+    assert_eq!(aborted.detail, "shutdown-abort");
+    // The completed run 1 is untouched.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Completed)
+            .count(),
+        1
+    );
+}
+
+// Q5(m) poll race: a signal arriving while the board poll is in flight
+// must interrupt the poll (the board client can block up to its 60s total
+// timeout — far outside the 5s daemon budget) and end the loop promptly,
+// never swallow the signal.
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_an_in_flight_board_poll() {
+    /// A poller whose poll never resolves (the hung-transport case).
+    struct HangingPoller;
+
+    #[async_trait]
+    impl BoardPoller for HangingPoller {
+        async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+            std::future::pending().await
+        }
+    }
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+    )
+    .unwrap();
+    // Synthetic SIGTERM 2s in, while the poll of cycle 1 is still hung.
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+    });
+    let runner = LoopRunner::new(
+        config,
+        HangingPoller,
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 0,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(signal_rx).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::Shutdown);
+    // Signal at 2s; a swallowed signal would hang the loop inside the poll
+    // (60s board timeout) or wait it out — well past 5s.
+    assert!(
+        summary.elapsed_secs <= 5,
+        "the in-flight poll must be interrupted by the shutdown: {}",
+        summary.elapsed_secs
+    );
+    assert_eq!(summary.spawns, 0, "no spawn from the interrupted pass");
+    assert!(runs.runs_for_invocation("inv").unwrap().is_empty());
+}
+
+// Two signals: the second short-circuits the remaining grace window. The
+// loop must abort at the SECOND signal (2s + 1s), not at the full grace
+// budget (2s + 5s) — the docs and CHANGELOG advertise this short-circuit.
+#[tokio::test(start_paused = true)]
+async fn a_second_signal_short_circuits_the_remaining_grace() {
+    let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // First signal at 2s starts the 5s grace; the second at 3s must end it.
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ignore = signal_tx.send(2);
+    });
+    let (summary, _decisions, runs) =
+        run_loop(config, snapshot_with(&[1]), starter, "inv", signal_rx).await;
+
+    assert_eq!(summary.stop_reason, StopReason::Shutdown);
+    assert_eq!(summary.aborted_on_stop, 1);
+    // Short-circuit aborts at ~3s (+ tick slop); the full grace would end
+    // no sooner than 7s.
+    assert!(
+        summary.elapsed_secs < 7,
+        "the second signal must skip the remaining grace: {}",
+        summary.elapsed_secs
+    );
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::AbortedShutdown
+    );
+    assert_eq!(rows[0].detail, "shutdown-abort");
+}

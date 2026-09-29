@@ -65,12 +65,15 @@ impl BoardPoller for BoardSnapshotPoller {
 
 /// Production worker side: builds the bootstrap transport per spawn and
 /// drives `run_worker` on a background task (the runner already executes
-/// inside a runtime — no nested runtime is created).
+/// inside a runtime — no nested runtime is created). The starter receives
+/// the loop's own `WorkerBudgets` instance, so the worker's enforcement is
+/// the loop's enforcement — a single source, structurally no drift.
 struct DirectLoopStarter {
     project_dir: PathBuf,
     config_dir: PathBuf,
     tasks_dir: Option<PathBuf>,
     provider_endpoint: Option<String>,
+    budgets: WorkerBudgets,
 }
 
 #[async_trait]
@@ -115,7 +118,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
         let mut config = WorkerConfig::new(
             ProviderId::from_string(routing.provider.clone()),
             ModelId::from_string(routing.model.clone()),
-            WorkerBudgets::bootstrap_defaults(),
+            self.budgets.clone(),
         );
         config.prior_daily_spend_usd = prior_daily_spend_usd;
         let config = config.with_progress(beats_tx);
@@ -144,9 +147,10 @@ struct InstanceLock {
 
 /// A second concurrent `orc loop` invocation refused the instance lock.
 ///
-/// The rejection carries the machine-readable `loop-already-running` code as
-/// a structured miette diagnostic code — rendered on its own report header,
-/// independent of terminal width and message wrapping.
+/// The rejection carries the `loop-already-running` code as a structured
+/// miette diagnostic code — rendered on its own report header (readable by
+/// stderr-report consumers that scrape for the code), independent of
+/// terminal width and message wrapping.
 #[derive(Debug, thiserror::Error, Diagnostic)]
 #[error("another `orc loop` instance already holds the lock at {path}")]
 #[diagnostic(code("loop-already-running"))]
@@ -267,6 +271,10 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             config_dir: paths.config_dir.clone(),
             tasks_dir: args.worker_tasks_dir.clone(),
             provider_endpoint: args.worker_provider_endpoint.clone(),
+            // The same guard instance the runner validates and enforces:
+            // the worker layer reads these pinned values, so the two
+            // enforcement layers cannot drift.
+            budgets: loop_config.budgets.clone(),
         };
         let runner = LoopRunner::new(
             loop_config,

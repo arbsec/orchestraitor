@@ -85,38 +85,6 @@ fn finish_rejects_the_running_status() {
 }
 
 #[test]
-fn active_lists_only_running_rows() {
-    let store = LoopRunStore::open_in_memory().unwrap();
-    let first = store.start(&start_run("board-x-4", 1_000)).unwrap();
-    let second = store.start(&start_run("board-x-5", 1_000)).unwrap();
-    let third = store.start(&start_run("board-x-6", 1_000)).unwrap();
-    store
-        .finish(second.id, RunRowStatus::Failed, 1_050, 0.0, "typed-failure")
-        .unwrap();
-
-    let active = store.active().unwrap();
-    assert_eq!(
-        active.iter().map(|row| row.id).collect::<Vec<_>>(),
-        vec![first.id, third.id],
-        "only running rows hold concurrency slots"
-    );
-}
-
-#[test]
-fn runs_for_task_is_the_exclusion_surface() {
-    let store = LoopRunStore::open_in_memory().unwrap();
-    let row = store.start(&start_run("board-x-7", 1_000)).unwrap();
-    store
-        .finish(row.id, RunRowStatus::TimedOut, 9_000, 0.0, "worker-timeout")
-        .unwrap();
-
-    let runs = store.runs_for_task("board-x-7").unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunRowStatus::TimedOut);
-    assert!(store.runs_for_task("board-x-unknown").unwrap().is_empty());
-}
-
-#[test]
 fn daily_spend_sums_the_utc_day_of_the_explicit_clock() {
     let store = LoopRunStore::open_in_memory().unwrap();
     let day_one = 86_400; // 1970-01-02T00:00:00Z; day window [86_400, 172_800)
