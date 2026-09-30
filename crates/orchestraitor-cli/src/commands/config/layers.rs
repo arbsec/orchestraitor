@@ -87,6 +87,7 @@ impl LoadedLayers {
                         source_layer: layer.layer_name.clone(),
                         source_name: layer.source_name.clone(),
                         inherited: false,
+                        layer: layer.layer,
                     },
                 );
             }
@@ -107,6 +108,9 @@ pub(crate) struct ResolvedJson {
     pub(crate) source_layer: String,
     pub(crate) source_name: String,
     pub(crate) inherited: bool,
+    /// Typed precedence layer that supplied the value, for comparing which
+    /// of several leaves under one prefix wins provenance attribution.
+    pub(crate) layer: ConfigLayer,
 }
 
 #[derive(Debug, Clone)]

@@ -7,6 +7,7 @@ use crate::detection::{DetectionArtifact, DetectionRuleSet, Detector};
 use crate::error::AgentCatalogError;
 use crate::registry::{BUILT_IN_DOMAINS, BUILT_IN_ORCHESTRATION_ROLES, BUILT_IN_ROLES};
 use crate::role_routing::{BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, RoleRouter};
+use crate::roles_registry::{RegistryRoleKind, RoleRegistry};
 use crate::routing::{MatchedStep, Route, RoutingRequest, RoutingResolver, RoutingTable};
 use orchestraitor_core::{ConfigLayer, ConfigResolver, ConfigSource};
 
@@ -357,6 +358,236 @@ fn unknown_role_is_a_typed_error_listing_the_built_ins() {
     for role in BUILT_IN_ORCHESTRATION_ROLES {
         assert!(text.contains(role.id));
     }
+}
+
+#[test]
+fn custom_role_from_project_layer_resolves_through_the_same_path() {
+    let resolver = resolver_from(&[
+        (
+            ConfigLayer::BuiltInDefaults,
+            "built-in",
+            &role_routes_toml("neuralwatt", "glm-5.2"),
+        ),
+        (
+            ConfigLayer::Project,
+            "project",
+            "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+             [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+        ),
+    ]);
+    let decision = RoleRouter::new(&resolver).resolve("migrator").unwrap();
+
+    assert_eq!(decision.role, "migrator");
+    assert_eq!(decision.provider, "acme");
+    assert_eq!(decision.model, "acme-pro");
+    assert_eq!(
+        decision.precedence_path,
+        "roles.migrator.routing (provider: project, model: project)"
+    );
+    assert!(decision.fallback_reason.is_none());
+}
+
+#[test]
+fn custom_role_without_routing_entry_falls_back_to_the_bootstrap_default() {
+    // A `roles.<id>` key with no `routing` sub-table registers the custom
+    // role; with no routing entry in any layer, the bootstrap default wins.
+    let resolver = resolver_from(&[(ConfigLayer::Project, "project", "[roles.migrator]\n")]);
+    let decision = RoleRouter::new(&resolver).resolve("migrator").unwrap();
+
+    assert_eq!(decision.provider, BOOTSTRAP_PROVIDER);
+    assert_eq!(decision.model, BOOTSTRAP_MODEL);
+    assert_eq!(decision.precedence_path, "bootstrap-default");
+    let reason = decision.fallback_reason.unwrap();
+    assert!(reason.contains("roles.migrator.routing"));
+}
+
+#[test]
+fn custom_role_partial_entry_errors_naming_the_missing_key() {
+    // A project layer that sets only `provider` inherits `model` from lower
+    // layers in real loads; with no lower layer carrying the sub-key the
+    // partial entry is a typed error naming the missing key.
+    let resolver = resolver_from(&[(
+        ConfigLayer::Project,
+        "project",
+        "[roles.migrator.routing]\nprovider = \"neuralwatt\"\n",
+    )]);
+    let error = RoleRouter::new(&resolver).resolve("migrator").unwrap_err();
+
+    assert!(matches!(error, AgentCatalogError::MissingRoutingKey { .. }));
+    assert!(error.to_string().contains("roles.migrator.routing.model"));
+}
+
+#[test]
+fn custom_role_override_in_a_higher_layer_wins_and_removal_falls_back() {
+    let with_override = resolver_from(&[
+        (
+            ConfigLayer::BuiltInDefaults,
+            "built-in",
+            &role_routes_toml("neuralwatt", "glm-5.2"),
+        ),
+        (
+            ConfigLayer::GlobalUser,
+            "user",
+            "[roles.migrator.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+        ),
+        (
+            ConfigLayer::Project,
+            "project",
+            "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+             [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+        ),
+    ]);
+    let overridden = RoleRouter::new(&with_override).resolve("migrator").unwrap();
+    assert_eq!(overridden.provider, "acme");
+    assert_eq!(overridden.model, "acme-pro");
+    assert_eq!(
+        overridden.precedence_path,
+        "roles.migrator.routing (provider: project, model: project)"
+    );
+
+    // Removing the project-layer key (loading the layers without it) reveals
+    // the user-layer value again.
+    let without_override = resolver_from(&[
+        (
+            ConfigLayer::BuiltInDefaults,
+            "built-in",
+            &role_routes_toml("neuralwatt", "glm-5.2"),
+        ),
+        (
+            ConfigLayer::GlobalUser,
+            "user",
+            "[roles.migrator.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+        ),
+    ]);
+    let revealed = RoleRouter::new(&without_override)
+        .resolve("migrator")
+        .unwrap();
+    assert_eq!(revealed.provider, "neuralwatt");
+    assert_eq!(revealed.model, "glm-5.2");
+    assert_eq!(
+        revealed.precedence_path,
+        "roles.migrator.routing (provider: user, model: user)"
+    );
+}
+
+#[test]
+fn built_in_role_project_override_wins_and_removal_falls_back_to_user_then_default() {
+    let layers = |project_routing: &str| {
+        resolver_from(&[
+            (
+                ConfigLayer::BuiltInDefaults,
+                "built-in",
+                &role_routes_toml("neuralwatt", "glm-5.2"),
+            ),
+            (
+                ConfigLayer::GlobalUser,
+                "user",
+                "[roles.review.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+            ),
+            (ConfigLayer::Project, "project", project_routing),
+        ])
+    };
+    let override_toml =
+        "[roles.review.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2-x\"\n";
+
+    let overridden = RoleRouter::new(&layers(override_toml))
+        .resolve("review")
+        .unwrap();
+    assert_eq!(overridden.model, "glm-5.2-x");
+    assert_eq!(
+        overridden.precedence_path,
+        "roles.review.routing (provider: project, model: project)"
+    );
+
+    let without_override = RoleRouter::new(&layers("")).resolve("review").unwrap();
+    assert_eq!(without_override.model, "glm-5.2");
+    assert_eq!(
+        without_override.precedence_path,
+        "roles.review.routing (provider: user, model: user)"
+    );
+
+    let bare = resolver_from(&[(ConfigLayer::Project, "project", "")]);
+    let fallback = RoleRouter::new(&bare).resolve("review").unwrap();
+    assert_eq!(fallback.provider, BOOTSTRAP_PROVIDER);
+    assert_eq!(fallback.model, BOOTSTRAP_MODEL);
+    assert_eq!(fallback.precedence_path, "bootstrap-default");
+}
+
+#[test]
+fn invalid_custom_role_id_shape_is_a_typed_error() {
+    for bad_id in ["Bad-Role", "has.dot", "has/slash", "-leading-dash"] {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            &format!("[roles.\"{bad_id}\".routing]\nprovider = \"neuralwatt\"\nmodel = \"x\"\n"),
+        )]);
+        let error = RoleRouter::new(&resolver).resolve(bad_id).unwrap_err();
+        assert!(
+            matches!(error, AgentCatalogError::InvalidRoleId { .. }),
+            "role id '{bad_id}' must be rejected"
+        );
+    }
+}
+
+#[test]
+fn registry_lists_built_ins_first_then_custom_roles_marked_by_kind() {
+    let resolver = resolver_from(&[
+        (
+            ConfigLayer::BuiltInDefaults,
+            "built-in",
+            &role_routes_toml("neuralwatt", "glm-5.2"),
+        ),
+        (
+            ConfigLayer::Project,
+            "project",
+            "[roles.migrator.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+        ),
+    ]);
+    let registry = RoleRegistry::from_resolver(&resolver).unwrap();
+
+    assert!(registry.is_known("review"));
+    assert!(registry.is_known("migrator"));
+    assert!(!registry.is_known("warpcouncil"));
+
+    let roles = registry.list();
+    let built_ins = roles.iter().filter(|r| r.kind == RegistryRoleKind::BuiltIn);
+    assert_eq!(built_ins.count(), BUILT_IN_ORCHESTRATION_ROLES.len());
+    let custom = roles.iter().filter(|r| r.kind == RegistryRoleKind::Custom);
+    assert_eq!(custom.count(), 1);
+    let first_custom = roles
+        .iter()
+        .position(|r| r.id == "migrator")
+        .unwrap_or(usize::MAX);
+    assert!(first_custom >= BUILT_IN_ORCHESTRATION_ROLES.len());
+
+    let custom_role = roles.iter().find(|r| r.id == "migrator").unwrap();
+    assert_eq!(custom_role.kind, RegistryRoleKind::Custom);
+    assert_eq!(custom_role.description, None);
+    for role in &roles[..BUILT_IN_ORCHESTRATION_ROLES.len()] {
+        assert_eq!(role.kind, RegistryRoleKind::BuiltIn);
+        assert!(role.description.is_some());
+    }
+
+    assert!(registry.known_ids().contains("migrator"));
+    assert!(registry.known_ids().contains("explore"));
+}
+
+#[test]
+fn configured_collision_with_a_builtin_id_stays_builtin() {
+    let resolver = resolver_from(&[(
+        ConfigLayer::Project,
+        "project",
+        "[roles.review.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+    )]);
+    let registry = RoleRegistry::from_resolver(&resolver).unwrap();
+
+    let review = registry
+        .list()
+        .into_iter()
+        .find(|r| r.id == "review")
+        .unwrap();
+    assert_eq!(review.kind, RegistryRoleKind::BuiltIn);
+    assert_eq!(registry.list().len(), BUILT_IN_ORCHESTRATION_ROLES.len());
 }
 
 #[test]

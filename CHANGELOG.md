@@ -13,6 +13,18 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- Custom orchestration roles via layered configuration: the role registry is
+  now configuration, not a hardcoded taxonomy (spec `30-model-routing.md`
+  §9.45, §9.22.4; #326). Any `roles.<id>` key defined in a configuration
+  layer registers a custom role that `orc routing resolve --role <id>` and
+  `orc config get roles.<id>.routing.*` resolve through the same path as the
+  six built-in roles — identical layer precedence, field-wise merge, typed
+  errors for partial entries, and the `neuralwatt`/`glm-5.2` bootstrap
+  fallback. Role ids follow the provider id shape (1–64 lowercase ASCII
+  letters, digits, `-` or `_`); ids that are neither built-in nor configured
+  remain a typed `unknown role` error. Same-layer shard conflicts on
+  `roles.<id>.routing.*` keys are rejected by `orc config validate` with the
+  ambiguous-conflict error naming both sources.
 - `orchestraitor-board-contract` crate: the pluggable `BoardProvider` contract
   (spec `10-orchestrator.md` §9.43, #318) covering all six contract areas —
   items (stable `BoardItemId` identity, type, title, opaque body), statuses,

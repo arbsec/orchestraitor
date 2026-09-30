@@ -1,16 +1,19 @@
 //! Static heuristic role routing for the bootstrap (spec `30-model-routing.md`
-//! §9.45): the six built-in orchestration roles resolve to `(provider, model)`
-//! through the layered configuration (spec §9.22.2) under `roles.<id>.routing.*`,
-//! which carries the same layer semantics as `agents.domains.<id>.routing.*`
-//! (spec §9.19.2). No decision model and no subscription awareness live here;
-//! those deepen behind the `DecisionProvider` trait in the E2 milestone.
+//! §9.45): orchestration roles resolve to `(provider, model)` through the
+//! layered configuration (spec §9.22.2) under `roles.<id>.routing.*`, which
+//! carries the same layer semantics as `agents.domains.<id>.routing.*` (spec
+//! §9.19.2). The role registry is configuration, not a hardcoded taxonomy
+//! (spec §9.22.4): every `roles.<id>` key in the effective configuration is a
+//! custom role resolving through the same path as the six built-ins. No
+//! decision model and no subscription awareness live here; those deepen behind
+//! the `DecisionProvider` trait in the E2 milestone.
 
 use std::collections::BTreeSet;
 
 use orchestraitor_core::{ConfigLayer, ConfigResolver, OrchestraitorConfig, ResolvedValue};
 
-use crate::AgentCatalogError;
-use crate::registry::BUILT_IN_ORCHESTRATION_ROLES;
+use crate::error::AgentCatalogError;
+use crate::roles_registry::RoleRegistry;
 
 /// Bootstrap fallback provider id, the single-provider default from spec §10.3.
 pub const BOOTSTRAP_PROVIDER: &str = "neuralwatt";
@@ -23,6 +26,9 @@ const MAX_MODEL_ID_LEN: usize = 256;
 
 /// Max accepted length of a configured provider identifier.
 const MAX_PROVIDER_ID_LEN: usize = 64;
+
+/// Max accepted length of a configured custom role identifier.
+const MAX_ROLE_ID_LEN: usize = 64;
 
 /// One persisted unit of routing evidence for a resolved role.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,19 +58,24 @@ impl<'a> RoleRouter<'a> {
         Self { resolver }
     }
 
-    /// Resolves `(provider, model)` for one built-in orchestration role.
+    /// Resolves `(provider, model)` for one orchestration role.
     ///
-    /// A role with a complete `roles.<role>.routing.*` entry resolves to it,
-    /// recording the layer that supplied each value. A role with no entry in
-    /// any layer resolves via the documented single-provider bootstrap default
-    /// from spec §10.3, recording the fallback reason. A partial entry (only
-    /// one of `provider`/`model` set in the effective configuration) is a typed
-    /// error naming the missing key — never a silent default-to-first-model.
+    /// A role is resolvable when it is one of the six built-in orchestration
+    /// roles or when a `roles.<id>` key exists in the effective configuration
+    /// (custom role, spec §9.22.4). A role with a complete
+    /// `roles.<role>.routing.*` entry resolves to it, recording the layer that
+    /// supplied each value. A role with no entry in any layer resolves via the
+    /// documented single-provider bootstrap default from spec §10.3, recording
+    /// the fallback reason. A partial entry (only one of `provider`/`model`
+    /// set in the effective configuration) is a typed error naming the missing
+    /// key — never a silent default-to-first-model.
     ///
     /// # Errors
     ///
-    /// - [`AgentCatalogError::UnknownRole`] when `role` is not one of the six
-    ///   built-in orchestration roles (custom roles are an E2 non-goal here).
+    /// - [`AgentCatalogError::InvalidRoleId`] when `role` is a configured
+    ///   custom role whose id violates the identifier shape rules.
+    /// - [`AgentCatalogError::UnknownRole`] when `role` is neither built-in
+    ///   nor configured; the error lists the known roles.
     /// - [`AgentCatalogError::MissingRoutingKey`] when the entry is partial;
     ///   the error names the missing configuration key.
     /// - [`AgentCatalogError::InvalidRoutingValue`] when a value has an invalid
@@ -72,16 +83,14 @@ impl<'a> RoleRouter<'a> {
     /// - [`AgentCatalogError::Config`] when layered resolution itself fails
     ///   (for example an ambiguous same-layer conflict naming the key).
     pub fn resolve(self, role: &str) -> Result<RoleRoutingDecision, AgentCatalogError> {
-        let known = known_role_ids();
-        if !BUILT_IN_ORCHESTRATION_ROLES
-            .iter()
-            .any(|definition| definition.id == role)
-        {
+        let registry = RoleRegistry::from_resolver(self.resolver)?;
+        if !registry.is_known(role) {
             return Err(AgentCatalogError::UnknownRole {
                 role: role.to_string(),
-                known,
+                known: registry.known_ids(),
             });
         }
+        validate_role_id(role)?;
         let provider_key = format!("roles.{role}.routing.provider");
         let model_key = format!("roles.{role}.routing.model");
         let provider = self.resolver.resolve_value(&provider_key, |config| {
@@ -183,12 +192,26 @@ fn role_entry<'a>(
     config.roles.as_ref()?.get(role)?.routing.as_ref()
 }
 
-fn known_role_ids() -> String {
-    BUILT_IN_ORCHESTRATION_ROLES
-        .iter()
-        .map(|definition| definition.id)
-        .collect::<Vec<_>>()
-        .join(", ")
+/// Validates a custom role identifier shape: 1..=64 characters, ASCII
+/// lowercase letters, digits, `-` or `_`, starting with a letter or digit —
+/// the same shape rules as provider ids, so dotted role keys stay unambiguous
+/// (a role id can never contain a path or key separator).
+fn validate_role_id(role: &str) -> Result<(), AgentCatalogError> {
+    let valid_shape = !role.is_empty()
+        && role.len() <= MAX_ROLE_ID_LEN
+        && role
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && role
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !valid_shape {
+        return Err(AgentCatalogError::InvalidRoleId {
+            role: role.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn is_valid_provider_id(value: &str) -> bool {
