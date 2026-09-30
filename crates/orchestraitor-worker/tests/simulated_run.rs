@@ -71,6 +71,7 @@ struct FixtureSlowBash;
 
 #[async_trait]
 impl BashMediator for FixtureSlowBash {
+    /// Yields during dispatch so the supervisor can observe the preceding beat.
     async fn run_bash(&self, _script: &str) -> Result<MediatedRun, MediationError> {
         tokio::task::yield_now().await;
         Ok(MediatedRun {
@@ -330,6 +331,7 @@ fn fixture_task_source_loads_the_cli_shape() {
     assert_eq!(task.id, "leaf-1");
 }
 
+/// Checks increasing progress beats at each model turn and before tool dispatch.
 #[tokio::test]
 async fn progress_beats_fire_per_turn_and_per_dispatch() {
     // Script: turn 1 dispatches bash (through the yielding fixture), turn 2
@@ -385,6 +387,7 @@ async fn progress_beats_fire_per_turn_and_per_dispatch() {
     );
 }
 
+/// Checks that omitting the optional progress channel preserves worker completion.
 #[tokio::test]
 async fn no_progress_channel_still_completes() {
     // Default config emits nothing; the beat path must be inert.

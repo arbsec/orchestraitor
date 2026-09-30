@@ -46,6 +46,7 @@ struct BoardSnapshotPoller {
 
 #[async_trait]
 impl BoardPoller for BoardSnapshotPoller {
+    /// Reads board facts and derives ready and blocked candidates for one pass.
     async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
         let (open, warnings) = self
             .client
@@ -78,6 +79,7 @@ struct DirectLoopStarter {
 
 #[async_trait]
 impl LoopWorkerStarter for DirectLoopStarter {
+    /// Starts a bootstrap worker with shared budgets, prior spend, and progress beats.
     async fn start(
         &self,
         task_id: &str,
@@ -380,6 +382,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     Ok(())
 }
 
+/// Writes the human-readable stop reason, outcome counts, and elapsed time.
 fn render_text(
     writer: &mut dyn Write,
     summary: &orchestraitor_campaign::LoopSummary,

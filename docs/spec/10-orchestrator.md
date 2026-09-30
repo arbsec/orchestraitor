@@ -461,8 +461,8 @@ The daemon runs unprivileged; foreground and systemd-user-unit supervision are d
 > scheduler-facing bounds the §9.35 bootstrap pass does not: the concurrency cap, the
 > supervisor-side stall kill (beat staleness), pass pacing, the spend-intake seal, and
 > the run budget. Kick-off conditions, reconcile semantics, `board-diverged` events,
-> and budget classes deepen in E8; single-flight across campaign invocations is the
-> loop's instance lock (#314) until the daemon owns it.
+> restart recovery, and budget classes deepen in E8; single-flight across campaign
+> invocations is the loop's instance lock (#314) until the daemon owns it.
 
 ### 9.37 Agent issue reporting
 
