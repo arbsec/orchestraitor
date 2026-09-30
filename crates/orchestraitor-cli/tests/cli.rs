@@ -774,6 +774,265 @@ fn spawn_access_token_server(
     Ok((endpoint, observed))
 }
 
+/// Serves one mint response, then one API response on the next connection.
+/// The API response echoes the incoming Authorization header inside the body
+/// so tests can assert where the installation token traveled.
+fn spawn_mint_then_api_server(api_status: u16, api_body: &str) -> miette::Result<String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    let expires_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .into_diagnostic()?
+        .as_secs()
+        + 3_300;
+    let expires_at =
+        time::OffsetDateTime::from_unix_timestamp(expires_at_epoch.try_into().into_diagnostic()?)
+            .into_diagnostic()?
+            .format(&time::format_description::well_known::Rfc3339)
+            .into_diagnostic()?;
+    let mint_body =
+        format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
+    let api_body_owned = api_body.to_string();
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut stream) = connection else { break };
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        request_bytes.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&request_bytes);
+                        let Some(match_headers_end) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let content_length = text[..match_headers_end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request_bytes.len() >= match_headers_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&request_bytes).to_string();
+            let is_mint = request.contains("/app/installations/");
+            let (status_line, body) = if is_mint {
+                (String::from("HTTP/1.1 201 Created"), mint_body.clone())
+            } else {
+                let status_line = format!("HTTP/1.1 {api_status}");
+                (status_line, api_body_owned.clone())
+            };
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok(endpoint)
+}
+
+fn github_cli(
+    temp: &tempfile::TempDir,
+    endpoint: &str,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            endpoint,
+        ])
+        .args(args)
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .into_diagnostic()
+}
+
+#[test]
+fn github_api_passthrough_prints_body_and_exits_zero_on_2xx() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_mint_then_api_server(200, r#"{"number":446,"state":"open"}"#)?;
+
+    let output = github_cli(
+        &temp,
+        &endpoint,
+        &[
+            "github",
+            "api",
+            "POST",
+            "repos/arbsec/orchestraitor/issues",
+            "--field",
+            "title=hello",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert_eq!(stdout.trim(), r#"{"number":446,"state":"open"}"#);
+    assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
+    Ok(())
+}
+
+#[test]
+fn github_api_passthrough_exits_nonzero_on_4xx_without_leaking_headers() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    // The 404 body deliberately contains a token-look-alike; the CLI must
+    // still print the body (caller's business) but the failure must be
+    // status-shaped and the stderr must not name the Authorization header.
+    let endpoint = spawn_mint_then_api_server(404, r#"{"message":"ghs_fakeLEAK0123"}"#)?;
+
+    let output = github_cli(&temp, &endpoint, &["github", "api", "GET", "/app"])?;
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert_eq!(stdout.trim(), r#"{"message":"ghs_fakeLEAK0123"}"#);
+    assert!(stderr.contains("404"), "stderr: {stderr}");
+    assert!(!stderr.contains("ghs_fakeLEAK0123"), "stderr: {stderr}");
+    assert!(
+        !stderr.to_lowercase().contains("authorization"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains(GITHUB_APP_TOKEN_MARKER),
+        "stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_api_rejects_unknown_method_before_minting() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    // No endpoint/server: the typed method error must fire before any mint.
+    let output = github_cli(
+        &temp,
+        "http://127.0.0.1:1",
+        &["github", "api", "CONNECT", "/app"],
+    )?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stderr.contains("unsupported method"), "stderr: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn github_commit_author_derives_identity_from_app_response() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_mint_then_api_server(
+        200,
+        r#"{"id":5082653,"slug":"arbsec-agent","bot":{"id":334074867,"login":"arbsec-agent[bot]"}}"#,
+    )?;
+
+    let output = github_cli(&temp, &endpoint, &["github", "commit-author"])?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "name=arbsec-agent[bot]",
+            "email=334074867+arbsec-agent[bot]@users.noreply.github.com"
+        ]
+    );
+    assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_injects_gh_token_into_child_and_propagates_exit() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    // Child script: asserts the token reaches GH_TOKEN by writing its LENGTH
+    // (never the value) into a file, then exits with a distinctive code.
+    let child = temp.path().join("child.sh");
+    let out_file = temp.path().join("child.out");
+    fs::write(
+        &child,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" | wc -c | tr -d ' \"' > \"{}\"\nexit 7\n",
+            out_file.display()
+        ),
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = github_cli(
+        &temp,
+        &endpoint,
+        &["github", "gh-env", "--", &child.display().to_string()],
+    )?;
+
+    // The child's exit code propagates...
+    assert_eq!(output.status.code(), Some(7));
+    // ... orc's own streams never contain the token ...
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stdout.is_empty() && stderr.is_empty());
+    assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
+    // ... and the child DID observe GH_TOKEN with the expected length.
+    let observed = fs::read_to_string(&out_file).into_diagnostic()?;
+    assert_eq!(observed.trim(), GITHUB_APP_TOKEN_MARKER.len().to_string());
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_fails_typed_when_child_is_missing() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = github_cli(
+        &temp,
+        &endpoint,
+        &[
+            "github",
+            "gh-env",
+            "--",
+            "definitely-not-a-real-binary-orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    // miette's fancy renderer wraps lines; collapse whitespace before matching.
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("notfoundon") && flat.contains("PATH"),
+        "stderr: {stderr}"
+    );
+    Ok(())
+}
+
 const BOARD_RESOLVE_PROJECT: &str = r#"{"data":{"organization":{"projectV2":{"id":"PVT_fixture_project","title":"Arbsec Development"}}}}"#;
 const BOARD_RESOLVE_FIELDS: &str = r#"{"data":{"node":{"fields":{"nodes":[{"id":"PVTSSF_fixture_status","name":"Status","options":[{"id":"OPT_fixture_ready","name":"Ready"},{"id":"OPT_fixture_in_progress","name":"In Progress"}]},{"id":"PVTSSF_fixture_target","name":"Target","options":[{"id":"OPT_fixture_mvp","name":"MVP"}]}]}}}}"#;
 const BOARD_ITEMS: &str = r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PVTI_F_130","content":{"__typename":"Issue","number":130,"state":"OPEN","title":"Eligible native task","url":"https://github.com/arbsec/orchestraitor/issues/130","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0},"blockedBy":{"nodes":[],"totalCount":0}},"fieldValues":{"totalCount":2,"nodes":[{"name":"MVP","field":{"name":"Target"}},{"name":"Ready","field":{"name":"Status"}}]}},{"id":"PVTI_F_139","content":null,"fieldValues":{"totalCount":0,"nodes":[]}}]}}}}"#;
