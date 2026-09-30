@@ -221,6 +221,111 @@ fn config_get_reports_provenance_for_a_custom_role_routing_table() -> miette::Re
 }
 
 #[test]
+fn config_get_composes_the_full_routing_table_at_role_depth() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+         [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "config",
+        "get",
+        "roles.migrator",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+
+    assert_eq!(
+        String::from_utf8(output).into_diagnostic()?,
+        "{\"routing\":{\"model\":\"acme-pro\",\"provider\":\"acme\"}}\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn config_get_composes_every_role_with_its_full_routing_nesting() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+         [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "config",
+        "get",
+        "roles",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    let composed: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
+
+    // The depth-2 `routing` nesting level must survive composition; built-in
+    // defaults ship all six roles, the custom role joins them.
+    let roles = composed
+        .as_object()
+        .ok_or_else(|| miette::miette!("composed `roles` is not an object"))?;
+    assert_eq!(
+        roles
+            .get("migrator")
+            .and_then(|r| r.get("routing"))
+            .and_then(|r| r.get("provider")),
+        Some(&serde_json::Value::String("acme".to_string()))
+    );
+    assert_eq!(
+        roles
+            .get("migrator")
+            .and_then(|r| r.get("routing"))
+            .and_then(|r| r.get("model")),
+        Some(&serde_json::Value::String("acme-pro".to_string()))
+    );
+    for role in [
+        "explore",
+        "research",
+        "plan",
+        "implement",
+        "review",
+        "verify",
+    ] {
+        assert_eq!(
+            roles
+                .get(role)
+                .and_then(|r| r.get("routing"))
+                .and_then(|r| r.get("provider")),
+            Some(&serde_json::Value::String("neuralwatt".to_string())),
+            "built-in role {role} must nest under routing"
+        );
+        assert_eq!(
+            roles
+                .get(role)
+                .and_then(|r| r.get("routing"))
+                .and_then(|r| r.get("model")),
+            Some(&serde_json::Value::String("glm-5.2".to_string())),
+            "built-in role {role} must nest under routing"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn config_get_and_explain_agree_on_an_empty_role_table() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     let config_dir = temp.path().join("config");

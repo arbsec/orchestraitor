@@ -65,23 +65,24 @@ where
 
 fn insert_nested<'a>(
     target: &mut serde_json::Map<String, serde_json::Value>,
-    mut path: impl Iterator<Item = &'a str>,
+    path: impl Iterator<Item = &'a str>,
     value: serde_json::Value,
 ) {
-    let Some(segment) = path.next() else {
+    let path: Vec<&'a str> = path.collect();
+    let Some((segment, rest)) = path.split_first() else {
         return;
     };
-    if path.next().is_none() {
-        target.insert(segment.to_string(), value);
+    if rest.is_empty() {
+        target.insert((*segment).to_string(), value);
         return;
     }
     let child = target
-        .entry(segment.to_string())
+        .entry((*segment).to_string())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(child_map) = child {
-        insert_nested(child_map, path, value);
+        insert_nested(child_map, rest.iter().copied(), value);
         if child_map.is_empty() {
-            target.remove(segment);
+            target.remove(*segment);
         }
     }
 }
