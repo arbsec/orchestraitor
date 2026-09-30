@@ -139,6 +139,161 @@ fn config_get_resolves_builtin_role_routing_keys() -> miette::Result<()> {
 }
 
 #[test]
+fn config_get_resolves_the_routing_table_for_builtin_and_custom_roles() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+         [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+    )
+    .into_diagnostic()?;
+
+    for (key, expected) in [
+        (
+            "roles.review.routing",
+            "{\"model\":\"glm-5.2\",\"provider\":\"neuralwatt\"}",
+        ),
+        (
+            "roles.migrator.routing",
+            "{\"model\":\"acme-pro\",\"provider\":\"acme\"}",
+        ),
+    ] {
+        let mut output = Vec::new();
+        let cli = Cli::parse_from([
+            "orc",
+            "--config-dir",
+            &config_dir.display().to_string(),
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "config",
+            "get",
+            key,
+        ]);
+        orchestraitor_cli::run_with_writer(cli, &mut output)?;
+        assert_eq!(
+            String::from_utf8(output).into_diagnostic()?,
+            format!("{expected}\n"),
+            "config get {key}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn config_get_reports_provenance_for_a_custom_role_routing_table() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[roles.migrator.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "config",
+        "explain",
+        "roles.migrator.routing",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    let rendered = String::from_utf8(output).into_diagnostic()?;
+
+    assert!(rendered.contains("key = roles.migrator.routing"));
+    assert!(rendered.contains("source_layer = project"));
+    Ok(())
+}
+
+#[test]
+fn routing_resolve_accepts_a_custom_role_from_the_project_layer() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[providers.acme]\nendpoint = \"https://example.invalid/v1\"\n\
+         [roles.migrator.routing]\nprovider = \"acme\"\nmodel = \"acme-pro\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "routing",
+        "resolve",
+        "--role",
+        "migrator",
+        "--json",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    let json: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
+
+    assert_eq!(json["role"], "migrator");
+    assert_eq!(json["provider"], "acme");
+    assert_eq!(json["model"], "acme-pro");
+    assert_eq!(
+        json["precedence_path"],
+        "roles.migrator.routing (provider: project, model: project)"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_rejects_same_layer_role_routing_conflict() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let project_shards = temp.path().join("orchestraitor.d");
+    fs::create_dir_all(&project_shards).into_diagnostic()?;
+    fs::write(
+        project_shards.join("a.toml"),
+        "[roles.myrole.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+    )
+    .into_diagnostic()?;
+    fs::write(
+        project_shards.join("b.toml"),
+        "[roles.myrole.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+    )
+    .into_diagnostic()?;
+    let mut output = Vec::new();
+
+    let cli = Cli::parse_from([
+        "orc",
+        "--project-dir",
+        &temp.path().display().to_string(),
+        "config",
+        "validate",
+    ]);
+    let result = orchestraitor_cli::run_with_writer(cli, &mut output);
+    let error = match result {
+        Ok(()) => {
+            return Err(miette::miette!(
+                "same-layer role conflict passed validation"
+            ));
+        }
+        Err(error) => error,
+    };
+
+    let text = error.to_string();
+    assert!(
+        text.contains("ambiguous configuration conflict for key `roles.myrole.routing."),
+        "error must name the conflicting role key, got: {text}"
+    );
+    assert!(text.contains("a.toml"), "error must name source a.toml");
+    assert!(text.contains("b.toml"), "error must name source b.toml");
+    Ok(())
+}
+
+#[test]
 fn routing_resolve_persists_six_distinct_role_records() -> miette::Result<()> {
     use orchestraitor_agent_catalog::{BUILT_IN_ORCHESTRATION_ROLES, RoleRoutingDecisionStore};
 

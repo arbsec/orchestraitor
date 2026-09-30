@@ -18,8 +18,13 @@ spec §9.19.2.
 | `review` | Critiquing existing code or a diff. |
 | `verify` | Running and interpreting required checks. |
 
-Custom roles are not part of the bootstrap; an unknown role id is a typed error
-listing the built-in roles. Role registry generalization deepens in E2.
+Custom roles are configuration, not a hardcoded taxonomy (spec §9.22.4): any
+`roles.<id>` key defined in a configuration layer registers a custom role that
+resolves through the same path, the same layer semantics, and the same
+fallback chain as a built-in. A role id must be 1–64 lowercase ASCII letters,
+digits, `-` or `_`, starting with a letter or digit — never a path or key
+separator. A role id that is neither built-in nor configured is a typed error
+listing the known roles.
 
 ## Configuration
 
@@ -56,9 +61,46 @@ entry in any layer (library callers that resolve without the built-in defaults),
 resolution falls back to the documented bootstrap default `neuralwatt`/`glm-5.2`
 and the decision record's `fallback_reason` captures that fact.
 
+## Custom roles
+
+Define a custom role by adding a `roles.<id>` block in any layer — project
+layer shown here:
+
+```toml
+# orchestraitor.toml (project layer)
+[providers.acme]
+endpoint = "https://example.invalid/v1"
+
+[roles.migrator.routing]
+provider = "acme"
+model = "acme-pro"
+```
+
+The custom role resolves through the exact same path as a built-in: the same
+`roles.<id>.routing.*` sub-keys, the same layer precedence and field-wise
+merge, the same typed errors for partial entries and invalid values, and the
+same bootstrap default when no entry resolves. Override and removal follow the
+layer chain: a higher layer wins field by field, and removing the key from that
+layer (`orc config unset roles.migrator.routing.provider --layer project`)
+reveals the lower layer's value again.
+
+## Precedence and conflicts
+
+Layers resolve bottom-up (built-in defaults → user → org → project → dir).
+Same-layer shards that set the same `roles.<id>.routing.*` key are rejected as
+ambiguous by `orc config validate` before anything resolves — the error names
+the key and both sources:
+
+```text
+ambiguous configuration conflict for key `roles.migrator.routing.provider`
+from sources [".../orchestraitor.d/a.toml", ".../orchestraitor.d/b.toml"]
+```
+
 ## Commands
 
 ```sh
+orc config get roles.review.routing               # -> {model = ..., provider = ...}
+orc config get roles.migrator.routing             # custom role, same shape
 orc config get roles.implement.routing.provider   # -> neuralwatt (built-in default)
 orc routing resolve --role <id> [--json]          # resolve + persist a decision record
 ```

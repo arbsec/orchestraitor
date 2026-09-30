@@ -27,6 +27,16 @@ pub enum AgentCatalogError {
         known: String,
     },
 
+    /// A configured custom role id violates the identifier shape rules.
+    #[error(
+        "invalid role id '{role}': role ids must be 1..=64 lowercase ASCII \
+         letters, digits, `-` or `_`, starting with a letter or digit"
+    )]
+    InvalidRoleId {
+        /// Rejected role id.
+        role: String,
+    },
+
     /// A role routing table entry is missing one of its required sub-keys.
     #[error("role routing entry is incomplete: missing configuration key `{key}`")]
     MissingRoutingKey {

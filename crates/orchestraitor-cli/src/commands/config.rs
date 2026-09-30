@@ -4,6 +4,7 @@ mod edit;
 pub(crate) mod layers;
 mod values;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 
@@ -16,8 +17,41 @@ use crate::cli::{
 
 use edit::{parse_cli_value, read_document, remove_key, schema_version, set_key, write_document};
 use layers::{BUILT_IN_DEFAULTS, layer_name, layer_path, load_layers};
-use values::{diff_entries, read_value_map, read_value_map_from_str, render_json_value};
+use values::{
+    compose_prefix_value, diff_entries, read_value_map, read_value_map_from_str, render_json_value,
+};
 const CURRENT_SCHEMA_VERSION: &str = "0.14";
+
+/// Resolves one dotted config key to its effective value plus provenance. A
+/// key naming a leaf returns that leaf's entry; a key naming a table (for
+/// example `roles.review.routing`) composes the nested object from every leaf
+/// under it, attributing the value to the highest-precedence source that
+/// supplies any part of it.
+fn resolve_key_value(
+    resolved: &BTreeMap<String, layers::ResolvedJson>,
+    key: &str,
+) -> Result<layers::ResolvedJson> {
+    if let Some(value) = resolved.get(key) {
+        return Ok(value.clone());
+    }
+    let prefix = format!("{key}.");
+    let composed = compose_prefix_value(resolved, key, |entry| &entry.value)
+        .ok_or_else(|| miette!("config key `{key}` is not set"))?;
+    let mut source = layers::ResolvedJson {
+        value: composed,
+        source_layer: String::new(),
+        source_name: String::new(),
+        inherited: false,
+    };
+    if let Some((_, highest)) = resolved
+        .iter()
+        .find(|(leaf_key, _)| leaf_key.starts_with(&prefix))
+    {
+        source.source_layer.clone_from(&highest.source_layer);
+        source.source_name.clone_from(&highest.source_name);
+    }
+    Ok(source)
+}
 
 /// Runs an `orc config` subcommand.
 ///
@@ -37,17 +71,13 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: ConfigCommand, writer: &mut W
 
 fn get<W: Write>(paths: &ConfigPaths, args: &KeyArgs, writer: &mut W) -> Result<()> {
     let resolved = load_layers(paths)?.resolved_map()?;
-    let value = resolved
-        .get(&args.key)
-        .ok_or_else(|| miette!("config key `{}` is not set", args.key))?;
+    let value = resolve_key_value(&resolved, &args.key)?;
     writeln!(writer, "{}", render_json_value(&value.value)).into_diagnostic()
 }
 
 fn explain<W: Write>(paths: &ConfigPaths, args: &KeyArgs, writer: &mut W) -> Result<()> {
     let resolved = load_layers(paths)?.resolved_map()?;
-    let value = resolved
-        .get(&args.key)
-        .ok_or_else(|| miette!("config key `{}` is not set", args.key))?;
+    let value = resolve_key_value(&resolved, &args.key)?;
     writeln!(writer, "key = {}", args.key).into_diagnostic()?;
     writeln!(writer, "value = {}", render_json_value(&value.value)).into_diagnostic()?;
     writeln!(writer, "source_layer = {}", value.source_layer).into_diagnostic()?;

@@ -35,6 +35,48 @@ pub(crate) fn flatten_json(value: &serde_json::Value) -> BTreeMap<String, serde_
     map
 }
 
+/// Composes a table-valued result for a dotted key that names a table rather
+/// than a leaf: collects every entry under `prefix` and nests them into a
+/// JSON object. Returns `None` when no entry lives under the prefix.
+pub(crate) fn compose_prefix_value<V, F>(
+    map: &BTreeMap<String, V>,
+    prefix: &str,
+    value_of: F,
+) -> Option<serde_json::Value>
+where
+    F: Fn(&V) -> &serde_json::Value,
+{
+    let mut root = serde_json::Map::new();
+    let dotted_prefix = format!("{prefix}.");
+    for (key, entry) in map {
+        let Some(suffix) = key.strip_prefix(&dotted_prefix) else {
+            continue;
+        };
+        insert_nested(&mut root, suffix.split('.'), value_of(entry).clone());
+    }
+    (!root.is_empty()).then(|| serde_json::Value::Object(root))
+}
+
+fn insert_nested<'a>(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    mut path: impl Iterator<Item = &'a str>,
+    value: serde_json::Value,
+) {
+    let Some(segment) = path.next() else {
+        return;
+    };
+    if path.next().is_none() {
+        target.insert(segment.to_string(), value);
+        return;
+    }
+    let child = target
+        .entry(segment.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(child_map) = child {
+        insert_nested(child_map, path, value);
+    }
+}
+
 pub(crate) fn diff_entries(
     before: &BTreeMap<String, serde_json::Value>,
     after: &BTreeMap<String, serde_json::Value>,

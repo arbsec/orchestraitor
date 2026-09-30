@@ -11,6 +11,7 @@ pub mod detection;
 pub mod error;
 pub mod registry;
 pub mod role_routing;
+pub mod roles_registry;
 pub mod routing;
 
 pub use decision_store::{
@@ -24,6 +25,7 @@ pub use registry::{
     RoleDefinition,
 };
 pub use role_routing::{BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, RoleRouter, RoleRoutingDecision};
+pub use roles_registry::{RegistryRole, RegistryRoleKind, RoleRegistry};
 pub use routing::{
     MatchedStep, ResolvedRoute, Route, RoutingRequest, RoutingResolver, RoutingTable,
 };
