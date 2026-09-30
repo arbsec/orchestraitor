@@ -26,7 +26,7 @@ jobs:
     if: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5  # v5.0.0
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: mdbook,mdbook-mermaid
