@@ -127,7 +127,11 @@ catalog fetch into the local cache; `orc models rollback` returns to the previou
 snapshot without deleting manually configured models. `orc routing resolve` resolves one of
 the six built-in orchestration roles (`explore`, `research`, `plan`, `implement`, `review`,
 `verify`) to its configured `(provider, model)` pair and persists the routing decision
-record — see [docs/cli/orc-routing.md](docs/cli/orc-routing.md).
+record — see [docs/cli/orc-routing.md](docs/cli/orc-routing.md). Setting the
+default-off `routing.provider = "fixture"` config key consults the
+deterministic fixture `DecisionProvider` first (typed structured output with
+calibrated confidence); the heuristic table stays the fallback chain whenever
+the provider errors or is unavailable (spec §9.45).
 
 ## Bootstrap worker sandbox mediation
 

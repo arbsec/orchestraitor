@@ -24,7 +24,10 @@ pub use registry::{
     BUILT_IN_DOMAINS, BUILT_IN_ORCHESTRATION_ROLES, BUILT_IN_ROLES, DomainDefinition,
     RoleDefinition,
 };
-pub use role_routing::{BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, RoleRouter, RoleRoutingDecision};
+pub use role_routing::{
+    BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, DecisionProviderConfigError, RoleRouter,
+    RoleRoutingDecision, resolve_decision_provider,
+};
 pub use roles_registry::{RegistryRole, RegistryRoleKind, RoleRegistry};
 pub use routing::{
     MatchedStep, ResolvedRoute, Route, RoutingRequest, RoutingResolver, RoutingTable,

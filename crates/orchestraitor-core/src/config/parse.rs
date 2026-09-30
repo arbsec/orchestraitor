@@ -110,6 +110,7 @@ fn is_known_key(key: &str) -> bool {
                 | "github_app.installation_id"
                 | "github_app.private_key_uri"
         )
+        || matches!(key, "routing.provider")
         || key == "service_identities"
 }
 
