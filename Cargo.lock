@@ -3915,12 +3915,15 @@ dependencies = [
 name = "orchestraitor-agent-catalog"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "orchestraitor-core",
  "orchestraitor-model",
+ "orchestraitor-provider-api",
  "rusqlite",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "toml 1.1.6+spec-1.1.0",
 ]
 

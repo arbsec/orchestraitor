@@ -7,7 +7,7 @@ use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
-    SubscriptionConfig, parse_toml_config,
+    RoutingDecisionProviderConfig, SubscriptionConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -145,7 +145,18 @@ impl OrchestraitorConfig {
             next.github_app,
             GitHubAppConfig::merge,
         );
+        merge_option(
+            &mut self.routing,
+            next.routing,
+            RoutingDecisionProviderConfig::merge,
+        );
         merge_scalar(&mut self.service_identities, next.service_identities);
+    }
+}
+
+impl RoutingDecisionProviderConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.provider, next.provider);
     }
 }
 

@@ -12,8 +12,10 @@ description = "Domain and role catalog, model route resolver, and detection heur
 workspace = true
 
 [dependencies]
+async-trait = "0.1"
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
+orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 # Decision-record persistence for spec 30-model-routing.md §9.45 uses the
 # workspace-pinned SQLite crate (tech-stack §11); no new third-party dependency.
 rusqlite = { workspace = true }
@@ -23,3 +25,4 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

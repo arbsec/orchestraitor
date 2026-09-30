@@ -54,6 +54,35 @@ layer) overrides the built-in default field by field:
   (ASCII letters, digits, `-`, `_`, `.`, `/`, `:`, 1–256 characters, starting with
   a letter or digit); violations are a typed error naming the key.
 - `roles.<role>.routing.profile` — optional profile name, reserved.
+- `routing.provider` — decision-provider selection (spec §9.45
+  "DecisionProvider"), **default off**: when absent, the heuristic table
+  above is the router and no decision model is consulted. When set to
+  `fixture`, the deterministic table-driven `FixtureDecisionProvider`
+  (in `orchestraitor-provider-api`) is consulted first for every role
+  resolution; its typed proposal — provider, model, calibrated confidence
+  (`0.0..=1.0`, validated at the boundary), and the alternatives it
+  considered with skip reasons — wins over the table when the target
+  provider is routable in the effective configuration. Any other value is a
+  typed `unknown decision provider` error naming the available
+  implementations; no TypeSafe/jev adapter exists and no network calls are
+  made (tech-stack §17 keeps that adapter default-off until its license is
+  allowlisted, tech-stack §18).
+
+### Decision-provider fallback
+
+The heuristic table remains the fallback chain when a decision provider is
+configured but unavailable (spec §9.45): provider errors, unknown fixture
+roles, proposals failing identifier validation, or proposals naming a
+non-routable provider all fall back to the table resolution, and the
+unavailability is documented in the decision record's `fallback_reason`
+(for example `decision provider 'fixture' unavailable: …; applied the
+heuristic table fallback (spec 30-model-routing.md §9.45)`). A
+`DecisionProvider`-proposed resolution records the provider and its
+confidence in `precedence_path`
+(`decision-provider:fixture (confidence 0.95, 1 alternative(s))`).
+Confidence, structured alternatives, and per-alternative skip reasons land
+as typed columns in a future `SCHEMA_V2` decision-store migration; the
+current store keeps working unchanged.
 
 Because layers merge field-wise, a project entry that sets only `provider`
 inherits `model` from lower layers. A typed error naming the missing
@@ -138,5 +167,8 @@ migrations.
 
 The table is config-only: `orc config unset roles.<role>.routing.<key>` removes
 an override from the active layer and reveals the lower layer (or the built-in
-default) again. Decision records already persisted are append-only evidence and
+default) again. The decision-provider flag rolls back the same way:
+`orc config unset routing.provider` re-disables the feature and the heuristic
+table becomes the router again — no code or store migration is involved.
+Decision records already persisted are append-only evidence and
 are not rewritten.
