@@ -1,0 +1,4 @@
+[github_app]
+client_id = "Iv23linxUDbcc53QbFVK"
+installation_id = 165043398
+private_key_uri = "secret://keyring/orchestraitor-app-pem"

@@ -33,10 +33,26 @@ pub struct OrchestraitorConfig {
     /// GitHub App service identity used for agent-driven GitHub operations
     /// (spec `10-orchestrator.md` §9.25.2).
     pub github_app: Option<GitHubAppConfig>,
+    /// Decision-provider selection for model routing (spec
+    /// `30-model-routing.md` §9.45). Default-off: the heuristic table stays
+    /// the router when this block is absent.
+    pub routing: Option<RoutingDecisionProviderConfig>,
     /// Service-identity bot slugs for the ready-queue assignee exclusion:
     /// items assigned to a service identity stay schedulable while items
     /// assigned to a human are excluded (spec `10-orchestrator.md` §9.41).
     pub service_identities: Option<Vec<String>>,
+}
+
+/// Decision-provider selection for model routing (spec
+/// `30-model-routing.md` §9.45). The heuristic table is the default; a
+/// configured provider is consulted first and the heuristic table remains
+/// the fallback chain when the provider is unavailable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoutingDecisionProviderConfig {
+    /// Decision provider implementation name. The only shipped value is
+    /// `fixture` (deterministic, table-driven); any other value is a typed
+    /// unknown-provider error at resolve time.
+    pub provider: Option<String>,
 }
 
 /// GitHub App service identity configuration block.

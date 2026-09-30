@@ -3,7 +3,9 @@
 use std::io::Write;
 
 use miette::{IntoDiagnostic, Result, miette};
-use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecisionStore};
+use orchestraitor_agent_catalog::{
+    RoleRouter, RoleRoutingDecisionStore, resolve_decision_provider,
+};
 use serde::Serialize;
 
 use crate::cli::{ConfigPaths, ResolveArgs, RoutingCommand};
@@ -33,9 +35,19 @@ struct ResolveOutput<'a> {
 fn resolve<W: Write>(paths: &ConfigPaths, args: &ResolveArgs, writer: &mut W) -> Result<()> {
     let layers = load_layers(paths)?;
     let router = RoleRouter::new(&layers.resolver);
-    let decision = router
-        .resolve(&args.role)
-        .map_err(|error| miette!("{error}"))?;
+    // DecisionProvider consultation (spec §9.45, default off): when the
+    // `routing.provider` flag names an implementation, it is consulted first
+    // and the heuristic table stays the fallback chain.
+    let decision =
+        match resolve_decision_provider(&layers.resolver).map_err(|error| miette!("{error}"))? {
+            Some(provider) => tokio::runtime::Runtime::new()
+                .into_diagnostic()?
+                .block_on(router.resolve_with_decision_provider(&args.role, provider.as_ref()))
+                .map_err(|error| miette!("{error}"))?,
+            None => router
+                .resolve(&args.role)
+                .map_err(|error| miette!("{error}"))?,
+        };
     let store_path = paths.config_dir.join("routing.db");
     let store = RoleRoutingDecisionStore::open(&store_path)
         .map_err(|error| miette!("cannot open routing decision store: {error}"))?;

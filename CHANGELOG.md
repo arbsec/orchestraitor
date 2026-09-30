@@ -13,6 +13,26 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- Pluggable decision-model selection behind the `DecisionProvider` trait
+  (spec `30-model-routing.md` §9.45; #329): decision providers return typed
+  structured outputs with calibrated confidence (`0.0..=1.0`, validated at
+  the boundary — NaN and out-of-range values are rejected, never clamped)
+  plus the alternatives they considered with per-alternative skip reasons.
+  The trait lives in `orchestraitor-provider-api` as a new single-shot
+  structured-output provider class — no message streams, no chat surface.
+  The deterministic table-driven `FixtureDecisionProvider` ships as the only
+  implementation and conformance target; the TypeSafe/jev adapter stays
+  default-off until its license is allowlisted (tech-stack §17, §18) and no
+  network calls are made anywhere. Router integration is **default off**
+  behind the new `routing.provider` config key: unset keeps the heuristic
+  table as the router (byte-identical behavior), `routing.provider =
+  "fixture"` consults the provider first, and any other value is a typed
+  unknown-provider error. When a configured provider errors or proposes
+  something unroutable, the heuristic table fallback engages and the
+  unavailability is documented in the decision record's `fallback_reason`;
+  provider-backed resolutions record the provider and confidence in
+  `precedence_path`. Documented in
+  [docs/cli/orc-routing.md](docs/cli/orc-routing.md).
 - Custom orchestration roles via layered configuration: the role registry is
   now configuration, not a hardcoded taxonomy (spec `30-model-routing.md`
   §9.45, §9.22.4; #326). Any `roles.<id>` key defined in a configuration

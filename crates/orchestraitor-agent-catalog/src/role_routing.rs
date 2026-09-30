@@ -1,19 +1,26 @@
-//! Static heuristic role routing for the bootstrap (spec `30-model-routing.md`
-//! §9.45): orchestration roles resolve to `(provider, model)` through the
+//! Static heuristic role routing for the bootstrap (spec
+//! `30-model-routing.md` §9.45): orchestration roles resolve to `(provider, model)` through the
 //! layered configuration (spec §9.22.2) under `roles.<id>.routing.*`, which
 //! carries the same layer semantics as `agents.domains.<id>.routing.*` (spec
 //! §9.19.2). The role registry is configuration, not a hardcoded taxonomy
 //! (spec §9.22.4): every `roles.<id>` key in the effective configuration is a
-//! custom role resolving through the same path as the six built-ins. No
-//! decision model and no subscription awareness live here; those deepen behind
-//! the `DecisionProvider` trait in the E2 milestone.
+//! custom role resolving through the same path as the six built-ins. A
+//! `DecisionProvider` may be consulted first behind the default-off
+//! `routing.provider` config flag (spec §9.45 `DecisionProvider`); the
+//! heuristic table stays the default and the fallback chain when the
+//! provider errors or is unavailable — the unavailability is recorded in the
+//! decision record's `fallback_reason` (`SCHEMA_V1` field; a typed
+//! `provider_confidence` column lands as `SCHEMA_V2` in a later slice).
 
 use std::collections::BTreeSet;
 
 use orchestraitor_core::{ConfigLayer, ConfigResolver, OrchestraitorConfig, ResolvedValue};
+use orchestraitor_provider_api::DecisionProvider;
 
 use crate::error::AgentCatalogError;
 use crate::roles_registry::RoleRegistry;
+
+use thiserror::Error as ThisError;
 
 /// Bootstrap fallback provider id, the single-provider default from spec §10.3.
 pub const BOOTSTRAP_PROVIDER: &str = "neuralwatt";
@@ -129,6 +136,78 @@ impl<'a> RoleRouter<'a> {
                 )),
             }),
         }
+    }
+
+    /// Resolves one role consulting a [`DecisionProvider`] first (spec
+    /// §9.45 "DecisionProvider"): a well-formed proposal wins and the
+    /// provider's confidence is recorded in `precedence_path`; any provider
+    /// error or unavailability falls back to the heuristic table with the
+    /// unavailability documented in `fallback_reason`. The heuristic table —
+    /// not the proposal — is validated against the layered configuration's
+    /// provider allowlist before the provider is consulted, and the
+    /// resolution is recorded either way.
+    ///
+    /// `provider_id` is the fixture proposal's own id, surfaced in the
+    /// precedence path for evidence.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`RoleRouter::resolve`]; a failing `DecisionProvider` is NOT
+    /// an error — it engages the documented fallback chain.
+    pub async fn resolve_with_decision_provider(
+        self,
+        role: &str,
+        decision_provider: &dyn DecisionProvider,
+    ) -> Result<RoleRoutingDecision, AgentCatalogError> {
+        let heuristic = self.resolve(role)?;
+        // A proposal grants no authority: only well-formed, provider-id-safe
+        // values are adoptable, and the target provider must be routable in
+        // the effective configuration (spec §9.45: untrusted typed data).
+        let proposal = decision_provider.propose_role_resolution(role).await;
+        let rejection = match proposal {
+            Ok(proposal) => {
+                let shape_ok = is_valid_provider_id(proposal.provider.as_str())
+                    && is_valid_model_id(&proposal.model);
+                let routable = shape_ok && {
+                    let allowed = self.allowed_providers()?;
+                    allowed.contains(proposal.provider.as_str())
+                };
+                if routable {
+                    return Ok(RoleRoutingDecision {
+                        role: role.to_string(),
+                        provider: proposal.provider.as_str().to_string(),
+                        model: proposal.model.clone(),
+                        precedence_path: format!(
+                            "decision-provider:{} (confidence {:.2}, {} alternative(s))",
+                            decision_provider.id().as_str(),
+                            proposal.confidence,
+                            proposal.alternatives.len(),
+                        ),
+                        fallback_reason: None,
+                    });
+                }
+                // Explicit attribution: a shape-invalid proposal and a
+                // shape-valid but non-routable proposal are distinct
+                // fallback causes in the decision record.
+                if shape_ok {
+                    format!(
+                        "proposed provider '{}' is not a configured provider id",
+                        proposal.provider
+                    )
+                } else {
+                    format!(
+                        "proposed provider '{}' or model '{}' failed identifier shape validation",
+                        proposal.provider, proposal.model
+                    )
+                }
+            }
+            Err(error) => error.to_string(),
+        };
+        Ok(heuristic_with_provider_fallback(
+            heuristic,
+            decision_provider.id().as_str(),
+            rejection.as_str(),
+        ))
     }
 
     fn validate_pair(
@@ -248,5 +327,383 @@ fn layer_tag(layer: ConfigLayer) -> &'static str {
         ConfigLayer::DirectoryDomain => "dir",
         ConfigLayer::TaskAgent => "task-agent",
         ConfigLayer::CliFlag => "cli-flag",
+    }
+}
+
+/// Documents a decision-provider unavailability in the heuristic decision's
+/// `fallback_reason` (`SCHEMA_V1` field). When the heuristic resolution itself
+/// already carried a fallback reason (for example `bootstrap-default`), both
+/// facts are joined so no evidence is lost.
+fn heuristic_with_provider_fallback(
+    heuristic: RoleRoutingDecision,
+    provider_id: &str,
+    detail: &str,
+) -> RoleRoutingDecision {
+    let unavailability = format!(
+        "decision provider '{provider_id}' unavailable: {detail}; applied the heuristic table fallback (spec 30-model-routing.md §9.45)"
+    );
+    let fallback_reason = Some(match heuristic.fallback_reason {
+        Some(existing) => format!("{existing}; {unavailability}"),
+        None => unavailability,
+    });
+    RoleRoutingDecision {
+        fallback_reason,
+        ..heuristic
+    }
+}
+
+/// Typed error for `routing.provider` decision-provider resolution.
+#[derive(Debug, ThisError)]
+pub enum DecisionProviderConfigError {
+    /// The configured decision provider name matches no implementation.
+    #[error("unknown decision provider `{name}`; available: {available}")]
+    Unknown {
+        /// Configured name that matched nothing.
+        name: String,
+        /// Comma-separated list of available implementation names.
+        available: String,
+    },
+    /// Layered configuration resolution failed before the flag could be
+    /// read (for example an ambiguous same-layer conflict naming the key).
+    #[error("decision provider configuration resolution failed: {0}")]
+    Config(#[from] orchestraitor_core::OrchestraitorError),
+}
+
+/// The only shipped decision-provider implementation name (the deterministic
+/// fixture; tech-stack §17 keeps real adapters default-off until allowlisted).
+pub const FIXTURE_DECISION_PROVIDER: &str = "fixture";
+
+/// Available decision-provider implementation names, in stable order.
+pub const AVAILABLE_DECISION_PROVIDERS: [&str; 1] = [FIXTURE_DECISION_PROVIDER];
+
+/// Builds the decision provider named by the effective `routing.provider`
+/// config value (spec §9.45, default off): `None` when the flag is unset
+/// (heuristic table only), the deterministic fixture behind `"fixture"`, and
+/// a typed unknown-provider error for any other value.
+///
+/// # Errors
+///
+/// Returns [`DecisionProviderConfigError::Unknown`] for a configured name
+/// that matches no available implementation and
+/// [`DecisionProviderConfigError::Config`] when layered configuration
+/// resolution itself fails.
+pub fn resolve_decision_provider(
+    resolver: &ConfigResolver,
+) -> Result<Option<Box<dyn DecisionProvider>>, DecisionProviderConfigError> {
+    let configured = resolver
+        .resolve_config()?
+        .routing
+        .and_then(|routing| routing.provider);
+    match configured.as_deref() {
+        None => Ok(None),
+        Some(FIXTURE_DECISION_PROVIDER) => Ok(Some(Box::new(
+            orchestraitor_provider_api::FixtureDecisionProvider::new(),
+        ))),
+        Some(name) => Err(DecisionProviderConfigError::Unknown {
+            name: name.to_string(),
+            available: AVAILABLE_DECISION_PROVIDERS.join(", "),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod decision_provider_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+    use orchestraitor_core::ConfigSource;
+    use orchestraitor_provider_api::{
+        DecisionProposal, DecisionProvider, DecisionResult, FixtureDecisionProvider, FixtureMode,
+        TaskSelection,
+    };
+
+    use super::*;
+
+    fn resolver_from(layers: &[(ConfigLayer, &str, &str)]) -> ConfigResolver {
+        let mut resolver = ConfigResolver::new();
+        for (layer, name, toml) in layers {
+            resolver = resolver
+                .with_toml(
+                    ConfigSource {
+                        layer: *layer,
+                        name: name.to_string(),
+                    },
+                    toml,
+                )
+                .unwrap();
+        }
+        resolver
+    }
+
+    #[tokio::test]
+    async fn flag_unset_router_behavior_is_identical_to_resolve() {
+        // Default-off: with no decision provider supplied, the caller path is
+        // plain `resolve`; this asserts the fixture path with flag unset is
+        // byte-identical to the heuristic resolution.
+        let resolver = resolver_from(&[]);
+        let plain = RoleRouter::new(&resolver).resolve("implement").unwrap();
+        assert_eq!(plain.provider, BOOTSTRAP_PROVIDER);
+        assert_eq!(plain.model, BOOTSTRAP_MODEL);
+        assert_eq!(plain.precedence_path, "bootstrap-default");
+        assert!(
+            plain
+                .fallback_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("bootstrap default")
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_on_fixture_proposal_wins_with_confidence_recorded() {
+        let resolver = resolver_from(&[]);
+        let provider = FixtureDecisionProvider::new();
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &provider)
+            .await
+            .unwrap();
+        // The fixture table proposes the same pair the heuristic table ships,
+        // but the precedence path must carry the provider + confidence so
+        // decision records prove the proposal won (spec §9.45).
+        assert_eq!(decision.provider, "neuralwatt");
+        assert_eq!(decision.model, "glm-5.2");
+        assert!(
+            decision
+                .precedence_path
+                .starts_with("decision-provider:fixture (confidence 0.95"),
+            "precedence_path must record provider and confidence: {}",
+            decision.precedence_path
+        );
+        assert!(decision.fallback_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn flag_on_unavailable_provider_falls_back_with_unavailability_recorded() {
+        let resolver = resolver_from(&[]);
+        let provider = FixtureDecisionProvider::with_mode(FixtureMode::Unavailable);
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &provider)
+            .await
+            .unwrap();
+        // Heuristic fallback engages with identical resolution...
+        assert_eq!(decision.provider, BOOTSTRAP_PROVIDER);
+        assert_eq!(decision.model, BOOTSTRAP_MODEL);
+        assert_eq!(decision.precedence_path, "bootstrap-default");
+        // ...and the unavailability is recorded in the SCHEMA_V1 record.
+        let reason = decision
+            .fallback_reason
+            .expect("unavailability must be recorded");
+        assert!(
+            reason.contains("decision provider 'fixture' unavailable"),
+            "fallback_reason must document the unavailability: {reason}"
+        );
+        assert!(
+            reason.contains("heuristic table fallback"),
+            "fallback_reason must document the fallback: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_on_provider_error_over_table_entry_falls_back_to_layer_value() {
+        let toml = "[roles.implement.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n";
+        let resolver = resolver_from(&[(ConfigLayer::Project, "project", toml)]);
+        let provider = FixtureDecisionProvider::with_mode(FixtureMode::Unavailable);
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &provider)
+            .await
+            .unwrap();
+        assert_eq!(decision.provider, "neuralwatt");
+        assert_eq!(decision.model, "glm-5.2");
+        assert!(
+            decision.precedence_path.contains("project"),
+            "layer attribution must be preserved: {}",
+            decision.precedence_path
+        );
+        assert!(decision.fallback_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_role_is_typed_error_even_with_provider_configured() {
+        let resolver = resolver_from(&[]);
+        let provider = FixtureDecisionProvider::new();
+        let error = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("nonexistent", &provider)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentCatalogError::UnknownRole { .. }));
+    }
+
+    #[test]
+    fn resolve_decision_provider_none_when_flag_unset() {
+        let resolver = resolver_from(&[]);
+        let built = resolve_decision_provider(&resolver).unwrap();
+        assert!(built.is_none(), "default must stay off");
+    }
+
+    #[test]
+    fn resolve_decision_provider_builds_fixture_when_configured() {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            "[routing]\nprovider = \"fixture\"\n",
+        )]);
+        let built = resolve_decision_provider(&resolver).unwrap();
+        assert!(built.is_some());
+        assert_eq!(
+            built.as_ref().map(|provider| provider.id().as_str()),
+            Some("fixture")
+        );
+    }
+
+    #[test]
+    fn resolve_decision_provider_unknown_value_is_typed_error() {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            "[routing]\nprovider = \"typesafe\"\n",
+        )]);
+        let Err(error) = resolve_decision_provider(&resolver) else {
+            panic!("unknown provider value must be a typed error");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unknown decision provider `typesafe`"),
+            "error must be the typed unknown-provider error: {error}"
+        );
+        assert!(error.to_string().contains("fixture"));
+    }
+
+    #[test]
+    fn resolve_decision_provider_config_failure_is_not_unknown_provider() {
+        // Two same-layer shards defining the same key are an ambiguous
+        // conflict: the error must be attributed to configuration
+        // resolution, not misreported as an unknown provider.
+        let toml = "[routing]\nprovider = \"fixture\"\n";
+        let mut resolver = ConfigResolver::new();
+        for name in ["shard-a", "shard-b"] {
+            resolver = resolver
+                .with_toml(
+                    ConfigSource {
+                        layer: ConfigLayer::Project,
+                        name: name.to_string(),
+                    },
+                    toml,
+                )
+                .unwrap();
+        }
+        let Err(error) = resolve_decision_provider(&resolver) else {
+            panic!("ambiguous conflict must be a typed error");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("configuration resolution failed"),
+            "config failure must carry its own attribution: {error}"
+        );
+        assert!(
+            !error.to_string().contains("unknown decision provider"),
+            "config failure must not surface as unknown-provider: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shape_invalid_proposal_fallback_names_provider_and_model() {
+        struct Malformed;
+        static MALFORMED_ID: std::sync::LazyLock<orchestraitor_model::ProviderId> =
+            std::sync::LazyLock::new(|| {
+                orchestraitor_model::ProviderId::from_string("malformed".to_string())
+            });
+        #[async_trait::async_trait]
+        impl DecisionProvider for Malformed {
+            fn id(&self) -> &orchestraitor_model::ProviderId {
+                &MALFORMED_ID
+            }
+
+            async fn propose_role_resolution(
+                &self,
+                _role: &str,
+            ) -> DecisionResult<DecisionProposal> {
+                DecisionProposal::new(
+                    "implement",
+                    orchestraitor_model::ProviderId::from_string("BAD ID".to_string()),
+                    "bad model id with spaces",
+                    0.9,
+                    Vec::new(),
+                )
+            }
+
+            async fn propose_task_selection(
+                &self,
+                _ready_task_ids: &[String],
+            ) -> DecisionResult<TaskSelection> {
+                TaskSelection::new("task-a", 1.0)
+            }
+        }
+
+        let resolver = resolver_from(&[]);
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &Malformed)
+            .await
+            .unwrap();
+        assert_eq!(decision.provider, BOOTSTRAP_PROVIDER);
+        let reason = decision.fallback_reason.expect("refusal must be recorded");
+        assert!(
+            reason.contains("'BAD ID'") && reason.contains("'bad model id with spaces'"),
+            "fallback_reason must name the rejected provider and model: {reason}"
+        );
+        assert!(
+            reason.contains("shape validation"),
+            "shape failures must be attributed as such: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proposal_naming_unroutable_provider_falls_back() {
+        // A proposal is untrusted typed data naming a target; a provider
+        // outside the effective allowlist must never be adopted.
+        struct Rogue;
+        static ROGUE_ID: std::sync::LazyLock<orchestraitor_model::ProviderId> =
+            std::sync::LazyLock::new(|| {
+                orchestraitor_model::ProviderId::from_string("rogue".to_string())
+            });
+        #[async_trait::async_trait]
+        impl DecisionProvider for Rogue {
+            fn id(&self) -> &orchestraitor_model::ProviderId {
+                &ROGUE_ID
+            }
+
+            async fn propose_role_resolution(
+                &self,
+                _role: &str,
+            ) -> DecisionResult<DecisionProposal> {
+                DecisionProposal::new(
+                    "implement",
+                    orchestraitor_model::ProviderId::from_string("unroutable".to_string()),
+                    "evil-model",
+                    1.0,
+                    Vec::new(),
+                )
+            }
+
+            async fn propose_task_selection(
+                &self,
+                _ready_task_ids: &[String],
+            ) -> DecisionResult<TaskSelection> {
+                TaskSelection::new("task-a", 1.0)
+            }
+        }
+
+        let resolver = resolver_from(&[]);
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &Rogue)
+            .await
+            .unwrap();
+        assert_eq!(decision.provider, BOOTSTRAP_PROVIDER);
+        assert_eq!(decision.model, BOOTSTRAP_MODEL);
+        let reason = decision.fallback_reason.expect("refusal must be recorded");
+        assert!(
+            reason.contains("not a configured provider id"),
+            "fallback_reason must name the refusal cause: {reason}"
+        );
     }
 }
