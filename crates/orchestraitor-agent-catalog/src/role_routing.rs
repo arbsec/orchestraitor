@@ -164,14 +164,16 @@ impl<'a> RoleRouter<'a> {
         // values are adoptable, and the target provider must be routable in
         // the effective configuration (spec §9.45: untrusted typed data).
         let proposal = decision_provider.propose_role_resolution(role).await;
-        match proposal {
-            Ok(proposal)
-                if is_valid_provider_id(proposal.provider.as_str())
-                    && is_valid_model_id(&proposal.model) =>
-            {
-                let allowed = self.allowed_providers()?;
-                if allowed.contains(proposal.provider.as_str()) {
-                    Ok(RoleRoutingDecision {
+        let rejection = match proposal {
+            Ok(proposal) => {
+                let shape_ok = is_valid_provider_id(proposal.provider.as_str())
+                    && is_valid_model_id(&proposal.model);
+                let routable = shape_ok && {
+                    let allowed = self.allowed_providers()?;
+                    allowed.contains(proposal.provider.as_str())
+                };
+                if routable {
+                    return Ok(RoleRoutingDecision {
                         role: role.to_string(),
                         provider: proposal.provider.as_str().to_string(),
                         model: proposal.model.clone(),
@@ -182,29 +184,30 @@ impl<'a> RoleRouter<'a> {
                             proposal.alternatives.len(),
                         ),
                         fallback_reason: None,
-                    })
+                    });
+                }
+                // Explicit attribution: a shape-invalid proposal and a
+                // shape-valid but non-routable proposal are distinct
+                // fallback causes in the decision record.
+                if shape_ok {
+                    format!(
+                        "proposed provider '{}' is not a configured provider id",
+                        proposal.provider
+                    )
                 } else {
-                    Ok(heuristic_with_provider_fallback(
-                        heuristic,
-                        decision_provider.id().as_str(),
-                        &format!(
-                            "proposed provider '{}' is not a configured provider id",
-                            proposal.provider
-                        ),
-                    ))
+                    format!(
+                        "proposed provider '{}' or model '{}' failed identifier shape validation",
+                        proposal.provider, proposal.model
+                    )
                 }
             }
-            Ok(_) => Ok(heuristic_with_provider_fallback(
-                heuristic,
-                decision_provider.id().as_str(),
-                "proposal failed identifier shape validation",
-            )),
-            Err(error) => Ok(heuristic_with_provider_fallback(
-                heuristic,
-                decision_provider.id().as_str(),
-                error.to_string().as_str(),
-            )),
-        }
+            Err(error) => error.to_string(),
+        };
+        Ok(heuristic_with_provider_fallback(
+            heuristic,
+            decision_provider.id().as_str(),
+            rejection.as_str(),
+        ))
     }
 
     fn validate_pair(
@@ -349,7 +352,7 @@ fn heuristic_with_provider_fallback(
     }
 }
 
-/// Typed error for an unknown `routing.provider` decision-provider value.
+/// Typed error for `routing.provider` decision-provider resolution.
 #[derive(Debug, ThisError)]
 pub enum DecisionProviderConfigError {
     /// The configured decision provider name matches no implementation.
@@ -360,6 +363,10 @@ pub enum DecisionProviderConfigError {
         /// Comma-separated list of available implementation names.
         available: String,
     },
+    /// Layered configuration resolution failed before the flag could be
+    /// read (for example an ambiguous same-layer conflict naming the key).
+    #[error("decision provider configuration resolution failed: {0}")]
+    Config(#[from] orchestraitor_core::OrchestraitorError),
 }
 
 /// The only shipped decision-provider implementation name (the deterministic
@@ -377,16 +384,14 @@ pub const AVAILABLE_DECISION_PROVIDERS: [&str; 1] = [FIXTURE_DECISION_PROVIDER];
 /// # Errors
 ///
 /// Returns [`DecisionProviderConfigError::Unknown`] for a configured name
-/// that matches no available implementation.
+/// that matches no available implementation and
+/// [`DecisionProviderConfigError::Config`] when layered configuration
+/// resolution itself fails.
 pub fn resolve_decision_provider(
     resolver: &ConfigResolver,
 ) -> Result<Option<Box<dyn DecisionProvider>>, DecisionProviderConfigError> {
     let configured = resolver
-        .resolve_config()
-        .map_err(|error| DecisionProviderConfigError::Unknown {
-            name: error.to_string(),
-            available: AVAILABLE_DECISION_PROVIDERS.join(", "),
-        })?
+        .resolve_config()?
         .routing
         .and_then(|routing| routing.provider);
     match configured.as_deref() {
@@ -566,6 +571,90 @@ mod decision_provider_tests {
             "error must be the typed unknown-provider error: {error}"
         );
         assert!(error.to_string().contains("fixture"));
+    }
+
+    #[test]
+    fn resolve_decision_provider_config_failure_is_not_unknown_provider() {
+        // Two same-layer shards defining the same key are an ambiguous
+        // conflict: the error must be attributed to configuration
+        // resolution, not misreported as an unknown provider.
+        let toml = "[routing]\nprovider = \"fixture\"\n";
+        let mut resolver = ConfigResolver::new();
+        for name in ["shard-a", "shard-b"] {
+            resolver = resolver
+                .with_toml(
+                    ConfigSource {
+                        layer: ConfigLayer::Project,
+                        name: name.to_string(),
+                    },
+                    toml,
+                )
+                .unwrap();
+        }
+        let Err(error) = resolve_decision_provider(&resolver) else {
+            panic!("ambiguous conflict must be a typed error");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("configuration resolution failed"),
+            "config failure must carry its own attribution: {error}"
+        );
+        assert!(
+            !error.to_string().contains("unknown decision provider"),
+            "config failure must not surface as unknown-provider: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shape_invalid_proposal_fallback_names_provider_and_model() {
+        struct Malformed;
+        static MALFORMED_ID: std::sync::LazyLock<orchestraitor_model::ProviderId> =
+            std::sync::LazyLock::new(|| {
+                orchestraitor_model::ProviderId::from_string("malformed".to_string())
+            });
+        #[async_trait::async_trait]
+        impl DecisionProvider for Malformed {
+            fn id(&self) -> &orchestraitor_model::ProviderId {
+                &MALFORMED_ID
+            }
+
+            async fn propose_role_resolution(
+                &self,
+                _role: &str,
+            ) -> DecisionResult<DecisionProposal> {
+                DecisionProposal::new(
+                    "implement",
+                    orchestraitor_model::ProviderId::from_string("BAD ID".to_string()),
+                    "bad model id with spaces",
+                    0.9,
+                    Vec::new(),
+                )
+            }
+
+            async fn propose_task_selection(
+                &self,
+                _ready_task_ids: &[String],
+            ) -> DecisionResult<TaskSelection> {
+                TaskSelection::new("task-a", 1.0)
+            }
+        }
+
+        let resolver = resolver_from(&[]);
+        let decision = RoleRouter::new(&resolver)
+            .resolve_with_decision_provider("implement", &Malformed)
+            .await
+            .unwrap();
+        assert_eq!(decision.provider, BOOTSTRAP_PROVIDER);
+        let reason = decision.fallback_reason.expect("refusal must be recorded");
+        assert!(
+            reason.contains("'BAD ID'") && reason.contains("'bad model id with spaces'"),
+            "fallback_reason must name the rejected provider and model: {reason}"
+        );
+        assert!(
+            reason.contains("shape validation"),
+            "shape failures must be attributed as such: {reason}"
+        );
     }
 
     #[tokio::test]

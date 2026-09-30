@@ -55,4 +55,7 @@ pub enum DecisionProviderError {
         /// Comma-separated list of available implementation names.
         available: String,
     },
+    /// A structured output failed to deserialize with valid confidence.
+    #[error("decision provider returned a malformed structured output: {0}")]
+    MalformedOutput(String),
 }

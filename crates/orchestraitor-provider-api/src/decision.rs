@@ -31,6 +31,7 @@ pub type DecisionResult<T> = Result<T, DecisionProviderError>;
 /// provider's calibrated probability for the primary proposal, validated to
 /// `0.0..=1.0` at construction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "DecisionProposalRaw")]
 pub struct DecisionProposal {
     /// Orchestration role id the proposal resolves.
     pub role: String,
@@ -42,6 +43,33 @@ pub struct DecisionProposal {
     pub confidence: f64,
     /// Alternatives the decision model considered with skip reasons.
     pub alternatives: Vec<DecisionAlternative>,
+}
+
+/// Raw deserialization shape for [`DecisionProposal`]: identical fields, funneled
+/// through the same confidence validation as [`DecisionProposal::new`] so no
+/// serde path can construct a proposal with uncalibrated confidence.
+#[derive(Debug, Deserialize)]
+struct DecisionProposalRaw {
+    role: String,
+    provider: ProviderId,
+    model: String,
+    confidence: f64,
+    #[serde(default)]
+    alternatives: Vec<DecisionAlternative>,
+}
+
+impl TryFrom<DecisionProposalRaw> for DecisionProposal {
+    type Error = DecisionProviderError;
+
+    fn try_from(raw: DecisionProposalRaw) -> DecisionResult<Self> {
+        Self::new(
+            raw.role,
+            raw.provider,
+            raw.model,
+            raw.confidence,
+            raw.alternatives,
+        )
+    }
 }
 
 /// One alternative a [`DecisionProvider`] considered and skipped (spec §9.45
@@ -89,11 +117,28 @@ impl DecisionProposal {
 /// (spec `10-orchestrator.md` §9.35). `task_id` is the deterministic worker
 /// task id from the ready queue; the heuristic selector stays the fallback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "TaskSelectionRaw")]
 pub struct TaskSelection {
     /// The selected deterministic worker task id.
     pub task_id: String,
     /// Calibrated confidence for the selection, `0.0..=1.0` (validated).
     pub confidence: f64,
+}
+
+/// Raw deserialization shape for [`TaskSelection`]: identical fields, funneled
+/// through the same confidence validation as [`TaskSelection::new`].
+#[derive(Debug, Deserialize)]
+struct TaskSelectionRaw {
+    task_id: String,
+    confidence: f64,
+}
+
+impl TryFrom<TaskSelectionRaw> for TaskSelection {
+    type Error = DecisionProviderError;
+
+    fn try_from(raw: TaskSelectionRaw) -> DecisionResult<Self> {
+        Self::new(raw.task_id, raw.confidence)
+    }
 }
 
 impl TaskSelection {
@@ -239,5 +284,75 @@ mod tests {
         let json = serde_json::to_string(&proposal).unwrap();
         let parsed: DecisionProposal = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, proposal);
+    }
+
+    #[test]
+    fn deserialization_rejects_confidence_above_one() {
+        // serde_json's arbitrary_precision-less float parse accepts 2.0; the
+        // try_from funnel must reject it as a typed error.
+        let error = serde_json::from_str::<DecisionProposal>(
+            r#"{"role":"plan","provider":"p","model":"m","confidence":2.0,"alternatives":[]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid confidence 2"),
+            "deserialization must reject confidence > 1.0: {error}"
+        );
+        let error =
+            serde_json::from_str::<TaskSelection>(r#"{"task_id":"task-a","confidence":2.0}"#)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid confidence 2"),
+            "task-selection deserialization must reject confidence > 1.0: {error}"
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_negative_confidence() {
+        let error = serde_json::from_str::<DecisionProposal>(
+            r#"{"role":"plan","provider":"p","model":"m","confidence":-1.0,"alternatives":[]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid confidence -1"),
+            "deserialization must reject negative confidence: {error}"
+        );
+        let error =
+            serde_json::from_str::<TaskSelection>(r#"{"task_id":"task-a","confidence":-1.0}"#)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("invalid confidence -1"),
+            "task-selection deserialization must reject negative confidence: {error}"
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_non_finite_confidence() {
+        // JSON has no NaN/Infinity literal, but the string form parses as a
+        // float error and the `null` form must also be rejected; the serde
+        // funnel guarantees no code path constructs an uncalibrated value.
+        assert!(
+            serde_json::from_str::<DecisionProposal>(
+                r#"{"role":"plan","provider":"p","model":"m","confidence":"NaN","alternatives":[]}"#,
+            )
+            .is_err(),
+            "string NaN must not deserialize as a valid confidence"
+        );
+        assert!(
+            serde_json::from_str::<TaskSelection>(r#"{"task_id":"task-a","confidence":null}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deserialization_preserves_in_range_confidence() {
+        let parsed: DecisionProposal = serde_json::from_str(
+            r#"{"role":"plan","provider":"p","model":"m","confidence":0.42,"alternatives":[]}"#,
+        )
+        .unwrap();
+        assert!((parsed.confidence - 0.42).abs() < f64::EPSILON);
+        let parsed: TaskSelection =
+            serde_json::from_str(r#"{"task_id":"task-a","confidence":0.0}"#).unwrap();
+        assert!((parsed.confidence - 0.0).abs() < f64::EPSILON);
     }
 }
