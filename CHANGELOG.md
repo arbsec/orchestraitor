@@ -25,7 +25,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   remain a typed `unknown role` error. Same-layer shard conflicts on
   `roles.<id>.routing.*` keys are rejected by `orc config validate` with the
   ambiguous-conflict error naming both sources.
-
 - `orchestraitor-board-contract` crate: the pluggable `BoardProvider` contract
   (spec `10-orchestrator.md` §9.43, #318) covering all six contract areas —
   items (stable `BoardItemId` identity, type, title, opaque body), statuses,

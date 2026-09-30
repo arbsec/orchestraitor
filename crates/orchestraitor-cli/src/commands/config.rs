@@ -25,8 +25,9 @@ const CURRENT_SCHEMA_VERSION: &str = "0.14";
 /// Resolves one dotted config key to its effective value plus provenance. A
 /// key naming a leaf returns that leaf's entry; a key naming a table (for
 /// example `roles.review.routing`) composes the nested object from every leaf
-/// under it, attributing the value to the highest-precedence source that
-/// supplies any part of it.
+/// under it and attributes the composed view to the highest-precedence layer
+/// among those leaves. Per-leaf `explain` remains the precise provenance for
+/// individual sub-keys.
 fn resolve_key_value(
     resolved: &BTreeMap<String, layers::ResolvedJson>,
     key: &str,
@@ -37,19 +38,13 @@ fn resolve_key_value(
     let prefix = format!("{key}.");
     let composed = compose_prefix_value(resolved, key, |entry| &entry.value)
         .ok_or_else(|| miette!("config key `{key}` is not set"))?;
-    let mut source = layers::ResolvedJson {
-        value: composed,
-        source_layer: String::new(),
-        source_name: String::new(),
-        inherited: false,
-    };
-    if let Some((_, highest)) = resolved
+    let mut source = resolved
         .iter()
-        .find(|(leaf_key, _)| leaf_key.starts_with(&prefix))
-    {
-        source.source_layer.clone_from(&highest.source_layer);
-        source.source_name.clone_from(&highest.source_name);
-    }
+        .filter(|(leaf_key, _)| leaf_key.starts_with(&prefix))
+        .map(|(_, entry)| entry.clone())
+        .max_by_key(|entry| entry.layer)
+        .ok_or_else(|| miette!("config key `{key}` is not set"))?;
+    source.value = composed;
     Ok(source)
 }
 

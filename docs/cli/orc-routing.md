@@ -23,7 +23,10 @@ Custom roles are configuration, not a hardcoded taxonomy (spec §9.22.4): any
 resolves through the same path, the same layer semantics, and the same
 fallback chain as a built-in. A role id must be 1–64 lowercase ASCII letters,
 digits, `-` or `_`, starting with a letter or digit — never a path or key
-separator. A role id that is neither built-in nor configured is a typed error
+separator. Configuration storage is shape-agnostic: a role id that fails these
+shape rules can still be written via `orc config set`/`unset`, but it is
+rejected at resolve time with the typed `InvalidRoleId` error — resolution is
+the gate. A role id that is neither built-in nor configured is a typed error
 listing the known roles.
 
 ## Configuration

@@ -186,9 +186,17 @@ fn config_get_reports_provenance_for_a_custom_role_routing_table() -> miette::Re
     let temp = tempfile::tempdir().into_diagnostic()?;
     let config_dir = temp.path().join("config");
     fs::create_dir_all(&config_dir).into_diagnostic()?;
+    // Mixed layers: the user layer sets the model, the project layer sets the
+    // provider. The composed-table view attributes provenance to the
+    // highest-precedence layer among the leaves (project).
+    fs::write(
+        config_dir.join("user.toml"),
+        "[roles.migrator.routing]\nmodel = \"glm-5.2\"\n",
+    )
+    .into_diagnostic()?;
     fs::write(
         temp.path().join("orchestraitor.toml"),
-        "[roles.migrator.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
+        "[roles.migrator.routing]\nprovider = \"neuralwatt\"\n",
     )
     .into_diagnostic()?;
     let mut output = Vec::new();
@@ -207,7 +215,44 @@ fn config_get_reports_provenance_for_a_custom_role_routing_table() -> miette::Re
     let rendered = String::from_utf8(output).into_diagnostic()?;
 
     assert!(rendered.contains("key = roles.migrator.routing"));
+    assert!(rendered.contains("value = {\"model\":\"glm-5.2\",\"provider\":\"neuralwatt\"}"));
     assert!(rendered.contains("source_layer = project"));
+    Ok(())
+}
+
+#[test]
+fn config_get_and_explain_agree_on_an_empty_role_table() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    // An empty `roles.myrole` table registers no leaves: both `get` and
+    // `explain` must report the key as not set.
+    fs::write(temp.path().join("orchestraitor.toml"), "[roles.myrole]\n").into_diagnostic()?;
+
+    for command in ["get", "explain"] {
+        let mut output = Vec::new();
+        let cli = Cli::parse_from([
+            "orc",
+            "--config-dir",
+            &config_dir.display().to_string(),
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "config",
+            command,
+            "roles.myrole",
+        ]);
+        let result = orchestraitor_cli::run_with_writer(cli, &mut output);
+        let error = match result {
+            Ok(()) => {
+                return Err(miette::miette!("{command} resolved an empty role table"));
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("is not set"),
+            "{command} must report the empty table as not set, got: {error}"
+        );
+    }
     Ok(())
 }
 

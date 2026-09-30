@@ -52,6 +52,12 @@ where
         let Some(suffix) = key.strip_prefix(&dotted_prefix) else {
             continue;
         };
+        if suffix.is_empty() {
+            // The prefix itself appears as a flattened entry; only an empty
+            // table can reach compose here (leaves resolve via direct get).
+            // An empty table composes to absent, never to a nested object.
+            continue;
+        }
         insert_nested(&mut root, suffix.split('.'), value_of(entry).clone());
     }
     (!root.is_empty()).then(|| serde_json::Value::Object(root))
@@ -74,6 +80,9 @@ fn insert_nested<'a>(
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(child_map) = child {
         insert_nested(child_map, path, value);
+        if child_map.is_empty() {
+            target.remove(segment);
+        }
     }
 }
 
