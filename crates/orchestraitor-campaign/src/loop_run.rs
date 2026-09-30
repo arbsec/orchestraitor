@@ -370,6 +370,9 @@ enum TickSignal {
 enum PassPoll {
     /// The poll returned a snapshot.
     Snapshot(BoardSnapshot),
+    /// The poll returned an error (a transient board failure — back off
+    /// and retry; the loop stays alive).
+    PollFailed(CampaignError),
     /// The shutdown signal won the race.
     Shutdown,
     /// The remaining run budget won the race (the board client's 60s
@@ -880,7 +883,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // never wakes.
             let shutdown = self.shutdown.as_mut();
             tokio::select! {
-                result = &mut poll => PassPoll::Snapshot(result?),
+                result = &mut poll => match result {
+                    Ok(snapshot) => PassPoll::Snapshot(snapshot),
+                    // Transient board failure: recorded and paced below —
+                    // never propagated (a propagated error would kill the
+                    // run and orphan its in-flight workers).
+                    Err(error) => PassPoll::PollFailed(error),
+                },
                 () = async move {
                     match shutdown {
                         // Ok(()) = a signal; Err = the sender was dropped,
@@ -917,6 +926,19 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 }
                 self.plan_and_spawn(counters, events, elapsed, now, snapshot)
                     .await
+            }
+            PassPoll::PollFailed(error) => {
+                // Transient board failure: count it, journal it, pace the
+                // next pass — the loop stays alive and keeps supervising
+                // any in-flight workers. Propagating would end the run
+                // without a drain, leaving running rows and detached
+                // worker tasks behind.
+                counters.poll_failures += 1;
+                events.push(LoopEvent::PollFailed {
+                    message: error.to_string(),
+                });
+                self.pace_no_spawn(events, elapsed);
+                Ok(false)
             }
             PassPoll::Shutdown => {
                 // The poll future is dropped mid-request; the signal that

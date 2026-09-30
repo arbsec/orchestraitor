@@ -61,7 +61,10 @@ weakened guard is a runaway loop.
   the next run.
 - **Terminal stops.** The spend soft cap and the run budget end the invocation with a
   typed stop reason (in the summary JSON); empty-queue no-ops are transient — the loop
-  backs off and re-polls.
+  backs off and re-polls. A failed board poll (network blip, rate limit) is transient
+  too: it is counted in the summary (`poll-failures`), journaled as `poll-failed`, and
+  the next pass is paced out — the loop stays alive and keeps supervising in-flight
+  workers. The run budget still bounds the poll while it waits.
 
 ## Retry and reselection
 
