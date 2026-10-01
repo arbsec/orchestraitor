@@ -43,12 +43,13 @@ board poll → manager selection → worker implementation → structured change
 - **Adversarial review** — independent review converges on the result before merge.
 - **Human-gated merge** — security-sensitive changes always require human review.
 
-The loop is bounded by an explicit guard set (issue #310): attempts, re-plans, worker
+The loop will be bounded by an explicit guard set (issue #310): attempts, re-plans, worker
 timeout, concurrency cap, supervisor stall kill, exponential backoff, a daily spend soft cap,
 and a run budget. Guard-weakening configuration is rejected fail-closed. Run state is durable
 (`loop.db`, one row per supervised run, updated with heartbeat liveness and a terminal
 status; the decision records in `campaign.db` are the append-only audit trail), and a
-single-instance lock ensures only one loop invocation runs at a time.
+single-instance lock ensures only one loop invocation runs at a time. These loop mechanics
+land with #434 — they are not shipped yet.
 
 See [`docs/cli/orc-campaign.md`](docs/cli/orc-campaign.md) for the manager selection pass;
 the cron-shaped `orc loop` runner and its `docs/cli/orc-loop.md` reference land with the
@@ -110,8 +111,9 @@ The loop's first concrete surfaces ship today:
 - [`orc github mint-token`](docs/cli/orc-github.md) — GitHub App installation-token minting
   (non-secret metadata only).
 - [`orc board query`](docs/cli/orc-board.md) — the read-only `board.query` coordinator
-  decision tool against the board (#458): typed filter search plus a transitive
-  blocked-graph walk with cycle detection.
+  decision tool (#458): typed filter search plus a transitive blocked-graph walk with cycle
+  detection. In this slice it reads a deterministic in-memory fixture board; the live
+  sqlite/GitHub provider wiring is a follow-up (#318 split).
 - The `orchestraitor-board-contract` crate — the `BoardProvider` contract with a
   write-through, board-wins read cache (spec §9.43).
 
@@ -187,11 +189,12 @@ orc models rollback
 orc github mint-token
 orc routing resolve --role <id> [--json]
 orc campaign run --once [--json]
-orc board query <item> [--json]
+orc board query [--blocked-by <item-id> | [--item-type <type>] [--status <name>] [--field <name>=<option>]...] [--json]
 orc loop --max-cycles N [--json]
 ```
 
-The last line lands with #434; `orc board query` shipped with #458.
+The last line lands with #434; `orc board query` shipped with #458 (fixture board;
+`--blocked-by` selects blocked-graph mode, the filter flags select filter mode).
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
 and profile contribution placeholder. `orc config validate` rejects ambiguous same-layer
