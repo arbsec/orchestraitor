@@ -69,6 +69,30 @@ fn resolved_config(paths: &ConfigPaths) -> Result<OrchestraitorConfig> {
     })
 }
 
+/// Resolves the layered config into the `github_app` block, failing typed
+/// when absent, and constructs the [`GitHubAppAuth`] minter from it. Shared
+/// by every subcommand that needs App credentials so validation and the
+/// missing-credential diagnostics stay identical across commands.
+///
+/// # Errors
+/// Returns a typed diagnostic when the layered config fails to resolve, the
+/// `github_app` block is absent, or any required credential key is missing.
+fn github_app_auth(config: &OrchestraitorConfig) -> Result<GitHubAppAuth> {
+    let github_app = config.github_app.as_ref().ok_or_else(|| {
+        miette!(
+            "github_app configuration is not set (need client_id, installation_id, private_key_uri; see docs/cli/orc-github.md)"
+        )
+    })?;
+    let client_id = required(github_app.client_id.as_ref(), "client_id")?.clone();
+    let installation_id = *required(github_app.installation_id.as_ref(), "installation_id")?;
+    let private_key_uri = required(github_app.private_key_uri.as_ref(), "private_key_uri")?.clone();
+    Ok(GitHubAppAuth::new(
+        client_id,
+        installation_id,
+        private_key_uri,
+    ))
+}
+
 /// Effective service-identity enforcement mode (`recommended` when unset).
 fn enforcement_mode(config: &OrchestraitorConfig) -> ServiceIdentityEnforcement {
     config
@@ -166,16 +190,12 @@ fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<(Strin
 /// `Authorization` header or a child environment — never printed or logged.
 fn mint_installation_token(paths: &ConfigPaths) -> Result<(u64, InstallationToken)> {
     let config = resolved_config(paths)?;
-    let Some(github_app) = config.github_app else {
-        return Err(miette!(
-            "github_app configuration is not set (need client_id, installation_id, private_key_uri; see docs/cli/orc-github.md)"
-        ));
-    };
-    let client_id = required(github_app.client_id.as_ref(), "client_id")?.clone();
+    let auth = github_app_auth(&config)?;
+    let github_app = config
+        .github_app
+        .as_ref()
+        .ok_or_else(|| miette!("github_app configuration is not set"))?;
     let installation_id = *required(github_app.installation_id.as_ref(), "installation_id")?;
-    let private_key_uri = required(github_app.private_key_uri.as_ref(), "private_key_uri")?.clone();
-
-    let auth = GitHubAppAuth::new(client_id, installation_id, private_key_uri);
     let transport =
         ReqwestInstallationTransport::new(paths.github_api_endpoint.clone()).into_diagnostic()?;
     let token = auth.installation_token(&transport).into_diagnostic()?;
@@ -366,23 +386,8 @@ fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
 /// for the slug, then an unauthenticated `GET /users/{slug}[bot]` for the bot
 /// user id. Both responses are validated; failures are typed and token-free.
 fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
-    let layers = load_layers(paths)?;
-    let config = layers.resolver.resolve_config().map_err(|error| {
-        miette!(
-            "configuration validation failed: {}",
-            error.structured().cause
-        )
-    })?;
-    let github_app = config.github_app.as_ref().ok_or_else(|| {
-        miette!(
-            "github_app configuration is not set (need client_id, installation_id, private_key_uri; see docs/cli/orc-github.md)"
-        )
-    })?;
-    let client_id = required(github_app.client_id.as_ref(), "client_id")?.clone();
-    let installation_id = *required(github_app.installation_id.as_ref(), "installation_id")?;
-    let private_key_uri = required(github_app.private_key_uri.as_ref(), "private_key_uri")?.clone();
-
-    let auth = GitHubAppAuth::new(client_id, installation_id, private_key_uri);
+    let config = resolved_config(paths)?;
+    let auth = github_app_auth(&config)?;
     let jwt = auth.app_jwt().into_diagnostic()?;
     let transport = ApiTransport::new(paths.github_api_endpoint.clone())?;
     let (status, body) = transport.request_bearer("GET", "app", jwt.expose_secret(), None)?;
