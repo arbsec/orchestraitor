@@ -12,7 +12,7 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 
 **Every new commit invalidates earlier convergence.** A review generation run against commit A says nothing about commit A+1. The next generation re-examines the full diff at the new HEAD.
 
-**Exception: verified-commit ref swing.** A force-swing of the branch ref (replaying the same commits as GitHub-signed commits — see [verified-commit-path.md](verified-commit-path.md)) does **not** invalidate convergence by itself, **if** the resulting tree is byte-identical to the reviewed head: `git diff <old-oid> <new-oid>` must be empty. The reviewer/orchestrator MUST verify tree identity and record it on the PR; an unverified swing, or any tree difference, invalidates convergence as with any push.
+**Exception: verified-commit ref swing.** A force-swing of the branch ref (replaying the same commits as GitHub-signed commits — see [verified-commit-path.md](verified-commit-path.md)) does **not** invalidate convergence by itself, **if** the resulting tree is byte-identical to the reviewed head: `git rev-parse <old-oid>^{tree}` and `git rev-parse <new-oid>^{tree}` must return the same tree object ID. (Tree identity, not `git diff` emptiness: `git diff` can run configured `textconv` filters, which may be one-way and lossy, so different trees can display no diff.) The reviewer/orchestrator MUST verify tree identity and record it on the PR; an unverified swing, or any tree difference, invalidates convergence as with any push.
 
 ## What "noteworthy" means
 

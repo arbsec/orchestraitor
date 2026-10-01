@@ -1,9 +1,9 @@
 # Verified-commit path (App-API pushes)
 
 The repo's `main` ruleset enforces `required_signatures`: a commit shows `verified: true`
-only when GitHub itself can attest to it. A locally-created commit carrying the bot
-identity in author/committer name+email is **always** unverified — attribution metadata is
-not a signature. Verified commits come from exactly two sources:
+only when GitHub itself can attest to it. An unsigned locally-created commit carrying the
+bot identity in author/committer name+email is **always** unverified — attribution metadata
+is not a signature. Verified commits come from exactly two sources:
 
 1. **API-created commits.** Commits created via GraphQL `createCommitOnBranch` by the App
    installation are signed by GitHub (`web-flow` committer) and verify as `reason=valid`.
@@ -38,6 +38,7 @@ Authorization headers), so the token cannot leak through a proxied request.
 - **New agent commits:** create them via the App API (`createCommitOnBranch`) from the
   start — do not push unsigned commits and replay afterwards.
 - **Existing unsigned chains:** run the replay script, then verify
-  `git diff <old-oid> <new-oid>` is empty and record tree identity on the PR (see
+  `git rev-parse <old-oid>^{tree}` and `git rev-parse <new-oid>^{tree}` return the
+  same tree object ID and record tree identity on the PR (see
   [pr-convergence.md](pr-convergence.md) for why a tree-identical swing preserves
   review convergence).
