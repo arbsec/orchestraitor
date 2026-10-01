@@ -35,6 +35,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   board provider is configured; when none is, the gateway's tool router
   disables the route (hidden from `tools/list`, calls rejected). Documented
   in [docs/cli/orc-board.md](docs/cli/orc-board.md).
+- Continuous coverage reporting in CI (`.github/workflows/coverage.yml`): every push to
+  `main` and every pull request touching the workspace runs the test suite under
+  `cargo llvm-cov nextest` and publishes per-file LCOV coverage to
+  [qlty.sh](https://qlty.sh), with `lcov.info` also attached as a 30-day workflow
+  artifact. Publishing is skipped — without failing the workflow — when the
+  `QLTY_COVERAGE_TOKEN` secret is not yet configured or on fork pull requests.
+  No coverage threshold is enforced yet (intended targets per
+  `.agents/project/orchestraitor-workflow.md`: the Arbitraitor integration boundary and
+  the transaction/normalization engine, parity gate in `docs/spec/tech-stack.md` §15).
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at

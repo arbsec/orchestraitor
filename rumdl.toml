@@ -22,3 +22,8 @@ indent = 2
 
 [MD012]
 maximum = 1
+
+[per-file-ignores]
+# Workflow YAML: comment blocks are markdown to rumdl's parser, and action
+# pins use aligned double spaces (same pattern the existing workflows carry).
+".github/workflows/*.yml" = ["MD022", "MD023", "MD026", "MD034", "MD064"]
