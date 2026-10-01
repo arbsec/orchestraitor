@@ -23,7 +23,7 @@
 //! (`parent_op_id` chains to the invoking operation; the payload records the
 //! chain head as `delegation_chain`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use orchestraitor_board_contract::{
     BoardContractError, BoardFieldValue, BoardItem, BoardItemId, BoardItemType, BoardProvider,
@@ -91,6 +91,8 @@ pub enum BoardQueryItemType {
 }
 
 impl From<BoardQueryItemType> for BoardItemType {
+    /// Lossily maps the tool-facing item class onto the contract's; the
+    /// tool domain is a subset, so the mapping is total.
     fn from(value: BoardQueryItemType) -> Self {
         match value {
             BoardQueryItemType::Task => Self::Task,
@@ -264,6 +266,10 @@ pub enum BoardQueryError {
 }
 
 impl From<BoardContractError> for BoardQueryError {
+    /// Collapses a contract error into the tool's static provider label:
+    /// contract error text is structural (crate-level guarantee), but the
+    /// tool surface carries a fixed tag only so log lines cannot widen
+    /// with board content (§9.23.4).
     fn from(error: BoardContractError) -> Self {
         // Contract error text is structural (crate-level guarantee): it names
         // the failing operation class, never board content — but the tool
@@ -554,16 +560,28 @@ async fn project_item(
     })
 }
 
-/// Walks the transitive blocked set breadth-first from the root. Cycle-safe:
-/// a revisit produces the typed [`BlockedCycle`] and the walk stops (§9.40 —
-/// a cycle is board-data corruption, surfaced, never auto-broken).
+/// Walks the transitive blocked set from the root, tracking the SHORTEST
+/// path depth at which each item was reached. Cycle-safe: a back edge to a
+/// node on the current DFS path produces the typed [`BlockedCycle`] and the
+/// walk stops (§9.40 — a cycle is board-data corruption, surfaced, never
+/// auto-broken).
 ///
-/// Cycle detection is classic back-edge detection (issue #458 F1): a global
-/// `visited` set guarantees termination; the DFS path (kept as an explicit
-/// stack of frames) tracks the CURRENT walk. Only an edge back to a node ON
-/// THE CURRENT PATH is a cycle — a diamond DAG (root ← {a, b} ← c) revisits
-/// `c` from both branches but is acyclic and must not be reported as
-/// corruption.
+/// Cycle detection is classic back-edge detection (issue #458 F1): the DFS
+/// path (kept as an explicit stack of frames) tracks the CURRENT walk. Only
+/// an edge back to a node ON THE CURRENT PATH is a cycle — a diamond DAG
+/// (root ← {a, b} ← c) revisits `c` from both branches but is acyclic and
+/// must not be reported as corruption.
+///
+/// Revisit handling tracks the shortest depth per item (issue #458-gen3):
+/// a global visited set alone would let a long branch claim a shared node
+/// first and drop the descendants reachable within the cap via a shorter
+/// path. Instead, a node reached at a strictly smaller path depth is
+/// RE-EXPANDED with the shorter depth (its subtree frame is replaced with
+/// the shorter depth); a revisit at `>=` the recorded depth is skipped.
+/// Termination holds because each item's recorded depth strictly decreases
+/// on every re-expansion. The cap still bounds path depth, never breadth
+/// (issue #458-gen2 N3): a branch stopped at depth > [`MAX_BLOCKED_DEPTH`]
+/// sets `depth_capped` and its siblings continue.
 async fn walk_blocked(
     root: &BoardItemId,
     root_exists: bool,
@@ -581,8 +599,10 @@ async fn walk_blocked(
     // Fields are board-global: fetch once, not per item (issue #458 F5).
     let fields_catalog = provider.fields().await?;
 
-    let mut visited: HashSet<&BoardItemId> = HashSet::new();
-    visited.insert(root);
+    // Shortest path depth seen per item; the root sits at depth 0 (issue
+    // #458-gen3: revisits only skip when the new path is not shorter).
+    let mut seen: HashMap<&BoardItemId, usize> = HashMap::new();
+    seen.insert(root, 0);
     let mut path_ids: Vec<String> = vec![root.to_string()];
     let mut blocking_items: Vec<&BoardItemId> = Vec::new();
     let mut cycle: Option<BlockedCycle> = None;
@@ -604,35 +624,43 @@ async fn walk_blocked(
             continue;
         }
         let path_depth = frame;
-        if visited.contains(item) {
-            // Revisit: a cycle ONLY if the node is on the current DFS path
-            // (back edge). Re-convergence from a sibling branch (diamond)
-            // revisits but is not corruption. Either way the subtree was
-            // already walked; termination is guaranteed.
-            if path_ids.iter().any(|id| id == item.as_str()) {
-                cycle = Some(BlockedCycle {
-                    item: item.to_string(),
-                    path: path_ids.clone(),
-                });
-                break;
+        match seen.get(item) {
+            Some(&seen_depth) if path_depth >= seen_depth => {
+                // Revisit at equal or greater depth: no new reachability.
+                if path_ids.iter().any(|id| id == item.as_str()) {
+                    // Back edge to a node on the current DFS path: a cycle
+                    // (§9.40). Re-convergence from a sibling branch (a
+                    // diamond) is not corruption.
+                    cycle = Some(BlockedCycle {
+                        item: item.to_string(),
+                        path: path_ids.clone(),
+                    });
+                    break;
+                }
             }
-            continue;
-        }
-        if path_depth > MAX_BLOCKED_DEPTH {
-            // Path depth, never breadth: walking stops along THIS branch
-            // only (issue #458-gen2 N3); siblings continue.
-            depth_capped = true;
-            continue;
-        }
-        visited.insert(item);
-        path_ids.push(item.to_string());
-        blocking_items.push(item);
-        // Unwind marker first (LIFO: popped after all blockers).
-        stack.push((item, EXIT));
-        if let Some(blockers) = blocked_by.get(item) {
-            let child_depth = path_depth.saturating_add(1);
-            for blocker in blockers {
-                stack.push((blocker, child_depth));
+            _ if path_depth > MAX_BLOCKED_DEPTH => {
+                // Path depth, never breadth: walking stops along THIS branch
+                // only (issue #458-gen2 N3); siblings continue. Unseen nodes
+                // beyond the cap cannot hide shorter-path reachability: a
+                // recorded depth is always <= the cap.
+                depth_capped = true;
+            }
+            _ => {
+                // First visit, or a STRICTLY shorter path than any previous
+                // one: expand (or re-expand) the subtree at this depth.
+                seen.insert(item, path_depth);
+                // Replace a stale unwind marker from a previous, longer
+                // walk: the deeper pass's EXIT frame now sits below this
+                // one, so popping restores the path correctly either way.
+                stack.push((item, EXIT));
+                path_ids.push(item.to_string());
+                blocking_items.push(item);
+                if let Some(blockers) = blocked_by.get(item) {
+                    let child_depth = path_depth.saturating_add(1);
+                    for blocker in blockers {
+                        stack.push((blocker, child_depth));
+                    }
+                }
             }
         }
     }
@@ -691,6 +719,8 @@ fn truncate_payload_json(value: &Value) -> Value {
 /// [`MAX_FILTER_FIELDS`] entries, appending a static marker when overflow is
 /// dropped — the audit record shows the bound was hit, never silently.
 fn cap_filter_fields(value: &Value) -> Value {
+    /// Static marker appended when the serialized `filter.fields` array
+    /// exceeds [`MAX_FILTER_FIELDS`] entries.
     const MARKER: &str = "…[filter fields truncated]";
     match value {
         Value::Object(object) => {
@@ -724,6 +754,15 @@ const MAX_CHAIN_PRINCIPALS: usize = 32;
 /// Static marker appended when the principal list exceeds the cap.
 const CHAIN_TRUNCATION_MARKER: &str = "…[chain truncated]";
 
+/// Records one completed invocation into the caller-owned store (the
+/// empty-store path; the gateway's shared-store path appends via
+/// [`crate::gateway::run_board_query_shared`] instead). Payload layout,
+/// truncation, and chain labelling follow [`build_invocation_event`].
+///
+/// # Errors
+///
+/// Returns [`BoardQueryError::EventStore`] when the store rejects the
+/// envelope; the error is typed and carries no board content.
 fn record_invocation(
     mode: &BoardQueryMode,
     summary: &InvocationSummary,
@@ -872,6 +911,7 @@ mod tests {
         })
     }
 
+    /// A two-principal client-asserted delegation chain for one invocation.
     fn chain() -> DelegationChain {
         DelegationChain {
             correlation_id: OperationId::new(),
@@ -883,10 +923,12 @@ mod tests {
         }
     }
 
+    /// A fresh in-memory audit store per test: isolation by construction.
     fn empty_store() -> InMemoryAuditStore {
         InMemoryAuditStore::default()
     }
 
+    /// Search mode returns typed items with field values and direct-blocker edges.
     #[tokio::test]
     async fn search_returns_typed_items_with_fields_and_edges() {
         let board = board_fixture();
@@ -924,6 +966,7 @@ mod tests {
         );
     }
 
+    /// A typed field criterion matches conjunctively (single exact hit).
     #[tokio::test]
     async fn search_field_filter_is_conjunctive_and_typed() {
         let board = board_fixture();
@@ -950,6 +993,7 @@ mod tests {
         assert_eq!(result.items[0].id, "root");
     }
 
+    /// The blocked-graph mode walks the full transitive blocker set, cycle-free, uncapped.
     #[tokio::test]
     async fn blocked_graph_walks_transitively() {
         let board = board_fixture();
@@ -974,6 +1018,7 @@ mod tests {
         assert!(!graph.depth_capped);
     }
 
+    /// A dependency cycle surfaces as the typed [`BlockedCycle`] with its DFS path.
     #[tokio::test]
     async fn blocked_graph_surfaces_cycle_typed() {
         let board = board_fixture();
@@ -999,6 +1044,7 @@ mod tests {
         );
     }
 
+    /// A nonexistent root is reported via `root_exists: false`, not an error.
     #[tokio::test]
     async fn blocked_graph_reports_missing_root_typed() {
         let board = board_fixture();
@@ -1173,6 +1219,7 @@ mod tests {
         );
     }
 
+    /// One invocation appends exactly one `ToolRequest` event carrying the tool name, mode, summary, and client-asserted chain labels.
     #[tokio::test]
     async fn invocation_recorded_as_tool_request_with_delegation_chain() {
         let board = board_fixture();
@@ -1210,6 +1257,7 @@ mod tests {
         );
     }
 
+    /// A hostile filter value enters the audit record truncated with the static marker — the payload tail never survives.
     #[tokio::test]
     async fn hostile_filter_value_is_truncated_in_event_payload() {
         let board = board_fixture();
@@ -1341,9 +1389,194 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Issue #458-gen3: a shared node first reached near the depth cap via
+    // a long branch must still be RE-EXPANDED when a shorter path reaches
+    // it later — a global visited set dropped those descendants.
+    // ------------------------------------------------------------------
+
+    /// Diamond at the cap boundary: a long chain (root -> long-000 -> … ->
+    /// long-062) first reaches `shared` at path depth 64, and a short path
+    /// (root -> a-short -> shared) reaches it at depth 2 LATER in DFS order.
+    /// Under the old global-visited walker the `shared` subtree was claimed
+    /// by the long branch and skipped on the short visit, dropping every
+    /// `shared` descendant (`shared-child`). The exact blocking set must
+    /// include the full subtree reachable within the cap via the shorter
+    /// path.
+    #[tokio::test]
+    async fn shared_node_near_cap_is_reexpanded_via_shorter_path() {
+        // Chain: root(0) -> long-000(1) -> … -> long-062(63) -> shared(64).
+        let chain_len = super::MAX_BLOCKED_DEPTH - 1; // 63 long-* nodes
+        let board = InMemoryBoardProvider::new(|setup| {
+            setup.item("root", BoardItemType::Task, "Root", "b", "In Progress", &[]);
+            setup.item(
+                "a-short",
+                BoardItemType::Task,
+                "A short",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.item(
+                "shared",
+                BoardItemType::Task,
+                "Shared",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.item(
+                "shared-child",
+                BoardItemType::Task,
+                "SC",
+                "b",
+                "In Progress",
+                &[],
+            );
+            // Edge insertion order controls DFS pop order: the LAST pushed
+            // blocker pops FIRST. Insert the short edge first so `long-1`
+            // pops before `short` and the long branch reaches `shared` first.
+            setup.edge("root", "a-short");
+            for i in 0..chain_len {
+                let id = format!("long-{i:03}");
+                setup.item(&id, BoardItemType::Task, &id, "b", "In Progress", &[]);
+                let parent = if i == 0 {
+                    String::from("root")
+                } else {
+                    format!("long-{:03}", i - 1)
+                };
+                setup.edge(&parent, &id);
+            }
+            // Short path into shared: root -> a-short -> shared (depth 2).
+            setup.edge("a-short", "shared");
+            // Long path into shared: long-062 -> shared (depth 64).
+            setup.edge(&format!("long-{:03}", chain_len - 1), "shared");
+            // Descendant reachable ONLY via shared (depth 3 via short path).
+            setup.edge("shared", "shared-child");
+        });
+        let mut store = empty_store();
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let result = board_query(&board, &mode, &chain(), &mut store)
+            .await
+            .expect("query succeeds");
+        let BoardQueryResultKind::BlockedBy(graph) = result else {
+            panic!("expected blocked graph");
+        };
+        assert!(graph.cycle.is_none(), "this diamond DAG is acyclic");
+        // The long branch reaches shared at depth 64 and expands
+        // shared-child at 65 — that branch IS capped; the short path still
+        // delivers every node (the flag reports the capped branch, not a
+        // lost result).
+        assert!(graph.depth_capped);
+        let ids: Vec<&str> = graph.blocking.iter().map(|item| item.id.as_str()).collect();
+        let mut expected: Vec<String> = (0..chain_len).map(|i| format!("long-{i:03}")).collect();
+        expected.extend(
+            ["root", "shared", "shared-child", "a-short"]
+                .into_iter()
+                .skip(1)
+                .map(String::from),
+        );
+        expected.sort();
+        let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(
+            ids, expected_refs,
+            "EXACT set: long chain + short + shared + shared-child — \
+             shared-child proves the re-expansion at the shorter depth"
+        );
+    }
+
+    /// Same shape as [`Self::shared_node_near_cap_is_reexpanded_via_shorter_path`]
+    /// but the short path lands at depth 2 and the shared node's own
+    /// subtree extends deeper than one hop: the re-expansion must carry the
+    /// SHORTER depth into the subtree, not merely re-list the node.
+    #[tokio::test]
+    async fn shorter_path_reexpansion_uses_shorter_depth_for_descendants() {
+        // root(0) -> long-000(1) -> … -> long-062(63) -> shared(64)
+        //   -> deep-a(65: capped via the long path)
+        // root(0) -> short(1) -> shared(2) -> deep-a(3) -> deep-b(4)
+        let chain_len = super::MAX_BLOCKED_DEPTH - 1;
+        let board = InMemoryBoardProvider::new(|setup| {
+            setup.item("root", BoardItemType::Task, "Root", "b", "In Progress", &[]);
+            setup.item(
+                "a-short",
+                BoardItemType::Task,
+                "A short",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.item(
+                "shared",
+                BoardItemType::Task,
+                "Shared",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.item(
+                "deep-a",
+                BoardItemType::Task,
+                "DeepA",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.item(
+                "deep-b",
+                BoardItemType::Task,
+                "DeepB",
+                "b",
+                "In Progress",
+                &[],
+            );
+            setup.edge("root", "a-short");
+            for i in 0..chain_len {
+                let id = format!("long-{i:03}");
+                setup.item(&id, BoardItemType::Task, &id, "b", "In Progress", &[]);
+                let parent = if i == 0 {
+                    String::from("root")
+                } else {
+                    format!("long-{:03}", i - 1)
+                };
+                setup.edge(&parent, &id);
+            }
+            setup.edge("a-short", "shared");
+            setup.edge(&format!("long-{:03}", chain_len - 1), "shared");
+            // deep-a is two hops below shared: unreachable at depth 66 via
+            // the long path (capped twice over) but at depth 4 via short.
+            setup.edge("shared", "deep-a");
+            setup.edge("deep-a", "deep-b");
+        });
+        let mut store = empty_store();
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let result = board_query(&board, &mode, &chain(), &mut store)
+            .await
+            .expect("query succeeds");
+        let BoardQueryResultKind::BlockedBy(graph) = result else {
+            panic!("expected blocked graph");
+        };
+        assert!(graph.cycle.is_none());
+        assert!(graph.depth_capped);
+        let ids: Vec<&str> = graph.blocking.iter().map(|item| item.id.as_str()).collect();
+        let mut expected: Vec<String> = (0..chain_len).map(|i| format!("long-{i:03}")).collect();
+        expected.extend(["deep-a", "deep-b", "shared", "a-short"].map(String::from));
+        expected.sort();
+        let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(
+            ids, expected_refs,
+            "EXACT set: deep-a and deep-b reachable ONLY through the \
+             shorter path's re-expanded subtree"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // N4 (issue #458-gen2): principal labels are bounded client data.
     // ------------------------------------------------------------------
 
+    /// Oversized principal labels are truncated and over-long chains are capped with a static marker — overflow is marked, never silent.
     #[tokio::test]
     async fn oversized_principal_labels_are_truncated_and_chain_bounded() {
         let board = board_fixture();
@@ -1397,6 +1630,7 @@ mod tests {
         );
     }
 
+    /// An instruction-shaped filter value is opaque data: identical typed outcome as any non-match, recorded verbatim (truncated), with no board side effect.
     #[tokio::test]
     async fn injection_shaped_filter_value_is_inert_data() {
         let board = board_fixture();
@@ -1463,6 +1697,7 @@ mod tests {
         assert_eq!(after.items.len(), 8, "all fixture items intact");
     }
 
+    /// A blank item id is rejected as the typed `invalid-item-id` provider error.
     #[tokio::test]
     async fn missing_item_id_is_a_typed_error() {
         let board = board_fixture();
@@ -1477,21 +1712,32 @@ mod tests {
     }
 
     /// Contract-transport failure maps to the typed provider error.
+    ///
+    /// A provider whose every method fails with a `Transport` error: used
+    /// to prove that provider failures surface as the typed
+    /// [`BoardQueryError::Provider`] — never as missing data, never as a
+    /// panic — and that failed invocations record nothing.
     struct FailingProvider;
 
     #[async_trait::async_trait]
     impl BoardProvider for FailingProvider {
+        // Every method fails with `Transport`: a deliberate always-broken
+        // provider for typed-error tests. Bodies are trait-signature
+        // boilerplate and carry no behavior to document individually.
+        /// Always fails: `Transport` (test stub).
         async fn item(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
         ) -> Result<orchestraitor_board_contract::BoardItem, BoardContractError> {
             Err(BoardContractError::Transport { operation: "item" })
         }
+        /// Always fails: `Transport` (test stub).
         async fn items(
             &self,
         ) -> Result<Vec<orchestraitor_board_contract::BoardItem>, BoardContractError> {
             Err(BoardContractError::Transport { operation: "items" })
         }
+        /// Always fails: `Transport` (test stub).
         async fn create_item(
             &self,
             _item_type: BoardItemType,
@@ -1502,6 +1748,7 @@ mod tests {
                 operation: "create_item",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn update_item_body(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
@@ -1512,6 +1759,7 @@ mod tests {
                 operation: "update_item_body",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn statuses(
             &self,
         ) -> Result<Vec<orchestraitor_board_contract::BoardStatus>, BoardContractError> {
@@ -1519,6 +1767,7 @@ mod tests {
                 operation: "statuses",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn set_item_status(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
@@ -1528,6 +1777,7 @@ mod tests {
                 operation: "set_item_status",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn fields(
             &self,
         ) -> Result<Vec<orchestraitor_board_contract::BoardField>, BoardContractError> {
@@ -1535,6 +1785,7 @@ mod tests {
                 operation: "fields",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn field_value(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
@@ -1544,6 +1795,7 @@ mod tests {
                 operation: "field_value",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn set_field_value(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
@@ -1554,6 +1806,7 @@ mod tests {
                 operation: "set_field_value",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn dependency_edges(
             &self,
         ) -> Result<Vec<orchestraitor_board_contract::DependencyEdge>, BoardContractError> {
@@ -1561,6 +1814,7 @@ mod tests {
                 operation: "dependency_edges",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn add_dependency_edge(
             &self,
             _blocked: &orchestraitor_board_contract::BoardItemId,
@@ -1570,6 +1824,7 @@ mod tests {
                 operation: "add_dependency_edge",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn remove_dependency_edge(
             &self,
             _blocked: &orchestraitor_board_contract::BoardItemId,
@@ -1579,6 +1834,7 @@ mod tests {
                 operation: "remove_dependency_edge",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn cross_references(
             &self,
             _id: &orchestraitor_board_contract::BoardItemId,
@@ -1587,6 +1843,7 @@ mod tests {
                 operation: "cross_references",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn add_cross_reference(
             &self,
             _from: &orchestraitor_board_contract::BoardItemId,
@@ -1596,6 +1853,7 @@ mod tests {
                 operation: "add_cross_reference",
             })
         }
+        /// Always fails: `Transport` (test stub).
         async fn search(
             &self,
             _filter: &orchestraitor_board_contract::BoardSearch,
@@ -1606,6 +1864,7 @@ mod tests {
         }
     }
 
+    /// A transport failure surfaces as the typed provider error and records no event.
     #[tokio::test]
     async fn provider_transport_failure_is_typed_and_recorded_nothing() {
         let mut store = empty_store();
@@ -1626,6 +1885,7 @@ mod tests {
     // `provider.item` must NOT surface as `root_exists: false` — only the
     // typed `ItemNotFound` means the root is missing. Any other provider
     // error propagates.
+    /// A transport failure behind the root lookup propagates as an error — never reported as a missing root.
     #[tokio::test]
     async fn blocked_by_transport_failure_propagates_not_reported_missing() {
         let mut store = empty_store();
@@ -1640,6 +1900,7 @@ mod tests {
 
     // CodeRabbit Minor (merge gate): filter fields in the audit payload are
     // bounded like the delegation chain — overflow is marked, never silent.
+    /// More filter fields than [`MAX_FILTER_FIELDS`] are capped with a static marker in the audit payload.
     #[tokio::test]
     async fn oversized_filter_fields_are_capped_in_audit_payload() {
         let board = board_fixture();
