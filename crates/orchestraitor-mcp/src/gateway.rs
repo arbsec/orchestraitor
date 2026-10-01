@@ -94,6 +94,13 @@ impl McpGateway {
 #[tool_router(router = static_tool_router, vis = "pub(crate)")]
 impl McpGateway {
     /// Read a UTF-8 project file and return content plus digest.
+    ///
+    /// Routes to the project-scoped filesystem tools; errors surface as
+    /// structured payloads, never panics.
+    /// Read a UTF-8 project file and return content plus digest.
+    ///
+    /// Routes to the project-scoped filesystem tools; errors surface as
+    /// structured payloads, never panics.
     #[tool(
         name = "fs.read",
         description = "Read a project file and return content plus digest"
@@ -119,6 +126,7 @@ impl McpGateway {
         name = "fs.list",
         description = "List direct children of a project directory"
     )]
+    /// List direct children of a project directory (structured result).
     fn fs_list(
         &self,
         Parameters(input): Parameters<PathInput>,
@@ -131,6 +139,8 @@ impl McpGateway {
         name = "fs.search",
         description = "Search UTF-8 project files for a literal string"
     )]
+    /// Literal substring search over UTF-8 project files; results are
+    /// project-relative paths (never escaped outside the scope).
     fn fs_search(
         &self,
         Parameters(input): Parameters<SearchInput>,
@@ -143,6 +153,8 @@ impl McpGateway {
         name = "fs.apply_patch",
         description = "Apply a unified patch when expected_digest matches the current file digest"
     )]
+    /// Apply a unified diff patch under optimistic concurrency: the call
+    /// fails closed when `expected_digest` no longer matches the file.
     fn fs_apply_patch(
         &self,
         Parameters(input): Parameters<ApplyPatchRequest>,
@@ -160,6 +172,7 @@ impl McpGateway {
     }
 
     #[tool(name = "fs.rename", description = "Rename a project file or directory")]
+    /// Rename (move) a project file or directory within the project scope.
     fn fs_rename(
         &self,
         Parameters(input): Parameters<RenameInput>,
@@ -168,6 +181,8 @@ impl McpGateway {
     }
 
     #[tool(name = "fs.remove", description = "Remove a project file or directory")]
+    /// Remove a project file or directory; the project root itself is
+    /// never removable.
     fn fs_remove(
         &self,
         Parameters(input): Parameters<PathInput>,
@@ -180,6 +195,8 @@ impl McpGateway {
         name = "format.run",
         description = "Run the configured formatter via policy-mediated execution"
     )]
+    /// `format.run`: invoke the configured formatter through Arbitraitor
+    /// policy mediation (inspection before execution).
     fn format_run(&self) -> Result<CallToolResult, ErrorData> {
         self.structured(
             self.workflow
@@ -192,6 +209,8 @@ impl McpGateway {
         name = "lint.run",
         description = "Run the configured linter via policy-mediated execution"
     )]
+    /// `lint.run`: invoke the configured linter through Arbitraitor
+    /// policy mediation (inspection before execution).
     fn lint_run(&self) -> Result<CallToolResult, ErrorData> {
         self.structured(
             self.workflow
@@ -204,6 +223,8 @@ impl McpGateway {
         name = "check.run",
         description = "Run configured checks via policy-mediated execution"
     )]
+    /// `check.run`: invoke configured checks through Arbitraitor policy
+    /// mediation (inspection before execution).
     fn check_run(&self) -> Result<CallToolResult, ErrorData> {
         self.structured(
             self.workflow
@@ -216,6 +237,8 @@ impl McpGateway {
         name = "test.run",
         description = "Run configured tests via policy-mediated execution"
     )]
+    /// `test.run`: invoke the configured test task through Arbitraitor
+    /// policy mediation (inspection before execution).
     fn test_run(&self) -> Result<CallToolResult, ErrorData> {
         self.structured(
             self.workflow
@@ -228,6 +251,8 @@ impl McpGateway {
         name = "task.run",
         description = "Run a named project task via policy-mediated execution"
     )]
+    /// `task.run`: invoke one named project task through Arbitraitor
+    /// policy mediation (inspection before execution).
     fn task_run(
         &self,
         Parameters(input): Parameters<WorkflowRequest>,
@@ -245,6 +270,8 @@ impl McpGateway {
         name = "board.query",
         description = "Read-only board query: typed search (item type, status, field values) or the transitive blockedBy graph for one item"
     )]
+    /// `board.query`: the typed read-only board query tool (see
+    /// [`run_board_query_shared`] for recording semantics).
     async fn board_query(
         &self,
         Parameters(input): Parameters<BoardQueryRequest>,
@@ -279,6 +306,9 @@ impl McpGateway {
 impl ServerHandler for McpGateway {}
 
 impl McpGateway {
+    /// Wraps a typed result into an rmcp `CallToolResult`: `Ok` serializes
+    /// to structured content, `Err` maps through [`error_payload`] so tool
+    /// failures are structured data, never exceptions.
     fn structured<T>(&self, result: McpGatewayResult<T>) -> Result<CallToolResult, ErrorData>
     where
         T: Serialize,
@@ -294,23 +324,31 @@ impl McpGateway {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+/// Request shape for single-path tools (`fs.read`, `fs.stat`, `fs.list`,
+/// `fs.remove`): one project-relative path.
 struct PathInput {
     path: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+/// Request shape for `fs.search`: a project-relative path plus a literal
+/// query string.
 struct SearchInput {
     path: String,
     query: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+/// Request shape for `fs.create`: a project-relative path and the file
+/// content to write.
 struct CreateInput {
     path: String,
     content: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+/// Request shape for `fs.rename`: source and destination project-relative
+/// paths.
 struct RenameInput {
     from: String,
     to: String,
@@ -395,6 +433,9 @@ pub(crate) async fn run_board_query_shared(
         .map_err(|error| McpGatewayError::BoardQuery(error.to_string()))
 }
 
+/// Maps a typed gateway error onto the structured error payload the MCP
+/// client sees: a human-readable message plus a stable machine `code`
+/// (never board content, never internal details).
 fn error_payload(error: &McpGatewayError) -> serde_json::Value {
     serde_json::json!({
         "error": error.to_string(),
@@ -419,8 +460,11 @@ mod tests {
 
     use super::*;
 
+    /// The `#[tool_router]`/`#[tool_handler]` macros expand for the
+    /// gateway and the router-disable path keeps `ServerHandler` intact.
     #[test]
     fn rmcp_tool_macro_compiles_for_gateway() -> McpGatewayResult<()> {
+        /// Compile-time proof that the gateway implements `ServerHandler`.
         fn assert_server_handler<T: ServerHandler>() {}
         assert_server_handler::<McpGateway>();
 

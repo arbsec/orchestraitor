@@ -212,6 +212,13 @@ fn write_item_line<W: Write>(
     .into_diagnostic()
 }
 
+/// Runs `orc board query`: parses the CLI filter arguments, executes the
+/// typed query through the MCP board-query path, and renders either JSON
+/// or human-readable lines.
+///
+/// # Errors
+/// Returns a diagnostic when the mode is invalid, the board is
+/// unconfigured, or the provider fails.
 fn query<W: Write>(args: &crate::cli::BoardQueryArgs, writer: &mut W) -> Result<()> {
     use orchestraitor_events::InMemoryAuditStore;
     use orchestraitor_mcp::board_query::{BoardQueryResultKind, DelegationChain, board_query};
@@ -295,6 +302,12 @@ fn query<W: Write>(args: &crate::cli::BoardQueryArgs, writer: &mut W) -> Result<
     Ok(())
 }
 
+/// Runs `orc board ready`: lists issues eligible to start (no unresolved
+/// blockers), as JSON or human-readable lines. Skip warnings go to stderr
+/// via [`report_warnings`].
+///
+/// # Errors
+/// Returns a diagnostic when board config, auth, or GraphQL fails.
 fn ready<W: Write>(
     runtime: &tokio::runtime::Runtime,
     client: &BoardClient,
@@ -318,6 +331,12 @@ fn ready<W: Write>(
     Ok(())
 }
 
+/// Runs `orc board move`: sets one item's Status to a non-empty option
+/// name and reports the read-back-verified outcome.
+///
+/// # Errors
+/// Returns a diagnostic for a blank `--status`, or when board config,
+/// auth, or GraphQL fails.
 fn move_item<W: Write>(
     runtime: &tokio::runtime::Runtime,
     client: &BoardClient,
