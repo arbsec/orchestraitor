@@ -45,13 +45,18 @@ jobs:
       # are set explicitly (empty) in case the runner image exports them by default.
       SCCACHE_GHA_ENABLED: ""
       RUSTC_WRAPPER: ""
-      # Job-level mapping so the step-level `if: env.QLTY_COVERAGE_TOKEN != ''` guards can
-      # read the token: the `env` context in a step `if:` only sees workflow- and job-level
-      # `env:` blocks, not secret inputs. Fork PRs receive empty repository secrets, so the
-      # guards evaluate to '' there and the publish step stays skipped.
-      QLTY_COVERAGE_TOKEN: ${{ secrets.QLTY_COVERAGE_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Token-presence probe: a step `if:` cannot read `secrets` directly (the `env`
+      # context in an `if:` only sees workflow/job `env:` blocks and step outputs), and a
+      # job-level `env: QLTY_COVERAGE_TOKEN: ${{ secrets... }}` mapping would expose the
+      # raw token to every step in the job. So the secret never enters a step environment:
+      # this probe publishes only a boolean output, and the publish step receives the token
+      # exclusively via the action's `token:` input. Fork PRs and unconfigured repos see
+      # `has-token=false`, keeping the publish step skipped.
+      - name: Check for coverage token
+        id: has-token
+        run: echo "has-token=${{ secrets.QLTY_COVERAGE_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
       # Installs cargo-llvm-cov and cargo-nextest. cargo-llvm-cov auto-installs the
       # `llvm-tools-preview` rustup component for the active toolchain in CI
       # (CI is detected via the `CI` env var, so no interactive prompt).
@@ -69,19 +74,23 @@ jobs:
           name: lcov.info
           path: lcov.info
           retention-days: 30
-      # Publish to Qlty Cloud via the qlty-action. Skipped when QLTY_COVERAGE_TOKEN is
-      # unset (not yet configured, or a fork PR — fork PRs do not receive repository
-      # secrets), so the job never fails because a secret is missing. There is no
-      # initial-branch or first-upload flag to pass: qlty decides trust per branch from
-      # the uploads it receives, and publishing to `main` works as soon as this step
-      # runs there with the token set.
+      # Publish to Qlty Cloud via the qlty-action, gated on the probe output. Skipped when
+      # QLTY_COVERAGE_TOKEN is unset (not yet configured, or a fork PR — fork PRs do not
+      # receive repository secrets), so the job never fails because a secret is missing.
+      # `skip-errors: false` is explicit: the pinned action defaults it to true, which
+      # would log upload failures while the job stays green; only the missing-token path
+      # (the step-level if above) keeps the job green. There is no initial-branch or
+      # first-upload flag to pass: qlty decides trust per branch from the uploads it
+      # receives, and publishing to `main` works as soon as this step runs there with the
+      # token set.
       - name: Publish coverage to qlty.sh
-        if: env.QLTY_COVERAGE_TOKEN != ''
+        if: steps.has-token.outputs.has-token == 'true'
         uses: qltysh/qlty-action/coverage@c9b09987143d1e4ac955f4803c7bea742102feb5  # v2.4.0
         with:
           token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
           files: lcov.info
           format: lcov
+          skip-errors: false
       - name: Notice publish skipped
-        if: env.QLTY_COVERAGE_TOKEN == ''
+        if: steps.has-token.outputs.has-token != 'true'
         run: echo "::notice::QLTY_COVERAGE_TOKEN not set (or fork PR); qlty coverage publish skipped. lcov.info is available as a workflow artifact."
