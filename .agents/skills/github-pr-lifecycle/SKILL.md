@@ -67,6 +67,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   Deduplicate across loops — see review-findings.md.
                   Fix all CRITICAL/HIGH; MEDIUM unless explicitly justified+recorded;
                   LOW may be deferred with recorded reasoning.
+                  Bot-generated review comments (coderabbitai and similar) enter
+                  the same findings pipeline — deduplicated and severity-verified
+                  against code before remediation; never applied verbatim.
 
 5. REMEDIATE       Apply fixes in a FRESH context (not the implementer's). Push.
                   Each new commit INVALIDATES earlier review convergence — the next
