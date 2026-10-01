@@ -18,7 +18,8 @@ TUI, IDE, and headless clients.
 
 Its first product axis is a bounded, self-improving delivery loop: work items live on a kanban
 board, a fresh manager session selects the next eligible task, a worker implements it in an
-isolated workspace and opens a pull request, adversarial review converges on the result, and
+isolated workspace and produces a structured change set (PR delivery lands with the campaign
+delivery lane), adversarial review converges on the result, and
 merges of security-sensitive changes are human-gated. Orchestraitor's own backlog is the loop's
 first and continuous workload (self-hosting) (spec `00-overview.md` §1, §2.3, §3.1).
 
@@ -27,7 +28,7 @@ first and continuous workload (self-hosting) (spec `00-overview.md` §1, §2.3, 
 The loop is a fixed cycle, not a free-running swarm:
 
 ```text
-board poll → manager selection → worker implementation → pull request
+board poll → manager selection → worker implementation → structured change set
            → adversarial review → human-gated merge
 ```
 
@@ -37,16 +38,17 @@ board poll → manager selection → worker implementation → pull request
 - **Manager selection** — one campaign pass applies the P0-first epic-focus rule, selects at
   most one eligible task, and persists exactly one append-only decision record.
 - **Worker** — a headless bootstrap worker implements the task in a path-confined worktree
-  with exactly four tools, all security primitives mediated by Arbitraitor, and opens a
-  pull request.
+  with exactly four tools, all security primitives mediated by Arbitraitor, and produces a
+  structured change set (the pull-request sink lands with the campaign delivery lane).
 - **Adversarial review** — independent review converges on the result before merge.
 - **Human-gated merge** — security-sensitive changes always require human review.
 
 The loop is bounded by an explicit guard set (issue #310): attempts, re-plans, worker
 timeout, concurrency cap, supervisor stall kill, exponential backoff, a daily spend soft cap,
 and a run budget. Guard-weakening configuration is rejected fail-closed. Run state is durable
-(`loop.db`, one append-only row per supervised run), and a single-instance lock ensures only
-one loop invocation runs at a time.
+(`loop.db`, one row per supervised run, updated with heartbeat liveness and a terminal
+status; the decision records in `campaign.db` are the append-only audit trail), and a
+single-instance lock ensures only one loop invocation runs at a time.
 
 See [`docs/cli/orc-campaign.md`](docs/cli/orc-campaign.md) for the manager selection pass;
 the cron-shaped `orc loop` runner and its `docs/cli/orc-loop.md` reference land with the
