@@ -15,9 +15,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 - `orc github` service-identity enforcement is now configurable through the
   layered config key `github_app.enforcement` (`recommended` | `required`,
-  default `recommended`). In `recommended` mode nothing changes: when the
-  `github_app` config does not resolve, mutating GitHub operations take the
-  labelled personal-auth fallback with a loud WARNING. In `required` mode the
+  default `recommended`). In `recommended` mode, when the `github_app` config
+  is absent or partial, mutating GitHub operations from the skill-script
+  wrapper take the labelled personal-auth fallback with a loud WARNING;
+  direct `orc github` subcommands fail closed when complete configuration is
+  unavailable, as do configuration-resolution errors and failed
+  enforcement-config reads. In `required` mode the
   fail-closed behavior applies everywhere: `orc github gh-env` refuses to
   delegate with a typed error naming the missing `github_app.*` keys (no
   personal fallback), the skill-script wrapper returns its typed config
