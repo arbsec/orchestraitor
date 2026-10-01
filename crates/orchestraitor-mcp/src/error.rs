@@ -68,6 +68,11 @@ pub enum McpGatewayError {
     /// Filesystem operation failed.
     #[error("filesystem operation failed")]
     Io(#[source] std::io::Error),
+    /// The `board.query` decision tool failed (provider transport or event
+    /// store). Message text is a static, log-safe label — never board
+    /// content (spec `40-arbitraitor-integration.md` §9.23.4).
+    #[error("board.query failed: {0}")]
+    BoardQuery(String),
 }
 
 impl From<std::io::Error> for McpGatewayError {

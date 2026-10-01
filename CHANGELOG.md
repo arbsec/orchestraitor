@@ -13,6 +13,22 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- The `board.query` coordinator decision tool (spec `10-orchestrator.md`
+  §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
+  with two modes — a conjunctive filter search (item type, status, typed
+  field values) returning typed items (id, type, title, status, fields,
+  dependency edges), never raw provider JSON; and a blocked-graph mode that
+  walks the board's native `blockedBy` edges transitively, cycle-safe with a
+  depth cap, surfacing a dependency cycle as a typed board-data-corruption
+  indication (§9.40) instead of looping. Every invocation is recorded in the
+  event store as a `ToolRequest` event carrying the tool name, the filters
+  as data, a result summary, and the §9.25.1 delegation chain. Filter values
+  are untrusted input (§6.1): instruction-shaped values are matched as inert
+  data and never executed. Surfaced as `orc board query` (against a
+  deterministic in-memory fixture board in this slice — the sqlite provider
+  is the #318 follow-up) and as the `board.query` MCP gateway tool when a
+  board provider is configured; the tool is absent (disabled) otherwise.
+  Documented in [docs/cli/orc-board.md](docs/cli/orc-board.md).
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at

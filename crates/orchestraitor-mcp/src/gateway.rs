@@ -1,12 +1,15 @@
 //! In-process MCP gateway logic for MVP.
 
 use orchestraitor_arbitraitor_client::ArbitraitorClient;
+use orchestraitor_board_contract::BoardProvider;
+use orchestraitor_model::OperationId;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ErrorData};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::board_query::{BoardQueryMode, BoardQueryResultKind, DelegationChain, board_query};
 use crate::config::ResolvedMcpServers;
 use crate::error::{McpGatewayError, McpGatewayResult};
 use crate::fs::FileSystemTools;
@@ -15,7 +18,7 @@ use crate::project::{ProjectId, ProjectScope, require_server_project};
 use crate::workflow::{WorkflowKind, WorkflowRequest, WorkflowTools};
 
 /// Gateway context resolved for one project-scoped connection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GatewayContext {
     /// Project scope.
     pub scope: ProjectScope,
@@ -23,10 +26,14 @@ pub struct GatewayContext {
     pub servers: ResolvedMcpServers,
     /// Arbitraitor adapter. Security decisions remain delegated to this adapter.
     pub arbitraitor: ArbitraitorClient,
+    /// Board provider the `board.query` decision tool reads through
+    /// (spec `10-orchestrator.md` §9.39, §9.43; issue #332). `None` keeps
+    /// the tool absent from the tool list — the additive disable path.
+    pub board: Option<std::sync::Arc<dyn BoardProvider>>,
 }
 
 /// rmcp server exposing Orchestraitor built-in tools for one project scope.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpGateway {
     context: GatewayContext,
     fs: FileSystemTools,
@@ -201,6 +208,37 @@ impl McpGateway {
     ) -> Result<CallToolResult, ErrorData> {
         self.structured(self.workflow.run(WorkflowKind::Task, &input))
     }
+
+    /// Query board state through the configured [`BoardProvider`]: typed
+    /// conjunctive search or the transitive blocked graph (spec
+    /// `10-orchestrator.md` §9.39, §9.40, §9.43; issue #332). Read-only;
+    /// filter values are opaque data. Absent when no board provider is
+    /// configured in the context.
+    #[tool(
+        name = "board.query",
+        description = "Read-only board query: typed search (item type, status, field values) or the transitive blockedBy graph for one item"
+    )]
+    async fn board_query(
+        &self,
+        Parameters(input): Parameters<BoardQueryRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match &self.context.board {
+            Some(provider) => {
+                let provider = provider.clone();
+                let mode = input.mode;
+                let chain = input.delegation_chain;
+                // rmcp's tool macro supports async fns; the tool body stays
+                // async rather than bridging runtimes (block_in_place panics
+                // on a current_thread runtime).
+                let result = run_board_query(provider.as_ref(), &mode, chain).await;
+                self.structured(result)
+            }
+            None => Ok(CallToolResult::structured_error(serde_json::json!({
+                "error": "board.query is not configured for this project scope",
+                "code": "board_query_unconfigured"
+            }))),
+        }
+    }
 }
 
 #[tool_handler(name = "orchestraitor-mcp", version = "0.0.0")]
@@ -244,6 +282,37 @@ struct RenameInput {
     to: String,
 }
 
+/// `board.query` request shape: the mode plus the §9.25.1 delegation-chain
+/// labels supplied by the invoking session (recorded verbatim as data).
+#[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+struct BoardQueryRequest {
+    /// Query mode: `search` with a typed filter, or `blocked_by` with one
+    /// item id.
+    mode: BoardQueryMode,
+    /// Delegation-chain principal labels, root first (e.g.
+    /// `["user:alice", "session:sess_7e3f"]`). Static labels only.
+    #[serde(default)]
+    delegation_chain: Vec<String>,
+}
+
+/// Drives the typed board query against a provider with an audit store.
+async fn run_board_query(
+    provider: &dyn BoardProvider,
+    mode: &BoardQueryMode,
+    principals: Vec<String>,
+) -> Result<BoardQueryResultKind, McpGatewayError> {
+    let correlation_id = OperationId::new();
+    let chain = DelegationChain {
+        correlation_id,
+        parent_op_id: None,
+        principals,
+    };
+    let mut store = orchestraitor_events::InMemoryAuditStore::default();
+    board_query(provider, mode, &chain, &mut store)
+        .await
+        .map_err(|error| McpGatewayError::BoardQuery(error.to_string()))
+}
+
 fn error_payload(error: &McpGatewayError) -> serde_json::Value {
     serde_json::json!({
         "error": error.to_string(),
@@ -257,6 +326,7 @@ fn error_payload(error: &McpGatewayError) -> serde_json::Value {
             McpGatewayError::Toml(_) => "invalid_mcp_toml",
             McpGatewayError::CanonicalJson { .. } => "fingerprint_canonicalization_failed",
             McpGatewayError::Io(_) => "io_error",
+            McpGatewayError::BoardQuery(_) => "board_query_failed",
         }
     })
 }
@@ -276,6 +346,7 @@ mod tests {
             scope,
             servers: ResolvedMcpServers::default(),
             arbitraitor: ArbitraitorClient::default(),
+            board: None,
         });
         let _ = gateway;
         Ok(())

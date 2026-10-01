@@ -18,6 +18,16 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 miette = { workspace = true }
+# orchestraitor-mcp (MIT OR Apache-2.0): the board.query decision tool
+# (spec §9.39, issue #332) surfaced as `orc board query`.
+orchestraitor-mcp = { path = "../orchestraitor-mcp" }
+# orchestraitor-events (MIT OR Apache-2.0): the §9.25.1 audit store the
+# board.query CLI invocation records into.
+orchestraitor-events = { path = "../orchestraitor-events" }
+# orchestraitor-board-contract (MIT OR Apache-2.0): the fixture BoardProvider
+# `orc board query` reads through in this slice (sqlite provider is #318
+# follow-up).
+orchestraitor-board-contract = { path = "../orchestraitor-board-contract" }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-board = { path = "../orchestraitor-board" }
 orchestraitor-campaign = { path = "../orchestraitor-campaign" }

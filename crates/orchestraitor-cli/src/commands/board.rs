@@ -13,6 +13,14 @@ use crate::cli::{BoardCommand, BoardMoveArgs, BoardReadyArgs, ConfigPaths};
 /// # Errors
 /// Returns a diagnostic when board config, auth, GraphQL, or output fails.
 pub fn run<W: Write>(paths: &ConfigPaths, command: BoardCommand, writer: &mut W) -> Result<()> {
+    // The board.query decision tool reads the deterministic fixture board in
+    // this slice (spec §9.39, issue #332): no board auth, no network — the
+    // sqlite provider is a #318 follow-up and the GitHub provider lands
+    // separately. The fixture keeps the tool surface, typed results, and
+    // event recording testable end to end today.
+    if let BoardCommand::Query(args) = command {
+        return query(&args, writer);
+    }
     let (config, _path) = BoardProjectConfig::load(&paths.project_dir).into_diagnostic()?;
     let token_uri = config
         .token_uri
@@ -35,7 +43,245 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: BoardCommand, writer: &mut W)
     match command {
         BoardCommand::Ready(args) => ready(&runtime, &client, &config, args, writer),
         BoardCommand::Move(args) => move_item(&runtime, &client, &config, &args, writer),
+        // Typed early return above keeps this arm exhaustive only.
+        BoardCommand::Query(_) => Ok(()),
     }
+}
+
+/// Builds the shared `board.query` fixture board (same shape as the crate
+/// tests): a small typed board with a blocked chain, a cycle branch, and
+/// filterable items.
+fn fixture_board() -> orchestraitor_board_contract::InMemoryBoardProvider {
+    use orchestraitor_board_contract::{BoardFieldKind, BoardFieldValue, BoardItemType};
+    orchestraitor_board_contract::InMemoryBoardProvider::new(|setup| {
+        setup
+            .status("Ready")
+            .status("In Progress")
+            .status("Blocked")
+            .status("Done")
+            .field("Priority", BoardFieldKind::SingleSelect)
+            .field("Target", BoardFieldKind::SingleSelect)
+            .field("Points", BoardFieldKind::Number)
+            .item(
+                "root",
+                BoardItemType::Task,
+                "Root task",
+                "body",
+                "Blocked",
+                &[(
+                    "Priority",
+                    BoardFieldValue::SingleSelect {
+                        option: "P0".into(),
+                    },
+                )],
+            )
+            .item(
+                "deep-1",
+                BoardItemType::Task,
+                "Deep blocker one",
+                "body",
+                "In Progress",
+                &[(
+                    "Priority",
+                    BoardFieldValue::SingleSelect {
+                        option: "P1".into(),
+                    },
+                )],
+            )
+            .item(
+                "deep-2",
+                BoardItemType::Task,
+                "Deep blocker two",
+                "body",
+                "In Progress",
+                &[],
+            )
+            .item(
+                "deep-3",
+                BoardItemType::Task,
+                "Deep blocker three",
+                "body",
+                "In Progress",
+                &[],
+            )
+            .edge("root", "deep-1")
+            .edge("deep-1", "deep-2")
+            .edge("deep-2", "deep-3")
+            .item(
+                "cyc-a",
+                BoardItemType::Bug,
+                "Cycle A",
+                "body",
+                "In Progress",
+                &[],
+            )
+            .item(
+                "cyc-b",
+                BoardItemType::Bug,
+                "Cycle B",
+                "body",
+                "In Progress",
+                &[],
+            )
+            .edge("cyc-a", "cyc-b")
+            .edge("cyc-b", "cyc-a")
+            .item(
+                "ready-epic",
+                BoardItemType::Epic,
+                "Ready epic",
+                "body",
+                "Ready",
+                &[(
+                    "Target",
+                    BoardFieldValue::SingleSelect {
+                        option: "MVP".into(),
+                    },
+                )],
+            )
+            .item(
+                "done-task",
+                BoardItemType::Task,
+                "Done task",
+                "body",
+                "Done",
+                &[("Points", BoardFieldValue::Number { value: 3 })],
+            );
+    })
+}
+
+/// Parses CLI filter arguments into the typed query mode.
+fn query_mode(
+    args: &crate::cli::BoardQueryArgs,
+) -> miette::Result<orchestraitor_mcp::board_query::BoardQueryMode> {
+    use orchestraitor_mcp::board_query::{
+        BoardQueryField, BoardQueryFieldValue, BoardQueryFilter, BoardQueryItemType, BoardQueryMode,
+    };
+    if let Some(item) = &args.blocked_by {
+        return Ok(BoardQueryMode::BlockedBy { item: item.clone() });
+    }
+    let item_type = match args.item_type.as_deref() {
+        None => None,
+        Some("task") => Some(BoardQueryItemType::Task),
+        Some("bug") => Some(BoardQueryItemType::Bug),
+        Some("epic") => Some(BoardQueryItemType::Epic),
+        Some("feature") => Some(BoardQueryItemType::Feature),
+        Some(other) => {
+            return Err(miette!(
+                "--item-type must be one of task|bug|epic|feature, got {other:?}"
+            ));
+        }
+    };
+    let mut fields = Vec::new();
+    for field in &args.fields {
+        let (name, value) = field.split_once('=').ok_or_else(|| {
+            miette!("--field must be name=value (single-select option), got {field:?}")
+        })?;
+        fields.push(BoardQueryField {
+            name: name.to_string(),
+            value: BoardQueryFieldValue::SingleSelect {
+                option: value.to_string(),
+            },
+        });
+    }
+    Ok(BoardQueryMode::Search {
+        filter: BoardQueryFilter {
+            item_type,
+            status: args.status.clone(),
+            fields,
+        },
+    })
+}
+
+/// Renders one typed result item line.
+fn write_item_line<W: Write>(
+    writer: &mut W,
+    item: &orchestraitor_mcp::board_query::BoardQueryItem,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "  [{}] {}: {} (status: {})",
+        item.item_type, item.id, item.title, item.status
+    )
+    .into_diagnostic()
+}
+
+fn query<W: Write>(args: &crate::cli::BoardQueryArgs, writer: &mut W) -> Result<()> {
+    use orchestraitor_events::InMemoryAuditStore;
+    use orchestraitor_mcp::board_query::{BoardQueryResultKind, DelegationChain, board_query};
+    use orchestraitor_model::OperationId;
+
+    let mode = query_mode(args)?;
+    let board = fixture_board();
+    let chain = DelegationChain {
+        correlation_id: OperationId::new(),
+        parent_op_id: None,
+        principals: vec![
+            String::from("user:cli"),
+            String::from("session:orc-board-query"),
+        ],
+    };
+    let mut store = InMemoryAuditStore::default();
+    let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
+    let result = runtime
+        .block_on(board_query(&board, &mode, &chain, &mut store))
+        .map_err(|error| miette!("{error}"))?;
+    if args.json {
+        serde_json::to_writer_pretty(&mut *writer, &result).into_diagnostic()?;
+        writeln!(writer).into_diagnostic()?;
+        return Ok(());
+    }
+    match result {
+        BoardQueryResultKind::Search(result) => {
+            writeln!(
+                writer,
+                "Matched {} item(s){}:",
+                result.items.len(),
+                if result.truncated { " (truncated)" } else { "" }
+            )
+            .into_diagnostic()?;
+            for item in &result.items {
+                write_item_line(writer, item)?;
+                if !item.blocked_by.is_empty() {
+                    writeln!(writer, "      blockedBy: {}", item.blocked_by.join(", "))
+                        .into_diagnostic()?;
+                }
+            }
+        }
+        BoardQueryResultKind::BlockedBy(graph) => {
+            if !graph.root_exists {
+                writeln!(writer, "Item {} not found on the board.", graph.root)
+                    .into_diagnostic()?;
+                return Ok(());
+            }
+            writeln!(
+                writer,
+                "Transitive blocked set of {} ({} item(s)):",
+                graph.root,
+                graph.blocking.len()
+            )
+            .into_diagnostic()?;
+            for item in &graph.blocking {
+                write_item_line(writer, item)?;
+            }
+            if let Some(cycle) = &graph.cycle {
+                writeln!(
+                    writer,
+                    "CYCLE (board-data corruption, spec §9.40): {} revisited via {}",
+                    cycle.item,
+                    cycle.path.join(" -> ")
+                )
+                .into_diagnostic()?;
+            }
+            if graph.depth_capped {
+                writeln!(
+                    writer,
+                    "DEPTH CAP: walk stopped at the maximum depth; result may be incomplete."
+                )
+                .into_diagnostic()?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ready<W: Write>(

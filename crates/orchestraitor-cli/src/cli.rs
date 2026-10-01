@@ -260,6 +260,12 @@ pub enum BoardCommand {
     Ready(BoardReadyArgs),
     /// Move a board item to a new Status value, verified by read-back.
     Move(BoardMoveArgs),
+    /// Run the `board.query` decision tool against the in-memory fixture
+    /// board (spec `10-orchestrator.md` §9.39; issue #332): typed search or
+    /// the transitive blocked graph. The sqlite/GitHub provider wiring is a
+    /// separate follow-up (#318 split), so this slice reads the deterministic
+    /// fixture board.
+    Query(BoardQueryArgs),
 }
 
 /// Arguments for `orc board ready`.
@@ -278,6 +284,27 @@ pub struct BoardMoveArgs {
     /// Target Status option name, e.g. "In Progress".
     #[arg(long)]
     pub status: String,
+}
+
+/// Arguments for `orc board query`.
+#[derive(Debug, Clone, Args)]
+pub struct BoardQueryArgs {
+    /// Blocked-graph mode: return the transitive blocked set for this item
+    /// id instead of a filter search.
+    #[arg(long)]
+    pub blocked_by: Option<String>,
+    /// Restrict to one item type (`task`, `bug`, `epic`, `feature`).
+    #[arg(long)]
+    pub item_type: Option<String>,
+    /// Restrict to one status name (exact match).
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Required field value as `name=option` (single-select; repeatable).
+    #[arg(long = "field", value_name = "NAME=VALUE")]
+    pub fields: Vec<String>,
+    /// Emit the typed result as stable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `orc worker` subcommands.

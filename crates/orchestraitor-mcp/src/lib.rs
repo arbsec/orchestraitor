@@ -15,6 +15,13 @@ mod patch;
 mod project;
 mod workflow;
 
+pub mod board_query;
+
+pub use board_query::{
+    BlockedCycle, BlockedGraph, BoardQueryField, BoardQueryFieldValue, BoardQueryFilter,
+    BoardQueryFixture, BoardQueryItem, BoardQueryMode, BoardQueryResult, BoardQueryResultKind,
+    DelegationChain, board_query,
+};
 pub use config::{
     McpConfig, McpConfigLayer, McpServerConfig, McpServerLifetime, McpTransportConfig,
     ResolvedMcpServers, load_canonical_mcp_config, resolve_mcp_servers,
