@@ -46,7 +46,13 @@ jobs:
       SCCACHE_GHA_ENABLED: ""
       RUSTC_WRAPPER: ""
     steps:
+      # `persist-credentials: false`: nothing in this job needs the checkout-scoped
+      # credentials (the qlty publish token arrives via the action's `token:` input), so
+      # the runner's auth token is not persisted into the local git config for the
+      # instrumented test run to inherit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       # Token-presence probe: a step `if:` cannot read `secrets` directly (the `env`
       # context in an `if:` only sees workflow/job `env:` blocks and step outputs), and a
       # job-level `env: QLTY_COVERAGE_TOKEN: ${{ secrets... }}` mapping would expose the
