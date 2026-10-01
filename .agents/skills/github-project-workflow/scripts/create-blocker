@@ -66,12 +66,12 @@ if [ "$TARGET_REPO" = "$ORCH_REPO" ]; then
   echo "Linked blockedBy edge: $BLOCKED_ISSUE -> #$BLOCKER_NUM" >&2
 else
   # Cross-repo: use GraphQL addBlockedBy (node IDs are cross-repo within an org).
-  BLOCKER_ID="$(orc_lib_gh issue view "$(echo "$BLOCKER_URL" | grep -oP '\d+$')" --repo "$TARGET_REPO" --json id -q '.id' 2>/dev/null || true)"
-  BLOCKED_ID="$(orc_lib_gh issue view "$BLOCKED_ISSUE" --repo "$ORCH_REPO" --json id -q '.id' 2>/dev/null || true)"
+  BLOCKER_ID="$(orc_lib_gh_service issue view "$(echo "$BLOCKER_URL" | grep -oP '\d+$')" --repo "$TARGET_REPO" --json id -q '.id' 2>/dev/null || true)"
+  BLOCKED_ID="$(orc_lib_gh_service issue view "$BLOCKED_ISSUE" --repo "$ORCH_REPO" --json id -q '.id' 2>/dev/null || true)"
   if [ -n "$BLOCKER_ID" ] && [ -n "$BLOCKED_ID" ]; then
     echo "[dry-run] gh api graphql -f query='mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { ... } }'" >&2
     if [ "$OPT_DRY_RUN" = false ]; then
-      orc_lib_gh api graphql -f query="mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { issue { number } blockingIssue { number } } }" 2>/dev/null || \
+      orc_lib_gh_service api graphql -f query="mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { issue { number } blockingIssue { number } } }" 2>/dev/null || \
         echo "  GraphQL addBlockedBy failed; falling back to body link." >&2
     fi
   fi

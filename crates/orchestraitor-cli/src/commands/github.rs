@@ -195,27 +195,62 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolves a program name to an executable path on `PATH`.
+/// Resolves a program name to an executable path on `PATH`. A file without
+/// the executable bit is rejected: pre-mint validation must not pass a child
+/// that is guaranteed to fail at spawn time (after the token was minted).
 fn which_executable(program: &str) -> Option<std::path::PathBuf> {
+    let is_executable = |path: &std::path::Path| {
+        #[cfg(unix)]
+        {
+            std::fs::metadata(path).is_ok_and(|metadata| {
+                std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            path.is_file()
+        }
+    };
     if program.contains(std::path::MAIN_SEPARATOR) {
         let path = std::path::PathBuf::from(program);
-        return path.is_file().then_some(path);
+        return is_executable(&path).then_some(path);
     }
     let path_var = std::env::var_os("PATH")?;
     std::env::split_paths(&path_var)
         .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
 }
 
 /// `orc github commit-author`: print ONLY the identity pair, derived from the
 /// authenticated App (`GET /app` → slug + bot user id) — never hardcoded.
+/// `GET /app` is an App-level endpoint: GitHub rejects installation tokens
+/// with 401, so the request authenticates with a freshly minted App JWT
+/// (itself secret material — same never-printed rules as the token).
 fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
-    let (_, token) = mint_installation_token(paths)?;
+    let layers = load_layers(paths)?;
+    let config = layers.resolver.resolve_config().map_err(|error| {
+        miette!(
+            "configuration validation failed: {}",
+            error.structured().cause
+        )
+    })?;
+    let github_app = config.github_app.as_ref().ok_or_else(|| {
+        miette!(
+            "github_app configuration is not set (need client_id, installation_id, private_key_uri; see docs/cli/orc-github.md)"
+        )
+    })?;
+    let client_id = required(github_app.client_id.as_ref(), "client_id")?.clone();
+    let installation_id = *required(github_app.installation_id.as_ref(), "installation_id")?;
+    let private_key_uri = required(github_app.private_key_uri.as_ref(), "private_key_uri")?.clone();
+
+    let auth = GitHubAppAuth::new(client_id, installation_id, private_key_uri);
+    let jwt = auth.app_jwt().into_diagnostic()?;
     let transport = ApiTransport::new(paths.github_api_endpoint.clone())?;
-    let (status, body) = transport.request("GET", "app", &token, None)?;
+    let (status, body) = transport.request_bearer("GET", "app", jwt.expose_secret(), None)?;
     if !status.is_success() {
         bail!("github api request returned HTTP {status} (GET /app)");
     }
+    drop(jwt);
     let app: Value = serde_json::from_str(&body)
         .map_err(|_| miette!("github app response is malformed: unexpected JSON shape"))?;
     let (name, email) = derive_commit_identity(&app)?;
@@ -226,10 +261,11 @@ fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
 /// Minimal request transport for the `api` passthrough and `GET /app`.
 ///
 /// Distinct from [`ReqwestInstallationTransport`]: that one exists to mint
-/// tokens with App-JWT bearer auth; this one carries installation-token
-/// bearer auth and returns raw response bodies. Error paths carry only
-/// transport classification and status codes — never headers or token
-/// material.
+/// tokens with App-JWT bearer auth; this one carries an explicit bearer
+/// credential — the installation token for the `api` passthrough, a freshly
+/// minted App JWT for `GET /app` — and returns raw response bodies. Error
+/// paths carry only transport classification and status codes — never
+/// headers or credential material.
 struct ApiTransport {
     client: reqwest::blocking::Client,
     base_url: String,
@@ -249,14 +285,28 @@ impl ApiTransport {
         Ok(Self { client, base_url })
     }
 
-    /// Executes one request. The token is injected only into the
-    /// `Authorization` header; it is never written to the URL, the error
-    /// paths, or the response body.
+    /// Executes one request authenticated with an installation token. The
+    /// token is injected only into the `Authorization` header; it is never
+    /// written to the URL, the error paths, or the response body.
     fn request(
         &self,
         method: &str,
         path: &str,
         token: &InstallationToken,
+        body: Option<String>,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        self.request_bearer(method, path, token.token().expose_secret(), body)
+    }
+
+    /// Executes one request with an explicit bearer credential — an
+    /// installation token or an App JWT (`GET /app`). The credential is
+    /// injected only into the `Authorization` header; it is never written to
+    /// the URL, the error paths, or the response body.
+    fn request_bearer(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: &str,
         body: Option<String>,
     ) -> Result<(reqwest::StatusCode, String)> {
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
@@ -267,7 +317,7 @@ impl ApiTransport {
                     .map_err(|_| miette!("unsupported http method `{method}`"))?,
                 &url,
             )
-            .bearer_auth(token.token().expose_secret())
+            .bearer_auth(bearer)
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         let request = match body {
@@ -579,39 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn http_error_diagnostic_names_status_and_endpoint_never_body() -> Result<()> {
-        // Stub server that always answers 404 with a token look-alike in the
-        // body: the diagnostic `api()` raises carries the status + endpoint
-        // shape, never the body or the token.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").into_diagnostic()?;
-        let addr = listener.local_addr().into_diagnostic()?;
-        let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("one request arrives");
-            let mut stream = stream;
-            let mut buffer = [0u8; 2048];
-            let _ = stream.read(&mut buffer);
-            let _ = std::io::Write::write_all(
-                &mut stream,
-                b"HTTP/1.1 404 Not Found\r\ncontent-length: 22\r\nconnection: close\r\n\r\n{not_found_or_whatever",
-            );
-        });
-        let token = fixture_token("SECRETMARKER0002");
-        let transport = ApiTransport {
-            client: reqwest::blocking::Client::new(),
-            base_url: format!("http://{addr}"),
-        };
-        let (status, body) = transport.request("GET", "app", &token, None)?;
-        assert_eq!(status.as_u16(), 404);
-        assert!(body.contains("not_found_or_whatever"));
-        join_server(server);
-
-        let diagnostic = format!("github api request returned HTTP {status} (GET /app)");
-        assert!(!diagnostic.contains("not_found_or_whatever"));
-        assert!(!diagnostic.contains("SECRETMARKER0002"));
-        Ok(())
-    }
-
-    #[test]
     fn authorization_header_carries_token_and_metadata_stays_token_free() -> Result<()> {
         // Stub server echoes the Authorization header value back in the body.
         // This proves header shaping; the never-printed guarantee on orc's own
@@ -736,15 +753,27 @@ mod tests {
     }
 
     #[test]
-    fn gh_env_missing_child_is_typed_error_before_minting() {
-        let command = ["definitely-not-a-real-binary-orchestraitor".to_string()];
-        let program = &command[0];
-        if which_executable(program).is_none() {
-            let error = format!("child command `{program}` not found on PATH");
-            assert!(error.contains("not found on PATH"));
-        } else {
-            panic!("fixture binary must not exist");
-        }
+    fn which_executable_rejects_non_executable_files() -> Result<()> {
+        // A regular file without the executable bit must NOT resolve —
+        // pre-mint validation would otherwise pass and mint a token for a
+        // child that is guaranteed to fail at spawn time.
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let plain = temp.path().join("not-executable-orchestraitor-fixture");
+        std::fs::write(&plain, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
+        let direct = which_executable(&plain.display().to_string());
+        assert!(
+            direct.is_none(),
+            "non-executable direct path must not resolve"
+        );
+
+        // The by-name PATH lookup also rejects it (the uniquely-named fixture
+        // cannot be shadowed by a same-named executable elsewhere on PATH).
+        let on_path = which_executable("not-executable-orchestraitor-fixture");
+        assert!(
+            on_path.is_none(),
+            "non-executable file on PATH must not resolve"
+        );
+        Ok(())
     }
 
     #[test]

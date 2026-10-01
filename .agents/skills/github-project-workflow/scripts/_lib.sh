@@ -103,16 +103,29 @@ orc_lib_gh() {
 
 # --- Service-identity gh routing (AGENTS.md; .agents/project/orchestraitor-workflow.md) ---
 # Agent-driven GitHub operations MUST authenticate as the arbsec-agent GitHub
-# App service identity, never a personal account. `orc github gh-env --` runs a
-# child with GH_TOKEN set to a freshly minted installation token (the token is
-# never printed by orc; it exists only in the child's environment).
+# App service identity, never a personal account. Mutating call sites (the
+# `orc_lib_run_or_dry_run` execution path, plus per-script precondition reads
+# and the create-blocker cross-repo edge write) route through
+# `orc_lib_gh_service`, which runs `orc github gh-env --` so the child's
+# GH_TOKEN is a freshly minted installation token (the token is never printed
+# by orc; it exists only in the child's environment). Read-only helpers
+# (`orc_lib_gh`) stay on the ambient `gh` auth.
 #
 # Usage: orc_lib_gh_service <args...>
-#   - github_app config present  -> gh runs as the App installation.
-#   - absent                     -> labelled personal-auth fallback, loud warning.
+#   - complete github_app config -> gh runs as the App installation.
+#   - absent or partial          -> labelled personal-auth fallback, loud warning.
+#   - config resolution error    -> typed failure; never silently personal.
 orc_lib_gh_service() {
-  if orc_lib_has_github_app_config; then
-    command "${ORC_BIN:-orc}" github gh-env -- command "${GH_BIN:-gh}" "$@"
+  # `|| probe_status=$?` keeps the capture safe under `set -e` regardless of
+  # the caller's context, and is always the status of THIS probe call.
+  local probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  if [ "$probe_status" -eq 0 ]; then
+    command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" "$@"
+  elif [ "$probe_status" -eq 2 ]; then
+    echo "error: github_app configuration is present but could not be resolved;" >&2
+    echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+    return "$ORC_ERR_CONFIG"
   else
     echo "WARNING: service-identity fallback — github_app config is not set;" >&2
     echo "         running gh as the PERSONAL account (policy: labelled fallback only)." >&2
@@ -120,11 +133,30 @@ orc_lib_gh_service() {
   fi
 }
 
-# Detects whether the layered orc config resolves a github_app block. Best-effort:
-# if orc itself is unavailable the caller falls back (labelled above).
+# Detects whether the layered orc config resolves a COMPLETE github_app block
+# (all of client_id, installation_id, private_key_uri). Exit codes:
+#   0 (yes)    -> the caller may take the service-identity path.
+#   1 (absent) -> no github_app key resolves anywhere: the labelled personal
+#                 fallback is allowed (config-absent, not an orc failure).
+#   2 (error)  -> orc is available but the layered config could not be
+#                 resolved: fail closed (never silently fall back to personal
+#                 auth on a broken configuration).
 orc_lib_has_github_app_config() {
-  command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1
-  "${ORC_BIN:-orc}" config get github_app.client_id >/dev/null 2>&1
+  if ! command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! "${ORC_BIN:-orc}" config validate >/dev/null 2>&1; then
+    return 2
+  fi
+  local key
+  for key in client_id installation_id private_key_uri; do
+    if ! "${ORC_BIN:-orc}" config get "github_app.${key}" >/dev/null 2>&1; then
+      # A partial config is incomplete for minting, but it is a deployment
+      # state, not a resolution error: the caller takes the labelled fallback.
+      return 1
+    fi
+  done
+  return 0
 }
 
 # --- jq wrapper: parse gh --json safely ----------------------------------------
@@ -186,8 +218,8 @@ orc_lib_run_or_dry_run() {
     return 0
   fi
   case "$kind" in
-    gh)        command "${GH_BIN:-gh}" "${_arr[@]}" ;;
-    graphql)   command "${GH_BIN:-gh}" api graphql "${_arr[@]}" ;;
+    gh)        orc_lib_gh_service "${_arr[@]}" ;;
+    graphql)   orc_lib_gh_service api graphql "${_arr[@]}" ;;
     *)         printf 'error: unknown run kind %q\n' "$kind" >&2; return "$ORC_ERR_CONFIG" ;;
   esac
 }

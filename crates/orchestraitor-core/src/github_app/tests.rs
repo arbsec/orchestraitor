@@ -417,6 +417,57 @@ fn secret_material_never_renders_in_errors_or_debug() -> Result<(), GitHubAppErr
 }
 
 #[test]
+fn app_jwt_signs_verifiable_claims_without_minting_a_token() -> Result<(), GitHubAppError> {
+    // `app_jwt()` signs directly from the resolved PEM — no transport, no
+    // installation-token round trip. The clock feeds `iat`/`exp` exactly as
+    // the mint path does.
+    let now = Arc::new(StdMutex::new(1_234u64));
+    let auth = auth_with_fixture_pem(&now)?;
+    let jwt = auth.app_jwt()?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = false;
+    let data = jsonwebtoken::decode::<DecodedClaims>(
+        jwt.expose_secret(),
+        &DecodingKey::from_rsa_pem(TEST_PUBLIC_PEM.as_bytes())
+            .map_err(|_| GitHubAppError::InvalidPrivateKeyPem)?,
+        &validation,
+    )
+    .map_err(|_| GitHubAppError::JwtSigning)?;
+    assert_eq!(data.header.alg, Algorithm::RS256);
+    assert_eq!(data.claims.iss, TEST_CLIENT_ID);
+    assert_eq!(data.claims.iat, 1_234);
+    assert_eq!(data.claims.exp, 1_234 + JWT_LIFETIME_SECS);
+    Ok(())
+}
+
+#[test]
+fn app_jwt_is_secret_material_and_failures_are_marker_free() -> Result<(), GitHubAppError> {
+    // The rendered Debug/error surface must never leak the JWT value or the
+    // PEM it was derived from. JWTs always start with the `eyJ` header prefix.
+    let now = Arc::new(StdMutex::new(1_000u64));
+    let auth = auth_with_fixture_pem(&now)?;
+    let jwt = auth.app_jwt()?;
+    assert!(
+        !format!("{jwt:?}").contains("eyJ"),
+        "SecretString debug must redact the JWT"
+    );
+    assert!(
+        !format!("{auth:?}").contains("eyJ"),
+        "auth debug must be jwt-free"
+    );
+
+    let unset = auth_with_default_resolver(&now, UNSET_ENV_VAR)?;
+    let error = match unset.app_jwt() {
+        Err(error) => format!("{error:?} {error}"),
+        Ok(_) => return Err(unexpected("unset key must never resolve")),
+    };
+    assert!(!error.contains("PRIVATE KEY"));
+    assert!(!error.contains("eyJ"));
+    Ok(())
+}
+
+#[test]
 fn fingerprint_prefix_is_stable_and_bounded() -> Result<(), GitHubAppError> {
     let token = AccessTokenResponse {
         token: FIXTURE_TOKEN_MARKER.to_string(),

@@ -136,14 +136,22 @@ orc github gh-env -- gh pr view 446 --json state
   process environment. **Trust model:** the child can read and leak its own
   environment — that is the operator's responsibility, the same model as
   `gh auth token | xargs`. Do not point `gh-env` at commands you do not trust.
-- The child command is validated to exist on `PATH` (or as a direct path)
-  BEFORE minting; a missing command is a typed error and no token is minted.
+- The child command is validated to exist on `PATH` (or as a direct path) AND
+  carry the executable bit BEFORE minting; a missing or non-executable command
+  is a typed error and no token is minted.
 
 ## `orc github commit-author`
 
 Prints ONLY the App's canonical commit identity as two lines, derived from the
 authenticated App (`GET /app` → `slug` + `bot.id` → the GitHub noreply email
-convention) — never hardcoded:
+convention) — never hardcoded. `GET /app` is an **App-level endpoint**:
+GitHub rejects installation tokens with 401, so this subcommand authenticates
+with a freshly minted **App JWT** (RS256, `iss = client_id`, 10-minute
+lifetime) signed from the App private key — the same secret material and the
+same secrecy rules as the mint path. The JWT is held in memory only, injected
+solely into the one `Authorization` header, and never printed, logged, or
+persisted. The other three subcommands (`mint-token`, `api`, `gh-env`) keep
+using installation tokens.
 
 ```sh
 $ orc github commit-author
@@ -151,8 +159,12 @@ name=arbsec-agent[bot]
 email=334074867+arbsec-agent[bot]@users.noreply.github.com
 ```
 
-Use the pair for commit flows that must attribute authorship to the service
-identity (workflow policy: bot-authored commits + DCO sign-off). Any
+The output above is the contract for a correctly configured App. It requires
+live GitHub access with the registered App's private key: the request
+authenticates the App itself, not an installation, so it cannot be satisfied
+by a stubbed installation-token endpoint. Failures (unresolvable private key,
+unreachable API, HTTP 401 on a malformed JWT) exit non-zero with a typed
+diagnostic that never contains the PEM, the JWT, or any token. Any
 malformation in the `/app` payload is a typed error; the payload is never
 echoed.
 

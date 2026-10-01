@@ -11,6 +11,29 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- `orc github commit-author` authenticates `GET /app` with a freshly minted
+  App JWT instead of an installation token: `GET /app` is an App-level
+  endpoint that GitHub answers with 401 for installation tokens, so the
+  subcommand previously could never deliver its documented output. The JWT is
+  secret material under the same guarantees as the token: held in memory
+  only, injected solely into the one `Authorization` header, never printed,
+  logged, or persisted.
+- `orc github gh-env` now rejects a child command that exists but lacks the
+  executable bit BEFORE minting a token; previously the token was minted and
+  then the spawn was guaranteed to fail.
+- Skill-script service-identity routing (`orc_lib_gh_service` in the
+  github-project-workflow / github-pr-lifecycle skills) now routes ALL
+  mutating `gh` call sites (claim-issue, release-issue, create-blocker,
+  create-follow-up, decompose-issue) through the App installation token, not
+  just merge-gate; read-only call sites are unchanged. The github_app config
+  probe requires all three keys (`client_id`, `installation_id`,
+  `private_key_uri`), distinguishes config-absent (labelled personal
+  fallback) from a config resolution error (typed failure — never a silent
+  personal-auth fallback), and the gh-env handoff no longer passes a stray
+  `command` token into the child argv, which made every routed call fail.
+
 ### Added
 
 - The `board.query` coordinator decision tool (spec `10-orchestrator.md`
