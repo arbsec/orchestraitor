@@ -220,6 +220,10 @@ fn query<W: Write>(args: &crate::cli::BoardQueryArgs, writer: &mut W) -> Result<
             String::from("session:orc-board-query"),
         ],
     };
+    // §9.25.1 recording: one-shot CLI invocation — the event is written,
+    // hash-chain-validated, and summarized here; the in-memory store lives
+    // only for this process (per-invocation-volatile). Durable persistence
+    // lands with the daemon event-store wiring (§9.17), not in this slice.
     let mut store = InMemoryAuditStore::default();
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
     let result = runtime

@@ -2,6 +2,7 @@
 
 use orchestraitor_arbitraitor_client::ArbitraitorClient;
 use orchestraitor_board_contract::BoardProvider;
+use orchestraitor_events::AuditStore as _;
 use orchestraitor_model::OperationId;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ErrorData};
@@ -27,9 +28,18 @@ pub struct GatewayContext {
     /// Arbitraitor adapter. Security decisions remain delegated to this adapter.
     pub arbitraitor: ArbitraitorClient,
     /// Board provider the `board.query` decision tool reads through
-    /// (spec `10-orchestrator.md` §9.39, §9.43; issue #332). `None` keeps
-    /// the tool absent from the tool list — the additive disable path.
+    /// (spec `10-orchestrator.md` §9.39, §9.43; issue #332). `None` disables
+    /// the tool: the gateway's tool router drops `board.query` from
+    /// `tools/list` (rmcp `disable_route`), so the tool is invisible AND
+    /// uncallsable — verified against rmcp 2.2.0, where `list_all`, `get`,
+    /// and `call` all honor the disabled set.
     pub board: Option<std::sync::Arc<dyn BoardProvider>>,
+    /// Shared audit store for `board.query` invocation events (§9.25.1).
+    /// `None` records per-invocation-volatile (validated, then dropped with
+    /// the invocation's store); persistence lands with the daemon
+    /// event-store wiring (§9.17).
+    pub board_audit_store:
+        Option<std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>>,
 }
 
 /// rmcp server exposing Orchestraitor built-in tools for one project scope.
@@ -38,17 +48,30 @@ pub struct McpGateway {
     context: GatewayContext,
     fs: FileSystemTools,
     workflow: WorkflowTools,
+    /// Per-instance router: the `#[tool_router]`-generated static set,
+    /// with `board.query` disabled when no board provider is configured
+    /// (rmcp `disable_route` hides it from `list_all`/`get` and rejects
+    /// `call` — the verified per-connection disable path, issue #458 F2).
+    tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl McpGateway {
+    /// The `board.query` tool name, used by the router-disable path.
+    const BOARD_QUERY_NAME: &'static str = "board.query";
+
     /// Creates a gateway for a resolved project scope.
     #[must_use]
     pub fn new(context: GatewayContext) -> Self {
         let fs = FileSystemTools::new(context.scope.clone());
+        let mut tool_router = Self::static_tool_router();
+        if context.board.is_none() {
+            tool_router.disable_route(Self::BOARD_QUERY_NAME);
+        }
         Self {
             context,
             fs,
             workflow: WorkflowTools::new(),
+            tool_router,
         }
     }
 
@@ -65,7 +88,7 @@ impl McpGateway {
     }
 }
 
-#[tool_router]
+#[tool_router(router = static_tool_router, vis = "pub(crate)")]
 impl McpGateway {
     /// Read a UTF-8 project file and return content plus digest.
     #[tool(
@@ -212,8 +235,9 @@ impl McpGateway {
     /// Query board state through the configured [`BoardProvider`]: typed
     /// conjunctive search or the transitive blocked graph (spec
     /// `10-orchestrator.md` §9.39, §9.40, §9.43; issue #332). Read-only;
-    /// filter values are opaque data. Absent when no board provider is
-    /// configured in the context.
+    /// filter values are opaque data. When no board provider is configured
+    /// in the context, the route is disabled entirely (hidden from
+    /// `tools/list`, calls rejected) — this arm is defense in depth.
     #[tool(
         name = "board.query",
         description = "Read-only board query: typed search (item type, status, field values) or the transitive blockedBy graph for one item"
@@ -230,7 +254,14 @@ impl McpGateway {
                 // rmcp's tool macro supports async fns; the tool body stays
                 // async rather than bridging runtimes (block_in_place panics
                 // on a current_thread runtime).
-                let result = run_board_query(provider.as_ref(), &mode, chain).await;
+                //
+                // A shared audit store (§9.25.1, F3) is drained under its
+                // lock BEFORE the await: MutexGuard is not Send, so the
+                // store's records are cloned into the invocation and merged
+                // back after — a short synchronous section, no guard held
+                // across an await point.
+                let shared = self.context.board_audit_store.clone();
+                let result = run_board_query_shared(provider.as_ref(), &mode, chain, shared).await;
                 self.structured(result)
             }
             None => Ok(CallToolResult::structured_error(serde_json::json!({
@@ -241,7 +272,7 @@ impl McpGateway {
     }
 }
 
-#[tool_handler(name = "orchestraitor-mcp", version = "0.0.0")]
+#[tool_handler(router = self.tool_router, name = "orchestraitor-mcp", version = "0.0.0")]
 impl ServerHandler for McpGateway {}
 
 impl McpGateway {
@@ -295,11 +326,26 @@ struct BoardQueryRequest {
     delegation_chain: Vec<String>,
 }
 
-/// Drives the typed board query against a provider with an audit store.
-async fn run_board_query(
+/// Drives the typed board query against a provider, recording into the
+/// context's audit store when one is shared, otherwise a fresh in-memory
+/// store (issue #458 F3).
+///
+/// With no shared store the recording is PER-INVOCATION-VOLATILE: the event
+/// is written and validated, then dropped with the store. Persistence lands
+/// with the daemon event-store wiring (§9.17), not in this slice.
+///
+/// The shared variant works by draining the shared store's existing records
+/// under its lock (a short synchronous section — `MutexGuard` is not `Send`,
+/// so no guard may cross an await), replaying them into the invocation's
+/// store so the hash chain continues, and writing the merged chain back. A
+/// poisoned lock fails the invocation closed.
+async fn run_board_query_shared(
     provider: &dyn BoardProvider,
     mode: &BoardQueryMode,
     principals: Vec<String>,
+    shared_store: Option<
+        std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>,
+    >,
 ) -> Result<BoardQueryResultKind, McpGatewayError> {
     let correlation_id = OperationId::new();
     let chain = DelegationChain {
@@ -307,6 +353,40 @@ async fn run_board_query(
         parent_op_id: None,
         principals,
     };
+    if let Some(shared) = shared_store {
+        let existing = {
+            let store = shared
+                .lock()
+                .map_err(|_| McpGatewayError::BoardQuery(String::from("audit store poisoned")))?;
+            store.records().to_vec()
+        };
+        let mut store = orchestraitor_events::InMemoryAuditStore::default();
+        for record in existing {
+            store
+                .r#import(
+                    &serde_json_canonicalizer::to_vec(&record)
+                        .map_err(|_| {
+                            McpGatewayError::BoardQuery(String::from(
+                                "audit replay serialization failed",
+                            ))
+                        })?
+                        .into_iter()
+                        .chain(std::iter::once(b'\n'))
+                        .collect::<Vec<u8>>(),
+                )
+                .map_err(|_| McpGatewayError::BoardQuery(String::from("audit replay rejected")))?;
+        }
+        let result = board_query(provider, mode, &chain, &mut store)
+            .await
+            .map_err(|error| McpGatewayError::BoardQuery(error.to_string()))?;
+        {
+            let mut guard = shared
+                .lock()
+                .map_err(|_| McpGatewayError::BoardQuery(String::from("audit store poisoned")))?;
+            *guard = store;
+        }
+        return Ok(result);
+    }
     let mut store = orchestraitor_events::InMemoryAuditStore::default();
     board_query(provider, mode, &chain, &mut store)
         .await
@@ -347,8 +427,74 @@ mod tests {
             servers: ResolvedMcpServers::default(),
             arbitraitor: ArbitraitorClient::default(),
             board: None,
+            board_audit_store: None,
         });
         let _ = gateway;
+        Ok(())
+    }
+
+    /// F2 (issue #458): with no board provider, `board.query` is DISABLED —
+    /// hidden from the router's tool list AND rejected by call. Probed
+    /// through the same `disable_route` path rmcp's `list_all`/`get`/`call`
+    /// honor (verified against rmcp 2.2.0 source).
+    #[test]
+    fn board_query_is_absent_from_tool_list_when_unconfigured() -> McpGatewayResult<()> {
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let unconfigured = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+        });
+        let listed: Vec<String> = unconfigured
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            !listed.iter().any(|name| name == "board.query"),
+            "board.query must be hidden from tools/list when unconfigured: {listed:?}"
+        );
+        assert!(
+            !unconfigured.tool_router.has_route("board.query"),
+            "board.query must be uncallsable when unconfigured"
+        );
+        assert!(
+            unconfigured.tool_router.is_disabled("board.query"),
+            "the route is disabled, not removed"
+        );
+        Ok(())
+    }
+
+    /// F2 counterpart: WITH a board provider, `board.query` is listed and
+    /// callable.
+    #[test]
+    fn board_query_is_listed_when_a_provider_is_configured() -> McpGatewayResult<()> {
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let configured = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: Some(std::sync::Arc::new(
+                orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
+            )),
+            board_audit_store: None,
+        });
+        let listed: Vec<String> = configured
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            listed.iter().any(|name| name == "board.query"),
+            "board.query must be listed when a provider is configured: {listed:?}"
+        );
+        assert!(configured.tool_router.has_route("board.query"));
         Ok(())
     }
 }

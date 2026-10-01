@@ -19,8 +19,8 @@ pub mod board_query;
 
 pub use board_query::{
     BlockedCycle, BlockedGraph, BoardQueryField, BoardQueryFieldValue, BoardQueryFilter,
-    BoardQueryFixture, BoardQueryItem, BoardQueryMode, BoardQueryResult, BoardQueryResultKind,
-    DelegationChain, board_query,
+    BoardQueryItem, BoardQueryMode, BoardQueryResult, BoardQueryResultKind, DelegationChain,
+    board_query,
 };
 pub use config::{
     McpConfig, McpConfigLayer, McpServerConfig, McpServerLifetime, McpTransportConfig,
