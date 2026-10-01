@@ -165,6 +165,13 @@ orc github gh-env -- gh pr view 446 --json state
 
 - The child's stdout/stderr pass through unchanged and the child's exit code
   propagates (a missing exit code maps to 1).
+- In `required` enforcement mode the child's git identity is PINNED via
+  `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/
+  `GIT_COMMITTER_EMAIL` (the canonical bot identity from `commit-author`).
+  These environment variables take precedence over repo config AND over
+  per-invocation `git -c user.email=…` overrides, so a delegated child cannot
+  stamp personal attribution onto commits even if it rewrites its identity.
+  Identity values are non-secret (public bot login + noreply email).
 - The token never appears in `orc`'s own output: it exists only in the child
   process environment. **Trust model:** the child can read and leak its own
   environment — that is the operator's responsibility, the same model as

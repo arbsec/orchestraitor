@@ -1039,9 +1039,17 @@ fn spawn_two_response_server(
     first_body: &str,
     second_body: &str,
 ) -> miette::Result<TwoResponseServer> {
+    spawn_sequence_server(&[first_body, second_body])
+}
+
+/// Serves the given JSON bodies on successive connections (the last body
+/// repeats for any further connections) and records each request's path +
+/// Authorization header. Unlike [`spawn_mint_then_api_server`] this serves
+/// NO mint response: every connection gets the next scripted body.
+fn spawn_sequence_server(bodies: &[&str]) -> miette::Result<TwoResponseServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
     let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
-    let mut bodies = [first_body.to_string(), second_body.to_string()];
+    let mut bodies: Vec<String> = bodies.iter().map(ToString::to_string).collect();
     let (auth_tx, auth_rx) = std::sync::mpsc::channel::<String>();
     thread::spawn(move || {
         for (index, connection) in listener.incoming().enumerate() {
@@ -1090,6 +1098,92 @@ fn spawn_two_response_server(
 struct TwoResponseServer {
     endpoint: String,
     auth_rx: std::sync::mpsc::Receiver<String>,
+}
+
+/// Serves one mint response (the recorded fixture token), then two scripted
+/// API responses on the following connections — the flow
+/// `gh-env -- required` performs: mint (installation token), `GET /app`
+/// (App JWT), `GET /users/{slug}[bot]` (unauthenticated).
+fn spawn_mint_then_two_api_server(
+    first_api_body: &str,
+    second_api_body: &str,
+) -> miette::Result<TwoResponseServer> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    let expires_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .into_diagnostic()?
+        .as_secs()
+        + 3_300;
+    let expires_at =
+        time::OffsetDateTime::from_unix_timestamp(expires_at_epoch.try_into().into_diagnostic()?)
+            .into_diagnostic()?
+            .format(&time::format_description::well_known::Rfc3339)
+            .into_diagnostic()?;
+    let mint_body =
+        format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
+    let mut bodies = vec![
+        mint_body,
+        first_api_body.to_string(),
+        second_api_body.to_string(),
+    ];
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut stream) = connection else { break };
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        request_bytes.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&request_bytes);
+                        if text.contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&request_bytes).to_string();
+            let request_line = request.lines().next().unwrap_or_default();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let auth = request
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_default();
+            let _ = auth_tx.send(format!("{path}\t{auth}"));
+            // Mint requests are detected by path so the scripted bodies stay
+            // positional: connection 1 = mint, 2 = /app, 3 = /users/{slug}[bot].
+            let is_mint = path.contains("/app/installations/");
+            let body = if is_mint {
+                bodies[0].clone()
+            } else if bodies.len() > 2 {
+                // Consume the next scripted API body; the last one repeats
+                // for any further connection.
+                bodies.remove(1)
+            } else {
+                bodies[1].clone()
+            };
+            let (status_line, payload) = if is_mint {
+                (String::from("HTTP/1.1 201 Created"), body)
+            } else {
+                (String::from("HTTP/1.1 200 OK"), body)
+            };
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok(TwoResponseServer { endpoint, auth_rx })
 }
 
 #[test]
@@ -1203,6 +1297,114 @@ fn github_gh_env_required_enforcement_fails_closed_when_config_partial() -> miet
     assert!(
         flat.contains("missing:installation_id,") && flat.contains("private_key_uri"),
         "typed refusal must list every missing key: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_required_mode_pins_git_identity_env_for_child() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n\
+         installation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n",
+    )
+    .into_diagnostic()?;
+    // The required-mode gate resolves the bot identity from the live App and
+    // pins GIT_AUTHOR_*/GIT_COMMITTER_* into the child env: a child that
+    // runs `git -c user.email=attacker@… commit` still stamps bot
+    // attribution, because those env vars beat repo config (and `-c`
+    // config) for commit identity.
+    let child = temp.path().join("child.sh");
+    let out_file = temp.path().join("child.out");
+    // The child sets a HOSTILE per-invocation config override, then records
+    // what git would actually use for author/committer identity. Because
+    // GIT_AUTHOR_*/GIT_COMMITTER_* env vars beat `-c` config, the identity
+    // must still be the bot's.
+    fs::write(
+        &child,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null\n",
+                "git -c user.name=attacker -c user.email=attacker@evil.example commit --allow-empty -m x >/dev/null 2>&1 && git log -1 --format='%an|%ae|%cn|%ce' > \"{}\" 2>/dev/null\n",
+                "exit 0\n"
+            ),
+            out_file.display()
+        ),
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let repo_str = repo.display().to_string();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", &repo_str])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    // The per-repo gitconfig must already carry the bot identity (the gate
+    // verifies it before delegating); the env pin then protects against
+    // per-invocation `git -c` overrides inside the child.
+    assert!(
+        git(&["config", "user.name", "arbsec-agent[bot]"])?
+            .status
+            .success()
+    );
+    assert!(
+        git(&[
+            "config",
+            "user.email",
+            "334074867+arbsec-agent[bot]@users.noreply.github.com"
+        ])?
+        .status
+        .success()
+    );
+    let child_str = child.display().to_string();
+    let server = spawn_mint_then_two_api_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &server.endpoint,
+            "github",
+            "gh-env",
+            "--",
+            &child_str,
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let observed = fs::read_to_string(&out_file).into_diagnostic()?;
+    assert_eq!(
+        observed.trim(),
+        "arbsec-agent[bot]|334074867+arbsec-agent[bot]@users.noreply.github.com|\
+         arbsec-agent[bot]|334074867+arbsec-agent[bot]@users.noreply.github.com",
+        "child git identity must be env-pinned to the bot even under `git -c` overrides: {observed}"
     );
     Ok(())
 }

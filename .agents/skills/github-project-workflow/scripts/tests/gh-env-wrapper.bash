@@ -66,7 +66,8 @@ run_service_required_env() {
   # present (case 9): exercises $ORC_GITHUB_APP_ENFORCEMENT precedence.
   local orc_state="${1:-absent}"; shift
   # The exports are deliberately subshell-local (each case isolates its env);
-  # The SC2030/SC2031 notes from ShellCheck about that are expected here.
+  # SC2030/SC2031: the subshell-local exports are intentional; capture
+  # relies on `|| probe_status=$?` below, so the notes are expected here.
   # shellcheck disable=SC2030,SC2031
   ( set -euo pipefail; export PATH="$WORK:$PATH"; export GH_BIN="$WORK/gh"
     export ORC_GITHUB_APP_ENFORCEMENT=required

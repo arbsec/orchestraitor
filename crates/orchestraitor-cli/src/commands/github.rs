@@ -121,15 +121,21 @@ fn require_service_identity<'a>(
 /// `gh-env` (the skill scripts' `orc_lib_gh_service` wrapper). Verifies the
 /// repo-local `git config user.email` equals the service-identity bot's
 /// canonical noreply email (`<bot-id>+<slug>[bot]@users.noreply.github.com`,
-/// resolved from the live App identity via `commit_author`) so
+/// resolved from the live App identity via `commit_author_identity`) so
 /// locally-created commits cannot carry personal attribution. The bot id is
 /// not guessable, so a suffix match would accept an unrelated
 /// `anything+<slug>[bot]@…` address — the comparison is exact.
 ///
+/// On success returns the resolved canonical `(name, email)` so the caller
+/// can pin the child's git identity environment: a child could otherwise
+/// override attribution per-invocation with `git -c user.email=… commit`
+/// (config is beaten by the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` environment
+/// variables, which is why the caller sets them).
+///
 /// # Errors
 /// Returns a typed diagnostic when the identity cannot be resolved or the
 /// configured email is not the bot's canonical noreply address.
-fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<()> {
+fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<(String, String)> {
     let output = Command::new("git")
         .args(["config", "--get", "user.email"])
         .output()
@@ -143,22 +149,16 @@ fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<()> {
              user.email = <id>+arbsec-agent[bot]@users.noreply.github.com)"
         );
     }
-    let expected = expected_bot_email(paths)?;
-    if email != expected {
+    let expected = commit_author_identity(paths)?;
+    if email != expected.1 {
         bail!(
             "service-identity enforcement is `required`: refusing to delegate `{program}` \
              because `git config user.email` ({email}) is not the service-identity bot's \
-             canonical noreply address — set user.email to {expected}"
+             canonical noreply address — set user.email to {}",
+            expected.1
         );
     }
-    Ok(())
-}
-
-/// Resolves the service-identity bot's canonical noreply email from the live
-/// App identity (the same two-request derivation `commit-author` performs).
-fn expected_bot_email(paths: &ConfigPaths) -> Result<String> {
-    let (_name, email) = commit_author_identity(paths)?;
-    Ok(email)
+    Ok(expected)
 }
 
 /// Resolves the `github_app` config and mints one installation token. The
@@ -285,13 +285,14 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     // stamp personal attribution onto agent-created commits.
     let config = resolved_config(paths)?;
     let required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
+    let mut bot_identity: Option<(String, String)> = None;
     if required {
         require_service_identity(&config, "delegate a gh-env child command")?;
         // Exact-identity check before delegating: the repo git identity must
         // equal the service-identity bot's canonical noreply email (resolved
         // from the live App) so any agent-driven `git commit` path cannot
         // stamp personal or look-alike attribution onto commits.
-        require_bot_git_identity(paths, program)?;
+        bot_identity = Some(require_bot_git_identity(paths, program)?);
     }
     let (_, token) = mint_installation_token(paths)?;
     let Some(executable) = which else {
@@ -301,6 +302,18 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     child
         .args(&args.command[1..])
         .env("GH_TOKEN", token.token().expose_secret());
+    // Pin the git identity for the child: `git -c user.email=… commit` beats
+    // repo config but NOT the GIT_AUTHOR_*/GIT_COMMITTER_* environment
+    // variables, so env-pinning guarantees bot attribution even for a child
+    // that rewrites its identity per invocation. Identity values are
+    // non-secret (public bot login + noreply email).
+    if let Some((name, email)) = bot_identity {
+        child
+            .env("GIT_AUTHOR_NAME", &name)
+            .env("GIT_AUTHOR_EMAIL", &email)
+            .env("GIT_COMMITTER_NAME", &name)
+            .env("GIT_COMMITTER_EMAIL", &email);
+    }
     let status = child
         .status()
         .map_err(|error| miette!("failed to spawn child command `{program}`: {error}"))?;
