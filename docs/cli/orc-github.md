@@ -37,6 +37,36 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"  # or secret://env/<V
   (`.agents/project/github-project.local.toml`), or `$ORC_SERVICE_IDENTITIES`,
   defaulting to `arbsec-agent`.
 
+### Enforcement (`github_app.enforcement`)
+
+The layered config key `github_app.enforcement` controls how strictly the
+service identity is enforced when the `github_app` block does not resolve
+(absent, partial, or unresolvable). Values:
+
+- `recommended` (default): current behaviour — the skill-script wrapper
+  (`orc_lib_gh_service`) takes the labelled personal-auth fallback with a loud
+  `WARNING` on stderr. This is a **named bootstrap deviation** (spec
+  `10-orchestrator.md` §9.41): the org rule stays "never personal account";
+  the fallback is a labelled, temporary bridge until the App identity is
+  configured everywhere, never an equal option.
+- `required`: fail closed. `orc github gh-env` refuses to delegate (typed
+  error naming the missing `github_app.*` keys) — no personal fallback, no
+  WARNING; the skill-script wrapper returns its typed config error (exit 2)
+  without reaching `gh`. In this mode the wrapper also verifies the repo git
+  identity before delegating: `git config user.email` must match the
+  service-identity bot pattern (`<id>+<slug>[bot]@users.noreply.github.com`),
+  so agent-driven `git commit` paths cannot stamp personal attribution onto
+  commits. Set the per-repo gitconfig to the bot identity
+  (`user.name = arbsec-agent[bot]`) when operating under `required`.
+
+Invalid values fail closed at parse time (typed configuration error). The
+effective value is visible through `orc config get github_app.enforcement`
+and `orc config explain github_app.enforcement`. Wrapper-only deployments
+(where the skill scripts run without `orc` on `PATH`) may pin the mode with
+`ORC_GITHUB_APP_ENFORCEMENT=required`, which takes precedence over the
+layered config; when it declares `required`, a missing `orc` binary fails
+closed instead of falling back to personal auth.
+
 ### Why two `service_identities` surfaces (recorded decision)
 
 The ready-queue skill script runs outside the daemon today and owns its local

@@ -14,6 +14,9 @@ use serde_json::Value;
 
 use crate::cli::{ApiArgs, ConfigPaths, GitHubCommand};
 use crate::commands::config::layers::load_layers;
+use orchestraitor_core::config::{
+    GitHubAppConfig, OrchestraitorConfig, ServiceIdentityEnforcement,
+};
 
 /// GitHub REST API base URL.
 const DEFAULT_GITHUB_API_BASE_URL: &str = "https://api.github.com";
@@ -54,17 +57,104 @@ fn mint_token<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
     .into_diagnostic()
 }
 
-/// Resolves the `github_app` config and mints one installation token. The
-/// token value stays a `SecretString` and is only ever injected into an
-/// `Authorization` header or a child environment — never printed or logged.
-fn mint_installation_token(paths: &ConfigPaths) -> Result<(u64, InstallationToken)> {
+/// Resolves the layered config (same path the mint commands use) so
+/// enforcement decisions read the effective `github_app` values.
+fn resolved_config(paths: &ConfigPaths) -> Result<OrchestraitorConfig> {
     let layers = load_layers(paths)?;
-    let config = layers.resolver.resolve_config().map_err(|error| {
+    layers.resolver.resolve_config().map_err(|error| {
         miette!(
             "configuration validation failed: {}",
             error.structured().cause
         )
-    })?;
+    })
+}
+
+/// Effective service-identity enforcement mode (`recommended` when unset).
+fn enforcement_mode(config: &OrchestraitorConfig) -> ServiceIdentityEnforcement {
+    config
+        .github_app
+        .as_ref()
+        .and_then(|app| app.enforcement)
+        .unwrap_or_default()
+}
+
+/// Fail-closed gate for `required` enforcement: a typed error when the
+/// `github_app` config does not resolve (absent or partial). In
+/// `recommended` mode this is a no-op — the labelled personal fallback
+/// remains available to callers.
+///
+/// # Errors
+/// Returns a typed diagnostic naming the missing keys when enforcement is
+/// `required` and the config block is absent or incomplete.
+fn require_service_identity<'a>(
+    config: &'a OrchestraitorConfig,
+    context: &str,
+) -> Result<&'a GitHubAppConfig> {
+    let Some(github_app) = config.github_app.as_ref() else {
+        bail!(
+            "service-identity enforcement is `required`: refusing to {context} without a \
+             complete github_app configuration (need enforcement-eligible client_id, \
+             installation_id, private_key_uri; see docs/cli/orc-github.md)"
+        );
+    };
+    let mut missing = Vec::new();
+    if github_app.client_id.is_none() {
+        missing.push("client_id");
+    }
+    if github_app.installation_id.is_none() {
+        missing.push("installation_id");
+    }
+    if github_app.private_key_uri.is_none() {
+        missing.push("private_key_uri");
+    }
+    if !missing.is_empty() {
+        bail!(
+            "service-identity enforcement is `required`: refusing to {context}; github_app \
+             config is incomplete (missing: {}; see docs/cli/orc-github.md)",
+            missing.join(", ")
+        );
+    }
+    Ok(github_app)
+}
+
+/// Bot commit-identity check for agent `git commit` paths delegated through
+/// `gh-env` (the skill scripts' `orc_lib_gh_service` wrapper). Verifies the
+/// repo-local `git config user.email` resolves to the service-identity bot
+/// pattern so locally-created commits cannot carry personal attribution.
+///
+/// # Errors
+/// Returns a typed diagnostic when the check cannot be performed or the
+/// configured identity does not match the bot pattern.
+fn require_bot_git_identity(program: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["config", "--get", "user.email"])
+        .output()
+        .map_err(|error| miette!("failed to run `git config user.email`: {error}"))?;
+    let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || email.is_empty() {
+        bail!(
+            "service-identity enforcement is `required`: refusing to delegate `{program}` \
+             because `git config user.email` is unset — set the per-repo gitconfig to the \
+             service-identity bot (user.name = arbsec-agent[bot], \
+             user.email = <id>+arbsec-agent[bot]@users.noreply.github.com)"
+        );
+    }
+    if !email.ends_with("+arbsec-agent[bot]@users.noreply.github.com") {
+        bail!(
+            "service-identity enforcement is `required`: refusing to delegate `{program}` \
+             because `git config user.email` ({email}) does not match the service-identity \
+             bot pattern — set user.email to \
+             <id>+arbsec-agent[bot]@users.noreply.github.com"
+        );
+    }
+    Ok(())
+}
+
+/// Resolves the `github_app` config and mints one installation token. The
+/// token value stays a `SecretString` and is only ever injected into an
+/// `Authorization` header or a child environment — never printed or logged.
+fn mint_installation_token(paths: &ConfigPaths) -> Result<(u64, InstallationToken)> {
+    let config = resolved_config(paths)?;
     let Some(github_app) = config.github_app else {
         return Err(miette!(
             "github_app configuration is not set (need client_id, installation_id, private_key_uri; see docs/cli/orc-github.md)"
@@ -177,6 +267,19 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     let which = which_executable(program);
     if which.is_none() {
         bail!("child command `{program}` not found on PATH");
+    }
+    // Enforcement gate reads the effective config before any token minting:
+    // `required` refuses to delegate at all when the App config does not
+    // resolve, and (cheap check) refuses when the repo git identity would
+    // stamp personal attribution onto agent-created commits.
+    let config = resolved_config(paths)?;
+    let required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
+    if required {
+        require_service_identity(&config, "delegate a gh-env child command")?;
+        // Cheap check before delegating: the repo git identity must match the
+        // service-identity bot pattern so any agent-driven `git commit` path
+        // cannot stamp personal attribution onto commits.
+        require_bot_git_identity(program)?;
     }
     let (_, token) = mint_installation_token(paths)?;
     let Some(executable) = which else {

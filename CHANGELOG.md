@@ -11,6 +11,27 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ## [Unreleased]
 
+### Added
+
+- `orc github` service-identity enforcement is now configurable through the
+  layered config key `github_app.enforcement` (`recommended` | `required`,
+  default `recommended`). In `recommended` mode nothing changes: when the
+  `github_app` config does not resolve, mutating GitHub operations take the
+  labelled personal-auth fallback with a loud WARNING. In `required` mode the
+  fail-closed behavior applies everywhere: `orc github gh-env` refuses to
+  delegate with a typed error naming the missing `github_app.*` keys (no
+  personal fallback), the skill-script wrapper returns its typed config
+  error without reaching `gh`, and delegation is refused when the repo git
+  identity (`git config user.email`) does not match the service-identity
+  bot pattern (`<id>+<slug>[bot]@users.noreply.github.com` — a generic
+  noreply address does not pass) — so agent-driven `git commit` paths cannot
+  stamp personal attribution onto commits. Wrapper-only deployments may pin
+  the mode with `ORC_GITHUB_APP_ENFORCEMENT=required`; a declared `required`
+  fails closed even when the `orc` binary is unavailable. Invalid values
+  fail closed at parse time. The default is a documented bootstrap deviation
+  (spec `10-orchestrator.md` §9.41): enforcement must be `required` at
+  public release.
+
 ### Fixed
 
 - `orc github commit-author` authenticates `GET /app` with a freshly minted

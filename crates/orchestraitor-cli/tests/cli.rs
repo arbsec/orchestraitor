@@ -1033,6 +1033,225 @@ fn github_gh_env_fails_typed_when_child_is_missing() -> miette::Result<()> {
     Ok(())
 }
 
+#[test]
+fn github_gh_env_required_enforcement_fails_closed_when_config_absent() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    // No github_app block at all; enforcement still readable as `required`
+    // via the built-in defaults' slug layer + this project layer.
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\n",
+    )
+    .into_diagnostic()?;
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("enforcementis`required`") && flat.contains("client_id"),
+        "typed refusal must name the mode and the missing keys: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_required_enforcement_fails_closed_when_config_partial() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n",
+    )
+    .into_diagnostic()?;
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("missing:installation_id,") && flat.contains("private_key_uri"),
+        "typed refusal must list every missing key: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    // enforcement = required rides the same project layer.
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n\
+         installation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n",
+    )
+    .into_diagnostic()?;
+    // A real git repo whose identity is PERSONAL — the forbidden effect.
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let repo_str = repo.display().to_string();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", &repo_str])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    assert!(
+        git(&["config", "user.email", "marcus.ekwall@gmail.com"])?
+            .status
+            .success()
+    );
+    let child = repo.join("child.sh");
+    fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let child_str = child.display().to_string();
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    // The child process must observe the personal identity: cwd is the repo.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &endpoint,
+            "github",
+            "gh-env",
+            "--",
+            &child_str,
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    // Collapse whitespace AND miette's gutter glyphs (`│`, `·`), which are not
+    // whitespace but sit inside wrapped lines at terminal-width-dependent
+    // positions — asserting on the collapsed text must not depend on where
+    // miette happened to break the line (differs between Linux and macOS).
+    // Keep only ASCII alphanumerics (plus `@` in emails): miette wraps at
+    // terminal-width-dependent positions and its gutter glyphs (`│`), the
+    // em-dash, and hyphens sit at different places per platform, so any
+    // substring assertion on the rendered text must ignore all punctuation.
+    let flat: String = stderr
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
+        .collect();
+    assert!(
+        flat.contains("doesnotmatchtheserviceidentitybotpattern"),
+        "typed refusal must name the identity mismatch: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_recommended_mode_falls_back_config_absent() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    // No github_app block: recommended mode keeps the labelled fallback
+    // surface (the daemon-side wrapper owns the WARNING); gh-env itself
+    // still fails typed — minting without a complete config is impossible.
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("github_app.client_id") && flat.contains("notset"),
+        "recommended mode keeps the typed mint error when config is absent: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n\
+         installation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n",
+    )
+    .into_diagnostic()?;
+    // A generic @users.noreply.github.com identity (e.g. some other account's
+    // noreply address) must ALSO be refused: only the bot pattern passes.
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let repo_str = repo.display().to_string();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", &repo_str])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    assert!(
+        git(&["config", "user.email", "attacker@users.noreply.github.com"])?
+            .status
+            .success()
+    );
+    let child = repo.join("child.sh");
+    fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let child_str = child.display().to_string();
+    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &endpoint,
+            "github",
+            "gh-env",
+            "--",
+            &child_str,
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    // Keep only ASCII alphanumerics (plus `@` in emails): miette wraps at
+    // terminal-width-dependent positions and its gutter glyphs (`│`), the
+    // em-dash, and hyphens sit at different places per platform, so any
+    // substring assertion on the rendered text must ignore all punctuation.
+    let flat: String = stderr
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
+        .collect();
+    assert!(
+        flat.contains("doesnotmatchtheserviceidentitybotpattern"),
+        "generic noreply identity must be refused in required mode: {stderr}"
+    );
+    Ok(())
+}
+
 const BOARD_RESOLVE_PROJECT: &str = r#"{"data":{"organization":{"projectV2":{"id":"PVT_fixture_project","title":"Arbsec Development"}}}}"#;
 const BOARD_RESOLVE_FIELDS: &str = r#"{"data":{"node":{"fields":{"nodes":[{"id":"PVTSSF_fixture_status","name":"Status","options":[{"id":"OPT_fixture_ready","name":"Ready"},{"id":"OPT_fixture_in_progress","name":"In Progress"}]},{"id":"PVTSSF_fixture_target","name":"Target","options":[{"id":"OPT_fixture_mvp","name":"MVP"}]}]}}}}"#;
 const BOARD_ITEMS: &str = r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PVTI_F_130","content":{"__typename":"Issue","number":130,"state":"OPEN","title":"Eligible native task","url":"https://github.com/arbsec/orchestraitor/issues/130","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0},"blockedBy":{"nodes":[],"totalCount":0}},"fieldValues":{"totalCount":2,"nodes":[{"name":"MVP","field":{"name":"Target"}},{"name":"Ready","field":{"name":"Status"}}]}},{"id":"PVTI_F_139","content":null,"fieldValues":{"totalCount":0,"nodes":[]}}]}}}}"#;

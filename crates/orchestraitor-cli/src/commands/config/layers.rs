@@ -24,6 +24,7 @@ backoff_ms = 250
 
 [github_app]
 slug = "arbsec-agent"
+enforcement = "recommended"
 
 # Static heuristic role routing table for the bootstrap (spec
 # 30-model-routing.md §9.45): every built-in orchestration role routes to the

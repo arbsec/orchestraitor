@@ -111,10 +111,23 @@ orc_lib_gh() {
 # by orc; it exists only in the child's environment). Read-only helpers
 # (`orc_lib_gh`) stay on the ambient `gh` auth.
 #
+# Enforcement mode comes from the layered config key
+# `github_app.enforcement`:
+#   - `recommended` (default): config absent/partial -> labelled
+#     personal-auth fallback, loud WARNING.
+#   - `required`: config absent/partial -> typed failure, no fallback, no
+#     personal auth. In this mode the wrapper also verifies the repo git
+#     identity matches the service-identity bot pattern before delegating
+#     (agent `git commit` paths must not produce personal-identity commits).
+# Wrapper-only deployments may pin the mode via $ORC_GITHUB_APP_ENFORCEMENT
+# (takes precedence over the layered config; when set to `required`, even a
+# missing orc binary fails closed instead of falling back).
+#
 # Usage: orc_lib_gh_service <args...>
 #   - complete github_app config -> gh runs as the App installation.
-#   - absent or partial          -> labelled personal-auth fallback, loud warning.
-#   - config resolution error    -> typed failure; never silently personal.
+#   - recommended + absent/partial -> labelled personal-auth fallback, loud warning.
+#   - required + absent/partial    -> typed config failure (exit 2).
+#   - config resolution error      -> typed failure; never silently personal.
 orc_lib_gh_service() {
   # `|| probe_status=$?` keeps the capture safe under `set -e` regardless of
   # the caller's context, and is always the status of THIS probe call.
@@ -126,11 +139,35 @@ orc_lib_gh_service() {
     echo "error: github_app configuration is present but could not be resolved;" >&2
     echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
     return "$ORC_ERR_CONFIG"
+  elif orc_lib_enforcement_required; then
+    echo "error: service-identity enforcement is \`required\` (github_app.enforcement);" >&2
+    echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+    echo "       resolve the github_app config (client_id, installation_id, private_key_uri)" >&2
+    echo "       or set github_app.enforcement = \"recommended\"; see docs/cli/orc-github.md" >&2
+    return "$ORC_ERR_CONFIG"
   else
     echo "WARNING: service-identity fallback — github_app config is not set;" >&2
     echo "         running gh as the PERSONAL account (policy: labelled fallback only)." >&2
     command "${GH_BIN:-gh}" "$@"
   fi
+}
+
+# Reads the effective `github_app.enforcement` for this deployment. Exit
+# codes: 0 = `required` (fail closed), 1 = `recommended`/unset/unknown.
+# Precedence: $ORC_GITHUB_APP_ENFORCEMENT (wrapper-only deployments where the
+# declaration must survive a missing orc binary) > `orc config get
+# github_app.enforcement`. A missing orc binary is NOT "recommended": when
+# the declaration says `required`, failing closed is the only safe reading —
+# a labelled personal fallback must never depend on tool availability.
+orc_lib_enforcement_required() {
+  if [ -n "${ORC_GITHUB_APP_ENFORCEMENT:-}" ]; then
+    [ "$ORC_GITHUB_APP_ENFORCEMENT" = "required" ]
+    return
+  fi
+  command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1
+  local mode
+  mode="$("${ORC_BIN:-orc}" config get github_app.enforcement 2>/dev/null)" || return 1
+  [ "$mode" = "required" ]
 }
 
 # Detects whether the layered orc config resolves a COMPLETE github_app block
