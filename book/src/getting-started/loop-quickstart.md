@@ -57,8 +57,10 @@ orc loop [--json] [--max-cycles N]
   `<config-dir>/worker-tasks/<id>.json` (with `id`, `slug`, and `description` fields),
   where `<config-dir>` defaults to `.orchestraitor/`. The loop derives the id
   deterministically from the board item (`task_id_for` in #434): for an owner/repository
-  whose name parts are short (the combined `owner_name` stays within a 64-character
-  budget) and consist only of ASCII letters, digits, and `-`, the id is
+  whose name parts are short (the combined `owner_name` fits the remaining budget after
+  reserving the `board--<number>` prefix — the budget shrinks as the issue number gains
+  digits, so a repository name shorter than 64 characters can still take the fallback) and
+  consist only of ASCII letters, digits, and `-`, the id is
   `board-<owner>_<repo>-<number>`. Repositories with `_` or `.` in their names, other
   restricted characters, or names that exceed the budget get a fallback id instead —
   a truncated slug of the repository path plus an 8-hex FNV-1a digest of it, still
