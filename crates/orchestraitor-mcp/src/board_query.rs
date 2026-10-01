@@ -411,7 +411,11 @@ async fn execute(
                 truncated,
                 cycle_detected: false,
             };
-            let items = project_items(&matches, &blocked_by, provider).await?;
+            // Fields are board-global: one catalog call per query, never
+            // per item (issue #458 CodeRabbit Major — 500-item searches
+            // would otherwise repeat the catalog call per item).
+            let fields_catalog = provider.fields().await?;
+            let items = project_items(&matches, &blocked_by, &fields_catalog, provider).await?;
             Ok((
                 BoardQueryResultKind::Search(BoardQueryResult { items, truncated }),
                 summary,
@@ -508,37 +512,46 @@ fn direct_blockers(edges: &[DependencyEdge]) -> HashMap<&BoardItemId, Vec<&Board
 async fn project_items(
     items: &[BoardItem],
     blocked_by: &HashMap<&BoardItemId, Vec<&BoardItemId>>,
+    fields_catalog: &[orchestraitor_board_contract::BoardField],
     provider: &dyn BoardProvider,
 ) -> Result<Vec<BoardQueryItem>, BoardQueryError> {
-    // Fields are board-global: fetch the catalog once, not per item —
-    // a 500-item search would otherwise repeat the catalog call per item
-    // (issue #458 CodeRabbit Major: redundant round trips on network
-    // providers).
-    let fields_catalog = provider.fields().await?;
     let mut projected = Vec::with_capacity(items.len());
     for item in items {
-        let mut fields = BTreeMap::new();
-        for field in &fields_catalog {
-            let value = provider
-                .field_value(&item.id, &field.name)
-                .await?
-                .map(|typed| tool_value(&typed));
-            if let Some(value) = value {
-                fields.insert(field.name.clone(), value);
-            }
-        }
-        projected.push(BoardQueryItem {
-            id: item.id.to_string(),
-            item_type: item.item_type.to_string(),
-            title: item.title.clone(),
-            status: item.status.clone(),
-            fields,
-            blocked_by: blocked_by.get(&item.id).map_or_else(Vec::new, |blockers| {
-                blockers.iter().map(ToString::to_string).collect()
-            }),
-        });
+        projected.push(project_item(item, blocked_by, fields_catalog, provider).await?);
     }
     Ok(projected)
+}
+
+/// Projects one board item into its typed tool shape: id, type, title,
+/// status, typed field values (skipping fields the item does not carry),
+/// and direct blocker ids. Shared by the search mode and the blocked-graph
+/// mode — the two paths must not diverge (`#458` review refactor).
+async fn project_item(
+    item: &BoardItem,
+    blocked_by: &HashMap<&BoardItemId, Vec<&BoardItemId>>,
+    fields_catalog: &[orchestraitor_board_contract::BoardField],
+    provider: &dyn BoardProvider,
+) -> Result<BoardQueryItem, BoardQueryError> {
+    let mut fields = BTreeMap::new();
+    for field in fields_catalog {
+        let value = provider
+            .field_value(&item.id, &field.name)
+            .await?
+            .map(|typed| tool_value(&typed));
+        if let Some(value) = value {
+            fields.insert(field.name.clone(), value);
+        }
+    }
+    Ok(BoardQueryItem {
+        id: item.id.to_string(),
+        item_type: item.item_type.to_string(),
+        title: item.title.clone(),
+        status: item.status.clone(),
+        fields,
+        blocked_by: blocked_by.get(&item.id).map_or_else(Vec::new, |blockers| {
+            blockers.iter().map(ToString::to_string).collect()
+        }),
+    })
 }
 
 /// Walks the transitive blocked set breadth-first from the root. Cycle-safe:
@@ -633,22 +646,7 @@ async fn walk_blocked(
     let mut blocking = Vec::with_capacity(blocking_items.len());
     for id in &blocking_items {
         if let Ok(item) = provider.item(id).await {
-            let mut fields = BTreeMap::new();
-            for field in &fields_catalog {
-                if let Ok(Some(value)) = provider.field_value(&item.id, &field.name).await {
-                    fields.insert(field.name.clone(), tool_value(&value));
-                }
-            }
-            blocking.push(BoardQueryItem {
-                id: item.id.to_string(),
-                item_type: item.item_type.to_string(),
-                title: item.title.clone(),
-                status: item.status.clone(),
-                fields,
-                blocked_by: blocked_by.get(&item.id).map_or_else(Vec::new, |blockers| {
-                    blockers.iter().map(ToString::to_string).collect()
-                }),
-            });
+            blocking.push(project_item(&item, &blocked_by, &fields_catalog, provider).await?);
         }
     }
     blocking.sort_by(|a, b| a.id.cmp(&b.id));
