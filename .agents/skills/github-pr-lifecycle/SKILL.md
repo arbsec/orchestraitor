@@ -57,6 +57,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   implementer's session). Implementers may not approve their own
                   security-sensitive changes (spec `50-contracts-data.md` §21.1).
                   This skill does NOT perform the review itself; it tracks generations.
+                  Every generation uses the canonical prompt + report shape in
+                  references/review-message-template.md (parameters, fixed report
+                  sections, tone rules).
 
 4. FINDINGS       Fetch review threads with `review-threads` (GraphQL; `gh pr view
                   --json reviewThreads` DOES NOT EXIST — see gh-capabilities.md).
