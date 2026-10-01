@@ -17,6 +17,10 @@ orc loop [--json] [--max-cycles N]
 
 ## Prerequisites
 
+- **An `orc` binary on your `PATH`.** There are no binary releases yet; build from source
+  per [Installation](./installation.md) (`cargo build --release` puts `orc` at
+  `target/release/orc` — that directory is not on your `PATH` by default, so either add it
+  or invoke `orc` by path).
 - **A configured board.** Copy
   `.agents/project/github-project.example.toml` to
   `.agents/project/github-project.local.toml` and describe the shared GitHub Projects v2
@@ -26,9 +30,12 @@ orc loop [--json] [--max-cycles N]
   runtime via GraphQL and cached under `$XDG_CACHE_HOME/orchestraitor/`.
 - **Board authentication.** Auth is explicit — no ambient credential sniffing. Until the
   GitHub App service-identity module lands, export a bootstrap token and point the local
-  board config at it. First make the token available to the loop (any env var name works):
+  board config at it. `gh auth login` does not request the Projects scopes by default
+  (a known gh CLI gap), so request them first; `gh auth token` only prints the existing
+  token. First make the token available to the loop (any env var name works):
 
   ```sh
+  gh auth refresh -s project
   export GH_TOKEN="$(gh auth token)"
   ```
 
@@ -63,7 +70,11 @@ orc loop [--json] [--max-cycles N]
 - **Worker role routing.** Spawned workers run as the `implement` role; routing must
   resolve through the layered configuration. The shipped built-in default (Neuralwatt
   GLM-5.2, key via `secret://keyring/neuralwatt` or `NEURALWATT_API_KEY`) resolves out of
-  the box — see `docs/cli/orc-routing.md`.
+  the box — see `docs/cli/orc-routing.md`. In the bootstrap slice the loop-spawned worker
+  accepts **only** the `neuralwatt` provider: a routing decision resolving to another
+  provider fails every spawn with a typed `bootstrap worker supports only the neuralwatt
+  provider` error (recorded as a `failed` run row), and a missing Neuralwatt API key fails
+  transport construction the same way — configure the key before relying on the loop.
 - **A reachable board.** Verify the whole read path before starting the loop:
 
   ```sh
