@@ -68,7 +68,10 @@ and `orc config explain github_app.enforcement`. Wrapper-only deployments
 (where the skill scripts run without `orc` on `PATH`) may pin the mode with
 `ORC_GITHUB_APP_ENFORCEMENT=required`, which takes precedence over the
 layered config; when it declares `required`, a missing `orc` binary fails
-closed instead of falling back to personal auth.
+closed instead of falling back to personal auth. `orc github gh-env` honors
+the same pin: an env-pinned `required` runs the full required-mode gate
+(complete-config check plus the canonical git-identity check) even when the
+layered config does not declare it, and an invalid pin value fails closed.
 
 ### Why two `service_identities` surfaces (recorded decision)
 

@@ -37,8 +37,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   suffix look-alike does not pass) — so agent-driven `git commit` paths
   cannot stamp personal attribution onto commits. Wrapper-only deployments
   may pin the mode with `ORC_GITHUB_APP_ENFORCEMENT=required`; a declared
-  `required` fails closed even when the `orc` binary is unavailable. Invalid
-  values fail closed at parse time. The default is a documented bootstrap
+  `required` fails closed even when the `orc` binary is unavailable, and
+  `orc github gh-env` honors the same pin inside orc: an env-pinned
+  `required` runs the full required-mode gate (complete-config check plus
+  the canonical git-identity check) even when the layered config does not
+  declare it; invalid pin values fail closed. Invalid config values fail
+  closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
 

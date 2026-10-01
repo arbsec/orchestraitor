@@ -115,27 +115,31 @@ orc_lib_gh() {
 # an installation token (401), silently yielding an empty login that breaks
 # assignee-ownership checks. On the service path the caller's identity is the
 # App bot user, so it is resolved from `orc github commit-author` (the
-# canonical `name=<slug>[bot]` line). The `gh api user` probe stays ONLY on
-# the labelled personal fallback path, where it is the correct identity
-# source.
+# canonical `name=<slug>[bot]` line). The `gh api user` probe is used ONLY
+# when the AMBIENT route is selected (orc absent) — never as a fallback for a
+# failing service-path resolution: with complete App config the operations run
+# as the App installation, so mixing in the personal login would create a
+# principal mismatch (claim/release ownership checks evaluated against the
+# wrong identity). A failing service-path resolution yields an empty result,
+# which the calling scripts treat as a typed config failure.
 #
 # Usage: orc_lib_resolve_my_login -> prints the caller's login (bot or human).
-#   - gh-env available (service path) -> `<slug>[bot]` from commit-author.
-#   - personal fallback path          -> login from `gh api user`.
-#   - both fail                       -> empty output; callers must treat an
-#     empty login as a typed failure, never a wildcard match.
+#   - orc absent (ambient route)      -> login from `gh api user`.
+#   - orc present (service route)     -> `<slug>[bot]` from commit-author;
+#     commit-author failure           -> EMPTY output (callers fail closed).
+#   - callers must treat an empty login as a typed failure, never a wildcard
+#     match.
 orc_lib_resolve_my_login() {
   local login=""
-  if command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
-    login="$("${ORC_BIN:-orc}" github commit-author 2>/dev/null | sed -n 's/^name=//p' || true)"
-  fi
-  if [ -n "$login" ]; then
+  if ! command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
+    # Ambient route: `gh api user` is user-context and works with the ambient
+    # personal auth; the service identity plays no role here.
+    login="$(orc_lib_gh api user --jq '.login' 2>/dev/null || true)"
     printf '%s' "$login"
     return 0
   fi
-  # Personal fallback path only: `gh api user` is user-context and works with
-  # the ambient personal auth, never with an installation token.
-  login="$(orc_lib_gh api user --jq '.login' 2>/dev/null || true)"
+  # Service route: the principal is the App bot user, full stop.
+  login="$("${ORC_BIN:-orc}" github commit-author 2>/dev/null | sed -n 's/^name=//p' || true)"
   printf '%s' "$login"
 }
 #

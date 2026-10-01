@@ -299,12 +299,27 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     if which.is_none() {
         bail!("child command `{program}` not found on PATH");
     }
-    // Enforcement gate reads the effective config before any token minting:
-    // `required` refuses to delegate at all when the App config does not
-    // resolve, and (cheap check) refuses when the repo git identity would
-    // stamp personal attribution onto agent-created commits.
+    // Enforcement gate reads the effective enforcement mode before any token
+    // minting: `required` refuses to delegate at all when the App config does
+    // not resolve, and refuses when the repo git identity would stamp
+    // personal attribution onto agent-created commits. The layered config is
+    // the default source; `ORC_GITHUB_APP_ENFORCEMENT` (the wrapper-level
+    // declaration used where the layered config cannot carry it) OVERRIDES it
+    // — an env-pinned `required` must run the same identity gate, never a
+    // weaker layered value. Invalid env values fail closed.
     let config = resolved_config(paths)?;
-    let required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
+    let mut required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
+    if let Ok(pinned) = std::env::var("ORC_GITHUB_APP_ENFORCEMENT") {
+        match pinned.as_str() {
+            "required" => required = true,
+            "recommended" => {}
+            other => bail!(
+                "invalid ORC_GITHUB_APP_ENFORCEMENT value `{other}` (expected `recommended` \
+                 or `required`); refusing to delegate under an ambiguous enforcement \
+                 declaration"
+            ),
+        }
+    }
     let mut bot_identity: Option<(String, String)> = None;
     if required {
         require_service_identity(&config, "delegate a gh-env child command")?;

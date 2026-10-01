@@ -312,7 +312,8 @@ mv "$WORK/orc.hidden" "$WORK/orc"
 [ "$LOGIN" = "somehuman" ] || fail "personal fallback must resolve via gh api user, got: $LOGIN"
 grep -q 'gh:api user' "$GH_LOG" || fail "personal fallback must call gh api user: $(cat "$GH_LOG")"
 
-# Case C: both fail — empty output (callers must treat as a typed failure).
+# Case C: orc absent AND gh fails — empty output (callers must treat as a
+# typed failure).
 mv "$WORK/orc" "$WORK/orc.hidden"
 cat > "$WORK/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -324,5 +325,27 @@ LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export 
     . "$LIB"; orc_lib_resolve_my_login ) )"
 mv "$WORK/orc.hidden" "$WORK/orc"
 [ -z "$LOGIN" ] || fail "unresolvable identity must be empty, got: $LOGIN"
+
+# Case D: orc PRESENT (service route selected) but commit-author FAILS — the
+# ambient `gh api user` fallback must NOT fire: mixing the personal login
+# into a service-route decision is a principal mismatch. The result must be
+# EMPTY (callers fail closed), and gh must never be consulted.
+: > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
+  echo "jwt signature rejected" >&2
+  exit 1
+fi
+exit 1
+EOF
+chmod +x "$WORK/orc"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
+    # shellcheck source=/dev/null
+    . "$LIB"; orc_lib_resolve_my_login ) )"
+[ -z "$LOGIN" ] || fail "service-route commit-author failure must yield empty (fail closed), got: $LOGIN"
+if [ -s "$GH_LOG" ]; then
+  fail "ambient gh api user must not fire on a failing service-route resolution: $(cat "$GH_LOG")"
+fi
 
 echo "PASS gh-env service wrapper routing (login resolution)"

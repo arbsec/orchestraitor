@@ -1302,6 +1302,118 @@ fn github_gh_env_required_enforcement_fails_closed_when_config_partial() -> miet
 }
 
 #[test]
+fn github_gh_env_env_pinned_required_runs_gate_when_layered_unset() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    // Complete App config, layered enforcement UNSET, env pin `required`:
+    // the pin must upgrade the gate — with an attacker git identity the
+    // canonical-identity check has to fire (previously the pin was
+    // wrapper-only and orc delegated without the gate).
+    write_github_app_project_config(&temp)?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let repo_str = repo.display().to_string();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", &repo_str])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    assert!(
+        git(&["config", "user.email", "attacker@evil.example"])?
+            .status
+            .success()
+    );
+    let child = repo.join("child.sh");
+    fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    }
+    #[cfg(not(unix))]
+    {
+        // Best effort on non-unix: the test body below still exercises the
+        // gate before any spawn.
+    }
+    let child_str = child.display().to_string();
+    let server = spawn_mint_then_two_api_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &server.endpoint,
+            "github",
+            "gh-env",
+            "--",
+            &child_str,
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .env("ORC_GITHUB_APP_ENFORCEMENT", "required")
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
+        .collect();
+    assert!(
+        flat.contains("isnottheserviceidentitybotscanonicalnoreplyaddress"),
+        "env-pinned required must run the canonical-identity gate: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_gh_env_env_pinned_invalid_value_fails_closed() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &endpoint,
+            "github",
+            "gh-env",
+            "--",
+            "true",
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .env("ORC_GITHUB_APP_ENFORCEMENT", "optional")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("invalidORC_GITHUB_APP_ENFORCEMENTvalue"),
+        "invalid pin value must fail closed with a typed error: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 #[cfg(unix)]
 fn github_gh_env_required_mode_pins_git_identity_env_for_child() -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
