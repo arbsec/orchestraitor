@@ -25,12 +25,18 @@ orc loop [--json] [--max-cycles N]
   inside the checkout. GitHub node IDs are never stored in config; they are resolved at
   runtime via GraphQL and cached under `$XDG_CACHE_HOME/orchestraitor/`.
 - **Board authentication.** Auth is explicit — no ambient credential sniffing. Until the
-  GitHub App service-identity module lands, set a bootstrap token URI in the local board
-  config:
+  GitHub App service-identity module lands, export a bootstrap token and point the local
+  board config at it. First make the token available to the loop (any env var name works):
+
+  ```sh
+  export GH_TOKEN="$(gh auth token)"
+  ```
+
+  Then set a bootstrap token URI in the local board config:
 
   ```toml
   [auth]
-  token = "secret://env/GH_TOKEN" # any env var name; e.g. export GH_TOKEN="$(gh auth token)"
+  token = "secret://env/GH_TOKEN"
   ```
 
   The token is held in a `secrecy::SecretString`, injected only into the `Authorization`
@@ -41,10 +47,19 @@ orc loop [--json] [--max-cycles N]
   in [`docs/cli/orc-github.md`][orc-github]; until the App is registered, personal owner
   auth is the labelled bootstrap fallback above.
 - **Worker task fixtures.** The bootstrap worker resolves its task from
-  `<config-dir>/worker-tasks/<id>.json` (`{"id", "slug", "description"}`), where
-  `<config-dir>` defaults to `.orchestraitor/`. The loop derives the id deterministically
-  from the board item as `board-<owner>_<repo>-<number>`, so a selected issue needs a
-  matching fixture file before its pass can run the worker.
+  `<config-dir>/worker-tasks/<id>.json` (with `id`, `slug`, and `description` fields),
+  where `<config-dir>` defaults to `.orchestraitor/`. The loop derives the id
+  deterministically from the board item (`task_id_for` in #434): for an owner/repository
+  whose name parts are short (the combined `owner_name` stays within a 64-character
+  budget) and consist only of ASCII letters, digits, and `-`, the id is
+  `board-<owner>_<repo>-<number>`. Repositories with `_` or `.` in their names, other
+  restricted characters, or names that exceed the budget get a fallback id instead —
+  a truncated slug of the repository path plus an 8-hex FNV-1a digest of it, still
+  suffixed with the issue number (`board-<truncated-slug>-<8hex>-<number>`), so the id
+  stays deterministic and collision-resistant. If you are unsure which form applies to
+  your repository, read the persisted decision record the pass writes to
+  `campaign.db` — its `task_id` field is the authoritative fixture filename. A selected
+  issue needs a matching fixture file before its pass can run the worker.
 - **Worker role routing.** Spawned workers run as the `implement` role; routing must
   resolve through the layered configuration. The shipped built-in default (Neuralwatt
   GLM-5.2, key via `secret://keyring/neuralwatt` or `NEURALWATT_API_KEY`) resolves out of
@@ -191,11 +206,14 @@ simply picked up by a later invocation. There is no restart recovery of in-fligh
 this slice: historical rows stay as recorded, and concurrency counting applies only to
 workers supervised by the current invocation.
 
-## The guard set you can adjust
+## The fixed bootstrap guard set
 
-Every guard is owner-adjustable at the board (issue #310 set), pinned once in
-`WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop — the two
-enforcement layers can never drift apart:
+The bootstrap slice ships a fixed guard set (the issue-#310 defaults from
+`WorkerBudgets::bootstrap_defaults()`), shared between the worker and the loop — the two
+enforcement layers can never drift apart. This guard set is not owner-adjustable yet: the
+board exposes no budget field or command for overriding these values, and no CLI or
+layered-config key reads them. Changing them today requires constructing `WorkerBudgets`
+with different values in code. Owner-adjustable budgets land with the E8 watch daemon:
 
 | Guard | Default | Enforced by |
 | --- | --- | --- |
@@ -213,7 +231,5 @@ budget, negative spend cap, zero run deadline) is rejected fail-closed: a weaken
 a runaway loop.
 
 The full supervision semantics — including arbitration details and the terminal-stop
-vocabulary — live in the command reference,
-[`docs/cli/orc-loop.md`][orc-loop] (it lands on `main` with #434).
-
-[orc-loop]: https://github.com/arbsec/orchestraitor/blob/main/docs/cli/orc-loop.md
+vocabulary — will live in the command reference added by
+[#434](https://github.com/arbsec/orchestraitor/pull/434).

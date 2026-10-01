@@ -102,7 +102,7 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 - [Bootstrap Loop Quickstart](book/src/getting-started/loop-quickstart.md) — end-to-end
   owner walkthrough for the cron-shaped `orc loop` bootstrap runner ([#434][]): what to
   configure before the first invocation, what a pass does, how to read `loop.db` and the
-  summary JSON, and the guard set you can adjust.
+  summary JSON, and the fixed bootstrap guard set.
 
 [#434]: https://github.com/arbsec/orchestraitor/pull/434
 

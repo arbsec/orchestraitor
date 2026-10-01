@@ -39,7 +39,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   ([Bootstrap Loop Quickstart](book/src/getting-started/loop-quickstart.md)): prerequisites
   (board config, explicit board auth, optional GitHub App service identity), first
   invocation, what a normal pass does, how to read `loop.db` rows and the end-of-run
-  summary, stall/timeout/budget-stop semantics, safe shutdown, and the owner-adjustable
+  summary, stall/timeout/budget-stop semantics, safe shutdown, and the fixed bootstrap
   guard set. Served on GitHub Pages with the rest of `book/` (the loop runner itself lands
   with #434). Documented at
   [book/src/getting-started/loop-quickstart.md](book/src/getting-started/loop-quickstart.md)
