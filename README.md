@@ -99,6 +99,12 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
   reconciled board, applies the P0-first epic-focus rule, selects at most one eligible
   task, persists exactly one append-only decision record, and spawns the worker via the
   daemon-less direct path (spec `10-orchestrator.md` §9.35).
+- [Bootstrap Loop Quickstart](book/src/getting-started/loop-quickstart.md) — end-to-end
+  owner walkthrough for the cron-shaped `orc loop` bootstrap runner ([#434][]): what to
+  configure before the first invocation, what a pass does, how to read `loop.db` and the
+  summary JSON, and the fixed bootstrap guard set.
+
+[#434]: https://github.com/arbsec/orchestraitor/pull/434
 
 ## CLI configuration surface
 

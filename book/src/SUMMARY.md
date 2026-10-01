@@ -8,6 +8,7 @@
 
 - [Installation](./getting-started/installation.md)
 - [Quick Start](./getting-started/quick-start.md)
+- [Bootstrap Loop Quickstart](./getting-started/loop-quickstart.md)
 - [Configuration](./getting-started/configuration.md)
 
 ---

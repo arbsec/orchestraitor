@@ -35,6 +35,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   board provider is configured; when none is, the gateway's tool router
   disables the route (hidden from `tools/list`, calls rejected). Documented
   in [docs/cli/orc-board.md](docs/cli/orc-board.md).
+- Owner quickstart for the `orc loop` bootstrap runner in the mdBook
+  ([Bootstrap Loop Quickstart](book/src/getting-started/loop-quickstart.md)): prerequisites
+  (board config, explicit board auth, optional GitHub App service identity), first
+  invocation, what a normal pass does, how to read `loop.db` rows and the end-of-run
+  summary, stall/timeout/budget-stop semantics, safe shutdown, and the fixed bootstrap
+  guard set. Served on GitHub Pages with the rest of `book/` (the loop runner itself lands
+  with #434). Documented at
+  [book/src/getting-started/loop-quickstart.md](book/src/getting-started/loop-quickstart.md)
+  and linked from the README.
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at
