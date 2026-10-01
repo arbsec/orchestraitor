@@ -57,6 +57,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   "The delivery loop" section describing the stage cycle, the guard set, and
   durable run state, and a "Now running" subsection listing the surfaces that
   ship today.
+- GitHub App service-identity write path (#445): `orc github api` executes one
+  authenticated GitHub REST call as the App installation (`gh api`-shaped
+  `--input`/`--field` body, verbatim body on stdout, exit code from the HTTP
+  status class), `orc github gh-env -- <command…>` runs one child with
+  `GH_TOKEN` set to a freshly minted installation token (token never printed by
+  `orc`; child exit code propagates), and `orc github commit-author` prints the
+  App's canonical commit identity (`name=`/`email=`) derived from `GET /app`,
+  not hardcoded. Every diagnostic stays token-free: the installation token is
+  held in memory only, injected solely into the `Authorization` header or the
+  child environment, and never printed, logged, or persisted. Removing the
+  `github_app` configuration fails all four `orc github` subcommands closed.
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at

@@ -133,11 +133,52 @@ pub struct CampaignRunArgs {
 }
 
 /// `orc github` subcommands.
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum GitHubCommand {
     /// Mint one installation access token and print only non-secret metadata
     /// (expiry, installation id, SHA-256 fingerprint prefix — never the token).
     MintToken,
+    /// Execute one authenticated GitHub REST API call as the App installation.
+    ///
+    /// Mirrors `gh api` minimally: METHOD plus a repository-relative API path,
+    /// an optional JSON body from `--input FILE` (`-` = stdin) or `--field
+    /// key=value` pairs. Prints the response body verbatim on stdout; exits 0
+    /// on 2xx, non-zero otherwise. The minted token is never printed.
+    Api(ApiArgs),
+    /// Run one child command with `GH_TOKEN` set to a freshly minted
+    /// installation token (never printed by orc; the child's environment is
+    /// the child's responsibility). Child stdout/stderr pass through and the
+    /// child's exit code propagates.
+    GhEnv(GhEnvArgs),
+    /// Print the App's canonical commit identity as `name=…` / `email=…`
+    /// lines, derived from the authenticated App (`GET /app`) — never
+    /// hardcoded.
+    CommitAuthor,
+}
+
+/// Arguments for `orc github api`.
+#[derive(Debug, Clone, Args)]
+pub struct ApiArgs {
+    /// HTTP method: GET, POST, PATCH, PUT, or DELETE.
+    pub method: String,
+    /// API path relative to the configured base URL (e.g.
+    /// `/repos/OWNER/REPO/pulls`).
+    pub path: String,
+    /// Read the JSON request body from a file (`-` reads stdin).
+    #[arg(long)]
+    pub input: Option<String>,
+    /// Add a JSON body field `key=value` (repeatable; values are raw JSON
+    /// when they parse as such, else strings — like `gh api -f`).
+    #[arg(long = "field", short = 'f')]
+    pub fields: Vec<String>,
+}
+
+/// Arguments for `orc github gh-env`.
+#[derive(Debug, Clone, Args)]
+pub struct GhEnvArgs {
+    /// Child command and arguments, after `--`.
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
 
 /// Arguments for `orc init`.

@@ -101,6 +101,32 @@ orc_lib_gh() {
   command "${GH_BIN:-gh}" "$@"
 }
 
+# --- Service-identity gh routing (AGENTS.md; .agents/project/orchestraitor-workflow.md) ---
+# Agent-driven GitHub operations MUST authenticate as the arbsec-agent GitHub
+# App service identity, never a personal account. `orc github gh-env --` runs a
+# child with GH_TOKEN set to a freshly minted installation token (the token is
+# never printed by orc; it exists only in the child's environment).
+#
+# Usage: orc_lib_gh_service <args...>
+#   - github_app config present  -> gh runs as the App installation.
+#   - absent                     -> labelled personal-auth fallback, loud warning.
+orc_lib_gh_service() {
+  if orc_lib_has_github_app_config; then
+    command "${ORC_BIN:-orc}" github gh-env -- command "${GH_BIN:-gh}" "$@"
+  else
+    echo "WARNING: service-identity fallback — github_app config is not set;" >&2
+    echo "         running gh as the PERSONAL account (policy: labelled fallback only)." >&2
+    command "${GH_BIN:-gh}" "$@"
+  fi
+}
+
+# Detects whether the layered orc config resolves a github_app block. Best-effort:
+# if orc itself is unavailable the caller falls back (labelled above).
+orc_lib_has_github_app_config() {
+  command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1
+  "${ORC_BIN:-orc}" config get github_app.client_id >/dev/null 2>&1
+}
+
 # --- jq wrapper: parse gh --json safely ----------------------------------------
 # Usage: orc_lib_jq_filter <gh-json-stdin> <jq-filter>  -> prints filtered result
 orc_lib_jq_filter() {
