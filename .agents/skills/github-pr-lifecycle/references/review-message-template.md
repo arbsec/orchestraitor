@@ -48,6 +48,12 @@ violated_rule, proposed_remediation, generation, status.
 
 CONSTRAINTS
 - Read-only: you make no edits, push no commits, run no mutating command.
+- Apply the tone rules of the `{{tone_profile}}` tone profile to every
+  sentence; `neutral` is the default and means the "Tone rules" section of
+  review-message-template.md. Stricter profiles tighten those rules; none
+  loosen them.
+- Keep the report body within the `{{max_output_lines}}`-line soft budget:
+  evidence quotes, not prose.
 - Worktree hygiene: if you need a scratch checkout, create a temporary
   worktree and remove it before returning.
 - You have no approval or merge authority: you do not approve, request
@@ -85,6 +91,11 @@ violated_rule, proposed_remediation, generation, status.
 
 CONSTRAINTS
 - Read-only: you make no edits, push no commits, run no mutating command.
+- Apply the tone rules of the `neutral` tone profile to every sentence; the
+  default profile is the "Tone rules" section of review-message-template.md.
+  Stricter profiles tighten those rules; none loosen them.
+- Keep the report body within the 40-line soft budget: evidence quotes, not
+  prose.
 - Worktree hygiene: if you need a scratch checkout, create a temporary
   worktree and remove it before returning.
 - You have no approval or merge authority: you do not approve, request
@@ -149,7 +160,7 @@ One line per gate, with real counts from the run:
 - CI: 7/7 checks passing @ {{head_sha}}
 ```
 
-### Footer (always present, always last)
+### Footer (always present, last fixed section)
 
 ```text
 NOTEWORTHY FINDINGS: <N>
@@ -158,11 +169,17 @@ VERDICT: converges | blocked
 
 - `NOTEWORTHY FINDINGS` counts open CRITICAL + HIGH + MEDIUM findings (the
   convergence blocking set; see pr-convergence.md).
-- `VERDICT: converges` requires zero CRITICAL/HIGH findings and no unjudged
+- `VERDICT: converges` requires zero CRITICAL/HIGH findings, no unjudged
   MEDIUM finding (each MEDIUM is fixed or formally resolved with recorded
-  reasoning). Otherwise `VERDICT: blocked`.
+  reasoning), and every LOW finding fixed or explicitly deferred with
+  recorded reasoning (see pr-convergence.md). Otherwise `VERDICT: blocked`.
 - `converges` is a review-generation verdict, NOT a merge approval — merging
   still requires the full `merge-gate` (checks, threads, checklist, docs).
+
+Optional extension sections MAY follow the footer. They never change the
+fixed sections: header, findings, acceptance criteria, verified clean, gates,
+and footer keep their exact shape and order, so parsers of the fixed sections
+are unaffected.
 
 ## Tone rules
 
