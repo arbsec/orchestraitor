@@ -33,7 +33,7 @@
 
 # Architecture Decision Records
 
-- [ADR Index](../../docs/adr/README.md)
+- [ADR Index](https://github.com/arbsec/orchestraitor/tree/main/docs/adr)
 
 ---
 

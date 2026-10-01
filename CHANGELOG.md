@@ -44,6 +44,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   with #434). Documented at
   [book/src/getting-started/loop-quickstart.md](book/src/getting-started/loop-quickstart.md)
   and linked from the README.
+- GitHub Pages documentation site (the mdBook under `book/` builds and deploys
+  via the previously disabled `docs.yml` workflow): the book introduction now
+  reflects the loop-first product framing and links to the rendered repo docs
+  instead of broken out-of-tree paths. Site goes live on the first push to
+  `main` that touches `book/**` or `docs/**`.
+
+### Changed
+
+- README updated to lead with the bounded, self-improving delivery loop as the
+  product's first axis (spec `00-overview.md` §1, §2.3, §3.1), with a new
+  "The delivery loop" section describing the stage cycle, the guard set, and
+  durable run state, and a "Now running" subsection listing the surfaces that
+  ship today.
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at

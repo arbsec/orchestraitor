@@ -21,9 +21,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Disabled until book/ scaffold exists (tracked in #11).
-    # Re-enable when book/book.toml + book/src/SUMMARY.md are committed.
-    if: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5  # v5.0.0
@@ -34,6 +31,10 @@ jobs:
         run: mkdir -p book/src/adr && cp -r docs/adr/* book/src/adr/ 2>/dev/null || true
       - name: Build book
         run: mdbook build book
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5.0.0
+        with:
+          enablement: true
       - name: Upload artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
