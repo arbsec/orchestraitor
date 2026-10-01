@@ -14,7 +14,7 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 
 ## What "noteworthy" means
 
-CRITICAL, HIGH, and MEDIUM findings are noteworthy. They MUST be resolved before merge. A finding is "resolved" when:
+CRITICAL, HIGH, and MEDIUM findings are noteworthy. Every review generation reports them in the fixed shape of [review-message-template.md](review-message-template.md), whose `VERDICT` footer reflects this convergence rule. They MUST be resolved before merge. A finding is "resolved" when:
 - the code is fixed AND the reviewer confirms the fix, OR
 - the finding is formally accepted with recorded reasoning in the review thread (e.g. "This is a known limitation; tracking in #N; accepted because X").
 
