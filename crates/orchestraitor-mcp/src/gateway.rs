@@ -10,7 +10,10 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::board_query::{BoardQueryMode, BoardQueryResultKind, DelegationChain, board_query};
+use crate::board_query::{
+    BoardQueryMode, BoardQueryResultKind, DelegationChain, board_query, build_invocation_event,
+    execute_query, invocation_summary,
+};
 use crate::config::ResolvedMcpServers;
 use crate::error::{McpGatewayError, McpGatewayResult};
 use crate::fs::FileSystemTools;
@@ -334,12 +337,16 @@ struct BoardQueryRequest {
 /// is written and validated, then dropped with the store. Persistence lands
 /// with the daemon event-store wiring (§9.17), not in this slice.
 ///
-/// The shared variant works by draining the shared store's existing records
-/// under its lock (a short synchronous section — `MutexGuard` is not `Send`,
-/// so no guard may cross an await), replaying them into the invocation's
-/// store so the hash chain continues, and writing the merged chain back. A
-/// poisoned lock fails the invocation closed.
-async fn run_board_query_shared(
+/// Shared-store merge (issues #458-gen2 N1/N2): the invocation event is
+/// built to CONTINUE that chain (sequence = len+1, `prev_hash` = last shared
+/// hash) and appended under one lock section. No drain-replay round trip and
+/// no blind overwrite: concurrent invocations serialize on the mutex, so
+/// seed events and one `ToolRequest` per invocation all survive. The store's
+/// `import` is not used here — its whole-chain validation requires seq=1,
+/// which a shared store's history violates by design. The lock is held only
+/// across synchronous section(s); `MutexGuard` is not Send and never crosses
+/// an await. A poisoned lock fails the invocation closed.
+pub(crate) async fn run_board_query_shared(
     provider: &dyn BoardProvider,
     mode: &BoardQueryMode,
     principals: Vec<String>,
@@ -354,36 +361,31 @@ async fn run_board_query_shared(
         principals,
     };
     if let Some(shared) = shared_store {
-        let existing = {
-            let store = shared
-                .lock()
-                .map_err(|_| McpGatewayError::BoardQuery(String::from("audit store poisoned")))?;
-            store.records().to_vec()
-        };
-        let mut store = orchestraitor_events::InMemoryAuditStore::default();
-        for record in existing {
-            store
-                .r#import(
-                    &serde_json_canonicalizer::to_vec(&record)
-                        .map_err(|_| {
-                            McpGatewayError::BoardQuery(String::from(
-                                "audit replay serialization failed",
-                            ))
-                        })?
-                        .into_iter()
-                        .chain(std::iter::once(b'\n'))
-                        .collect::<Vec<u8>>(),
-                )
-                .map_err(|_| McpGatewayError::BoardQuery(String::from("audit replay rejected")))?;
-        }
-        let result = board_query(provider, mode, &chain, &mut store)
+        // Run the read FIRST (no locks held); then snapshot + append under
+        // ONE lock section so the event continues the chain exactly as it
+        // stands and concurrent invocations serialize without loss (N2).
+        // The shared store is never overwritten: seed events and other
+        // invocations' events survive.
+        let result = execute_query(provider, mode)
             .await
             .map_err(|error| McpGatewayError::BoardQuery(error.to_string()))?;
+        let summary = invocation_summary(&result);
+
         {
-            let mut guard = shared
+            let mut store = shared
                 .lock()
                 .map_err(|_| McpGatewayError::BoardQuery(String::from("audit store poisoned")))?;
-            *guard = store;
+            let seq_base = store.records().len();
+            let prev_base = store.records().last().map(|record| record.hash.clone());
+            let event = build_invocation_event(mode, &chain, &summary, seq_base, prev_base)
+                .map_err(|_| {
+                    McpGatewayError::BoardQuery(String::from(
+                        "invocation event construction failed",
+                    ))
+                })?;
+            store.append(event).map_err(|_| {
+                McpGatewayError::BoardQuery(String::from("invocation event append rejected"))
+            })?;
         }
         return Ok(result);
     }
@@ -413,6 +415,8 @@ fn error_payload(error: &McpGatewayError) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -496,5 +500,91 @@ mod tests {
         );
         assert!(configured.tool_router.has_route("board.query"));
         Ok(())
+    }
+
+    /// N2 (issue #458-gen2): a shared store with a PRE-EXISTING seed event
+    /// survives two concurrent invocations — final count = seed + 2, every
+    /// original event intact, and the whole chain validates. The N1 probe
+    /// (one-at-a-time import of a multi-record history) is structurally
+    /// gone: the shared path now appends under one lock section and never
+    /// calls import at all.
+    #[tokio::test]
+    async fn shared_store_survives_concurrent_invocations_with_seed_events() {
+        use orchestraitor_board_contract::{BoardItemType, InMemoryBoardProvider};
+        use orchestraitor_events::{
+            AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
+        };
+        use std::sync::Arc;
+
+        use crate::board_query::BoardQueryFilter;
+
+        let board = Arc::new(InMemoryBoardProvider::new(|setup| {
+            setup.item("only", BoardItemType::Task, "Only item", "b", "Ready", &[]);
+        }));
+        let shared = Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::InMemoryAuditStore::default(),
+        ));
+
+        // Seed: one pre-existing non-board.query event. Errors are mapped
+        // to messages (no unwrap): the test fails loudly either way.
+        let seed = EventEnvelope::try_new(EventEnvelopeInput {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            monotonic_seq: 1,
+            wall_clock_ts: String::from("2026-07-30T00:00:00Z"),
+            correlation_id: orchestraitor_model::OperationId::from_string(String::from("op_seed")),
+            parent_op_id: None,
+            category: EventCategory::SessionLifecycle,
+            payload: serde_json::json!({"state": "seeded"}),
+            prev_hash: None,
+        })
+        .unwrap();
+        let seed_result = shared
+            .lock()
+            .map_err(|_| String::from("seed lock poisoned"))
+            .and_then(|mut store| {
+                store
+                    .append(seed)
+                    .map_err(|error| format!("seed append failed: {error}"))
+            });
+        seed_result.unwrap();
+
+        let run = || {
+            let board = board.clone();
+            let shared = shared.clone();
+            async move {
+                // Direct call into the crate-visible shared-store path.
+                crate::gateway::run_board_query_shared(
+                    board.as_ref(),
+                    &BoardQueryMode::Search {
+                        filter: BoardQueryFilter::default(),
+                    },
+                    vec![String::from("user:test")],
+                    Some(shared),
+                )
+                .await
+            }
+        };
+        let (first, second) = tokio::join!(run(), run());
+        first.expect("first invocation succeeds");
+        second.expect("second invocation succeeds");
+
+        let records = shared
+            .lock()
+            .map_err(|_| String::from("final lock poisoned"))
+            .map(|store| store.records().to_vec())
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            3,
+            "seed + one ToolRequest per invocation, nothing lost"
+        );
+        assert_eq!(
+            records[0].envelope.payload["state"], "seeded",
+            "seed event intact"
+        );
+        assert_eq!(records[1].envelope.payload["tool"], "board.query");
+        assert_eq!(records[2].envelope.payload["tool"], "board.query");
+        orchestraitor_events::validate_hash_chain(&records)
+            .expect("merged chain validates end to end");
     }
 }

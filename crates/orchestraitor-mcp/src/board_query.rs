@@ -236,8 +236,8 @@ pub struct DelegationChain {
 }
 
 /// A summary of one invocation, recorded in the audit event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct InvocationSummary {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct InvocationSummary {
     items_matched: usize,
     truncated: bool,
     cycle_detected: bool,
@@ -296,6 +296,93 @@ pub async fn board_query(
     let (result, summary) = execute(provider, mode).await?;
     record_invocation(mode, &summary, chain, store)?;
     Ok(result)
+}
+
+/// Derives the audit summary from a query result (used by the gateway's
+/// shared-store path, which records AFTER the read under its own lock).
+#[must_use]
+pub(crate) fn invocation_summary(result: &BoardQueryResultKind) -> InvocationSummary {
+    match result {
+        BoardQueryResultKind::Search(result) => InvocationSummary {
+            items_matched: result.items.len(),
+            truncated: result.truncated,
+            cycle_detected: false,
+        },
+        BoardQueryResultKind::BlockedBy(graph) => InvocationSummary {
+            items_matched: graph.blocking.len(),
+            truncated: false,
+            cycle_detected: graph.cycle.is_some(),
+        },
+    }
+}
+
+/// Builds the `ToolRequest` envelope for one invocation, continuing the
+/// chain at `(seq_base, prev_base)` — used by `record_invocation` (empty
+/// store: base 0/None) and the gateway's shared-store append (base = the
+/// shared store's head, issue #458-gen2 N1/N2).
+pub(crate) fn build_invocation_event(
+    mode: &BoardQueryMode,
+    chain: &DelegationChain,
+    summary: &InvocationSummary,
+    seq_base: usize,
+    prev_base: Option<HashDigest>,
+) -> Result<EventEnvelope, BoardQueryError> {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "tool".to_string(),
+        Value::String(String::from("board.query")),
+    );
+    payload.insert(
+        "mode".to_string(),
+        truncate_payload_json(
+            &serde_json::to_value(mode)
+                .map_err(|_| BoardQueryError::EventStore("filter serialization failed"))?,
+        ),
+    );
+    payload.insert(
+        "result_summary".to_string(),
+        serde_json::to_value(summary)
+            .map_err(|_| BoardQueryError::EventStore("summary serialization failed"))?,
+    );
+    payload.insert(
+        "chain_source".to_string(),
+        Value::String(String::from("client-asserted")),
+    );
+    // Client-supplied principal labels are data, not authority (N4): each
+    // label is truncated like any filter value, and the chain is bounded —
+    // overflow is marked, never silently dropped.
+    let mut principals: Vec<Value> = chain
+        .principals
+        .iter()
+        .take(MAX_CHAIN_PRINCIPALS)
+        .map(|principal| truncate_payload_value(principal))
+        .map(|truncated| Value::String(format!("claimed:{truncated}")))
+        .collect();
+    if chain.principals.len() > MAX_CHAIN_PRINCIPALS {
+        principals.push(Value::String(String::from(CHAIN_TRUNCATION_MARKER)));
+    }
+    payload.insert("delegation_chain".to_string(), Value::Array(principals));
+
+    let monotonic_seq = u64::try_from(seq_base).map_or(u64::MAX, |base| base.saturating_add(1));
+    EventEnvelope::try_new(EventEnvelopeInput {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        monotonic_seq,
+        wall_clock_ts: rfc3339_now(),
+        correlation_id: chain.correlation_id.clone(),
+        parent_op_id: chain.parent_op_id.clone(),
+        category: EventCategory::ToolRequest,
+        payload: Value::Object(payload),
+        prev_hash: prev_base,
+    })
+    .map_err(|_| BoardQueryError::EventStore("envelope rejected"))
+}
+
+/// Runs one read-only `board.query` against a provider.
+pub(crate) async fn execute_query(
+    provider: &dyn BoardProvider,
+    mode: &BoardQueryMode,
+) -> Result<BoardQueryResultKind, BoardQueryError> {
+    execute(provider, mode).await.map(|(result, _)| result)
 }
 
 /// Runs one read-only `board.query` against a provider.
@@ -454,6 +541,10 @@ async fn walk_blocked(
     provider: &dyn BoardProvider,
 ) -> Result<BlockedGraph, BoardQueryError> {
     /// One DFS frame unwind marker: popped after the node's blockers.
+    /// Regular frames carry the node's PATH DEPTH from the root (issue
+    /// #458-gen2 N3): the cap bounds path depth, never breadth — a wide
+    /// board (many direct blockers) must walk fully; only a chain deeper
+    /// than [`MAX_BLOCKED_DEPTH`] is capped.
     const EXIT: usize = usize::MAX;
 
     let blocked_by = direct_blockers(edges);
@@ -467,22 +558,22 @@ async fn walk_blocked(
     let mut cycle: Option<BlockedCycle> = None;
     let mut depth_capped = false;
 
+    // Frames: (item, path_depth) for a node to visit, or (item, EXIT) to
+    // unwind its path frame.
     let mut stack: Vec<(&BoardItemId, usize)> = Vec::new();
     if let Some(blockers) = blocked_by.get(root) {
-        if blockers.len() > MAX_BLOCKED_DEPTH {
-            depth_capped = true;
-        }
         for blocker in blockers {
-            stack.push((blocker, 0));
+            stack.push((blocker, 1));
         }
     }
 
-    while let Some((item, remaining)) = stack.pop() {
-        if remaining == EXIT {
+    while let Some((item, frame)) = stack.pop() {
+        if frame == EXIT {
             // Unwind frame: the node's subtree is fully walked.
             path_ids.pop();
             continue;
         }
+        let path_depth = frame;
         if visited.contains(item) {
             // Revisit: a cycle ONLY if the node is on the current DFS path
             // (back edge). Re-convergence from a sibling branch (diamond)
@@ -497,9 +588,11 @@ async fn walk_blocked(
             }
             continue;
         }
-        if stack.len() >= MAX_BLOCKED_DEPTH {
+        if path_depth > MAX_BLOCKED_DEPTH {
+            // Path depth, never breadth: walking stops along THIS branch
+            // only (issue #458-gen2 N3); siblings continue.
             depth_capped = true;
-            break;
+            continue;
         }
         visited.insert(item);
         path_ids.push(item.to_string());
@@ -507,11 +600,9 @@ async fn walk_blocked(
         // Unwind marker first (LIFO: popped after all blockers).
         stack.push((item, EXIT));
         if let Some(blockers) = blocked_by.get(item) {
-            if stack.len() + blockers.len() > MAX_BLOCKED_DEPTH {
-                depth_capped = true;
-            }
+            let child_depth = path_depth.saturating_add(1);
             for blocker in blockers {
-                stack.push((blocker, 0));
+                stack.push((blocker, child_depth));
             }
         }
     }
@@ -588,45 +679,19 @@ fn truncate_payload_json(value: &Value) -> Value {
 /// identity, so the labels are recorded under `chain_source:
 /// client-asserted` and each label is prefixed `claimed:` — provenance is
 /// never fabricated (§9.25: identity comes from the session layer, which
-/// will assert it itself once it records events).
+/// will assert it itself once it records events). Principal labels are
+/// client input, so each is truncated like any filter value and the chain
+/// length is bounded ([`MAX_CHAIN_PRINCIPALS`]).
+const MAX_CHAIN_PRINCIPALS: usize = 32;
+/// Static marker appended when the principal list exceeds the cap.
+const CHAIN_TRUNCATION_MARKER: &str = "…[chain truncated]";
+
 fn record_invocation(
     mode: &BoardQueryMode,
     summary: &InvocationSummary,
     chain: &DelegationChain,
     store: &mut (dyn AuditStore + Send),
 ) -> Result<(), BoardQueryError> {
-    let mut payload = serde_json::Map::new();
-    payload.insert(
-        "tool".to_string(),
-        Value::String(String::from("board.query")),
-    );
-    payload.insert(
-        "mode".to_string(),
-        truncate_payload_json(
-            &serde_json::to_value(mode)
-                .map_err(|_| BoardQueryError::EventStore("filter serialization failed"))?,
-        ),
-    );
-    payload.insert(
-        "result_summary".to_string(),
-        serde_json::to_value(summary)
-            .map_err(|_| BoardQueryError::EventStore("summary serialization failed"))?,
-    );
-    payload.insert(
-        "chain_source".to_string(),
-        Value::String(String::from("client-asserted")),
-    );
-    payload.insert(
-        "delegation_chain".to_string(),
-        Value::Array(
-            chain
-                .principals
-                .iter()
-                .map(|principal| Value::String(format!("claimed:{principal}")))
-                .collect(),
-        ),
-    );
-
     let previous = store
         .query(&orchestraitor_events::EventQuery {
             category: None,
@@ -635,24 +700,10 @@ fn record_invocation(
             include_uninterpreted: true,
         })
         .map_err(|_| BoardQueryError::EventStore("query failed"))?;
-    let last = previous.last();
-    let monotonic_seq = last.map_or(1, |record| record.envelope.monotonic_seq + 1);
-    // The chain links on the previous record's canonical hash; a queried
-    // record without one cannot be linked, so the event carries no prev_hash
-    // and the store's continuity validation decides whether that is legal.
-    let prev_hash: Option<HashDigest> = last.map(|record| record.hash.clone());
+    let seq_base = previous.len();
+    let prev_hash = previous.last().map(|record| record.hash.clone());
 
-    let envelope = EventEnvelope::try_new(EventEnvelopeInput {
-        schema_version: CURRENT_SCHEMA_VERSION,
-        monotonic_seq,
-        wall_clock_ts: rfc3339_now(),
-        correlation_id: chain.correlation_id.clone(),
-        parent_op_id: chain.parent_op_id.clone(),
-        category: EventCategory::ToolRequest,
-        payload: Value::Object(payload),
-        prev_hash,
-    })
-    .map_err(|_| BoardQueryError::EventStore("envelope rejected"))?;
+    let envelope = build_invocation_event(mode, chain, summary, seq_base, prev_hash)?;
     store
         .append(envelope)
         .map(|_| ())
@@ -1159,6 +1210,152 @@ mod tests {
         assert!(
             !carried.contains("test tail that only exists deep in the payload"),
             "the hostile payload tail must not survive into the audit record"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // N3 (issue #458-gen2): the depth cap bounds PATH depth, never breadth.
+    // ------------------------------------------------------------------
+
+    /// 70 direct blockers of one root: all 70 walk (breadth never triggers
+    /// the cap), and because 70 > `MAX_BLOCKED_DEPTH` (64) the FIRST branch
+    /// reaching path depth 65 sets `depth_capped` — the exact semantics are:
+    /// depth is path depth from the root; every node at depth ≤ 64 is in
+    /// the result.
+    #[tokio::test]
+    async fn wide_board_walks_every_direct_blocker_despite_depth_cap() {
+        let count = 70usize;
+        let board = InMemoryBoardProvider::new(|setup| {
+            setup.item("root", BoardItemType::Task, "Root", "b", "In Progress", &[]);
+            for i in 0..count {
+                let id = format!("blocker-{i:03}");
+                setup.item(&id, BoardItemType::Task, &id, "b", "In Progress", &[]);
+                setup.edge("root", &id);
+            }
+        });
+        let mut store = empty_store();
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let result = board_query(&board, &mode, &chain(), &mut store)
+            .await
+            .expect("query succeeds");
+        let BoardQueryResultKind::BlockedBy(graph) = result else {
+            panic!("expected blocked graph");
+        };
+        assert!(
+            graph.cycle.is_none(),
+            "a wide board is not a cycle: {:?}",
+            graph.cycle
+        );
+        assert_eq!(
+            graph.blocking.len(),
+            count,
+            "ALL direct blockers are visited — breadth never triggers the cap"
+        );
+        // MAX_BLOCKED_DEPTH is 64 and every blocker sits at path depth 1:
+        // the cap is never reached.
+        assert!(!graph.depth_capped, "path depth 1 << 64: no cap");
+        let ids: Vec<&str> = graph.blocking.iter().map(|item| item.id.as_str()).collect();
+        let expected: Vec<String> = (0..count).map(|i| format!("blocker-{i:03}")).collect();
+        let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(ids, expected_refs, "all 70, sorted");
+    }
+
+    /// A genuinely deep chain (depth > `MAX_BLOCKED_DEPTH`) still sets the
+    /// depth cap: the cap mechanism itself is intact after the N3 fix.
+    #[tokio::test]
+    async fn deep_chain_still_sets_depth_cap() {
+        let depth = super::MAX_BLOCKED_DEPTH + 10;
+        let board = InMemoryBoardProvider::new(|setup| {
+            setup.item("root", BoardItemType::Task, "Root", "b", "In Progress", &[]);
+            for i in 0..depth {
+                let id = format!("node-{i:03}");
+                setup.item(&id, BoardItemType::Task, &id, "b", "In Progress", &[]);
+                let parent = if i == 0 {
+                    String::from("root")
+                } else {
+                    format!("node-{:03}", i - 1)
+                };
+                setup.edge(&parent, &id);
+            }
+        });
+        let mut store = empty_store();
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let result = board_query(&board, &mode, &chain(), &mut store)
+            .await
+            .expect("query succeeds");
+        let BoardQueryResultKind::BlockedBy(graph) = result else {
+            panic!("expected blocked graph");
+        };
+        assert!(
+            graph.depth_capped,
+            "a chain deeper than the cap must report the cap"
+        );
+        assert_eq!(
+            graph.blocking.len(),
+            super::MAX_BLOCKED_DEPTH,
+            "exactly the first MAX_BLOCKED_DEPTH items come back"
+        );
+        assert!(graph.cycle.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // N4 (issue #458-gen2): principal labels are bounded client data.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn oversized_principal_labels_are_truncated_and_chain_bounded() {
+        let board = board_fixture();
+        let mut store = empty_store();
+        let long_principal = "user:".to_string() + &"x".repeat(500);
+        let chain = DelegationChain {
+            correlation_id: OperationId::new(),
+            parent_op_id: None,
+            // One oversized label + more labels than MAX_CHAIN_PRINCIPALS.
+            principals: (0..super::MAX_CHAIN_PRINCIPALS + 5)
+                .map(|i| {
+                    if i == 0 {
+                        long_principal.clone()
+                    } else {
+                        format!("user:principal-{i}")
+                    }
+                })
+                .collect(),
+        };
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let _ = board_query(&board, &mode, &chain, &mut store)
+            .await
+            .expect("query succeeds");
+        let records = store.records();
+        assert_eq!(records.len(), 1);
+        let payload = &records[0].envelope.payload;
+        let chain_labels = payload["delegation_chain"].as_array().expect("array");
+        assert_eq!(
+            chain_labels.len(),
+            super::MAX_CHAIN_PRINCIPALS + 1,
+            "capped principals + one static overflow marker"
+        );
+        assert_eq!(
+            chain_labels.last().and_then(Value::as_str),
+            Some(super::CHAIN_TRUNCATION_MARKER),
+            "overflow is marked, never silently dropped"
+        );
+        let first = chain_labels[0].as_str().expect("string label");
+        assert!(
+            first.chars().count()
+                <= "claimed:".len()
+                    + super::MAX_PAYLOAD_VALUE_CHARS
+                    + super::TRUNCATION_SUFFIX.chars().count(),
+            "oversized principal is truncated"
+        );
+        assert!(
+            first.ends_with(super::TRUNCATION_SUFFIX),
+            "truncated label carries the static marker: {first}"
         );
     }
 
