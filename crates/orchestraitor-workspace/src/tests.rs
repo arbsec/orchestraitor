@@ -103,6 +103,11 @@ impl TestRepo {
         repo.git(&["init"])?;
         repo.git(&["config", "user.email", "test@example.invalid"])?;
         repo.git(&["config", "user.name", "Test User"])?;
+        // Host git config may force SSH commit signing (e.g. a 1Password
+        // `gpg.ssh.program`), which blocks indefinitely in headless/CI
+        // sessions. Fixture commits are unsigned: signing is a
+        // developer-workstation setting, never a behavior under test.
+        repo.git(&["config", "commit.gpgsign", "false"])?;
         Ok(repo)
     }
 
