@@ -30,6 +30,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/gh-capabilities.md`](references/gh-capabilities.md) — verified `gh` CLI surface: `pr checks --json`, `pr view --json` (and its **missing** `reviewThreads`), `pr merge --squash --match-head-commit`, `pr review`.
   - [`references/graphql.md`](references/graphql.md) — the `pullRequest.reviewThreads` connection with `isResolved`/`isOutdated`/`comments`; resolve/unresolve mutations.
   - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `10-orchestrator.md` §9.33).
+  - [`references/verified-commit-path.md`](references/verified-commit-path.md) — why local bot-identity commits never verify, and the App-API replay path (`scripts/github-app-recreate-branch.sh`) for unsigned chains.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
 
 ## Core procedure
@@ -137,6 +138,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.
+- **Verified commits / service-identity push path.** Agent branch pushes MUST land as GitHub-signed commits via the App's GraphQL `createCommitOnBranch` — never as locally-created unsigned bot-identity commits (the `required_signatures` ruleset blocks them; locally-attributed commits fail closed). For new commits, create via the App API from the start. For existing unsigned chains, replay with `scripts/github-app-recreate-branch.sh` (see `references/verified-commit-path.md`). Pitfall: never reset a PR branch to an ancestor of main mid-replay — that auto-closes the PR; replay on a temp branch and swing the ref once.
 - **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity; commits are authored with the bot identity and DCO sign-off. For Orchestraitor that is the `arbsec-agent` App (org-owned, installation-scoped; planning runbook `.omo/drafts/github-app-setup.md`). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option.
 
 ## How this skill relates to project policy
