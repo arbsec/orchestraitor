@@ -87,8 +87,10 @@ shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §1
 
 - [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
   proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
-- [`orc board`](docs/cli/orc-board.md) — ready-queue read and verified Status write against
-  the shared GitHub Projects v2 board (spec `10-orchestrator.md` §9.43, §9.40).
+- [`orc board`](docs/cli/orc-board.md) — ready-queue read, verified Status write, and the
+  read-only `board.query` decision tool (typed filter search + transitive blocked-graph
+  walk, §9.39/§9.40) against the shared GitHub Projects v2 board
+  (spec `10-orchestrator.md` §9.43, §9.40).
 - [`orc worker`](docs/cli/orc-worker.md) — headless one-shot bootstrap worker: runs one
   leaf task through the bounded mini-agent loop with exactly four tools (file read,
   local content search, Arbitraitor-mediated bash, path-confined worktree write) and

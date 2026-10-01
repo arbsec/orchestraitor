@@ -157,11 +157,17 @@ impl Fixture {
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> io::Result<String> {
+    // Host git config may force SSH commit signing (e.g. a 1Password
+    // `gpg.ssh.program`), which blocks indefinitely in headless/CI sessions.
+    // Fixture commits are unsigned: signing is a developer-workstation
+    // setting, never a behavior under test.
     let output = Command::new("git")
         .arg("-c")
         .arg("user.name=Fixture")
         .arg("-c")
         .arg("user.email=fixture@arbsec.invalid")
+        .arg("-c")
+        .arg("commit.gpgsign=false")
         .args(args)
         .current_dir(dir)
         .output()?;
