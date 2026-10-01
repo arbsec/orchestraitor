@@ -37,10 +37,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   in [docs/cli/orc-board.md](docs/cli/orc-board.md).
 - Continuous coverage reporting in CI (`.github/workflows/coverage.yml`): every push to
   `main` and every pull request touching the workspace runs the test suite under
-  `cargo llvm-cov nextest` and publishes per-file LCOV coverage to
-  [qlty.sh](https://qlty.sh), with `lcov.info` also attached as a 30-day workflow
-  artifact. Publishing is skipped — without failing the workflow — when the
-  `QLTY_COVERAGE_TOKEN` secret is not yet configured or on fork pull requests.
+  `cargo llvm-cov nextest` and attaches the per-file LCOV report (`lcov.info`) as a
+  30-day workflow artifact. When the `QLTY_COVERAGE_TOKEN` secret is configured, the
+  same run also publishes that report to [qlty.sh](https://qlty.sh); when the secret is
+  not yet configured — and on fork pull requests, which never receive repository
+  secrets — the publish step is skipped without failing the workflow.
   No coverage threshold is enforced yet (intended targets per
   `.agents/project/orchestraitor-workflow.md`: the Arbitraitor integration boundary and
   the transaction/normalization engine, parity gate in `docs/spec/tech-stack.md` §15).
