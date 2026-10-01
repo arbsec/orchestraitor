@@ -109,11 +109,13 @@ The loop's first concrete surfaces ship today:
   forward-only migration.
 - [`orc github mint-token`](docs/cli/orc-github.md) — GitHub App installation-token minting
   (non-secret metadata only).
+- [`orc board query`](docs/cli/orc-board.md) — the read-only `board.query` coordinator
+  decision tool against the board (#458): typed filter search plus a transitive
+  blocked-graph walk with cycle detection.
 - The `orchestraitor-board-contract` crate — the `BoardProvider` contract with a
   write-through, board-wins read cache (spec §9.43).
 
-The cron-shaped `orc loop` runner and the read-only `orc board query` decision tool land
-with their in-flight PRs (#434, #458).
+The cron-shaped `orc loop` runner lands with #434.
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
@@ -189,8 +191,7 @@ orc board query <item> [--json]
 orc loop --max-cycles N [--json]
 ```
 
-The last two lines land with in-flight PRs: `orc board query` (read-only decision
-tool) with #458 and `orc loop` (cron-shaped runner with the guard set) with #434.
+The last line lands with #434; `orc board query` shipped with #458.
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
 and profile contribution placeholder. `orc config validate` rejects ambiguous same-layer
