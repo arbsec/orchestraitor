@@ -1,3 +1,3 @@
 # Contributing
 
-See [CONTRIBUTING.md](../../../CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/arbsec/orchestraitor/blob/main/CONTRIBUTING.md).

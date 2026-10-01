@@ -16,6 +16,42 @@ effects, transactional filesystem tools, a trusted output boundary for files hos
 later execute, an explainable context compiler, and a low-overhead native control plane for
 TUI, IDE, and headless clients.
 
+Its first product axis is a bounded, self-improving delivery loop: work items live on a kanban
+board, a fresh manager session selects the next eligible task, a worker implements it in an
+isolated workspace and opens a pull request, adversarial review converges on the result, and
+merges of security-sensitive changes are human-gated. Orchestraitor's own backlog is the loop's
+first and continuous workload (self-hosting) (spec `00-overview.md` §1, §2.3, §3.1).
+
+## The delivery loop
+
+The loop is a fixed cycle, not a free-running swarm:
+
+```text
+board poll → manager selection → worker implementation → pull request
+           → adversarial review → human-gated merge
+```
+
+- **Board poll** — the runner reads the reconciled GitHub Projects v2 board through the
+  [`orchestraitor-board-contract`](crates/orchestraitor-board-contract) provider contract
+  (write-through, board-wins cache).
+- **Manager selection** — one campaign pass applies the P0-first epic-focus rule, selects at
+  most one eligible task, and persists exactly one append-only decision record.
+- **Worker** — a headless bootstrap worker implements the task in a path-confined worktree
+  with exactly four tools, all security primitives mediated by Arbitraitor, and opens a
+  pull request.
+- **Adversarial review** — independent review converges on the result before merge.
+- **Human-gated merge** — security-sensitive changes always require human review.
+
+The loop is bounded by an explicit guard set (issue #310): attempts, re-plans, worker
+timeout, concurrency cap, supervisor stall kill, exponential backoff, a daily spend soft cap,
+and a run budget. Guard-weakening configuration is rejected fail-closed. Run state is durable
+(`loop.db`, one append-only row per supervised run), and a single-instance lock ensures only
+one loop invocation runs at a time.
+
+See [`docs/cli/orc-campaign.md`](docs/cli/orc-campaign.md) for the manager selection pass;
+the cron-shaped `orc loop` runner and its `docs/cli/orc-loop.md` reference land with the
+bootstrap-loop PR (#434).
+
 ## Relationship to Arbitraitor
 
 Arbitraitor (`arbsec/arbitraitor`) is the **exclusive security subsystem and authority** for
@@ -53,6 +89,29 @@ current-thread runtime. It currently exposes:
 By default, `orcd` listens at the first positional path argument, then
 `ORCHESTRAITOR_DAEMON_SOCKET`, then a temporary default path. `SIGTERM` triggers graceful
 shutdown within the five-second daemon budget from `docs/spec/tech-stack.md` §10.
+
+### Now running
+
+The loop's first concrete surfaces ship today:
+
+- [`orc board`](docs/cli/orc-board.md) — ready-queue read and verified Status writes against
+  the shared GitHub Projects v2 board.
+- [`orc worker`](docs/cli/orc-worker.md) — headless one-shot bootstrap worker with exactly
+  four tools, all bash mediated by Arbitraitor (network-denied execution policy, fail-closed
+  capability preflight).
+- [`orc campaign run --once`](docs/cli/orc-campaign.md) — one manager decision per pass:
+  P0-first selection, exactly one append-only decision record.
+- [`orc routing resolve`](docs/cli/orc-routing.md) — role routing over the six built-in
+  orchestration roles, custom roles, and the default-off `DecisionProvider` fixture.
+- [`orc config`](docs/cli/orc-init.md) — configuration inspection, validation, diff, and
+  forward-only migration.
+- [`orc github mint-token`](docs/cli/orc-github.md) — GitHub App installation-token minting
+  (non-secret metadata only).
+- The `orchestraitor-board-contract` crate — the `BoardProvider` contract with a
+  write-through, board-wins read cache (spec §9.43).
+
+The cron-shaped `orc loop` runner and the read-only `orc board query` decision tool land
+with their in-flight PRs (#434, #458).
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
@@ -124,7 +183,12 @@ orc models rollback
 orc github mint-token
 orc routing resolve --role <id> [--json]
 orc campaign run --once [--json]
+orc board query <item> [--json]
+orc loop --max-cycles N [--json]
 ```
+
+The last two lines land with in-flight PRs: `orc board query` (read-only decision
+tool) with #458 and `orc loop` (cron-shaped runner with the guard set) with #434.
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
 and profile contribution placeholder. `orc config validate` rejects ambiguous same-layer
