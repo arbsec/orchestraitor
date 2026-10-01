@@ -176,6 +176,13 @@ fn query_mode(
         let (name, value) = field.split_once('=').ok_or_else(|| {
             miette!("--field must be name=value (single-select option), got {field:?}")
         })?;
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            return Err(miette!(
+                "--field name and value must both be non-empty, got {field:?}"
+            ));
+        }
         fields.push(BoardQueryField {
             name: name.to_string(),
             value: BoardQueryFieldValue::SingleSelect {

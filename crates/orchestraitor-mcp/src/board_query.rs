@@ -51,6 +51,11 @@ const MAX_BLOCKED_DEPTH: usize = 64;
 const MAX_PAYLOAD_VALUE_CHARS: usize = 200;
 /// Static suffix appended to truncated event-payload values.
 const TRUNCATION_SUFFIX: &str = "…[truncated]";
+/// Maximum filter-field entries carried into the event payload (mirrors
+/// [`MAX_CHAIN_PRINCIPALS`]): the MCP caller controls `filter.fields`, so an
+/// unbounded array would let one request bloat the audit record. Overflow is
+/// marked, never silently dropped.
+const MAX_FILTER_FIELDS: usize = 32;
 
 /// The board.query execution modes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -97,9 +102,9 @@ impl From<BoardQueryItemType> for BoardItemType {
 }
 
 /// Typed, conjunctive filter mirroring the contract's [`BoardSearch`] —
-/// item type, status, and typed field values. Fields without a kind tag are
-/// matched as single-select option names for ergonomics (the board's
-/// decision fields are single-select); `kind` disambiguates when needed.
+/// item type, status, and typed field values. Every field value carries a
+/// `kind` tag (`single_select`, `text`, `number`, `date`); a value without
+/// one fails deserialization — the tool never guesses a variant.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BoardQueryFilter {
     /// Restrict to one item type (`task`, `bug`, `epic`, `feature`).
@@ -334,10 +339,10 @@ pub(crate) fn build_invocation_event(
     );
     payload.insert(
         "mode".to_string(),
-        truncate_payload_json(
+        cap_filter_fields(&truncate_payload_json(
             &serde_json::to_value(mode)
                 .map_err(|_| BoardQueryError::EventStore("filter serialization failed"))?,
-        ),
+        )),
     );
     payload.insert(
         "result_summary".to_string(),
@@ -414,8 +419,15 @@ async fn execute(
         }
         BoardQueryMode::BlockedBy { item } => {
             let root = BoardItemId::new(item.clone())?;
-            let root_item = provider.item(&root).await;
-            let root_exists = root_item.is_ok();
+            // Only a typed ItemNotFound means the root is missing (the
+            // graph reports `root_exists: false`). Transport/auth and every
+            // other provider failure propagate as an error — a failed
+            // lookup must never masquerade as "item not found".
+            let root_exists = match provider.item(&root).await {
+                Ok(_) => true,
+                Err(BoardContractError::ItemNotFound { .. }) => false,
+                Err(error) => return Err(error.into()),
+            };
             let edges = provider.dependency_edges().await?;
             let graph = walk_blocked(&root, root_exists, &edges, provider).await?;
             let summary = InvocationSummary {
@@ -498,16 +510,21 @@ async fn project_items(
     blocked_by: &HashMap<&BoardItemId, Vec<&BoardItemId>>,
     provider: &dyn BoardProvider,
 ) -> Result<Vec<BoardQueryItem>, BoardQueryError> {
+    // Fields are board-global: fetch the catalog once, not per item —
+    // a 500-item search would otherwise repeat the catalog call per item
+    // (issue #458 CodeRabbit Major: redundant round trips on network
+    // providers).
+    let fields_catalog = provider.fields().await?;
     let mut projected = Vec::with_capacity(items.len());
     for item in items {
         let mut fields = BTreeMap::new();
-        for field in provider.fields().await? {
+        for field in &fields_catalog {
             let value = provider
                 .field_value(&item.id, &field.name)
                 .await?
                 .map(|typed| tool_value(&typed));
             if let Some(value) = value {
-                fields.insert(field.name, value);
+                fields.insert(field.name.clone(), value);
             }
         }
         projected.push(BoardQueryItem {
@@ -668,6 +685,29 @@ fn truncate_payload_json(value: &Value) -> Value {
                 .map(|(key, nested)| (key.clone(), truncate_payload_json(nested)))
                 .collect(),
         ),
+        other => other.clone(),
+    }
+}
+
+/// Bounds the serialized `filter.fields` array in the event payload at
+/// [`MAX_FILTER_FIELDS`] entries, appending a static marker when overflow is
+/// dropped — the audit record shows the bound was hit, never silently.
+fn cap_filter_fields(value: &Value) -> Value {
+    const MARKER: &str = "…[filter fields truncated]";
+    match value {
+        Value::Object(object) => {
+            let mut capped = object.clone();
+            // Serialized BoardQueryMode::Search nests the filter under
+            // `filter`, with the field list at `filter.fields`.
+            if let Some(Value::Object(filter)) = capped.get_mut("filter")
+                && let Some(Value::Array(entries)) = filter.get_mut("fields")
+                && entries.len() > MAX_FILTER_FIELDS
+            {
+                *entries = entries[..MAX_FILTER_FIELDS].to_vec();
+                entries.push(Value::String(MARKER.to_string()));
+            }
+            Value::Object(capped)
+        }
         other => other.clone(),
     }
 }
@@ -1581,6 +1621,62 @@ mod tests {
         assert!(
             store.records().is_empty(),
             "failed invocation records nothing"
+        );
+    }
+
+    // CodeRabbit Major (merge gate): a transport failure behind
+    // `provider.item` must NOT surface as `root_exists: false` — only the
+    // typed `ItemNotFound` means the root is missing. Any other provider
+    // error propagates.
+    #[tokio::test]
+    async fn blocked_by_transport_failure_propagates_not_reported_missing() {
+        let mut store = empty_store();
+        let mode = BoardQueryMode::BlockedBy {
+            item: String::from("root"),
+        };
+        let error = board_query(&FailingProvider, &mode, &chain(), &mut store)
+            .await
+            .expect_err("transport failure surfaces as an error");
+        assert_eq!(error, BoardQueryError::Provider("transport"));
+    }
+
+    // CodeRabbit Minor (merge gate): filter fields in the audit payload are
+    // bounded like the delegation chain — overflow is marked, never silent.
+    #[tokio::test]
+    async fn oversized_filter_fields_are_capped_in_audit_payload() {
+        let board = board_fixture();
+        let mut store = empty_store();
+        let fields: Vec<BoardQueryField> = (0..MAX_FILTER_FIELDS + 10)
+            .map(|index| BoardQueryField {
+                name: format!("Field{index}"),
+                value: BoardQueryFieldValue::Text {
+                    value: format!("value-{index}"),
+                },
+            })
+            .collect();
+        let mode = BoardQueryMode::Search {
+            filter: BoardQueryFilter {
+                item_type: None,
+                status: None,
+                fields,
+            },
+        };
+        let _ = board_query(&board, &mode, &chain(), &mut store)
+            .await
+            .expect("query succeeds");
+        let records = store.records();
+        assert_eq!(records.len(), 1);
+        let carried = &records[0].envelope.payload["mode"]["filter"]["fields"];
+        let carried = carried.as_array().expect("fields is an array");
+        assert_eq!(
+            carried.len(),
+            MAX_FILTER_FIELDS + 1,
+            "capped at the bound plus the truncation marker"
+        );
+        assert_eq!(
+            carried[carried.len() - 1],
+            "…[filter fields truncated]",
+            "overflow is marked, never silently dropped"
         );
     }
 }
