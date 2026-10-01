@@ -53,11 +53,14 @@ service identity is enforced when the `github_app` block does not resolve
   error naming the missing `github_app.*` keys) — no personal fallback, no
   WARNING; the skill-script wrapper returns its typed config error (exit 2)
   without reaching `gh`. In this mode the wrapper also verifies the repo git
-  identity before delegating: `git config user.email` must match the
-  service-identity bot pattern (`<id>+<slug>[bot]@users.noreply.github.com`),
-  so agent-driven `git commit` paths cannot stamp personal attribution onto
-  commits. Set the per-repo gitconfig to the bot identity
-  (`user.name = arbsec-agent[bot]`) when operating under `required`.
+  identity before delegating: `git config user.email` must EQUAL the bot's
+  canonical noreply email (`<bot-id>+<slug>[bot]@users.noreply.github.com`),
+  resolved live from the App identity (`GET /app` → slug,
+  `GET /users/{slug}[bot]` → id) — a suffix match would accept look-alikes
+  like `anything+<slug>[bot]@…`, so the comparison is exact. Set the per-repo
+  gitconfig to the bot identity (`user.name = arbsec-agent[bot]`,
+  `user.email` = the canonical email printed by
+  `orc github commit-author`) when operating under `required`.
 
 Invalid values fail closed at parse time (typed configuration error). The
 effective value is visible through `orc config get github_app.enforcement`
@@ -173,15 +176,17 @@ orc github gh-env -- gh pr view 446 --json state
 ## `orc github commit-author`
 
 Prints ONLY the App's canonical commit identity as two lines, derived from the
-authenticated App (`GET /app` → `slug` + `bot.id` → the GitHub noreply email
+authenticated App (`GET /app` → `slug`, then an unauthenticated
+`GET /users/{slug}[bot]` → the bot user id → the GitHub noreply email
 convention) — never hardcoded. `GET /app` is an **App-level endpoint**:
 GitHub rejects installation tokens with 401, so this subcommand authenticates
-with a freshly minted **App JWT** (RS256, `iss = client_id`, 10-minute
+it with a freshly minted **App JWT** (RS256, `iss = client_id`, 10-minute
 lifetime) signed from the App private key — the same secret material and the
 same secrecy rules as the mint path. The JWT is held in memory only, injected
 solely into the one `Authorization` header, and never printed, logged, or
-persisted. The other three subcommands (`mint-token`, `api`, `gh-env`) keep
-using installation tokens.
+persisted. The bot-user lookup is unauthenticated (a public profile; no
+credential travels with it). The other three subcommands (`mint-token`,
+`api`, `gh-env`) keep using installation tokens.
 
 ```sh
 $ orc github commit-author
@@ -191,12 +196,15 @@ email=334074867+arbsec-agent[bot]@users.noreply.github.com
 
 The output above is the contract for a correctly configured App. It requires
 live GitHub access with the registered App's private key: the request
-authenticates the App itself, not an installation, so it cannot be satisfied
-by a stubbed installation-token endpoint. Failures (unresolvable private key,
-unreachable API, HTTP 401 on a malformed JWT) exit non-zero with a typed
-diagnostic that never contains the PEM, the JWT, or any token. Any
-malformation in the `/app` payload is a typed error; the payload is never
-echoed.
+authenticates the App itself, not an installation, so a stubbed
+installation-token endpoint cannot VERIFY the JWT — verifying the signature
+needs the real App. A stub that also serves `GET /app` and
+`GET /users/{slug}[bot]` CAN satisfy the CLI test (the CLI only needs
+well-formed responses over HTTP); it just proves response handling, not App
+identity. Failures (unresolvable private key, unreachable API, HTTP 401 on a
+malformed JWT) exit non-zero with a typed diagnostic that never contains the
+PEM, the JWT, or any token. Any malformation in the `/app` or
+`/users/{slug}[bot]` payload is a typed error; the payload is never echoed.
 
 ## Rollback
 

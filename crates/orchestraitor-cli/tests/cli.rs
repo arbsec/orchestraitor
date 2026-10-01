@@ -774,10 +774,19 @@ fn spawn_access_token_server(
     Ok((endpoint, observed))
 }
 
-/// Serves one mint response, then one API response on the next connection.
+/// Serves one mint response, then API responses on the next connections.
 /// The API response echoes the incoming Authorization header inside the body
 /// so tests can assert where the installation token traveled.
-fn spawn_mint_then_api_server(api_status: u16, api_body: &str) -> miette::Result<String> {
+///
+/// Every request's path and Authorization header value are sent to the
+/// returned channel as `"<path>\t<auth-or-empty>"`, so tests can assert WHICH
+/// bearer traveled to WHICH endpoint (installation token for `api`, App JWT
+/// for `commit-author`, no mint request at all for `commit-author`).
+fn spawn_mint_then_api_server(
+    api_status: u16,
+    api_body: &str,
+) -> miette::Result<(String, std::sync::mpsc::Receiver<String>)> {
+    use std::sync::mpsc;
     let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
     let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
     let expires_at_epoch = std::time::SystemTime::now()
@@ -793,6 +802,7 @@ fn spawn_mint_then_api_server(api_status: u16, api_body: &str) -> miette::Result
     let mint_body =
         format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
     let api_body_owned = api_body.to_string();
+    let (auth_tx, auth_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
         for connection in listener.incoming() {
             let Ok(mut stream) = connection else { break };
@@ -822,7 +832,20 @@ fn spawn_mint_then_api_server(api_status: u16, api_body: &str) -> miette::Result
                 }
             }
             let request = String::from_utf8_lossy(&request_bytes).to_string();
-            let is_mint = request.contains("/app/installations/");
+            let request_line = request.lines().next().unwrap_or_default();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let auth = request
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_default();
+            let _ = auth_tx.send(format!("{path}\t{auth}"));
+            let is_mint = path.contains("/app/installations/");
             let (status_line, body) = if is_mint {
                 (String::from("HTTP/1.1 201 Created"), mint_body.clone())
             } else {
@@ -836,7 +859,7 @@ fn spawn_mint_then_api_server(api_status: u16, api_body: &str) -> miette::Result
             let _write_result = stream.write_all(response.as_bytes());
         }
     });
-    Ok(endpoint)
+    Ok((endpoint, auth_rx))
 }
 
 fn github_cli(
@@ -866,7 +889,7 @@ fn github_cli(
 fn github_api_passthrough_prints_body_and_exits_zero_on_2xx() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_github_app_project_config(&temp)?;
-    let endpoint = spawn_mint_then_api_server(200, r#"{"number":446,"state":"open"}"#)?;
+    let (endpoint, auth_rx) = spawn_mint_then_api_server(200, r#"{"number":446,"state":"open"}"#)?;
 
     let output = github_cli(
         &temp,
@@ -889,6 +912,28 @@ fn github_api_passthrough_prints_body_and_exits_zero_on_2xx() -> miette::Result<
     let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
     assert_eq!(stdout.trim(), r#"{"number":446,"state":"open"}"#);
     assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
+    // Exactly two requests: the mint, then the API call — and the API call
+    // must carry the INSTALLATION token (not the App JWT).
+    let mint = auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    assert!(
+        mint.starts_with("/app/installations/165043398/access_tokens\t"),
+        "{mint}"
+    );
+    assert!(mint.contains("\tBearer eyJ"), "{mint}");
+    let api = auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    assert!(
+        api.starts_with("/repos/arbsec/orchestraitor/issues\t"),
+        "{api}"
+    );
+    assert_eq!(
+        api.split('\t').next_back(),
+        Some(format!("Bearer {GITHUB_APP_TOKEN_MARKER}").as_str()),
+        "api must send the installation token, never the App JWT: {api}"
+    );
     Ok(())
 }
 
@@ -899,7 +944,8 @@ fn github_api_passthrough_exits_nonzero_on_4xx_without_leaking_headers() -> miet
     // The 404 body deliberately contains a token-look-alike; the CLI must
     // still print the body (caller's business) but the failure must be
     // status-shaped and the stderr must not name the Authorization header.
-    let endpoint = spawn_mint_then_api_server(404, r#"{"message":"ghs_fakeLEAK0123"}"#)?;
+    let (endpoint, _auth_rx) =
+        spawn_mint_then_api_server(404, r#"{"message":"ghs_fakeLEAK0123"}"#)?;
 
     let output = github_cli(&temp, &endpoint, &["github", "api", "GET", "/app"])?;
 
@@ -937,15 +983,17 @@ fn github_api_rejects_unknown_method_before_minting() -> miette::Result<()> {
 }
 
 #[test]
-fn github_commit_author_derives_identity_from_app_response() -> miette::Result<()> {
+fn github_commit_author_derives_identity_from_app_and_bot_user_responses() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_github_app_project_config(&temp)?;
-    let endpoint = spawn_mint_then_api_server(
-        200,
-        r#"{"id":5082653,"slug":"arbsec-agent","bot":{"id":334074867,"login":"arbsec-agent[bot]"}}"#,
+    // GET /app carries the slug but NOT the bot user id (live GitHub shape);
+    // the id comes from the follow-up GET /users/{slug}[bot] profile.
+    let server = spawn_two_response_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
     )?;
 
-    let output = github_cli(&temp, &endpoint, &["github", "commit-author"])?;
+    let output = github_cli(&temp, &server.endpoint, &["github", "commit-author"])?;
 
     assert!(
         output.status.success(),
@@ -962,10 +1010,90 @@ fn github_commit_author_derives_identity_from_app_response() -> miette::Result<(
         ]
     );
     assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
+    // Request order and credentials: the App-JWT bearer goes ONLY to /app;
+    // the bot-user lookup is unauthenticated (no Authorization header), and
+    // NO installation-token mint happens on this subcommand.
+    let first = server
+        .auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    assert!(
+        first.starts_with("/app\tBearer eyJ"),
+        "commit-author must send the App JWT to GET /app: {first}"
+    );
+    let second = server
+        .auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    assert_eq!(
+        second, "/users/arbsec-agent[bot]\t",
+        "bot-user lookup must be unauthenticated: {second}"
+    );
     Ok(())
 }
 
+/// Serves two distinct JSON responses on successive connections and records
+/// each request's path + Authorization header (same recording shape as
+/// [`spawn_mint_then_api_server`]).
+fn spawn_two_response_server(
+    first_body: &str,
+    second_body: &str,
+) -> miette::Result<TwoResponseServer> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    let mut bodies = [first_body.to_string(), second_body.to_string()];
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for (index, connection) in listener.incoming().enumerate() {
+            let Ok(mut stream) = connection else { break };
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        request_bytes.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&request_bytes);
+                        if text.contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&request_bytes).to_string();
+            let request_line = request.lines().next().unwrap_or_default();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let auth = request
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_default();
+            let _ = auth_tx.send(format!("{path}\t{auth}"));
+            let body = bodies
+                .get_mut(index)
+                .map_or_else(|| "{}".to_string(), std::mem::take);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok(TwoResponseServer { endpoint, auth_rx })
+}
+
+struct TwoResponseServer {
+    endpoint: String,
+    auth_rx: std::sync::mpsc::Receiver<String>,
+}
+
 #[test]
+#[cfg(unix)]
 fn github_gh_env_injects_gh_token_into_child_and_propagates_exit() -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -984,7 +1112,7 @@ fn github_gh_env_injects_gh_token_into_child_and_propagates_exit() -> miette::Re
     )
     .into_diagnostic()?;
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
 
     let output = github_cli(
         &temp,
@@ -1009,7 +1137,7 @@ fn github_gh_env_injects_gh_token_into_child_and_propagates_exit() -> miette::Re
 fn github_gh_env_fails_typed_when_child_is_missing() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_github_app_project_config(&temp)?;
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
 
     let output = github_cli(
         &temp,
@@ -1043,7 +1171,7 @@ fn github_gh_env_required_enforcement_fails_closed_when_config_absent() -> miett
         "[github_app]\nenforcement = \"required\"\n",
     )
     .into_diagnostic()?;
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
 
     let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
 
@@ -1065,7 +1193,7 @@ fn github_gh_env_required_enforcement_fails_closed_when_config_partial() -> miet
         "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n",
     )
     .into_diagnostic()?;
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
 
     let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
 
@@ -1080,6 +1208,7 @@ fn github_gh_env_required_enforcement_fails_closed_when_config_partial() -> miet
 }
 
 #[test]
+#[cfg(unix)]
 fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1114,7 +1243,12 @@ fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette:
     fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
     let child_str = child.display().to_string();
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    // The required-mode gate resolves the expected bot identity from the live
+    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating.
+    let server = spawn_two_response_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
 
     // The child process must observe the personal identity: cwd is the repo.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
@@ -1124,7 +1258,7 @@ fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette:
             "--config-dir",
             &temp.path().display().to_string(),
             "--github-api-endpoint",
-            &endpoint,
+            &server.endpoint,
             "github",
             "gh-env",
             "--",
@@ -1152,19 +1286,19 @@ fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette:
         .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
         .collect();
     assert!(
-        flat.contains("doesnotmatchtheserviceidentitybotpattern"),
+        flat.contains("isnottheserviceidentitybotscanonicalnoreplyaddress"),
         "typed refusal must name the identity mismatch: {stderr}"
     );
     Ok(())
 }
 
 #[test]
-fn github_gh_env_recommended_mode_falls_back_config_absent() -> miette::Result<()> {
+fn github_gh_env_recommended_mode_fails_typed_when_config_absent() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     // No github_app block: recommended mode keeps the labelled fallback
     // surface (the daemon-side wrapper owns the WARNING); gh-env itself
     // still fails typed — minting without a complete config is impossible.
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
 
     let output = github_cli(&temp, &endpoint, &["github", "gh-env", "--", "true"])?;
 
@@ -1179,6 +1313,7 @@ fn github_gh_env_recommended_mode_falls_back_config_absent() -> miette::Result<(
 }
 
 #[test]
+#[cfg(unix)]
 fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1213,7 +1348,12 @@ fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miet
     fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
     let child_str = child.display().to_string();
-    let endpoint = spawn_mint_then_api_server(200, "{}")?;
+    // The required-mode gate resolves the expected bot identity from the live
+    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating.
+    let server = spawn_two_response_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
         .args([
@@ -1222,7 +1362,7 @@ fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miet
             "--config-dir",
             &temp.path().display().to_string(),
             "--github-api-endpoint",
-            &endpoint,
+            &server.endpoint,
             "github",
             "gh-env",
             "--",
@@ -1246,8 +1386,87 @@ fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miet
         .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
         .collect();
     assert!(
-        flat.contains("doesnotmatchtheserviceidentitybotpattern"),
+        flat.contains("isnottheserviceidentitybotscanonicalnoreplyaddress"),
         "generic noreply identity must be refused in required mode: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_required_enforcement_rejects_suffix_lookalike_bot_email() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\nclient_id = \"Iv1.cli-e2e\"\n\
+         installation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n",
+    )
+    .into_diagnostic()?;
+    // A suffix match on `+arbsec-agent[bot]@users.noreply.github.com` would
+    // accept this look-alike (wrong local part); only the canonical
+    // `<bot-id>+<slug>[bot]@…` address passes.
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let repo_str = repo.display().to_string();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", &repo_str])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    assert!(
+        git(&[
+            "config",
+            "user.email",
+            "anything+arbsec-agent[bot]@users.noreply.github.com"
+        ])?
+        .status
+        .success()
+    );
+    let child = repo.join("child.sh");
+    fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let child_str = child.display().to_string();
+    let server = spawn_two_response_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &server.endpoint,
+            "github",
+            "gh-env",
+            "--",
+            &child_str,
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '@')
+        .collect();
+    assert!(
+        flat.contains("isnottheserviceidentitybotscanonicalnoreplyaddress"),
+        "suffix look-alike bot email must be refused in required mode: {stderr}"
     );
     Ok(())
 }

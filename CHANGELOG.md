@@ -22,38 +22,51 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   delegate with a typed error naming the missing `github_app.*` keys (no
   personal fallback), the skill-script wrapper returns its typed config
   error without reaching `gh`, and delegation is refused when the repo git
-  identity (`git config user.email`) does not match the service-identity
-  bot pattern (`<id>+<slug>[bot]@users.noreply.github.com` — a generic
-  noreply address does not pass) — so agent-driven `git commit` paths cannot
-  stamp personal attribution onto commits. Wrapper-only deployments may pin
-  the mode with `ORC_GITHUB_APP_ENFORCEMENT=required`; a declared `required`
-  fails closed even when the `orc` binary is unavailable. Invalid values
-  fail closed at parse time. The default is a documented bootstrap deviation
-  (spec `10-orchestrator.md` §9.41): enforcement must be `required` at
-  public release.
+  identity (`git config user.email`) is not the service-identity bot's
+  canonical noreply email (`<bot-id>+<slug>[bot]@users.noreply.github.com`,
+  resolved live from the App identity — a generic noreply address or a
+  suffix look-alike does not pass) — so agent-driven `git commit` paths
+  cannot stamp personal attribution onto commits. Wrapper-only deployments
+  may pin the mode with `ORC_GITHUB_APP_ENFORCEMENT=required`; a declared
+  `required` fails closed even when the `orc` binary is unavailable. Invalid
+  values fail closed at parse time. The default is a documented bootstrap
+  deviation (spec `10-orchestrator.md` §9.41): enforcement must be
+  `required` at public release.
 
 ### Fixed
 
 - `orc github commit-author` authenticates `GET /app` with a freshly minted
   App JWT instead of an installation token: `GET /app` is an App-level
   endpoint that GitHub answers with 401 for installation tokens, so the
-  subcommand previously could never deliver its documented output. The JWT is
-  secret material under the same guarantees as the token: held in memory
-  only, injected solely into the one `Authorization` header, never printed,
-  logged, or persisted.
+  subcommand previously could never deliver its documented output. The bot
+  user id is resolved with a follow-up unauthenticated
+  `GET /users/{slug}[bot]` (the `GET /app` payload carries the slug but not
+  the bot user). The JWT is secret material under the same guarantees as the
+  token: held in memory only, injected solely into the one `Authorization`
+  header, never printed, logged, or persisted.
 - `orc github gh-env` now rejects a child command that exists but lacks the
   executable bit BEFORE minting a token; previously the token was minted and
   then the spawn was guaranteed to fail.
 - Skill-script service-identity routing (`orc_lib_gh_service` in the
   github-project-workflow / github-pr-lifecycle skills) now routes ALL
-  mutating `gh` call sites (claim-issue, release-issue, create-blocker,
-  create-follow-up, decompose-issue) through the App installation token, not
-  just merge-gate; read-only call sites are unchanged. The github_app config
-  probe requires all three keys (`client_id`, `installation_id`,
-  `private_key_uri`), distinguishes config-absent (labelled personal
-  fallback) from a config resolution error (typed failure — never a silent
-  personal-auth fallback), and the gh-env handoff no longer passes a stray
-  `command` token into the child argv, which made every routed call fail.
+  `gh` call sites that flow through the mutating scripts — the write
+  commands (merge-gate, claim-issue assignment, release-issue,
+  create-blocker, create-follow-up, decompose-issue) AND their per-script
+  precondition reads (issue view/list before a mutation, the create-blocker
+  cross-repo node-id lookups) — through the App installation token; only
+  the read-only helper `orc_lib_gh` stays on the ambient `gh` auth. The
+  caller identity for assignee-ownership checks is resolved from
+  `orc github commit-author` on the service path (`gh api user` is
+  user-context only and fails with an installation token); the
+  `gh api user` probe remains only on the labelled personal fallback. The
+  github_app config probe requires all three keys (`client_id`,
+  `installation_id`, `private_key_uri`), distinguishes config-absent
+  (labelled personal fallback) from a config resolution error (typed
+  failure — never a silent personal-auth fallback), and the gh-env handoff
+  no longer passes a stray `command` token into the child argv, which made
+  every routed call fail. A failed `orc config get
+  github_app.enforcement` read fails closed instead of permitting the
+  personal fallback (an unset key still falls back in recommended mode).
 
 ### Added
 

@@ -130,6 +130,9 @@ cat > "$WORK/orc" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
 if [ "${3:-}" = github_app.client_id ]; then echo "Iv23..."; exit 0; fi
+# The enforcement key is UNSET here: `config get` succeeds with empty output
+# (exit 0 = key unset, never a read failure); every other key is an error.
+if [ "${3:-}" = github_app.enforcement ]; then exit 0; fi
 exit 1
 EOF
 chmod +x "$WORK/orc"
@@ -205,4 +208,120 @@ grep -qx 'orc:github gh-env -- /.*/gh issue edit 18 --add-blocked-by 19' "$ORC_L
   || fail "required-declared + complete config must take the service path: $(cat "$ORC_LOG")"
 grep -qx 'rc:0' "$GH_LOG" || fail "service path must not fail the call"
 
+# --- 10. UNSET enforcement key (config get exit 0, empty output): the
+#         labelled fallback still applies — unset is not a read failure.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+# Mirrors real `orc` exit codes: an UNSET key exits 1 with empty output
+# ("is not set"); a FAILED read (unreadable layers, provider crash) also
+# exits non-zero. The two are distinguished below by the recorded output,
+# so this stub records whether it emitted a diagnostic.
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${2:-}" = get ]; then
+  # github_app.* keys ABSENT: exit 1, no diagnostic (unset, not a failure).
+  exit 1
+fi
+printf '%s\n' "orc:$*" >> "$ORC_LOG"
+exit 0
+EOF
+chmod +x "$WORK/orc"
+OUT="$(run_service issue close 20 2>&1)" || true
+grep -q 'WARNING: service-identity fallback' <<<"$OUT" || fail "unset enforcement key must keep the labelled fallback: $OUT"
+grep -qx 'gh:issue close 20' "$GH_LOG" || fail "unset-enforcement fallback must reach gh: $(cat "$GH_LOG")"
+grep -qx 'rc:0' "$GH_LOG" || fail "unset-enforcement fallback must not fail the call"
+
+# --- 11. FAILED enforcement read (config get exits non-zero, config absent):
+#         fail closed — a broken read must never permit the personal fallback.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then
+  # The layered config resolves (an absent github_app is a legal state), so
+  # the absence probe returns 1 and the decision falls to the enforcement read.
+  exit 0
+fi
+if [ "${2:-}" = get ]; then
+  echo "layered configuration provider failed" >&2
+  exit 1
+fi
+printf '%s\n' "orc:$*" >> "$ORC_LOG"
+exit 0
+EOF
+chmod +x "$WORK/orc"
+OUT="$(run_service issue close 21 2>&1)" || true
+grep -q 'failed to read github_app.enforcement' <<<"$OUT" || fail "failed enforcement read must print the typed config error: $OUT"
+grep -qx 'rc:2' "$GH_LOG" || fail "failed enforcement read must exit 2 (config), got: $(cat "$GH_LOG")"
+if grep -q '^gh:' "$GH_LOG"; then
+  fail "gh ran on the fallback path despite a failed enforcement read: $(cat "$GH_LOG")"
+fi
+if [ -s "$ORC_LOG" ]; then
+  fail "orc gh-env was reached despite a failed enforcement read: $(cat "$ORC_LOG")"
+fi
+
 echo "PASS gh-env service wrapper routing"
+
+# --- orc_lib_resolve_my_login ------------------------------------------------
+
+# Case A: service identity available — the login comes from commit-author's
+# `name=` line, and `gh api user` is NEVER called (it would 401 under an
+# installation token and must not mask the identity).
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
+  printf 'name=arbsec-agent[bot]\nemail=334074867+arbsec-agent[bot]@users.noreply.github.com\n'
+  exit 0
+fi
+exit 1
+EOF
+cat > "$WORK/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "gh:$*" >> "$GH_LOG"
+exit 0
+EOF
+chmod +x "$WORK/orc" "$WORK/gh"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
+    # shellcheck source=/dev/null
+    . "$LIB"; orc_lib_resolve_my_login ) )"
+[ "$LOGIN" = "arbsec-agent[bot]" ] || fail "service identity must resolve to the bot login, got: $LOGIN"
+if [ -s "$GH_LOG" ]; then
+  fail "gh api user must not be called on the service path: $(cat "$GH_LOG")"
+fi
+
+# Case B: orc absent — falls back to `gh api user` (personal path).
+: > "$GH_LOG"
+mv "$WORK/orc" "$WORK/orc.hidden"
+cat > "$WORK/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "gh:$*" >> "$GH_LOG"
+# Emulate `gh api user --jq '.login'`: apply the filter with real jq.
+if [ "${1:-}" = api ] && [ "${3:-}" = --jq ]; then
+  echo '{"login":"somehuman"}' | jq -r "$4"
+  exit 0
+fi
+echo '{"login":"somehuman"}'
+exit 0
+EOF
+chmod +x "$WORK/gh"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
+    # shellcheck source=/dev/null
+    . "$LIB"; orc_lib_resolve_my_login ) )"
+mv "$WORK/orc.hidden" "$WORK/orc"
+[ "$LOGIN" = "somehuman" ] || fail "personal fallback must resolve via gh api user, got: $LOGIN"
+grep -q 'gh:api user' "$GH_LOG" || fail "personal fallback must call gh api user: $(cat "$GH_LOG")"
+
+# Case C: both fail — empty output (callers must treat as a typed failure).
+mv "$WORK/orc" "$WORK/orc.hidden"
+cat > "$WORK/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$WORK/gh"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export GH_BIN="$WORK/gh"
+    # shellcheck source=/dev/null
+    . "$LIB"; orc_lib_resolve_my_login ) )"
+mv "$WORK/orc.hidden" "$WORK/orc"
+[ -z "$LOGIN" ] || fail "unresolvable identity must be empty, got: $LOGIN"
+
+echo "PASS gh-env service wrapper routing (login resolution)"

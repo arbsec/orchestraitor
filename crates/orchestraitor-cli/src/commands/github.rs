@@ -119,13 +119,17 @@ fn require_service_identity<'a>(
 
 /// Bot commit-identity check for agent `git commit` paths delegated through
 /// `gh-env` (the skill scripts' `orc_lib_gh_service` wrapper). Verifies the
-/// repo-local `git config user.email` resolves to the service-identity bot
-/// pattern so locally-created commits cannot carry personal attribution.
+/// repo-local `git config user.email` equals the service-identity bot's
+/// canonical noreply email (`<bot-id>+<slug>[bot]@users.noreply.github.com`,
+/// resolved from the live App identity via `commit_author`) so
+/// locally-created commits cannot carry personal attribution. The bot id is
+/// not guessable, so a suffix match would accept an unrelated
+/// `anything+<slug>[bot]@…` address — the comparison is exact.
 ///
 /// # Errors
-/// Returns a typed diagnostic when the check cannot be performed or the
-/// configured identity does not match the bot pattern.
-fn require_bot_git_identity(program: &str) -> Result<()> {
+/// Returns a typed diagnostic when the identity cannot be resolved or the
+/// configured email is not the bot's canonical noreply address.
+fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["config", "--get", "user.email"])
         .output()
@@ -139,15 +143,22 @@ fn require_bot_git_identity(program: &str) -> Result<()> {
              user.email = <id>+arbsec-agent[bot]@users.noreply.github.com)"
         );
     }
-    if !email.ends_with("+arbsec-agent[bot]@users.noreply.github.com") {
+    let expected = expected_bot_email(paths)?;
+    if email != expected {
         bail!(
             "service-identity enforcement is `required`: refusing to delegate `{program}` \
-             because `git config user.email` ({email}) does not match the service-identity \
-             bot pattern — set user.email to \
-             <id>+arbsec-agent[bot]@users.noreply.github.com"
+             because `git config user.email` ({email}) is not the service-identity bot's \
+             canonical noreply address — set user.email to {expected}"
         );
     }
     Ok(())
+}
+
+/// Resolves the service-identity bot's canonical noreply email from the live
+/// App identity (the same two-request derivation `commit-author` performs).
+fn expected_bot_email(paths: &ConfigPaths) -> Result<String> {
+    let (_name, email) = commit_author_identity(paths)?;
+    Ok(email)
 }
 
 /// Resolves the `github_app` config and mints one installation token. The
@@ -276,10 +287,11 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     let required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
     if required {
         require_service_identity(&config, "delegate a gh-env child command")?;
-        // Cheap check before delegating: the repo git identity must match the
-        // service-identity bot pattern so any agent-driven `git commit` path
-        // cannot stamp personal attribution onto commits.
-        require_bot_git_identity(program)?;
+        // Exact-identity check before delegating: the repo git identity must
+        // equal the service-identity bot's canonical noreply email (resolved
+        // from the live App) so any agent-driven `git commit` path cannot
+        // stamp personal or look-alike attribution onto commits.
+        require_bot_git_identity(paths, program)?;
     }
     let (_, token) = mint_installation_token(paths)?;
     let Some(executable) = which else {
@@ -325,11 +337,22 @@ fn which_executable(program: &str) -> Option<std::path::PathBuf> {
 }
 
 /// `orc github commit-author`: print ONLY the identity pair, derived from the
-/// authenticated App (`GET /app` → slug + bot user id) — never hardcoded.
-/// `GET /app` is an App-level endpoint: GitHub rejects installation tokens
-/// with 401, so the request authenticates with a freshly minted App JWT
-/// (itself secret material — same never-printed rules as the token).
+/// authenticated App — never hardcoded. `GET /app` is an App-level endpoint:
+/// GitHub rejects installation tokens with 401, so it authenticates with a
+/// freshly minted App JWT (itself secret material — same never-printed rules
+/// as the token). `GET /app` carries the App `slug` but NOT the bot user id,
+/// so the numeric id is resolved with an unauthenticated `GET /users/{slug}[bot]`
+/// (public bot-user profile; no credential is spent on it).
 fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
+    let (name, email) = commit_author_identity(paths)?;
+    writeln!(writer, "name={name}").into_diagnostic()?;
+    writeln!(writer, "email={email}").into_diagnostic()
+}
+
+/// Resolves the App's canonical commit identity: `GET /app` (App JWT bearer)
+/// for the slug, then an unauthenticated `GET /users/{slug}[bot]` for the bot
+/// user id. Both responses are validated; failures are typed and token-free.
+fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
     let layers = load_layers(paths)?;
     let config = layers.resolver.resolve_config().map_err(|error| {
         miette!(
@@ -356,9 +379,19 @@ fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
     drop(jwt);
     let app: Value = serde_json::from_str(&body)
         .map_err(|_| miette!("github app response is malformed: unexpected JSON shape"))?;
-    let (name, email) = derive_commit_identity(&app)?;
-    writeln!(writer, "name={name}").into_diagnostic()?;
-    writeln!(writer, "email={email}").into_diagnostic()
+    let slug = app_slug(&app)?;
+    let bot_login = format!("{slug}[bot]");
+    // The bot user id is not part of the `GET /app` payload: resolve it from
+    // the public bot-user profile. Unauthenticated: no credential material
+    // travels with this request.
+    let (user_status, user_body) =
+        transport.request_bearer("GET", &format!("users/{bot_login}"), "", None)?;
+    if !user_status.is_success() {
+        bail!("github api request returned HTTP {user_status} (GET /users/{bot_login})");
+    }
+    let bot_user: Value = serde_json::from_str(&user_body)
+        .map_err(|_| miette!("github user response is malformed: unexpected JSON shape"))?;
+    derive_commit_identity(slug, &bot_user)
 }
 
 /// Minimal request transport for the `api` passthrough and `GET /app`.
@@ -404,7 +437,8 @@ impl ApiTransport {
     /// Executes one request with an explicit bearer credential — an
     /// installation token or an App JWT (`GET /app`). The credential is
     /// injected only into the `Authorization` header; it is never written to
-    /// the URL, the error paths, or the response body.
+    /// the URL, the error paths, or the response body. An empty credential
+    /// sends no `Authorization` header at all (unauthenticated request).
     fn request_bearer(
         &self,
         method: &str,
@@ -420,9 +454,13 @@ impl ApiTransport {
                     .map_err(|_| miette!("unsupported http method `{method}`"))?,
                 &url,
             )
-            .bearer_auth(bearer)
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
+        let request = if bearer.is_empty() {
+            request
+        } else {
+            request.bearer_auth(bearer)
+        };
         let request = match body {
             Some(body) => request
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -464,19 +502,22 @@ fn validate_api_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derives the canonical commit identity from the `GET /app` payload:
-/// `slug[bot]` + `<bot-id>+<slug>[bot]@users.noreply.github.com`.
-fn derive_commit_identity(app: &Value) -> Result<(String, String)> {
-    let slug = app
-        .get("slug")
+/// Extracts the App slug from the `GET /app` payload.
+fn app_slug(app: &Value) -> Result<&str> {
+    app.get("slug")
         .and_then(Value::as_str)
         .filter(|slug| !slug.is_empty())
-        .ok_or_else(|| miette!("github app response is malformed: missing `slug`"))?;
-    let bot_id = app
-        .get("bot")
-        .and_then(|bot| bot.get("id"))
+        .ok_or_else(|| miette!("github app response is malformed: missing `slug`"))
+}
+
+/// Derives the canonical commit identity from the App `slug` and the bot
+/// user payload (the `GET /users/{slug}[bot]` response):
+/// `slug[bot]` + `<bot-id>+<slug>[bot]@users.noreply.github.com`.
+fn derive_commit_identity(slug: &str, bot_user: &Value) -> Result<(String, String)> {
+    let bot_id = bot_user
+        .get("id")
         .and_then(Value::as_u64)
-        .ok_or_else(|| miette!("github app response is malformed: missing `bot.id`"))?;
+        .ok_or_else(|| miette!("github user response is malformed: missing `id`"))?;
     Ok((
         format!("{slug}[bot]"),
         format!("{bot_id}+{slug}[bot]@users.noreply.github.com"),
@@ -783,15 +824,16 @@ mod tests {
     // --- commit-author derivation -------------------------------------------
 
     #[test]
-    fn commit_author_is_derived_from_app_slug_and_bot_id_not_hardcoded() -> Result<()> {
+    fn commit_author_is_derived_from_app_slug_and_bot_user_id_not_hardcoded() -> Result<()> {
         // A different slug/bot id than the real App (arbsec-agent/334074867)
-        // proves the value comes from the /app payload.
-        let app: Value = serde_json::json!({
-            "id": 99_999,
-            "slug": "other-bot",
-            "bot": { "id": 424_242, "login": "other-bot[bot]" }
-        });
-        let (name, email) = derive_commit_identity(&app)?;
+        // proves the value comes from the /app + /users/{slug}[bot] payloads.
+        let (name, email) = derive_commit_identity(
+            "other-bot",
+            &serde_json::json!({
+                "id": 424_242,
+                "login": "other-bot[bot]",
+            }),
+        )?;
         assert_eq!(name, "other-bot[bot]");
         assert_eq!(email, "424242+other-bot[bot]@users.noreply.github.com");
         Ok(())
@@ -799,11 +841,11 @@ mod tests {
 
     #[test]
     fn commit_author_identity_is_two_single_lines() {
-        let app: Value = serde_json::json!({
-            "slug": "arbsec-agent",
-            "bot": { "id": 334_074_867 }
-        });
-        let (name, email) = derive_commit_identity(&app).expect("well-formed payload");
+        let (name, email) = derive_commit_identity(
+            "arbsec-agent",
+            &serde_json::json!({ "id": 334_074_867, "login": "arbsec-agent[bot]" }),
+        )
+        .expect("well-formed payloads");
         assert_eq!(name, "arbsec-agent[bot]");
         assert_eq!(
             email,
@@ -814,15 +856,15 @@ mod tests {
 
     #[test]
     fn malformed_app_payloads_are_typed_errors() {
-        let cases = [
-            serde_json::json!({ "bot": { "id": 1 } }), // missing slug
-            serde_json::json!({ "slug": "x" }),        // missing bot.id
-            serde_json::json!({ "slug": "", "bot": { "id": 1 } }), // empty slug
-        ];
-        for app in cases {
-            let error = derive_commit_identity(&app).unwrap_err();
-            assert!(format!("{error}").contains("malformed"));
-        }
+        // Missing slug in the /app payload.
+        let error = app_slug(&serde_json::json!({ "id": 1 })).unwrap_err();
+        assert!(format!("{error}").contains("malformed"));
+        let error = app_slug(&serde_json::json!({ "slug": "" })).unwrap_err();
+        assert!(format!("{error}").contains("malformed"));
+        // Missing id in the /users/{slug}[bot] payload.
+        let error =
+            derive_commit_identity("x", &serde_json::json!({ "login": "x[bot]" })).unwrap_err();
+        assert!(format!("{error}").contains("malformed"));
     }
 
     // --- gh-env child spawn ---------------------------------------------------
