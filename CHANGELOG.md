@@ -277,6 +277,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc loop` creates the configuration directory on first run instead of dying on a
+  bare `No such file or directory` when `<config-dir>/loop.lock`'s parent does not
+  exist yet (#434).
+- `orc loop` no longer treats a worker spawn failure (missing task fixture,
+  unsupported provider, transport build failure) as a run-killer: the task is
+  recorded as a terminal `failed` run row, the pass is paced out, and the loop keeps
+  supervising in-flight work — the failed task is excluded for the rest of the
+  invocation (#434). A fatal durable-state failure now aborts and records in-flight
+  workers before the run returns, so no row is stranded `running`.
+- `orc loop` bounds process shutdown by the five-second daemon budget after the run
+  completes, so a blocking worker operation cannot hold process exit past it (#434).
 - `orc loop` now bounds board polling by the remaining run budget: the budget could
   previously expire while the loop sat inside a board request (up to the board client's
   60s timeout), leaving in-flight work unsupervised and letting the pass plan or start

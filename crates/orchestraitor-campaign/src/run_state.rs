@@ -337,7 +337,7 @@ impl LoopRunStore {
     /// Returns [`CampaignError::Store`] when the query fails.
     pub fn daily_spend(&self, now_secs: u64) -> Result<f64, CampaignError> {
         let day_start = secs_i64(now_secs - (now_secs % 86_400), &self.path_label)?;
-        let day_end = day_start + 86_400;
+        let day_end = day_start.saturating_add(86_400);
         self.conn
             .query_row(
                 "SELECT COALESCE(SUM(spend_usd), 0.0) FROM loop_worker_runs

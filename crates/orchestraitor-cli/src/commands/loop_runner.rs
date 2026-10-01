@@ -167,6 +167,9 @@ struct LoopAlreadyRunning {
 /// Returns a diagnostic when the lock file cannot be created or is held by
 /// another invocation.
 fn acquire_instance_lock(config_dir: &std::path::Path) -> Result<InstanceLock> {
+    // A fresh checkout has no config dir yet — the lock file's parent must
+    // exist before the open, or the run dies on a bare ENOENT.
+    std::fs::create_dir_all(config_dir).into_diagnostic()?;
     let path = config_dir.join("loop.lock");
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -331,7 +334,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     .map_err(|error| miette!("{error}"))?;
 
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
-    let summary = runtime.block_on(async {
+    let run_result = runtime.block_on(async {
         let (signal_rx, signals) = spawn_signal_task();
         let invocation_id = format!(
             "loop-{}",
@@ -371,7 +374,12 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
         };
         signals.abort();
         summary.map_err(|error| miette!("{error}"))
-    })?;
+    });
+    // Bound the shutdown by the daemon budget: a `spawn_blocking` bash op
+    // (mediated execution runs its blocking I/O on the blocking pool) must
+    // not hold process exit open past the advertised five seconds.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    let summary = run_result?;
 
     if args.json {
         serde_json::to_writer_pretty(&mut *writer, &summary).into_diagnostic()?;
