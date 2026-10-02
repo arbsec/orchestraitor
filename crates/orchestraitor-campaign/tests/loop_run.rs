@@ -874,18 +874,37 @@ async fn shutdown_preempts_the_spend_cap_drain_within_the_budget() {
 // must interrupt the poll (the board client can block up to its 60s total
 // timeout — far outside the 5s daemon budget) and end the loop promptly,
 // never swallow the signal.
-#[tokio::test(start_paused = true)]
-async fn shutdown_interrupts_an_in_flight_board_poll() {
-    /// A poller whose poll never resolves (the hung-transport case).
-    struct HangingPoller;
+//
+/// A poller whose poll never resolves (the hung-transport case).
+struct HangingPoller;
 
-    #[async_trait]
-    impl BoardPoller for HangingPoller {
-        async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+#[async_trait]
+impl BoardPoller for HangingPoller {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        std::future::pending().await
+    }
+}
+
+/// Serves the snapshot once (the spawn pass), then hangs (the wedged
+/// transport on the next cycle).
+struct FirstPollSnapshot {
+    snapshot: BoardSnapshot,
+    polls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BoardPoller for FirstPollSnapshot {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(self.snapshot.clone())
+        } else {
             std::future::pending().await
         }
     }
+}
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_an_in_flight_board_poll() {
     let decisions = CampaignDecisionStore::open_in_memory().unwrap();
     let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
     let config = LoopConfig::new(
@@ -926,6 +945,69 @@ async fn shutdown_interrupts_an_in_flight_board_poll() {
     );
     assert_eq!(summary.spawns, 0, "no spawn from the interrupted pass");
     assert!(runs.runs_for_invocation("inv").unwrap().is_empty());
+}
+
+// Q5(m2) poll race WITH an in-flight worker: the pass's interrupt arm
+// consumes the send through the clone, but the MAIN receiver still has it
+// pending — the run loop must advance its seen version, or wait_tick
+// misreads the first signal as a second one and collapses the 5s grace to
+// one tick. Asserts the full grace survives (straggler aborted no earlier
+// than signal + budget) and still lands inside the budget.
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_a_hung_poll_keeps_the_grace_for_in_flight_work() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+
+    let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
+    // Cycle 1's poll returns a task (the worker spawns); cycle 2's poll
+    // hangs — the signal lands mid-hang with the run still in flight.
+    let poller = FirstPollSnapshot {
+        snapshot: snapshot_with(&[1]),
+        polls: std::sync::atomic::AtomicUsize::new(0),
+    };
+
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    // The first pass completes fast; the signal fires during cycle 2's
+    // hang. Startup + first pass are sub-second; 2s is safely inside it.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+    });
+    let runner = LoopRunner::new(
+        config,
+        poller,
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(signal_rx).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::Shutdown);
+    assert_eq!(summary.spawns, 1, "the in-flight worker existed");
+    // The grace must NOT collapse to a tick (that abort would land ~3s);
+    // the straggler is aborted at signal + budget + tick slop.
+    assert!(
+        summary.elapsed_secs >= 6,
+        "the advertised grace must survive a pass-consumed signal: {}",
+        summary.elapsed_secs
+    );
+    assert!(
+        summary.elapsed_secs <= 12,
+        "the straggler still aborts within the budget: {}",
+        summary.elapsed_secs
+    );
+    assert_eq!(summary.aborted_on_stop, 1);
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows[0].detail, "shutdown-abort");
 }
 
 // Two signals: the second short-circuits the remaining grace window. The
