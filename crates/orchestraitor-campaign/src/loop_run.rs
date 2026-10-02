@@ -451,6 +451,7 @@ struct Counters {
 }
 
 impl Counters {
+    /// Counts a reaped worker outcome in the invocation summary.
     fn note(&mut self, reaped: &Reaped) {
         match reaped.status {
             RunRowStatus::Completed => self.completed += 1,
@@ -458,7 +459,7 @@ impl Counters {
             RunRowStatus::Stalled => self.stalled += 1,
             RunRowStatus::TimedOut => self.timed_out += 1,
             RunRowStatus::AbortedShutdown => self.aborted_on_stop += 1,
-            RunRowStatus::Running | RunRowStatus::AbortedCrash => {}
+            RunRowStatus::Running => {}
         }
     }
 }
@@ -520,6 +521,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             })
     }
 
+    /// Returns elapsed time on the Tokio clock, including virtual test time.
     fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
@@ -584,12 +586,6 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         // original receiver; the pass watches a clone.
         self.shutdown = Some(shutdown.clone());
         self.config.validate()?;
-        // Crash reconciliation before any guard reads slots: a previous
-        // invocation's running rows would otherwise occupy the concurrency
-        // cap forever.
-        self.runs
-            .reconcile_stale(&self.invocation_id, self.now_secs(self.elapsed())?)?;
-
         let tick = tick_interval(&self.config.budgets);
         let mut counters = Counters::default();
         let mut events = Vec::new();
@@ -1056,7 +1052,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 },
                 // `finish` rejects non-terminal statuses, so these never
                 // occur here.
-                RunRowStatus::Running | RunRowStatus::AbortedCrash => LoopEvent::WorkerFinished {
+                RunRowStatus::Running => LoopEvent::WorkerFinished {
                     run_id: slot.run_id,
                     task_id: slot.task_id.clone(),
                     completed: false,

@@ -172,8 +172,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   second concurrent invocation is rejected (`loop-already-running`, advisory flock).
   One worker run per task per invocation — failed or killed tasks are never silently
   retried; retry is a fresh board-driven selection in a later invocation. Run state is
-  durable at `<config-dir>/loop.db` with startup reconciliation of crashed invocations'
-  rows. Documented in [docs/cli/orc-loop.md](docs/cli/orc-loop.md) and the README.
+  recorded at `<config-dir>/loop.db` for guard accounting and run outcomes. Documented
+  in [docs/cli/orc-loop.md](docs/cli/orc-loop.md) and the README.
 - `orc worker run --task <id> [--json]` and the `orchestraitor-worker` crate: the headless
   one-shot bootstrap mini-worker (spec `10-orchestrator.md` §9.38, `60-milestones.md` MVP-6;
   #310). The worker resolves a fixture task, routes through the control plane's `implement`

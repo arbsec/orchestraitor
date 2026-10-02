@@ -36,6 +36,7 @@ struct ScriptServer {
 }
 
 impl ScriptServer {
+    /// Starts a local GraphQL fixture server with request matching rules.
     fn start(rules: Vec<Rule>) -> Result<Self, io::Error> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
@@ -74,6 +75,7 @@ impl ScriptServer {
 }
 
 impl Drop for ScriptServer {
+    /// Stops the fixture listener and waits for its accept thread to exit.
     fn drop(&mut self) {
         if let Ok(mut guard) = self.shutdown.lock() {
             *guard = true;
@@ -84,6 +86,7 @@ impl Drop for ScriptServer {
     }
 }
 
+/// Matches a GraphQL request against fixture rules and sends a JSON response.
 fn serve_connection(mut stream: std::net::TcpStream, rules: &[Rule]) {
     use std::io::{Read, Write as IoWrite};
     let mut buffer = [0u8; 8192];
@@ -112,6 +115,7 @@ fn serve_connection(mut stream: std::net::TcpStream, rules: &[Rule]) {
     }
 }
 
+/// Builds board configuration using a synthetic token from the test environment.
 fn board_config() -> String {
     [
         "[project]",
@@ -135,6 +139,7 @@ fn board_config() -> String {
     .join("\n")
 }
 
+/// Invokes the CLI subprocess with synthetic provider and board credentials.
 fn run_orc(args: &[String]) -> Result<Output, io::Error> {
     Command::new(env!("CARGO_BIN_EXE_orc"))
         .args(args)
@@ -161,6 +166,7 @@ fn spawn_simulator(script: Vec<orchestraitor_testkit::PlannedResponse>) -> miett
         .map_err(|error| miette::miette!("simulator did not start: {error}"))
 }
 
+/// Writes isolated board configuration and a deterministic worker task fixture.
 fn fixture_project(
     temp: &std::path::Path,
 ) -> miette::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
@@ -186,6 +192,7 @@ fn fixture_project(
     Ok((project_dir, config_dir, tasks_dir))
 }
 
+/// Checks CLI completion, JSON counts, and persisted run and decision records.
 #[test]
 fn loop_completes_a_seeded_task_within_the_cycle_bound() -> miette::Result<()> {
     let server = ScriptServer::start(vec![
@@ -273,6 +280,7 @@ fn loop_completes_a_seeded_task_within_the_cycle_bound() -> miette::Result<()> {
     Ok(())
 }
 
+/// Checks that an already-held instance lock produces the typed CLI rejection.
 #[test]
 fn a_second_loop_instance_is_a_typed_rejection() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;

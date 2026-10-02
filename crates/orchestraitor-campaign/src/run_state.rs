@@ -9,10 +9,8 @@
 //! `daily_spend()`. The heartbeat columns are the durable liveness record:
 //! every beat the supervisor observes is persisted via
 //! [`LoopRunStore::heartbeat`], so `loop.db` shows how far each run got
-//! even after a crash or kill. A crashed loop leaves `running` rows
-//! behind; the next invocation reconciles them to `aborted-crash` via
-//! [`LoopRunStore::reconcile_stale`] before enforcing any guard (a stale
-//! row would otherwise misrepresent concurrency in the audit surface).
+//! even after a crash or kill. Rows from earlier invocations are historical
+//! records; restart recovery is deferred to the E8 watch daemon.
 //!
 //! Rows reference the append-only campaign decision store by plain integer
 //! id (`decision_id`); the two stores live in separate files, so there is no
@@ -48,9 +46,6 @@ pub enum RunRowStatus {
     /// run-budget stop (the abort intent distinguishes the reason in
     /// `detail`; the row status is shared).
     AbortedShutdown,
-    /// Startup reconciliation of a `running` row left behind by a crashed
-    /// previous invocation.
-    AbortedCrash,
 }
 
 impl RunRowStatus {
@@ -70,10 +65,10 @@ impl RunRowStatus {
             Self::Stalled => "stalled",
             Self::TimedOut => "timed-out",
             Self::AbortedShutdown => "aborted-shutdown",
-            Self::AbortedCrash => "aborted-crash",
         }
     }
 
+    /// Decodes a stored lifecycle status, rejecting unknown spellings.
     fn parse(value: &str) -> Option<Self> {
         match value {
             "running" => Some(Self::Running),
@@ -82,7 +77,6 @@ impl RunRowStatus {
             "stalled" => Some(Self::Stalled),
             "timed-out" => Some(Self::TimedOut),
             "aborted-shutdown" => Some(Self::AbortedShutdown),
-            "aborted-crash" => Some(Self::AbortedCrash),
             _ => None,
         }
     }
@@ -93,8 +87,7 @@ impl RunRowStatus {
 pub struct RunRow {
     /// Monotonic row id.
     pub id: i64,
-    /// Loop invocation that started the run (the exclusion and reconciliation
-    /// scopes are per-invocation).
+    /// Loop invocation that started the run (the exclusion scope is per-invocation).
     pub invocation_id: String,
     /// Campaign decision record id that selected the task.
     pub decision_id: i64,
@@ -189,6 +182,7 @@ impl LoopRunStore {
         Self::init(conn, ":memory:".to_string())
     }
 
+    /// Configures the connection and creates the run-state schema.
     fn init(conn: Connection, path_label: String) -> Result<Self, CampaignError> {
         configure(&conn).map_err(|source| CampaignError::Store {
             path: path_label.clone(),
@@ -354,32 +348,7 @@ impl LoopRunStore {
             .map_err(|source| self.err(source))
     }
 
-    /// Sweeps `running` rows that do not belong to `invocation_id` to
-    /// `aborted-crash` and returns how many rows were reconciled. Must be
-    /// called at loop start: a crashed previous invocation's rows would
-    /// otherwise misrepresent concurrency in the audit surface.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CampaignError::Store`] when the update fails.
-    pub fn reconcile_stale(
-        &self,
-        invocation_id: &str,
-        now_secs: u64,
-    ) -> Result<u64, CampaignError> {
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE loop_worker_runs
-                 SET status = 'aborted-crash', finished_at_secs = ?2,
-                     detail = 'stale-running-row-from-crashed-invocation'
-                 WHERE status = 'running' AND invocation_id != ?1",
-                rusqlite::params![invocation_id, secs_i64(now_secs, &self.path_label)?],
-            )
-            .map_err(|source| self.err(source))?;
-        u64::try_from(changed).map_err(|source| bigint(&self.path_label, source))
-    }
-
+    /// Reads run rows with bound parameters and propagates decoding failures.
     fn query_rows(
         &self,
         sql: &str,
@@ -396,6 +365,7 @@ impl LoopRunStore {
         Ok(records)
     }
 
+    /// Reports a missing or already-terminal run to reject invalid updates.
     fn no_such_running_row(&self) -> CampaignError {
         CampaignError::Store {
             path: self.path_label.clone(),
@@ -403,6 +373,7 @@ impl LoopRunStore {
         }
     }
 
+    /// Attaches this store's path to a database error.
     fn err(&self, source: rusqlite::Error) -> CampaignError {
         CampaignError::Store {
             path: self.path_label.clone(),
@@ -411,6 +382,7 @@ impl LoopRunStore {
     }
 }
 
+/// Decodes the canonical column order, validating statuses and unsigned values.
 fn decode_row(row: &rusqlite::Row<'_>) -> Result<RunRow, rusqlite::Error> {
     let status_text: String = row.get(6)?;
     let status = RunRowStatus::parse(&status_text).ok_or_else(|| {
@@ -448,6 +420,7 @@ fn decode_row(row: &rusqlite::Row<'_>) -> Result<RunRow, rusqlite::Error> {
     })
 }
 
+/// Converts a stored integer to an unsigned value, rejecting negative data.
 fn row_u64(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|_| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -461,6 +434,7 @@ fn row_u64(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     })
 }
 
+/// Enables WAL journaling, normal synchronization, and foreign keys.
 fn configure(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -469,6 +443,7 @@ fn configure(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// Creates the initial run-state tables and indexes if absent.
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -498,14 +473,17 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// Converts a clock or beat value to `SQLite`'s signed integer range.
 fn secs_i64(value: u64, path_label: &str) -> Result<i64, CampaignError> {
     i64::try_from(value).map_err(|source| bigint(path_label, source))
 }
 
+/// Converts an issue number to `SQLite`'s signed integer range.
 fn number_i64(value: u64, path_label: &str) -> Result<i64, CampaignError> {
     i64::try_from(value).map_err(|source| bigint(path_label, source))
 }
 
+/// Wraps an integer overflow as a store conversion error with its path.
 fn bigint(path_label: &str, source: std::num::TryFromIntError) -> CampaignError {
     CampaignError::Store {
         path: path_label.to_string(),

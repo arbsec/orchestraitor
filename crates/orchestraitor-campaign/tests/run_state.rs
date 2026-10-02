@@ -1,4 +1,4 @@
-//! `LoopRunStore` roundtrip, reconciliation, and daily-spend tests
+//! `LoopRunStore` roundtrip and daily-spend tests
 //! (issue #314). All clocks are explicit `now_secs` parameters — no test
 //! reads a real clock.
 
@@ -14,6 +14,7 @@
 
 use orchestraitor_campaign::{LoopRunStore, RunRowStatus, StartRun};
 
+/// Builds a run insertion request with an explicit start time.
 fn start_run(task: &str, at: u64) -> StartRun {
     StartRun {
         invocation_id: "inv-1".to_string(),
@@ -25,6 +26,7 @@ fn start_run(task: &str, at: u64) -> StartRun {
     }
 }
 
+/// Checks that heartbeat and terminal outcome fields survive store roundtrips.
 #[test]
 fn start_heartbeat_finish_roundtrip() {
     let store = LoopRunStore::open_in_memory().unwrap();
@@ -57,6 +59,7 @@ fn start_heartbeat_finish_roundtrip() {
     assert!(done.status.is_terminal());
 }
 
+/// Checks that rejected updates leave an already-terminal row unchanged.
 #[test]
 fn heartbeat_and_finish_reject_terminal_rows() {
     let store = LoopRunStore::open_in_memory().unwrap();
@@ -76,6 +79,7 @@ fn heartbeat_and_finish_reject_terminal_rows() {
     assert_eq!(done.heartbeat_turn, 0);
 }
 
+/// Checks that finishing requires a terminal lifecycle status.
 #[test]
 fn finish_rejects_the_running_status() {
     let store = LoopRunStore::open_in_memory().unwrap();
@@ -84,6 +88,7 @@ fn finish_rejects_the_running_status() {
     assert!(result.is_err(), "running is not a terminal status");
 }
 
+/// Checks UTC day boundaries and excludes unrecorded spend from active runs.
 #[test]
 fn daily_spend_sums_the_utc_day_of_the_explicit_clock() {
     let store = LoopRunStore::open_in_memory().unwrap();
@@ -111,33 +116,4 @@ fn daily_spend_sums_the_utc_day_of_the_explicit_clock() {
         .unwrap();
     assert_eq!(store.daily_spend(day_two + 400).unwrap(), 9.0);
     drop(in_flight);
-}
-
-#[test]
-fn reconcile_stale_sweeps_only_other_invocations() {
-    let store = LoopRunStore::open_in_memory().unwrap();
-    let stale = store.start(&start_run("board-x-12", 1_000)).unwrap();
-    let fresh = store.start(&start_run("board-x-13", 1_000)).unwrap();
-
-    // The fresh invocation reconciles at startup (same invocation id as the
-    // rows it is about to create; the stale one predates it).
-    let swept = store.reconcile_stale("inv-2", 2_000).unwrap();
-    assert_eq!(swept, 2, "both rows belong to a previous invocation");
-
-    let stale_row = store.by_id(stale.id).unwrap();
-    assert_eq!(stale_row.status, RunRowStatus::AbortedCrash);
-    assert_eq!(stale_row.finished_at_secs, Some(2_000));
-    let fresh_row = store.by_id(fresh.id).unwrap();
-    assert_eq!(fresh_row.status, RunRowStatus::AbortedCrash);
-
-    // Rows created under the reconciled invocation survive a re-run.
-    let mine = store
-        .start(&StartRun {
-            invocation_id: "inv-2".to_string(),
-            ..start_run("board-x-14", 3_000)
-        })
-        .unwrap();
-    let swept_again = store.reconcile_stale("inv-2", 3_100).unwrap();
-    assert_eq!(swept_again, 0);
-    assert_eq!(store.by_id(mine.id).unwrap().status, RunRowStatus::Running);
 }
