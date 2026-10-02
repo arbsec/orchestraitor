@@ -12,9 +12,12 @@ is not a signature. Verified commits come from exactly two sources:
    comparing the resulting `verification` payload.
 2. **Real GPG/SSH signatures** from a key registered to the committing identity.
 
-## Replay procedure (`scripts/github-app-recreate-branch.sh`)
+## Replay procedure (documented here; no script yet)
 
-Retrofits an existing unsigned commit chain into GitHub-signed commits:
+The replay script (`scripts/github-app-recreate-branch.sh`) is the designated
+home for this procedure but is NOT yet implemented — perform the replay by
+following the steps below exactly. Retrofits an existing unsigned commit chain
+into GitHub-signed commits:
 
 1. Mint a JWT (RS256, `iss` = App client id, ≤10 min TTL) from the keyring PEM
    (`secret-tool lookup service orchestraitor`), exchange it for an installation token.
