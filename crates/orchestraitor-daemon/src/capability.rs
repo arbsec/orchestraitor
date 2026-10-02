@@ -255,15 +255,16 @@ mod tests {
             .required_capabilities
             .iter()
             .find(|cap| cap.identifier == "filesystem_isolation");
-        let expected = if report.protected_services_allowed {
-            ControlStatus::Available
-        } else {
+        let filesystem_missing = report.missing_controls.contains(&"filesystem_isolation");
+        let expected = if filesystem_missing {
             ControlStatus::Unavailable
+        } else {
+            ControlStatus::Available
         };
         assert_eq!(
             filesystem_cap.map(|cap| cap.status),
             Some(expected),
-            "filesystem_isolation must be reported and track the host Landlock probe"
+            "filesystem_isolation status must agree with missing_controls and track the host Landlock probe"
         );
     }
 
