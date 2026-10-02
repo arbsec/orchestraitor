@@ -488,10 +488,18 @@ pub(crate) async fn run_board_query_shared(
 /// context's audit store when one is shared, otherwise a fresh in-memory
 /// store (mirrors [`run_board_query_shared`], issue #458 F3).
 ///
-/// The move runs FIRST (no locks held), then the outcome — applied OR
-/// refused; a refusal is a decision and records too — appends under ONE
-/// lock section. The lock is held only across the synchronous section; a
-/// poisoned lock fails the invocation closed.
+/// The caller's §9.25.1 delegation-chain labels ride ON the request
+/// (`delegation_chain`, client-asserted data — PR #475 review thread 7)
+/// and are recorded verbatim with the same `claimed:` prefix and
+/// truncation bounds as `board.query`.
+///
+/// The move runs FIRST (no locks held), then the outcome — applied,
+/// refused, OR indeterminate; every terminal outcome is a decision and
+/// records — appends under ONE lock section. The lock is held only across
+/// the synchronous section; a poisoned lock fails the invocation closed.
+/// An append failure on a shared store maps to the typed indeterminate
+/// error: the board mutation (when applied) already landed and the audit
+/// gap must be visible (PR #475 review thread 1).
 pub(crate) async fn run_board_move_shared(
     provider: &dyn orchestraitor_board_contract::BoardProvider,
     registry: std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>,
@@ -504,11 +512,11 @@ pub(crate) async fn run_board_move_shared(
     let chain = BoardMoveDelegationChain {
         correlation_id,
         parent_op_id: None,
-        principals: Vec::new(),
+        principals: request.delegation_chain.clone(),
     };
     if let Some(shared) = shared_store {
-        let guarded = GuardedRegistry(std::sync::Arc::clone(&registry));
-        let (outcome, summary) = execute_move(provider, &mut { guarded }, &request)
+        let mut guarded = GuardedRegistry(std::sync::Arc::clone(&registry));
+        let (outcome, summary) = execute_move(provider, &mut guarded, &request)
             .await
             .map_err(|error| McpGatewayError::BoardMove(error.to_string()))?;
         {
@@ -525,7 +533,13 @@ pub(crate) async fn run_board_move_shared(
                         ))
                     })?;
             store.append(event).map_err(|_| {
-                McpGatewayError::BoardMove(String::from("invocation event append rejected"))
+                // The board mutation already landed; the audit append
+                // failed. Surface the indeterminate class, not a bare
+                // refusal (PR #475 review thread 1).
+                McpGatewayError::BoardMove(String::from(
+                    "invocation event append rejected: board state for this \
+                     move must be reconciled through a fresh read",
+                ))
             })?;
         }
         return Ok(BoardMoveResult {
@@ -542,19 +556,23 @@ pub(crate) async fn run_board_move_shared(
 
 /// Adapter that locks the shared registry long enough for one synchronous
 /// registry call — `LeaseRegistry` methods are sync and short (no await
-/// inside), so a per-call lock section never crosses an await point.
+/// inside), so a per-call lock section never crosses an await point. The
+/// shared registry serializes concurrent invocations at `try_claim`, so
+/// the TOCTOU fix holds across gateway requests (PR #475 review thread 2).
 struct GuardedRegistry(std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>);
 
 impl crate::board_move::LeaseRegistry for GuardedRegistry {
-    fn lease_on(
-        &self,
+    fn try_claim(
+        &mut self,
         item: &orchestraitor_board_contract::BoardItemId,
-    ) -> Result<Option<crate::board_move::ItemLease>, BoardMoveError> {
-        let leases = self
+        session: &str,
+        expires_at_unix_secs: u64,
+    ) -> Result<crate::board_move::ClaimOutcome, BoardMoveError> {
+        let mut leases = self
             .0
             .lock()
             .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-        leases.lease_on(item)
+        leases.try_claim(item, session, expires_at_unix_secs)
     }
 
     fn held_by(
@@ -567,19 +585,6 @@ impl crate::board_move::LeaseRegistry for GuardedRegistry {
             .lock()
             .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
         leases.held_by(item, session)
-    }
-
-    fn acquire(
-        &mut self,
-        item: &orchestraitor_board_contract::BoardItemId,
-        session: &str,
-        expires_at_unix_secs: u64,
-    ) -> Result<(), BoardMoveError> {
-        let mut leases = self
-            .0
-            .lock()
-            .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-        leases.acquire(item, session, expires_at_unix_secs)
     }
 
     fn release(

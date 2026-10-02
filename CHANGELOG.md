@@ -51,16 +51,25 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   retirement; `Triage` is a human/PM gate both ways, reopening `Done` and
   unclassified columns refuse), enforce the §9.40 unresolved-blocker rule
   (an item with unresolved `blockedBy` edges cannot enter In Progress), and
-  lease-check against a session lease registry (§9.24.2): another session's
-  live lease refuses `lease-conflict` naming the holder; the session's own
-  expired lease refuses `lease-expired`. An applied transition writes
-  through the provider and is verified by read-back — reconcile-visible,
-  board-wins on the next tick (§9.43). Every invocation — applied OR
-  refused — records to the event store as a `ToolRequest` event with the
-  §9.25.1 delegation chain (`chain_source: client-asserted`,
-  `claimed:`-prefixed labels), same mechanism as `board.query`. Refusals
+  lease-check against a session lease registry (§9.24.2) whose check-and-claim is
+  ONE atomic operation (concurrent sessions can never both move an unleased item);
+  `In Progress` and the held states (`Blocked`, `Approval Required`, `Input
+  Required`) are lease-protected — pausing keeps the lease. Another session's live
+  lease refuses `lease-conflict` naming the holder; the session's own expired lease
+  refuses `lease-expired`. An applied transition writes through the provider and is
+  verified by read-back — reconcile-visible, board-wins on the next tick (§9.43); a
+  landed write whose outcome cannot be verified (read-back failure or concurrent
+  drift) reports a typed `indeterminate` outcome (board state unknown — re-read
+  before retrying), never a false refusal; a landed write whose lease bookkeeping
+  fails reports applied plus a typed warning. Every invocation — applied, refused,
+  or indeterminate — records to the event store as a `ToolRequest` event with the
+  §9.25.1 delegation chain (`chain_source: client-asserted`, `claimed:`-prefixed
+  labels; the gateway tool accepts `delegation_chain` on the request), same
+  mechanism as `board.query`; an unrecordable invocation fails closed with the
+  event-store gap visible. Refusals
   are typed outcomes with static log-safe reason classes; the board is
-  unchanged after any refusal. Scope is status-class transitions only:
+  unchanged after any refusal, and the CLI renders refusals as decisions
+  (exit 0). Scope is status-class transitions only:
   requested field or edge writes refuse `out-of-scope`, never silently
   narrowed. Request values are untrusted input (§6.1) — a hostile status
   name matches nothing and refuses `unknown-status`. Surfaced as
