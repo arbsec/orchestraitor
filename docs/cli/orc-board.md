@@ -95,9 +95,9 @@ orc board guarded-move <item-id> --status "<Status option name>" --session <sess
   holder; the session's own expired lease refuses with `lease-expired`. An applied
   transition writes through the provider and is verified by read-back —
   reconcile-visible, board-wins on the next tick (§9.43). Every invocation —
-  applied OR refused — records to the event store as a `ToolRequest` event with the
-  §9.25.1 delegation chain (`chain_source: client-asserted`, `claimed:`-prefixed
-  labels), same mechanism as `board.query`. Refusals are typed outcomes with static
+  applied, refused, OR indeterminate — records to the event store as a `ToolRequest`
+  event with the §9.25.1 delegation chain (`chain_source: client-asserted`,
+  `claimed:`-prefixed labels), same mechanism as `board.query`. Refusals are typed outcomes with static
   log-safe reason classes (`policy-invalid` with the blocker ids, `lease-conflict`,
   `lease-expired`, `missing-session`, `unknown-status`, `unknown-item`,
   `provider-rejected`, `out-of-scope`); the board is unchanged after any refusal.

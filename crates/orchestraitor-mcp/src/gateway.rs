@@ -533,13 +533,27 @@ pub(crate) async fn run_board_move_shared(
                         ))
                     })?;
             store.append(event).map_err(|_| {
-                // The board mutation already landed; the audit append
-                // failed. Surface the indeterminate class, not a bare
-                // refusal (PR #475 review thread 1).
-                McpGatewayError::BoardMove(String::from(
-                    "invocation event append rejected: board state for this \
-                     move must be reconciled through a fresh read",
-                ))
+                // The append failed AFTER the move's terminal outcome: the
+                // message must match the outcome class (PR #478 review).
+                // Refused: the board is provably unchanged — only the
+                // record is missing. Applied/indeterminate: the board
+                // mutation may have landed, so the audit gap means the
+                // board state must be reconciled through a fresh read
+                // (PR #475 review thread 1). Either way the error return
+                // keeps the §9.39 fail-closed posture: the invocation is
+                // never reported as an unrecorded success.
+                let message = match &outcome {
+                    crate::board_move::BoardMoveOutcome::Refused { .. } => {
+                        "invocation event append rejected after a refused move; \
+                         the board is unchanged but the invocation was not recorded"
+                    }
+                    crate::board_move::BoardMoveOutcome::Applied { .. }
+                    | crate::board_move::BoardMoveOutcome::Indeterminate { .. } => {
+                        "invocation event append rejected: board state for this \
+                         move must be reconciled through a fresh read"
+                    }
+                };
+                McpGatewayError::BoardMove(String::from(message))
             })?;
         }
         return Ok(BoardMoveResult {

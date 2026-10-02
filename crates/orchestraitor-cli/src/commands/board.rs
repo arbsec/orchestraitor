@@ -505,8 +505,8 @@ fn guarded_move<W: Write>(args: &BoardGuardedMoveArgs, writer: &mut W) -> Result
             writeln!(
                 writer,
                 "INDETERMINATE ({failure}): the write of {item} to \"{requested_status}\" \
-                 landed but its outcome could not be verified — re-read the board state \
-                 before retrying"
+                 may have landed but its outcome could not be verified — re-read the board \
+                 state before retrying"
             )
             .into_diagnostic()?;
         }
