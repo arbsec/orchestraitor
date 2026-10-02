@@ -17,8 +17,7 @@ use crate::cli::{ConfigPaths, WorkerCommand, WorkerRunArgs};
 use crate::commands::config::layers::load_layers;
 use orchestraitor_agent_catalog::RoleRouter;
 
-/// Bootstrap worker routing role (the implement role drives task execution).
-const WORKER_ROLE: &str = "implement";
+use super::{WORKER_ROLE, require_bootstrap_provider};
 
 /// Runs an `orc worker` subcommand.
 ///
@@ -38,13 +37,7 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
     let decision = router
         .resolve(WORKER_ROLE)
         .map_err(|error| miette!("{error}"))?;
-    if decision.provider != "neuralwatt" {
-        return Err(miette!(
-            "bootstrap worker supports only the `neuralwatt` provider (spec §10.3); \
-             roles.{WORKER_ROLE}.routing.provider resolved to `{}`",
-            decision.provider
-        ));
-    }
+    require_bootstrap_provider(&decision.provider)?;
 
     let tasks_dir = args
         .worker_tasks_dir

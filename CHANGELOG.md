@@ -277,6 +277,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc loop` writes the run-state row BEFORE spawning the worker: a durable row-write
+  failure on the spawn path now fails the run with the in-flight worker aborted —
+  previously the spawned worker task detached and ran to its 45-minute timeout with no
+  run row, invisible to every sweep (#434).
+- `orc loop` run rows aborted by the fatal-exit sweep (a durable-state failure ended the
+  run) now carry the detail `unattributed-drain-abort` instead of a fabricated
+  `run-budget-abort`: no budget stop was declared, so the audit row no longer claims a
+  cause that did not hold. The unattributed abort is a distinct typed intent, and the
+  fabricated terminal reason is unrepresentable by construction (#434).
 - `orc loop` creates the configuration directory on first run instead of dying on a
   bare `No such file or directory` when `<config-dir>/loop.lock`'s parent does not
   exist yet (#434).
