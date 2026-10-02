@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_board::ReadyItem;
 use orchestraitor_campaign::{
-    BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunner,
-    LoopWorkerStarter, StopReason, WorkerProcess,
+    BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunStore,
+    LoopRunner, LoopWorkerStarter, StopReason, WorkerProcess,
 };
 use orchestraitor_worker::{BudgetEcho, RunStatus, UsageTotals, WorkerBudgets, WorkerRun};
 
@@ -101,7 +101,7 @@ fn fixture_run(task_id: &str, turns: u32, tokens: u64) -> WorkerRun {
 }
 
 /// What the fake worker does once started.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Behavior {
     /// Completes immediately with the given turn/token totals.
     Complete { turns: u32, tokens: u64 },
@@ -115,6 +115,9 @@ enum Behavior {
     SilentHang,
     /// Panics immediately (typed failed row, loop continues).
     Panic,
+    /// The starter itself fails before any worker task exists (the
+    /// missing-fixture / transport-build case).
+    SpawnFail,
 }
 
 #[derive(Clone)]
@@ -165,10 +168,16 @@ impl LoopWorkerStarter for FakeStarter {
             .lock()
             .unwrap()
             .push((task_id.to_string(), prior_daily_spend_usd));
-        let (tx, rx) = tokio::sync::watch::channel(0_u64);
-        let beats = self.beats_observed.clone();
         let spawn_index = self.spawns.lock().unwrap().len() - 1;
         let behavior = self.behaviors[spawn_index % self.behaviors.len()].clone();
+        if behavior == Behavior::SpawnFail {
+            return Err(CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: "fixture task load failed: no such fixture".to_string(),
+            });
+        }
+        let (tx, rx) = tokio::sync::watch::channel(0_u64);
+        let beats = self.beats_observed.clone();
         let id = task_id.to_string();
         let run = tokio::spawn(async move {
             match behavior {
@@ -202,6 +211,8 @@ impl LoopWorkerStarter for FakeStarter {
                 Behavior::Panic => {
                     panic!("fixture-worker-panic");
                 }
+                // Unreachable: the starter returned before spawning.
+                Behavior::SpawnFail => unreachable!("spawn-fail never reaches the worker task"),
             }
         });
         Ok(WorkerProcess { beats: rx, run })
@@ -1304,4 +1315,200 @@ async fn an_in_flight_worker_is_supervised_across_a_poll_error() {
     assert_eq!(summary.aborted_on_stop, 1, "the drain reached the worker");
     let rows = runs.runs_for_invocation("inv").unwrap();
     assert_eq!(rows[0].detail, "shutdown-abort");
+}
+
+/// Checks that a spawn failure is a recorded per-task outcome, not a
+/// run-killer: the loop survives, the row is terminal `failed`, and the
+/// task is excluded for the rest of the invocation.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_failure_is_recorded_and_the_loop_continues() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    // Cycle bound 2: the spawn must fail in cycle 1 and the loop must
+    // still reach cycle 2 (a propagated Spawn error would end the run
+    // before it).
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), Some(2)).unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1]),
+        },
+        FakeStarter::new(Behavior::SpawnFail),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(
+        summary.stop_reason,
+        StopReason::CycleBudget,
+        "the loop must survive the spawn failure and reach the cycle bound"
+    );
+    assert_eq!(summary.failed, 1, "the spawn failure is counted as failed");
+    assert_eq!(summary.spawns, 0, "no worker process ever existed");
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::Failed,
+        "the row is terminal, never stranded running"
+    );
+    assert!(
+        rows[0].detail.contains("fixture task load failed"),
+        "the spawner's log-safe reason is recorded: {}",
+        rows[0].detail
+    );
+    // Forbidden effect: the dead task is never re-selected this
+    // invocation — cycle 2 must not attempt it again (the exclusion reads
+    // terminal rows); a second spawn attempt would show as a second row.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Failed)
+            .count(),
+        1,
+        "the failed task is excluded for the rest of the invocation"
+    );
+    assert!(
+        !decisions.list().unwrap().is_empty(),
+        "a decision was recorded"
+    );
+}
+
+/// Checks that the fatal-exit path aborts in-flight workers and records
+/// them — a durable-state failure never leaves a row `running`.
+#[tokio::test(start_paused = true)]
+async fn a_fatal_error_drains_in_flight_workers_before_returning() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // Cycle 1 runs on a normal wall clock and spawns a beating worker; the
+    // fatal failure is armed to hit AFTER the spawn: the loop-start wall
+    // clock sits 2 seconds below the *i64* ceiling — the store converts
+    // timestamps to i64, so cycle 1 (sub-second) persists the spawn row,
+    // and once virtual elapsed reaches 2s the next `now_secs` exceeds
+    // i64::MAX → the row write/beat conversion fails (Store-class fatal).
+    // The runner must abort the in-flight worker, record it terminally,
+    // and return the error.
+    let overflow_lead = 2_u64;
+    let start_unix = i64::MAX as u64 - overflow_lead;
+    let poller = FirstPollSnapshot {
+        snapshot: snapshot_with(&[1]),
+        polls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
+    let runner = LoopRunner::new(
+        config,
+        poller,
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        start_unix,
+    )
+    .unwrap();
+    let result = runner.run(never()).await;
+
+    let error = result.expect_err("the clock overflow must fail the run");
+    // The spawn row persisted (cycle 1's now_secs fits); the next tick's
+    // clock overflows the i64 row conversion — a Store-class fatal.
+    assert!(
+        matches!(error, CampaignError::Loop(_) | CampaignError::Store { .. }),
+        "the fatal error is the clock overflow: {error:?}"
+    );
+    // The in-flight worker did not outlive the run as a detached task with
+    // a stranded `running` row: the sweep aborted and recorded it.
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows.len(), 1, "the spawned worker has a row");
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::AbortedShutdown,
+        "the row is terminal after the fatal exit"
+    );
+    assert_eq!(rows[0].detail, "run-budget-abort");
+}
+
+/// A poller whose first poll fails slowly (a real timeout case: the failure
+/// arrives only after the request has consumed most of its window).
+struct SlowFailingPoller {
+    polls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BoardPoller for SlowFailingPoller {
+    /// Consumes 8 virtual seconds, then fails (a 60s board timeout
+    /// compressed for the virtual clock).
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        let poll = self.polls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let _ignore = poll;
+        Err(CampaignError::Loop(
+            "board poll failed: fixture-blip".into(),
+        ))
+    }
+}
+
+/// Checks that the post-failure pace anchors at the failure time, not the
+/// pass start: a slow failing poll must not eat its own backoff (the next
+/// poll happens at failure + delay, never failure + tick).
+#[tokio::test(start_paused = true)]
+async fn a_slow_failing_poll_paces_from_the_failure_time() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    // Cycle bound 2: two failed polls; the second pass must start no
+    // earlier than failure(8s) + base backoff(10s) = 18s (pre-poll pacing
+    // would re-poll at ~9s).
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), Some(2)).unwrap();
+    let runner = LoopRunner::new(
+        config,
+        SlowFailingPoller {
+            polls: std::sync::atomic::AtomicUsize::new(0),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 0,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::CycleBudget);
+    assert_eq!(summary.poll_failures, 2);
+    // The decisive assertion: cycle 2's pass began only after the full
+    // backoff counted from cycle 1's *failure* (8s poll + 10s backoff,
+    // plus its own 8s failing poll before the bound trips). Pre-poll
+    // pacing anchors the delay at the pass start (t=0), so the second
+    // poll would begin at ~10s — the run would end near 18s.
+    assert!(
+        summary.elapsed_secs >= 25,
+        "the backoff must be counted from the failure, not the pass start: {}",
+        summary.elapsed_secs
+    );
+    // And it is bounded: two slow failures plus backoffs, plus tick slop.
+    assert!(
+        summary.elapsed_secs < 45,
+        "the loop still stops at the cycle bound: {}",
+        summary.elapsed_secs
+    );
 }
