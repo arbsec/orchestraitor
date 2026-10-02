@@ -103,15 +103,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (approvals require an independent authorized reviewer; the wrapper's
   service identity authors the PRs it reviews, and GitHub forbids
   self-approval) — `--comment` and `--request-changes` are supported.
-  Trailing flags without a value (`--title`, `--body`, `--body-file`) now
-  produce a typed argument error (exit 2) instead of a shell crash, and
-  `--body-file` (both `--body-file <path>` and `--body-file=<path>`) reaches
-  `gh` as a file flag so gh posts the file contents, not the path. The
+  Flag arguments are validated (a trailing `--title`, `--body`, or
+  `--body-file` without a value is a typed argument error, exit 2), and
+  `--body-file` posts the file contents rather than the file path. The
   `required` enforcement pin is honored even when the `orc` binary is
-  unavailable: the wrapper reads `github_app.enforcement` directly from the
-  repo `orchestraitor.toml` (`$(git rev-parse --show-toplevel)/orchestraitor.toml`,
-  overridable via `ORC_REPO_TOML`), so a pinned repo stays fail closed
-  without the tooling.
+  unavailable or the working tree cannot be resolved: the operation fails
+  closed with its typed config error instead of the personal fallback.
 - README updated to lead with the bounded, self-improving delivery loop as the
   product's first axis (spec `00-overview.md` §1, §2.3, §3.1), with a new
   "The delivery loop" section describing the stage cycle, the guard set, and
