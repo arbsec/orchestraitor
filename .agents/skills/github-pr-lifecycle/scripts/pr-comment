@@ -22,9 +22,13 @@ BODY_FILE=""
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
-    --body)         BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --body=*)       BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body-file)    BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --body-file=*)  BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)              REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
