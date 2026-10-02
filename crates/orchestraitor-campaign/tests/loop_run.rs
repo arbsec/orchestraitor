@@ -1148,3 +1148,160 @@ async fn a_poll_completing_after_budget_expiry_never_spawns() {
     // moment the overshoot is observed.
     assert_eq!(summary.aborted_on_stop, 0, "nothing in flight to abort");
 }
+
+// A poll error is a transient board failure, not a run-killer: before the
+// budget race, the error arm counted the failure, journaled it, and paced
+// the next pass — the loop stayed alive and kept supervising in-flight
+// workers. A propagated error would drop the runner mid-run, orphan the
+// spawned worker tasks, and strand their rows as `running` forever.
+/// A poller whose first poll fails (transient board outage), then recovers.
+struct FailsOncePoller {
+    snapshot: BoardSnapshot,
+    polls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BoardPoller for FailsOncePoller {
+    /// Fails the first poll, then serves the snapshot on later cycles.
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(CampaignError::Loop(
+                "board poll failed: fixture-blip".into(),
+            ))
+        } else {
+            Ok(self.snapshot.clone())
+        }
+    }
+}
+
+/// A poller that serves the snapshot once (the spawn pass), then errors on
+/// every later poll (the board outage on the next cycle).
+struct FirstPollThenErrors {
+    snapshot: BoardSnapshot,
+    polls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BoardPoller for FirstPollThenErrors {
+    /// Returns the initial snapshot once, then models a failing board.
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(self.snapshot.clone())
+        } else {
+            Err(CampaignError::Loop(
+                "board poll failed: fixture-blip".into(),
+            ))
+        }
+    }
+}
+
+/// Checks that a transient poll error backs off and retries — the loop
+/// survives, the failure is journaled, and the recovered pass spawns and
+/// supervises the worker to natural completion.
+#[tokio::test(start_paused = true)]
+async fn a_transient_poll_error_backs_off_and_the_loop_continues() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    // Cycle bound 2: the loop must reach cycle 2 after cycle 1's blip —
+    // a propagated error would end the run before it.
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), Some(2)).unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FailsOncePoller {
+            snapshot: snapshot_with(&[1]),
+            polls: std::sync::atomic::AtomicUsize::new(0),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 0,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(
+        summary.stop_reason,
+        StopReason::CycleBudget,
+        "the loop must survive the blip and reach the cycle bound"
+    );
+    assert_eq!(summary.poll_failures, 1, "the blip is counted, not fatal");
+    assert!(
+        summary
+            .events
+            .iter()
+            .any(|event| matches!(event, orchestraitor_campaign::LoopEvent::PollFailed { .. })),
+        "the failure is journaled as poll-failed"
+    );
+    assert_eq!(summary.cycles, 2, "cycle 2 ran after the failed cycle 1");
+    assert_eq!(summary.spawns, 1, "the recovered pass spawned the worker");
+    assert_eq!(summary.completed, 1, "the worker ran to natural completion");
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::Completed,
+        "no stranded running row: the worker was supervised, not orphaned"
+    );
+}
+
+/// Checks that an in-flight worker is still supervised and drained while
+/// the pass paces out after a poll error — supervision never stalls.
+#[tokio::test(start_paused = true)]
+async fn an_in_flight_worker_is_supervised_across_a_poll_error() {
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // Cycle 1: healthy poll → the beating worker spawns. Cycle 2+: the
+    // board blips — the error arm must pace the pass without ever
+    // abandoning the in-flight run; the shutdown drain finishes it.
+    let poller = FirstPollThenErrors {
+        snapshot: snapshot_with(&[1]),
+        polls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    // The worker spawns in cycle 1 (sub-second); the erroring cycle-2 pass
+    // paces the next attempt at +10s (base backoff) — the signal lands at
+    // 2s, while the loop is waiting out that backoff with the worker
+    // in flight. Reaching the drain proves the loop stayed alive across
+    // the blip and never abandoned supervision.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+    });
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let runner = LoopRunner::new(
+        config,
+        poller,
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(signal_rx).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::Shutdown);
+    assert_eq!(summary.spawns, 1, "the in-flight worker existed");
+    // Cycle 2's blip was counted — proof the error arm ran (and returned
+    // to the run loop, which stayed alive to see the signal) instead of
+    // propagating out of pass() and killing the run.
+    assert_eq!(summary.poll_failures, 1);
+    assert_eq!(summary.aborted_on_stop, 1, "the drain reached the worker");
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows[0].detail, "shutdown-abort");
+}
