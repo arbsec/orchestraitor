@@ -15,8 +15,9 @@ orc loop [--json] [--max-cycles N]
 ## Guard set
 
 Every guard is owner-adjustable at the board (issue #310 set), pinned once in
-`WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop — the
-two enforcement layers can never drift apart:
+`WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop (the
+loop hands its validated instance to the worker starter) — the two enforcement layers
+can never drift apart:
 
 | Guard | Default | Enforced by |
 | --- | --- | --- |
@@ -26,7 +27,7 @@ two enforcement layers can never drift apart:
 | concurrency | 2 | loop (cap on supervised slots) |
 | stall | 10m | worker-internal check + supervisor beat-staleness kill |
 | backoff | 10s·2^n capped at 5m | loop pass pacing (same schedule the worker uses for provider retries) |
-| spend | $10/day soft cap | worker records exceedance; loop seals the intake |
+| spend | $10/day soft cap | worker records exceedance; loop seals the intake (inert by default — the per-token spend estimate is `0.0` until the cost-ledger lane wires provider pricing in, so no accrual crosses the cap) |
 | run budget | 4h | loop (aborts in-flight runs, records them) |
 
 A configuration that weakens a guard (zero concurrency, zero stall timeout, zero
@@ -48,7 +49,11 @@ weakened guard is a runaway loop.
 - **Graceful stop.** SIGTERM/SIGINT stop the intake immediately, give in-flight runs a
   five-second window (the tech-stack daemon budget) to finish, then abort stragglers
   and record them (`aborted-shutdown`). A second signal short-circuits the remaining
-  grace. Stopping leaves board state intact — board-wins on the next run.
+  grace. A signal arriving during a terminal budget stop's drain (spend cap, run
+  budget) preempts that drain on the same budget — the stragglers are aborted and
+  recorded as shutdown-aborts. A signal arriving during a board poll interrupts the
+  poll instead of waiting it out. Stopping leaves board state intact — board-wins on
+  the next run.
 - **Terminal stops.** The spend soft cap and the run budget end the invocation with a
   typed stop reason (in the summary JSON); empty-queue no-ops are transient — the loop
   backs off and re-polls.
@@ -66,7 +71,8 @@ Cross-invocation suppression is a board/PM decision, not a loop policy.
 - Decision records: `<config-dir>/campaign.db` — append-only, shared with
   [orc campaign](orc-campaign.md).
 - Run state: `<config-dir>/loop.db` — one row per supervised worker run (invocation,
-  decision link, heartbeat, terminal status, recorded spend, detail). Startup
+  decision link, heartbeat — the persisted liveness record updated as the supervisor
+  observes progress beats —, terminal status, recorded spend, detail). Startup
   reconciliation sweeps `running` rows left by a crashed previous invocation to
   `aborted-crash` before any guard reads slots, so a crash never permanently consumes
   concurrency.
