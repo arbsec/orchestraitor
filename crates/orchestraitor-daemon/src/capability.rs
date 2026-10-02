@@ -251,21 +251,19 @@ mod tests {
         );
         assert!(!report.degraded_mode);
         assert_eq!(report.platform, "linux");
-        let Some(filesystem_cap) = report
+        let filesystem_cap = report
             .required_capabilities
             .iter()
-            .find(|cap| cap.identifier == "filesystem_isolation")
-        else {
-            panic!("filesystem_isolation is always reported");
-        };
+            .find(|cap| cap.identifier == "filesystem_isolation");
         let expected = if report.protected_services_allowed {
             ControlStatus::Available
         } else {
             ControlStatus::Unavailable
         };
         assert_eq!(
-            filesystem_cap.status, expected,
-            "filesystem_isolation must track the host Landlock probe"
+            filesystem_cap.map(|cap| cap.status),
+            Some(expected),
+            "filesystem_isolation must be reported and track the host Landlock probe"
         );
     }
 
