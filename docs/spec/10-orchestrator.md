@@ -452,6 +452,18 @@ The watch daemon (`orcd watch`) is the always-running supervision loop for §9.3
 
 The daemon runs unprivileged; foreground and systemd-user-unit supervision are documented operating modes, not requirements.
 
+> **Bootstrap deviation (E0, issue #314):** until the §9.36 watch daemon exists, the
+> bootstrap loop runner (`orc loop`) is a cron-shaped FOREGROUND approximation of the
+> poll-tick/supervise loop: it runs pass-then-supervise cycles under the minimal guard
+> set (attempts 3, re-plan 2, worker timeout 45m, concurrency 2, stall 10m, backoff
+> 10s·2^n capped 5m, spend $10/day soft cap, run budget 4h — the same pinned
+> `WorkerBudgets` the worker enforces, so the two layers cannot drift). It owns the
+> scheduler-facing bounds the §9.35 bootstrap pass does not: the concurrency cap, the
+> supervisor-side stall kill (beat staleness), pass pacing, the spend-intake seal, and
+> the run budget. Kick-off conditions, reconcile semantics, `board-diverged` events,
+> and budget classes deepen in E8; single-flight across campaign invocations is the
+> loop's instance lock (#314) until the daemon owns it.
+
 ### 9.37 Agent issue reporting
 
 Agents in the loop — workers, campaign sessions, reviewers, verifiers — MAY report bugs and issues they encounter. Reporting is reporting ONLY: filing an issue never grants work, schedules work, or implies that the reporter will fix it.
