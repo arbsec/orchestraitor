@@ -343,6 +343,8 @@ impl InMemoryLeaseRegistry {
 }
 
 impl LeaseRegistry for InMemoryLeaseRegistry {
+    /// The in-memory claim: one lock section covers the expiry scan and
+    /// the insert, so two sessions can never both claim an unleased item.
     fn try_claim(
         &mut self,
         item: &BoardItemId,
@@ -396,6 +398,8 @@ impl LeaseRegistry for InMemoryLeaseRegistry {
         Ok(ClaimOutcome::Claimed)
     }
 
+    /// The in-memory lookup: the map is keyed by (item, session), so the
+    /// answer is the stored lease verbatim — expired or not.
     fn held_by(
         &self,
         item: &BoardItemId,
@@ -410,6 +414,9 @@ impl LeaseRegistry for InMemoryLeaseRegistry {
             .cloned())
     }
 
+    /// The in-memory release: removing the (item, session) entry, whether
+    /// or not one exists (idempotent — releasing an unheld lease is a
+    /// no-op, never an error).
     fn release(&mut self, item: &BoardItemId, session: &str) -> Result<(), BoardMoveError> {
         let mut leases = self
             .leases
