@@ -42,6 +42,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
+# url (MIT OR Apache-2.0): form-encoded query building for `orc github api`
+# GET/DELETE `--field` pairs (the `gh api` query-parameter shape).
+url = { workspace = true }
 
 [dev-dependencies]
 # rusqlite (MIT): asserting the persisted decision rows in the campaign.db.

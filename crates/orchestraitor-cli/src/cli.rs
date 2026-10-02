@@ -142,8 +142,10 @@ pub enum GitHubCommand {
     ///
     /// Mirrors `gh api` minimally: METHOD plus a repository-relative API path,
     /// an optional JSON body from `--input FILE` (`-` = stdin) or `--field
-    /// key=value` pairs. Prints the response body verbatim on stdout; exits 0
-    /// on 2xx, non-zero otherwise. The minted token is never printed.
+    /// key=value` pairs (always string values, like `gh api -f`; on GET/DELETE
+    /// the pairs ride the URL query string). Prints the response body verbatim
+    /// on stdout; exits 0 on 2xx, non-zero otherwise. The minted token is
+    /// never printed.
     Api(ApiArgs),
     /// Run one child command with `GH_TOKEN` set to a freshly minted
     /// installation token (never printed by orc; the child's environment is
@@ -164,11 +166,14 @@ pub struct ApiArgs {
     /// API path relative to the configured base URL (e.g.
     /// `/repos/OWNER/REPO/pulls`).
     pub path: String,
-    /// Read the JSON request body from a file (`-` reads stdin).
+    /// Read the JSON request body from a file (`-` reads stdin). Not valid
+    /// with GET/DELETE (GitHub ignores bodies there).
     #[arg(long)]
     pub input: Option<String>,
-    /// Add a JSON body field `key=value` (repeatable; values are raw JSON
-    /// when they parse as such, else strings — like `gh api -f`).
+    /// Add a request field `key=value` (repeatable). The value is ALWAYS a
+    /// string, like `gh api -f/--raw-field` (`-f body=123` sends `"123"`,
+    /// never the number `123`). On GET/DELETE the pairs become URL query
+    /// parameters; otherwise they merge into an `--input` object body.
     #[arg(long = "field", short = 'f')]
     pub fields: Vec<String>,
 }

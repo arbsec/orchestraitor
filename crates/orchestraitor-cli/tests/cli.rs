@@ -967,6 +967,49 @@ fn github_api_passthrough_exits_nonzero_on_4xx_without_leaking_headers() -> miet
 }
 
 #[test]
+fn github_api_get_fields_become_query_parameters_not_a_body() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let (endpoint, auth_rx) = spawn_mint_then_api_server(200, r#"[{"number":1},{"number":2}]"#)?;
+
+    // `-f state=closed` on GET must ride the URL query string (the `gh api`
+    // shape), never a silently-dropped JSON body. The value contains a space
+    // and a comma to prove percent-encoding.
+    let output = github_cli(
+        &temp,
+        &endpoint,
+        &[
+            "github",
+            "api",
+            "GET",
+            "repos/arbsec/orchestraitor/issues",
+            "--field",
+            "labels=bug,help wanted",
+            "--field",
+            "state=closed",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _mint = auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    let api = auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    let api_path = api.split('\t').next().unwrap_or_default();
+    assert_eq!(
+        api_path, "/repos/arbsec/orchestraitor/issues?labels=bug%2Chelp+wanted&state=closed",
+        "GET --field pairs must be percent-encoded query parameters: {api_path}"
+    );
+    Ok(())
+}
+
+#[test]
 fn github_api_rejects_unknown_method_before_minting() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_github_app_project_config(&temp)?;

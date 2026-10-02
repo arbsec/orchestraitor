@@ -113,31 +113,39 @@ orc_lib_gh() {
 #
 # Identity resolution: `gh api user` is a USER-context endpoint and fails with
 # an installation token (401), silently yielding an empty login that breaks
-# assignee-ownership checks. On the service path the caller's identity is the
-# App bot user, so it is resolved from `orc github commit-author` (the
-# canonical `name=<slug>[bot]` line). The `gh api user` probe is used ONLY
-# when the AMBIENT route is selected (orc absent) — never as a fallback for a
-# failing service-path resolution: with complete App config the operations run
+# assignee-ownership checks. The route is chosen with the SAME probe
+# `orc_lib_gh_service` uses (`orc_lib_has_github_app_config`): when the
+# github_app config resolves (service route), the caller's identity is the App
+# bot user, resolved from `orc github commit-author` (the canonical
+# `name=<slug>[bot]` line); the `gh api user` probe is used ONLY when the
+# AMBIENT route is selected (config absent — the same state that sends the
+# mutations to the labelled personal fallback) — never as a fallback for a
+# failing service-route resolution: with complete App config the operations run
 # as the App installation, so mixing in the personal login would create a
 # principal mismatch (claim/release ownership checks evaluated against the
-# wrong identity). A failing service-path resolution yields an empty result,
-# which the calling scripts treat as a typed config failure.
+# wrong identity). A probe resolution error or a failing service-route
+# resolution yields an EMPTY result (fail closed), which the calling scripts
+# treat as a typed config failure.
 #
 # Usage: orc_lib_resolve_my_login -> prints the caller's login (bot or human).
-#   - orc absent (ambient route)      -> login from `gh api user`.
-#   - orc present (service route)     -> `<slug>[bot]` from commit-author;
+#   - config absent (ambient route)   -> login from `gh api user`.
+#   - config resolves (service route) -> `<slug>[bot]` from commit-author;
 #     commit-author failure           -> EMPTY output (callers fail closed).
+#   - config probe resolution error   -> EMPTY output (callers fail closed).
 #   - callers must treat an empty login as a typed failure, never a wildcard
 #     match.
 orc_lib_resolve_my_login() {
-  local login=""
-  if ! command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
-    # Ambient route: `gh api user` is user-context and works with the ambient
+  local login="" probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  if [ "$probe_status" -eq 1 ]; then
+    # Ambient route — the same route orc_lib_gh_service takes for absent
+    # config: `gh api user` is user-context and works with the ambient
     # personal auth; the service identity plays no role here.
     login="$(orc_lib_gh api user --jq '.login' 2>/dev/null || true)"
     printf '%s' "$login"
     return 0
   fi
+  [ "$probe_status" -eq 0 ] || return 0 # probe error -> EMPTY (fail closed)
   # Service route: the principal is the App bot user, full stop.
   login="$("${ORC_BIN:-orc}" github commit-author 2>/dev/null | sed -n 's/^name=//p' || true)"
   printf '%s' "$login"
@@ -211,9 +219,28 @@ orc_lib_enforcement_probe_status() {
 
 orc_lib_enforcement_required() {
   if [ -n "${ORC_GITHUB_APP_ENFORCEMENT:-}" ]; then
-    ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
-    [ "$ORC_GITHUB_APP_ENFORCEMENT" = "required" ]
-    return
+    # The pin is authoritative: `required` fails closed, `recommended` keeps
+    # the labelled fallback, and ANY other value is an operator error — the
+    # pin exists to fail closed, so an unrecognized value must never widen
+    # into the personal fallback (that would be the fail-open outcome the
+    # pin prevents).
+    case "$ORC_GITHUB_APP_ENFORCEMENT" in
+      required)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+        return 0
+        ;;
+      recommended)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+        return 1
+        ;;
+      *)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+        echo "error: invalid ORC_GITHUB_APP_ENFORCEMENT value \`$ORC_GITHUB_APP_ENFORCEMENT\`" >&2
+        echo "       (expected \`recommended\` or \`required\`); refusing to fall back to" >&2
+        echo "       personal auth under an ambiguous enforcement declaration." >&2
+        return 2
+        ;;
+    esac
   fi
   ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
   command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1

@@ -220,11 +220,19 @@ fn api<W: Write>(paths: &ConfigPaths, args: &ApiArgs, writer: &mut W) -> Result<
     validate_api_method(&args.method)?;
     let method = args.method.to_ascii_uppercase();
     validate_api_path(&args.path)?;
-    let path = args.path.trim_start_matches('/');
+    let mut path = args.path.trim_start_matches('/').to_string();
     let body = build_request_body(args)?;
+    // GET/DELETE carry `--field` pairs as URL query parameters (the `gh api`
+    // shape) instead of a silently-ignored JSON body.
+    if matches!(method.as_str(), "GET" | "DELETE") && !args.fields.is_empty() {
+        let query = build_request_query(&args.fields)?;
+        let separator = if path.contains('?') { "&" } else { "?" };
+        path.push_str(separator);
+        path.push_str(&query);
+    }
     let (_, token) = mint_installation_token(paths)?;
     let transport = ApiTransport::new(paths.github_api_endpoint.clone())?;
-    let (status, response_body) = transport.request(&method, path, &token, body)?;
+    let (status, response_body) = transport.request(&method, &path, &token, body)?;
     writer
         .write_all(response_body.as_bytes())
         .into_diagnostic()?;
@@ -240,7 +248,25 @@ fn api<W: Write>(paths: &ConfigPaths, args: &ApiArgs, writer: &mut W) -> Result<
 }
 
 /// Builds the JSON request body from `--input FILE|-` and `--field k=v`.
+///
+/// `-f/--field` behaves like `gh api -f/--raw-field`: the value is ALWAYS
+/// sent as a string, never JSON-parsed (`-f body=123` sends `"123"`, not
+/// `123`). For body-less request classes (GET, DELETE) fields become URL
+/// query parameters instead — the `gh api` shape — rather than being
+/// silently dropped into a JSON body the endpoint ignores.
 fn build_request_body(args: &ApiArgs) -> Result<Option<String>> {
+    let upper_method = args.method.to_ascii_uppercase();
+    let takes_body = !matches!(upper_method.as_str(), "GET" | "DELETE");
+    if !takes_body {
+        if args.input.is_some() {
+            bail!(
+                "`--input` cannot be combined with {upper_method}: GitHub ignores request \
+                 bodies on {upper_method}; use query fields (`-f key=value`) instead"
+            );
+        }
+        // Fields ride the URL query string instead (see `build_request_query`).
+        return Ok(None);
+    }
     let mut body: Option<Value> = None;
     if let Some(input) = &args.input {
         let raw = if input == "-" {
@@ -258,8 +284,8 @@ fn build_request_body(args: &ApiArgs) -> Result<Option<String>> {
         let Some((key, value)) = field.split_once('=') else {
             bail!("`--field` must be `key=value`, got `{field}`");
         };
-        let parsed: Value =
-            serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+        // `gh api -f` semantics: the value is always a string.
+        let parsed = Value::String(value.to_string());
         let Some(Value::Object(map)) = body.as_mut() else {
             if body.is_some() {
                 bail!("cannot combine `--input` body with `--field` on a non-object body");
@@ -281,6 +307,20 @@ fn build_request_body(args: &ApiArgs) -> Result<Option<String>> {
         None => None,
     };
     Ok(serialized)
+}
+
+/// Builds the URL query string from `--field k=v` pairs for body-less
+/// request classes (GET, DELETE) — the `gh api` shape. Percent-encodes both
+/// keys and values; the token never travels in the URL.
+fn build_request_query(fields: &[String]) -> Result<String> {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for field in fields {
+        let Some((key, value)) = field.split_once('=') else {
+            bail!("`--field` must be `key=value`, got `{field}`");
+        };
+        query.append_pair(key, value);
+    }
+    Ok(query.finish())
 }
 
 /// `orc github gh-env`: execute one child command with `GH_TOKEN` set to a
@@ -675,7 +715,9 @@ mod tests {
     // --- build_request_body --------------------------------------------------
 
     #[test]
-    fn field_values_parse_as_json_when_valid_and_fall_back_to_strings() -> Result<()> {
+    fn field_values_are_always_strings_like_gh_raw_field() -> Result<()> {
+        // `gh api -f` semantics: NO JSON parsing — `123` stays a string,
+        // `null` stays a string, a JSON-looking comment body stays a string.
         let args = ApiArgs {
             method: "POST".to_string(),
             path: "/repos/o/r/pulls".to_string(),
@@ -683,7 +725,9 @@ mod tests {
             fields: vec![
                 "title=Add service-identity writes".to_string(),
                 "draft=true".to_string(),
-                "head_count=3".to_string(),
+                "body=123".to_string(),
+                "name=null".to_string(),
+                "payload={\"x\":1}".to_string(),
             ],
         };
         let body = build_request_body(&args)?.expect("fields produce a body");
@@ -692,8 +736,18 @@ mod tests {
             parsed.get("title").and_then(Value::as_str),
             Some("Add service-identity writes")
         );
-        assert_eq!(parsed.get("draft").and_then(Value::as_bool), Some(true));
-        assert_eq!(parsed.get("head_count").and_then(Value::as_i64), Some(3));
+        for key in ["draft", "body", "name", "payload"] {
+            assert!(
+                parsed.get(key).is_some_and(Value::is_string),
+                "-f must always produce a string value for {key}: {parsed}"
+            );
+        }
+        assert_eq!(parsed.get("body").and_then(Value::as_str), Some("123"));
+        assert_eq!(parsed.get("name").and_then(Value::as_str), Some("null"));
+        assert_eq!(
+            parsed.get("payload").and_then(Value::as_str),
+            Some("{\"x\":1}")
+        );
         Ok(())
     }
 
@@ -723,7 +777,8 @@ mod tests {
         let body = build_request_body(&args)?.expect("input produces a body");
         let parsed: Value = serde_json::from_str(&body).into_diagnostic()?;
         assert_eq!(parsed.get("base").and_then(Value::as_str), Some("main"));
-        assert_eq!(parsed.get("draft").and_then(Value::as_bool), Some(false));
+        // `-f` values are always strings, even `false`.
+        assert_eq!(parsed.get("draft").and_then(Value::as_str), Some("false"));
         Ok(())
     }
 
@@ -753,6 +808,72 @@ mod tests {
         };
         assert!(build_request_body(&args)?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn get_fields_yield_no_body_and_ride_the_query_string() {
+        let args = ApiArgs {
+            method: "GET".to_string(),
+            path: "/repos/o/r/issues".to_string(),
+            input: None,
+            fields: vec!["state=closed".to_string(), "per_page=100".to_string()],
+        };
+        // The fields never become a JSON body on GET — `build_request_query`
+        // puts them on the URL instead (asserted end-to-end in the cli
+        // e2e suite); the body stays empty.
+        assert!(
+            build_request_body(&args)
+                .expect("GET fields must not error")
+                .is_none()
+        );
+        let query = build_request_query(&args.fields).expect("well-formed fields build a query");
+        assert_eq!(query, "state=closed&per_page=100");
+    }
+
+    #[test]
+    fn delete_fields_yield_no_body() -> Result<()> {
+        let args = ApiArgs {
+            method: "DELETE".to_string(),
+            path: "/repos/o/r/issues/1/labels/bug".to_string(),
+            input: None,
+            fields: vec!["foo=bar".to_string()],
+        };
+        assert!(build_request_body(&args)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn input_on_get_is_a_typed_error() {
+        let args = ApiArgs {
+            method: "GET".to_string(),
+            path: "/repos/o/r/issues".to_string(),
+            input: Some("-".to_string()),
+            fields: Vec::new(),
+        };
+        let error = format!("{}", build_request_body(&args).unwrap_err());
+        assert!(
+            error.contains("`--input` cannot be combined with GET"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn query_builder_percent_encodes_keys_and_values() {
+        let query = build_request_query(&[
+            "labels=bug,help wanted".to_string(),
+            "q=is:open in:title".to_string(),
+        ])
+        .expect("well-formed fields build a query");
+        assert_eq!(query, "labels=bug%2Chelp+wanted&q=is%3Aopen+in%3Atitle");
+    }
+
+    #[test]
+    fn query_builder_rejects_fields_without_equals() {
+        let error = format!(
+            "{}",
+            build_request_query(&["broken".to_string()]).unwrap_err()
+        );
+        assert!(error.contains("`--field` must be `key=value`"), "{error}");
     }
 
     // --- method/path validation ---------------------------------------------

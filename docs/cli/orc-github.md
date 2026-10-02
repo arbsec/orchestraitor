@@ -139,12 +139,25 @@ orc github api PATCH /repos/arbsec/orchestraitor/issues/445 --input - <<'JSON'
 JSON
 ```
 
+Acceptance check for issue #445 (record it as evidence when complete): post a
+comment or a review on a REAL pull request as `arbsec-agent[bot]` — an issue
+comment does not satisfy it. For example, against an actual PR number:
+
+```sh
+orc github api POST repos/arbsec/orchestraitor/issues/<PR-NUMBER>/comments \
+    --field body="Identity check: posted by arbsec-agent[bot] via the App installation token."
+```
+
 - `METHOD` is one of `GET`, `POST`, `PATCH`, `PUT`, `DELETE`; `PATH` is relative
   to the configured base URL (leading `/` optional).
-- The JSON body comes from `--input FILE` (`-` = stdin) and/or repeatable
-  `--field key=value` pairs (`value` parses as JSON when valid — `true`,
-  `42` — else is a string, like `gh api -f`). `--field` merges into an
-  `--input` object body; combining it with a non-object body is a typed error.
+- The JSON body comes from `--input FILE` (`-` = stdin; not valid with
+  GET/DELETE — GitHub ignores request bodies there) and/or repeatable
+  `--field key=value` pairs (`value` is ALWAYS a string, like `gh api
+  -f/--raw-field` — `-f body=123` sends `"123"`, never the number `123`;
+  `-f body={"x":1}` sends the literal text, not an object). On GET/DELETE the
+  pairs become percent-encoded URL query parameters (the `gh api` shape);
+  otherwise `--field` merges into an `--input` object body, and combining it
+  with a non-object body is a typed error.
 - The minted installation token is attached as `Authorization: Bearer …` only.
   The response body prints to stdout verbatim: it is the caller's business,
   including on failures. The exit code is 0 for 2xx, non-zero otherwise; the

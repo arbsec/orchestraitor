@@ -262,6 +262,28 @@ fi
 
 echo "PASS gh-env service wrapper routing"
 
+# --- 13. INVALID $ORC_GITHUB_APP_ENFORCEMENT value: fail closed — the pin
+#         exists to fail closed, so an unrecognized value must never widen
+#         into the personal fallback (matches orc's gh-env behavior).
+: > "$ORC_LOG"; : > "$GH_LOG"
+rm -f "$WORK/orc" # no orc on PATH at all
+( set -euo pipefail; export PATH="$WORK:$PATH"; export GH_BIN="$WORK/gh"
+  export ORC_GITHUB_APP_ENFORCEMENT="Required" # wrong case: operator error
+  # shellcheck source=/dev/null
+  . "$LIB"
+  set +e
+  orc_lib_gh_service issue close 23
+  "$WORK/rcnote" "$?"
+) 2>&1 | while IFS= read -r line; do printf '%s\n' "$line" >> "$WORK/case13.out"; done
+grep -q 'invalid ORC_GITHUB_APP_ENFORCEMENT' "$WORK/case13.out" \
+  || fail "invalid pin value must print the typed config error: $(cat "$WORK/case13.out")"
+grep -qx 'rc:2' "$GH_LOG" || fail "invalid pin value must exit 2 (config), got: $(cat "$GH_LOG")"
+if grep -q '^gh:' "$GH_LOG"; then
+  fail "gh ran on the fallback path despite an invalid pin: $(cat "$GH_LOG")"
+fi
+
+echo "PASS gh-env service wrapper routing"
+
 # --- orc_lib_resolve_my_login ------------------------------------------------
 
 # Case A: service identity available — the login comes from commit-author's
@@ -270,6 +292,8 @@ echo "PASS gh-env service wrapper routing"
 : > "$ORC_LOG"; : > "$GH_LOG"
 cat > "$WORK/orc" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${1:-}" = config ] && [ "${2:-}" = get ]; then printf 'stub\n'; exit 0; fi
 if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
   printf 'name=arbsec-agent[bot]\nemail=334074867+arbsec-agent[bot]@users.noreply.github.com\n'
   exit 0
@@ -290,9 +314,25 @@ if [ -s "$GH_LOG" ]; then
   fail "gh api user must not be called on the service path: $(cat "$GH_LOG")"
 fi
 
-# Case B: orc absent — falls back to `gh api user` (personal path).
+# Case B: config ABSENT (ambient route, the same route orc_lib_gh_service
+# takes for absent config) — falls back to `gh api user` (personal path).
+# orc is present on PATH here: route selection must ride the config probe,
+# not the orc binary's existence.
 : > "$GH_LOG"
-mv "$WORK/orc" "$WORK/orc.hidden"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+# Config-absent stub: layers read fine (validate passes), but no github_app
+# key resolves anywhere (every `config get github_app.*` misses, exit 1).
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${1:-}" = config ] && [ "${2:-}" = get ]; then exit 1; fi
+if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
+  # Never reached: the ambient route must not consult the bot identity.
+  printf 'name=WRONGROUTE[bot]\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$WORK/orc"
 cat > "$WORK/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "gh:$*" >> "$GH_LOG"
@@ -305,15 +345,17 @@ echo '{"login":"somehuman"}'
 exit 0
 EOF
 chmod +x "$WORK/gh"
-LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
     # shellcheck source=/dev/null
     . "$LIB"; orc_lib_resolve_my_login ) )"
-mv "$WORK/orc.hidden" "$WORK/orc"
-[ "$LOGIN" = "somehuman" ] || fail "personal fallback must resolve via gh api user, got: $LOGIN"
-grep -q 'gh:api user' "$GH_LOG" || fail "personal fallback must call gh api user: $(cat "$GH_LOG")"
+[ "$LOGIN" = "somehuman" ] || fail "config-absent ambient route must resolve via gh api user, got: $LOGIN"
+grep -q 'gh:api user' "$GH_LOG" || fail "ambient route must call gh api user: $(cat "$GH_LOG")"
+if grep -q 'WRONGROUTE' <<<"$LOGIN"; then
+  fail "ambient route must not consult commit-author: $LOGIN"
+fi
 
-# Case C: orc absent AND gh fails — empty output (callers must treat as a
-# typed failure).
+# Case C: orc absent (config probe reports absent) AND gh fails — empty
+# output (callers must treat as a typed failure).
 mv "$WORK/orc" "$WORK/orc.hidden"
 cat > "$WORK/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -326,13 +368,39 @@ LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export 
 mv "$WORK/orc.hidden" "$WORK/orc"
 [ -z "$LOGIN" ] || fail "unresolvable identity must be empty, got: $LOGIN"
 
-# Case D: orc PRESENT (service route selected) but commit-author FAILS — the
-# ambient `gh api user` fallback must NOT fire: mixing the personal login
+# Case C2: config probe ERRORS (orc present, `config validate` fails) —
+# fail closed: EMPTY output, no ambient `gh api user`, no commit-author call.
+: > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then
+  echo "layered config unreadable" >&2
+  exit 1
+fi
+if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
+  printf 'name=WRONGROUTE[bot]\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$WORK/orc"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh" GH_LOG="$GH_LOG"
+    # shellcheck source=/dev/null
+    . "$LIB"; orc_lib_resolve_my_login ) )"
+[ -z "$LOGIN" ] || fail "config probe error must yield empty (fail closed), got: $LOGIN"
+if [ -s "$GH_LOG" ]; then
+  fail "config probe error must not consult gh: $(cat "$GH_LOG")"
+fi
+
+# Case D: config RESOLVES (service route selected) but commit-author FAILS —
+# the ambient `gh api user` fallback must NOT fire: mixing the personal login
 # into a service-route decision is a principal mismatch. The result must be
 # EMPTY (callers fail closed), and gh must never be consulted.
 : > "$GH_LOG"
 cat > "$WORK/orc" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${1:-}" = config ] && [ "${2:-}" = get ]; then printf 'stub\n'; exit 0; fi
 if [ "${1:-}" = github ] && [ "${2:-}" = commit-author ]; then
   echo "jwt signature rejected" >&2
   exit 1
