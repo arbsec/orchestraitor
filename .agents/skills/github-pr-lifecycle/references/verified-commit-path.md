@@ -30,11 +30,12 @@ into GitHub-signed commits:
 **Pitfall:** never reset a PR branch through an ancestor-of-main state mid-replay —
 GitHub auto-closes the PR. Replay on the temp branch; swing the ref a single time.
 
-## Security posture
+## Security posture (requirements for the future script)
 
-The installation token lives in memory only — never echoed, logged, or persisted; the
-script fails closed on any error and refuses the Arbitraitor curl shim (which strips
-Authorization headers), so the token cannot leak through a proxied request.
+When the replay script is implemented it MUST hold the installation token in
+memory only — never echo, log, or persist it; it MUST fail closed on any
+error and refuse the Arbitraitor curl shim (which strips Authorization
+headers), so the token cannot leak through a proxied request.
 
 ## When to use what
 
