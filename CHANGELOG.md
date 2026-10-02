@@ -99,16 +99,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   orchestrator; falling back to personal auth is forbidden. Workers must run
   from a fresh checkout (a stale checkout predating the wrappers silently
   bypasses them) with `orc` on `PATH` (`ORC_BIN` overrides the binary name).
-  `pr-review-post` never approves: `--approve` is refused with a typed error
-  (approvals require an independent authorized reviewer; the wrapper's
-  service identity authors the PRs it reviews, and GitHub forbids
-  self-approval) — `--comment` and `--request-changes` are supported.
-  Flag arguments are validated (a trailing `--title`, `--body`, or
-  `--body-file` without a value is a typed argument error, exit 2), and
-  `--body-file` posts the file contents rather than the file path. The
-  `required` enforcement pin is honored even when the `orc` binary is
-  unavailable or the working tree cannot be resolved: the operation fails
-  closed with its typed config error instead of the personal fallback.
 - README updated to lead with the bounded, self-improving delivery loop as the
   product's first axis (spec `00-overview.md` §1, §2.3, §3.1), with a new
   "The delivery loop" section describing the stage cycle, the guard set, and
