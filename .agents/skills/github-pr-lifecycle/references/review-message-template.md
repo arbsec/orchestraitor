@@ -283,7 +283,9 @@ authority:
 A repository MAY override:
 
 - **Extra gates** — add repo-specific gates as additional `## Gates` lines
-  (e.g. `kybra: 0 errors`). The five default gates stay.
+  (e.g. `kybra: 0 errors`). The default gate set stays: the nine gates listed
+  in the prompt's VERIFY step, one `## Gates` line each (or an `N/A` marking
+  with its reason), plus the `CI:` line.
 - **Extra report sections** — appended AFTER the footer, never before or
   between the fixed sections.
 - **Focus areas** — via `scope_note` in the prompt; scope changes what is
