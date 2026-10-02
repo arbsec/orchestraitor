@@ -45,9 +45,13 @@ pub struct GatewayContext {
     pub board_audit_store:
         Option<std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>>,
     /// Session-scoped decision-record store for `decision.record` (§9.35,
-    /// issue #334). Shared across the connection's invocations so row ids
-    /// strictly increase within the session — the append-only guarantee is
-    /// observable, not just claimed. `None` uses a per-invocation store.
+    /// issue #334). REQUIRED for the tool to be usable: shared across the
+    /// connection's invocations so row ids strictly increase within the
+    /// session — the append-only guarantee is observable, not just claimed.
+    /// `None` DISABLES the tool (hidden from `tools/list`, calls rejected —
+    /// the same `disable_route` posture as `board.query`): the gateway
+    /// never opens a per-invocation store and reports success for an
+    /// append it would drop.
     pub decision_store:
         Option<std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>>,
 }
@@ -60,14 +64,19 @@ pub struct McpGateway {
     workflow: WorkflowTools,
     /// Per-instance router: the `#[tool_router]`-generated static set,
     /// with `board.query` disabled when no board provider is configured
-    /// (rmcp `disable_route` hides it from `list_all`/`get` and rejects
-    /// `call` — the verified per-connection disable path, issue #458 F2).
+    /// and `decision.record` disabled when no session-scoped decision
+    /// store is configured (rmcp `disable_route` hides it from
+    /// `list_all`/`get` and rejects `call` — the verified per-connection
+    /// disable path, issue #458 F2).
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl McpGateway {
     /// The `board.query` tool name, used by the router-disable path.
     const BOARD_QUERY_NAME: &'static str = "board.query";
+
+    /// The `decision.record` tool name, used by the router-disable path.
+    const DECISION_RECORD_NAME: &'static str = "decision.record";
 
     /// Creates a gateway for a resolved project scope.
     #[must_use]
@@ -76,6 +85,9 @@ impl McpGateway {
         let mut tool_router = Self::static_tool_router();
         if context.board.is_none() {
             tool_router.disable_route(Self::BOARD_QUERY_NAME);
+        }
+        if context.decision_store.is_none() {
+            tool_router.disable_route(Self::DECISION_RECORD_NAME);
         }
         Self {
             context,
@@ -270,7 +282,12 @@ impl McpGateway {
     /// `decision.record` (spec `10-orchestrator.md` §9.39, §9.35; issue
     /// #334): persist ONE append-only, replayable decision record into the
     /// campaign crate's §9.35 store — the SAME store `orc campaign run
-    /// --once` writes. Malformed records are refused with typed reasons
+    /// --once` writes. Requires the session-scoped decision store on the
+    /// context: without one the tool is disabled (hidden from
+    /// `tools/list`, calls rejected) and the shared runner refuses with a
+    /// typed `decision_record_unconfigured` error — the gateway never
+    /// opens a per-invocation store and reports success for an append it
+    /// would drop. Malformed records are refused with typed reasons
     /// (nothing is appended); secret-shaped material is refused
     /// (fail-closed). Every successful append is recorded as a `ToolRequest`
     /// event with the §9.25.1 delegation chain. There is no update or
@@ -463,18 +480,22 @@ struct DecisionRecordRequest {
     delegation_chain: Vec<String>,
 }
 
-/// Drives one `decision.record` append, recording the invocation into a
-/// per-invocation audit store (issue #334).
+/// Drives one `decision.record` append (issue #334).
 ///
-/// The store is the campaign crate's append-only §9.35 `SQLite` store. With
-/// a session-scoped store on the context, every invocation on the
-/// connection appends into THAT store (row ids strictly increase across the
-/// session — the append-only guarantee is observable); with none, the
-/// invocation opens its own in-memory store. DURABLE persistence stays
-/// owned by `orc campaign run --once` (which opens the same store at
-/// `<config-dir>/campaign.db`); wiring the MCP tool to that same on-disk
-/// store lands with the daemon decision-tool wiring (§9.17/§9.39) — the
-/// record shape and code path are identical, only the store handle differs.
+/// The store is the campaign crate's append-only §9.35 `SQLite` store; the
+/// session-scoped store on the context is REQUIRED. With it, every
+/// invocation on the connection appends into THAT store (row ids strictly
+/// increase across the session — the append-only guarantee is observable)
+/// and its records replay for the connection's lifetime. Without one, the
+/// invocation is REFUSED with [`McpGatewayError::DecisionRecordUnconfigured`]:
+/// appending into a per-invocation in-memory store and reporting success
+/// would fabricate persistence — the record would be dropped when the call
+/// returns while the caller believes it is stored (spec §9.35
+/// persist+replay). DURABLE persistence stays owned by `orc campaign run
+/// --once` (which opens the same store at `<config-dir>/campaign.db`);
+/// wiring the MCP tool to that same on-disk store lands with the daemon
+/// decision-tool wiring (§9.17/§9.39) — the record shape and code path are
+/// identical, only the store handle differs.
 pub(crate) fn run_decision_record_shared(
     input: &DecisionRecordInput,
     chain: &DelegationChain,
@@ -510,32 +531,17 @@ pub(crate) fn run_decision_record_shared(
             None => &mut local_audit,
         };
 
-    // With a session-scoped decision store the append lands in THAT store
-    // (row ids strictly increase across the session's invocations); with
-    // none, the invocation opens its own in-memory store. Durable
-    // persistence stays owned by `orc campaign run --once` until the daemon
-    // decision-tool wiring (§9.17) lands. The store mutex serializes
-    // concurrent appends; the audit event is written after the record, so a
-    // crash between them leaves a record without its §9.25.1 event (visible,
-    // never silent).
-    if let Some(shared_store) = shared_store {
-        let mut store = shared_store.lock().map_err(|_| {
-            McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
-        })?;
-        return record_decision(input, chain, &mut store, audit_target)
-            .map_err(|error| decision_record_error(&error));
-    }
-    let mut store = orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
-        .map_err(decision_store_error)?;
+    // The session-scoped decision store is REQUIRED (see the function
+    // contract): no store means no persistence, and the tool never reports
+    // success for an append it is about to drop.
+    let Some(shared_store) = shared_store else {
+        return Err(McpGatewayError::DecisionRecordUnconfigured);
+    };
+    let mut store = shared_store.lock().map_err(|_| {
+        McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
+    })?;
     record_decision(input, chain, &mut store, audit_target)
         .map_err(|error| decision_record_error(&error))
-}
-
-/// Maps a campaign store failure onto the typed gateway error. The message
-/// is the store's log-safe label (path + `SQLite` class), never record
-/// content.
-fn decision_store_error(error: orchestraitor_campaign::CampaignError) -> McpGatewayError {
-    McpGatewayError::DecisionRecord(DecisionRecordError::Store(error).to_string())
 }
 
 /// Maps a `decision.record` failure onto the typed gateway error. The
@@ -628,6 +634,7 @@ fn error_payload(error: &McpGatewayError) -> serde_json::Value {
             McpGatewayError::Io(_) => "io_error",
             McpGatewayError::BoardQuery(_) => "board_query_failed",
             McpGatewayError::DecisionRecord(_) => "decision_record_failed",
+            McpGatewayError::DecisionRecordUnconfigured => "decision_record_unconfigured",
         }
     })
 }
@@ -737,23 +744,55 @@ mod tests {
         Ok(())
     }
 
-    /// `decision.record` (issue #334) is always listed and callable: unlike
-    /// `board.query` it has no external dependency to configure — its store
-    /// opens per invocation (in-memory) until the daemon event-store wiring
-    /// (§9.17) lands.
+    /// `decision.record` (issue #334) is listed and callable exactly when
+    /// a session-scoped decision store is configured: with one, the route
+    /// is enabled; without one the route is DISABLED (hidden from
+    /// `tools/list`, calls rejected) and the shared runner refuses with the
+    /// typed `decision_record_unconfigured` error — a successful report
+    /// must never rest on a store the invocation drops.
     #[test]
     fn decision_record_is_listed_and_callable() -> McpGatewayResult<()> {
         let temp = tempfile::tempdir()?;
         let scope = ProjectScope::from_root(temp.path())?;
-        let gateway = McpGateway::new(GatewayContext {
-            scope,
+
+        // Without a store: hidden from the list, route disabled.
+        let unconfigured = McpGateway::new(GatewayContext {
+            scope: scope.clone(),
             servers: ResolvedMcpServers::default(),
             arbitraitor: ArbitraitorClient::default(),
             board: None,
             board_audit_store: None,
             decision_store: None,
         });
-        let listed: Vec<String> = gateway
+        let listed: Vec<String> = unconfigured
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            !listed.iter().any(|name| name == "decision.record"),
+            "decision.record must be hidden without a decision store: {listed:?}"
+        );
+        assert!(
+            !unconfigured.tool_router.has_route("decision.record"),
+            "the route must be disabled without a decision store"
+        );
+
+        // With a store: listed and callable.
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
+                .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?,
+        ));
+        let configured = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+            decision_store: Some(shared.clone()),
+        });
+        let listed: Vec<String> = configured
             .tool_router
             .list_all()
             .iter()
@@ -761,14 +800,44 @@ mod tests {
             .collect();
         assert!(
             listed.iter().any(|name| name == "decision.record"),
-            "decision.record must be listed on the gateway: {listed:?}"
+            "decision.record must be listed when a decision store is configured: {listed:?}"
         );
-        assert!(gateway.tool_router.has_route("decision.record"));
-        assert!(
-            !gateway.tool_router.is_disabled("decision.record"),
-            "decision.record has no disable path: append-only state is always available"
-        );
+        assert!(configured.tool_router.has_route("decision.record"));
         Ok(())
+    }
+
+    /// The typed unconfigured refusal (PR #479 review, major): with no
+    /// session-scoped decision store, the shared runner REFUSES with
+    /// `decision_record_unconfigured` instead of opening a per-invocation
+    /// in-memory store and reporting success for an append it drops.
+    #[test]
+    fn decision_record_without_store_is_refused_unconfigured() -> McpGatewayResult<()> {
+        let outcome = run_decision_record_shared(
+            &crate::decision_record::DecisionRecordInput {
+                kind: crate::decision_record::DecisionRecordKind::NoOp,
+                no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
+                selected: None,
+                role: String::from("implement"),
+                provider: String::from("neuralwatt"),
+                model: String::from("glm-5.2"),
+                precedence_path: String::from("bootstrap-default"),
+                fallback_reason: None,
+                worker_args: Vec::new(),
+                rationale: String::from("unconfigured store probe"),
+                alternatives: Vec::new(),
+                blocked_graph: Vec::new(),
+                skipped: Vec::new(),
+            },
+            &chain_for_test(),
+            None,
+            None,
+        );
+        match outcome {
+            Err(McpGatewayError::DecisionRecordUnconfigured) => Ok(()),
+            other => Err(McpGatewayError::DecisionRecord(format!(
+                "expected DecisionRecordUnconfigured, got {other:?}"
+            ))),
+        }
     }
 
     /// `decision.record` end to end through the shared runner (issue #334):
@@ -980,17 +1049,24 @@ mod tests {
         // against one shared audit store, joined at thread boundaries,
         // genuinely interleave; under the old lock scope the lost update
         // would surface as a broken hash chain or a missing event.
+        // The session-scoped decision store is REQUIRED (review round 4,
+        // PR #479): the invocations append through one shared store.
+        let shared_decisions = Arc::new(std::sync::Mutex::new(
+            orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
+                .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?,
+        ));
         let (threads, invocations_per_thread) = (8usize, 6usize);
         let mut handles = Vec::new();
         for _ in 0..threads {
             let shared_audit = shared_audit.clone();
+            let shared_decisions = shared_decisions.clone();
             handles.push(std::thread::spawn(move || {
                 for _ in 0..invocations_per_thread {
                     let input = make_input();
                     run_decision_record_shared(
                         &input,
                         &chain_for_test(),
-                        None,
+                        Some(&shared_decisions),
                         Some(&shared_audit),
                     )
                     .expect("concurrent invocation succeeds");
@@ -1035,50 +1111,6 @@ mod tests {
         Ok(())
     }
 
-    /// Review F2 counterpart (PR #476 gen-2): shared-audit WITHOUT a
-    /// decision store — the event still lands in the shared audit store and
-    /// the merged chain validates, even though the decision record itself
-    /// is per-invocation-volatile on this path.
-    #[test]
-    fn decision_record_records_event_without_decision_store() -> McpGatewayResult<()> {
-        let shared_audit = std::sync::Arc::new(std::sync::Mutex::new(
-            orchestraitor_events::InMemoryAuditStore::default(),
-        ));
-        let input = crate::decision_record::DecisionRecordInput {
-            kind: crate::decision_record::DecisionRecordKind::NoOp,
-            no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
-            selected: None,
-            role: String::from("implement"),
-            provider: String::from("neuralwatt"),
-            model: String::from("glm-5.2"),
-            precedence_path: String::from("bootstrap-default"),
-            fallback_reason: None,
-            worker_args: Vec::new(),
-            rationale: String::from("audit-only probe"),
-            alternatives: Vec::new(),
-            blocked_graph: Vec::new(),
-            skipped: Vec::new(),
-        };
-        run_decision_record_shared(&input, &chain_for_test(), None, Some(&shared_audit))
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        let records = shared_audit
-            .lock()
-            .map_err(|_| McpGatewayError::DecisionRecord(String::from("audit lock poisoned")))?
-            .records()
-            .to_vec();
-        assert_eq!(
-            records.len(),
-            1,
-            "the invocation event persists without a shared decision store"
-        );
-        assert_eq!(
-            records[0].envelope.payload["tool"],
-            crate::decision_record::TOOL_NAME
-        );
-        orchestraitor_events::validate_hash_chain(&records)
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        Ok(())
-    }
 
     /// N2 (issue #458-gen2): a shared store with a PRE-EXISTING seed event
     /// survives two concurrent invocations — final count = seed + 2, every

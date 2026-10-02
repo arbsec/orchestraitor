@@ -78,6 +78,12 @@ pub enum McpGatewayError {
     /// static, log-safe label — never record content (§9.23.4).
     #[error("decision.record failed: {0}")]
     DecisionRecord(String),
+    /// `decision.record` was called without a session-scoped decision
+    /// store. The tool never fabricates persistence: appending into a
+    /// per-invocation store and reporting success would violate the
+    /// persist+replay guarantee (spec §9.35).
+    #[error("decision.record is not configured with a session-scoped decision store")]
+    DecisionRecordUnconfigured,
 }
 
 impl From<std::io::Error> for McpGatewayError {
