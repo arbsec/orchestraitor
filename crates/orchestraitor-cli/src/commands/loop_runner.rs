@@ -260,17 +260,15 @@ fn spawn_signal_task() -> (
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     let signals = tokio::spawn(async move {
         let count_rx = signal_tx.subscribe();
-        let mut interrupt = match tokio::signal::ctrl_c() {
-            Ok(stream) => stream,
-            Err(error) => {
-                report_signal_failure(&format!("ctrl-c handler registration failed: {error}"));
+        // `tokio::signal::ctrl_c()` is an async fn (`io::Result<()>`), not a
+        // stream: await it once per signal and let it re-register the
+        // console handler on each iteration.
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                report_signal_failure("ctrl-c handler registration failed");
                 return;
             }
-        };
-        loop {
-            let mut count = *count_rx.borrow();
-            interrupt.recv().await;
-            count += 1;
+            let count = count_rx.borrow().wrapping_add(1);
             let _ignore = signal_tx.send(count);
         }
     });
