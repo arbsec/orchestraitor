@@ -942,6 +942,105 @@ impl BoardPoller for FirstPollSnapshot {
     }
 }
 
+/// Serves the snapshot after a (virtual) delay on the first poll only;
+/// later polls hang — a shutdown must preempt the racing snapshot.
+struct DelayedSnapshot {
+    snapshot: BoardSnapshot,
+    delay: Duration,
+    polls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BoardPoller for DelayedSnapshot {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            tokio::time::sleep(self.delay).await;
+            Ok(self.snapshot.clone())
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+/// Checks that a signal racing a completing poll still seals the intake:
+/// the unbiased `select!` may hand the snapshot arm the win, but the pass
+/// must honor the already-pending send before planning or spawning work.
+#[tokio::test(start_paused = true)]
+async fn a_signal_racing_a_completing_poll_seals_intake_before_spawn() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+
+    // The signal and the first snapshot become ready together (both at 2s);
+    // whether `select!` hands the win to the snapshot arm must not matter —
+    // the pass rechecks the pending send before `plan_and_spawn`. The
+    // spawned signal task shares the paused clock: its sleep at 2s fires on
+    // the same `advance` call that completes the poll's 2s sleep.
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
+    // The signal task parks after sending: a dropped sender reads as
+    // "closed channel — no signal will ever arrive", not "shutdown
+    // pending", and this test asserts the pending-signal path.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ignore = signal_tx.send(1);
+        std::future::pending::<()>().await;
+    });
+    let runner = LoopRunner::new(
+        config,
+        DelayedSnapshot {
+            snapshot: snapshot_with(&[1]),
+            delay: Duration::from_secs(2),
+            polls: std::sync::atomic::AtomicUsize::new(0),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 0,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    // Co-operatively advance the paused virtual clock while polling the
+    // runner future: the snapshot and the signal become ready at the same
+    // virtual instant (both at 2s), forcing the select race the fix must
+    // close. (The runner borrows the stores, so it cannot cross a spawn.)
+    tokio::pin! {
+        let run = runner.run(signal_rx);
+    }
+    let mut advanced = std::time::Duration::ZERO;
+    let summary = loop {
+        tokio::select! {
+            summary = &mut run => break summary.unwrap(),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                advanced += Duration::from_millis(10);
+                assert!(advanced < Duration::from_secs(30), "loop must settle");
+            }
+        }
+    };
+
+    assert_eq!(summary.stop_reason, StopReason::Shutdown);
+    // Forbidden effect: work planned or spawned after the signal raced the
+    // snapshot arm into `plan_and_spawn`.
+    assert_eq!(summary.spawns, 0, "no spawn after the racing signal");
+    assert!(
+        runs.runs_for_invocation("inv").unwrap().is_empty(),
+        "no run row after the racing signal"
+    );
+    assert!(
+        decisions.list().unwrap().is_empty(),
+        "no decision planned after the racing signal"
+    );
+    assert_eq!(summary.aborted_on_stop, 0, "nothing was ever in flight");
+}
+
 /// Checks that shutdown cancels a hung board poll within the daemon budget.
 #[tokio::test(start_paused = true)]
 async fn shutdown_interrupts_an_in_flight_board_poll() {
