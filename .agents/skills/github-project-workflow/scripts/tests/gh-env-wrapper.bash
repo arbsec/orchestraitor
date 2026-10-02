@@ -417,3 +417,127 @@ if [ -s "$GH_LOG" ]; then
 fi
 
 echo "PASS gh-env service wrapper routing (login resolution)"
+
+# --- pr-create / pr-comment / pr-review-post routing (service-identity
+#     coverage for PR creation, comments, and review posts — the paths that
+#     produced the personal-attribution PRs #475/#476).
+PRCREATE="$HERE/../../../github-pr-lifecycle/scripts/pr-create"
+PRCOMMENT="$HERE/../../../github-pr-lifecycle/scripts/pr-comment"
+PRREVIEW="$HERE/../../../github-pr-lifecycle/scripts/pr-review-post"
+
+run_script() {
+  # Run a skill script in a subshell with stub orc/gh on PATH and the
+  # enforcement mode declared via $ORC_GITHUB_APP_ENFORCEMENT (empty =
+  # unset). Args are passed through to the script.
+  local script="$1" enforcement="${2:-}"; shift 2
+  (
+    set -euo pipefail
+    export PATH="$WORK:$PATH"
+    export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh"
+    export GH_LOG="$GH_LOG" ORC_LOG="$ORC_LOG"
+    if [ -n "$enforcement" ]; then export ORC_GITHUB_APP_ENFORCEMENT="$enforcement"; else unset ORC_GITHUB_APP_ENFORCEMENT; fi
+    set +e
+    "$script" "$@"
+    "$WORK/rcnote" "$?"
+  )
+}
+
+# Stub orc: `config validate` passes (the layered config resolves), every
+# other invocation is recorded. `config get github_app.enforcement` reports
+# the mode the case sets via $STUB_ENFORCEMENT (unset key when empty).
+STUB_ENFORCEMENT=""
+new_orc_stub() {
+  STUB_ENFORCEMENT="${1:-}"
+  cat > "$WORK/orc" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = config ] && [ "\${2:-}" = validate ]; then exit 0; fi
+if [ "\${1:-}" = config ] && [ "\${2:-}" = get ] && [ "\${3:-}" = github_app.enforcement ]; then
+  if [ -n "$STUB_ENFORCEMENT" ]; then printf '%s\n' "$STUB_ENFORCEMENT"; fi
+  exit 0
+fi
+printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
+exit 0
+EOF
+  chmod +x "$WORK/orc"
+}
+
+# --- 12. enforcement=required + complete config: pr-create routes through
+#         `orc github gh-env --` (service path); the stub gh is never invoked
+#         directly, so no personal-auth write can happen.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
+  || fail "pr-create must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create ran gh directly (personal auth) on the service path: $(cat "$GH_LOG")"
+fi
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-create service path must not fail the call: $(cat "$GH_LOG")"
+
+# --- 13. missing config + enforcement=required: pr-create FAILS CLOSED
+#         (typed config error, exit 2) and gh is NEVER invoked — the
+#         forbidden effect (a personal-attribution PR) does not occur.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${2:-}" = get ]; then exit 1; fi   # no github_app.* key resolves
+exit 1
+EOF
+chmod +x "$WORK/orc"
+OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-create missing-config+required must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-create missing-config+required must exit 2: $(cat "$GH_LOG")"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create reached gh or orc gh-env despite required + missing config: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 14. same fail-closed shape for pr-comment and pr-review-post (required
+#         mode, config absent): typed refusal, gh never reached.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRCOMMENT" required 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-comment required+missing-config must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-comment required+missing-config must exit 2"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-comment ran gh on the fallback path in required mode"; fi
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --approve --body "ok" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-review-post required+missing-config must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-review-post required+missing-config must exit 2"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh on the fallback path in required mode"; fi
+
+# --- 15. required + complete config: pr-comment and pr-review-post route
+#         through gh-env; the stub gh is never invoked directly, and the
+#         gh-env child argv carries the intended gh subcommand.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRCOMMENT" required 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr comment 42 --repo arbsec/orchestraitor --body hi' "$ORC_LOG" \
+  || fail "pr-comment must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-comment ran gh directly on the service path"; fi
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --comment --body "finding" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment --body finding' "$ORC_LOG" \
+  || fail "pr-review-post must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh directly on the service path"; fi
+
+# --- 16. config present but enforcement UNSET (the live deployment state
+#         until this change pins it): the scripts still route through the
+#         service path (config resolves) — coverage does not depend on the
+#         pin; the pin only closes the fallback when config is missing.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub ""
+OUT="$(run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
+  || fail "pr-create with resolved config must take the service path regardless of the pin: orc=[$(cat "$ORC_LOG")]"
+
+# --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRCREATE" required --dry-run -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -q '\[dry-run\] gh pr create' <<<"$OUT" || fail "pr-create --dry-run must preview the gh command: $OUT"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create --dry-run must not reach orc gh-env or gh: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+echo "PASS pr-create / pr-comment / pr-review-post service-identity routing"

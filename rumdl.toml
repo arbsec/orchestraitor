@@ -17,6 +17,9 @@ exclude = [
 [MD003]
 style = "atx"
 
+[MD026]
+punctuation = ",;:!"
+
 [MD007]
 indent = 2
 

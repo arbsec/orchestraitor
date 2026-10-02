@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pr-review-post: post a PR review (comment/approve/request-changes) through
+# the service-identity wrapper. Wraps `gh pr review` via orc_lib_gh_service so
+# the review attributes to the arbsec-agent GitHub App service identity, never
+# a personal account (AGENTS.md critical rules;
+# .agents/project/orchestraitor-workflow.md). This script posts reviews
+# submitted by REVIEWER sessions — it never approves the implementer's own
+# security-sensitive change (spec 50-contracts-data.md §21.1; that policy
+# belongs to the skill's session, not this wrapper).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-review-post" "Post a PR review (gh pr review --comment|--approve|--request-changes) through the service-identity wrapper. Positional: <pr-number> --comment|--approve|--request-changes [--body <text>]."
+  exit "$ORC_OK"
+fi
+
+# Extract --body and the review verdict flag; the first remaining positional
+# arg is the PR number, the rest pass through to gh.
+BODY=""
+VERDICT=""
+REST=()
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --body)      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body=*)    BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --body-file) BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --approve|--request-changes|--comment) VERDICT="${ORC_LIB_EXTRA_ARGS[0]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    *)           REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+  esac
+done
+
+PR="${REST[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+if [ -z "$VERDICT" ]; then
+  echo "error: one of --comment, --approve, or --request-changes is required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+# `gh pr review --approve` and `--request-changes` require a body.
+if [ "$VERDICT" != "--comment" ] && [ -z "$BODY" ]; then
+  echo "error: --body <text> is required with $VERDICT" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+REPO="$(orc_lib_resolve_repo)"
+ARGS=(pr review "$PR" --repo "$REPO" "$VERDICT")
+[ -n "$BODY" ] && ARGS+=(--body "$BODY")
+ARGS+=("${REST[@]:1}")
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh ${ARGS[*]}" >&2
+  echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
+  exit "$ORC_OK"
+fi
+
+# Mutating call: service route or typed failure — never silent personal auth.
+orc_lib_run_or_dry_run ARGS gh
+echo "Review posted on PR #$PR ($VERDICT)." >&2

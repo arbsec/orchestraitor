@@ -82,6 +82,23 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- **Service-identity enforcement is now pinned to `required` for this
+  repository** (owner mandate, 2026-10-02: no GitHub writes under the
+  personal account, ever). `github_app.enforcement = "required"` in
+  `orchestraitor.toml` makes every mutating GitHub operation fail closed with
+  a typed config error when the `github_app` block cannot resolve — the
+  labelled personal-auth fallback no longer applies on this repo.
+- **PR creation, PR comments, and review posts now require the
+  service-identity wrapper** (skill-script behavior): the pr-lifecycle skill
+  ships `pr-create`, `pr-comment`, and `pr-review-post`, which route `gh pr
+  create`, `gh pr comment`, and `gh pr review` through `orc_lib_gh_service`
+  (`orc github gh-env --`) so writes attribute to the `arbsec-agent` App
+  installation, never a personal account. If the service path fails — missing
+  or partial `github_app` config, minting failure, `orc` unavailable — the
+  operation fails with its typed error and must be reported to the
+  orchestrator; falling back to personal auth is forbidden. Workers must run
+  from a fresh checkout (a stale checkout predating the wrappers silently
+  bypasses them) with `orc` on `PATH` (`ORC_BIN` overrides the binary name).
 - README updated to lead with the bounded, self-improving delivery loop as the
   product's first axis (spec `00-overview.md` §1, §2.3, §3.1), with a new
   "The delivery loop" section describing the stage cycle, the guard set, and
