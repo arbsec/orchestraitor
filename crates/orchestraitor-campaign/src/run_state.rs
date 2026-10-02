@@ -336,6 +336,19 @@ impl LoopRunStore {
         self.list_where_task(task_id)
     }
 
+    /// Lists every row of one loop invocation (insertion order) — the
+    /// per-invocation exclusion scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the query fails.
+    pub fn runs_for_invocation(&self, invocation_id: &str) -> Result<Vec<RunRow>, CampaignError> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE invocation_id = ?1 ORDER BY id"
+        );
+        self.query_rows(&sql, rusqlite::params![invocation_id])
+    }
+
     /// Sums the recorded spend of runs that STARTED on the UTC day of
     /// `now_secs` (the spend soft cap is daily; the day boundary is derived
     /// from the explicit clock parameter, never a real clock).

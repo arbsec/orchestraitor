@@ -3975,6 +3975,7 @@ dependencies = [
 name = "orchestraitor-campaign"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "orchestraitor-agent-catalog",
  "orchestraitor-board",
  "orchestraitor-worker",
@@ -3983,6 +3984,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
