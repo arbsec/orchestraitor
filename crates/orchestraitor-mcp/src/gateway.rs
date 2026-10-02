@@ -474,6 +474,13 @@ pub(crate) fn run_decision_record_shared(
     // documented posture as `board.query`). Durable persistence lands with
     // the daemon event-store wiring (§9.17). All sections here are
     // synchronous; no guard ever crosses an await point.
+    // The session-scoped decision store is REQUIRED (see the function
+    // contract): no store means no persistence, and the tool never reports
+    // success for an append it is about to drop. Checked FIRST so an
+    // unconfigured store returns without taking the shared audit lock.
+    let Some(shared_store) = shared_store else {
+        return Err(McpGatewayError::DecisionRecordUnconfigured);
+    };
     let mut local_audit = orchestraitor_events::InMemoryAuditStore::default();
     let mut shared_guard =
         match shared_audit {
@@ -488,12 +495,6 @@ pub(crate) fn run_decision_record_shared(
             None => &mut local_audit,
         };
 
-    // The session-scoped decision store is REQUIRED (see the function
-    // contract): no store means no persistence, and the tool never reports
-    // success for an append it is about to drop.
-    let Some(shared_store) = shared_store else {
-        return Err(McpGatewayError::DecisionRecordUnconfigured);
-    };
     let mut store = shared_store
         .lock()
         .map_err(|_| McpGatewayError::DecisionRecord(String::from("decision store poisoned")))?;
