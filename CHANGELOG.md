@@ -43,7 +43,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
-||||||| parent of 98f84f2 (feat(tools): board.move guarded transitions with typed refusals)
 - The `board.move` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #333): guarded board status-class transitions —
   never a raw provider write. Transitions validate against the
