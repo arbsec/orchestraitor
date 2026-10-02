@@ -239,12 +239,34 @@ mod tests {
         // When: probing capabilities at startup.
         let report = probe_capabilities(&client, "linux");
 
-        // Then: every required control is available and protected services pass.
-        assert!(report.protected_services_allowed);
+        // Then: protected services are allowed exactly when the running host
+        // delivers every probed control. Since arbitraitor ab7af5e (#754/#755)
+        // the matrix couples `filesystem_isolation` to the host's Landlock
+        // probe, so a non-Linux CI host probing the "linux" reference platform
+        // correctly sees that control unavailable (fail closed), while a
+        // Linux host with Landlock sees the fully-allowed report.
+        assert_eq!(
+            report.protected_services_allowed,
+            report.missing_controls.is_empty()
+        );
         assert!(!report.degraded_mode);
-        assert!(report.missing_controls.is_empty());
-        assert_eq!(report.status_str(), "ok");
         assert_eq!(report.platform, "linux");
+        let Some(filesystem_cap) = report
+            .required_capabilities
+            .iter()
+            .find(|cap| cap.identifier == "filesystem_isolation")
+        else {
+            panic!("filesystem_isolation is always reported");
+        };
+        let expected = if report.protected_services_allowed {
+            ControlStatus::Available
+        } else {
+            ControlStatus::Unavailable
+        };
+        assert_eq!(
+            filesystem_cap.status, expected,
+            "filesystem_isolation must track the host Landlock probe"
+        );
     }
 
     #[test]
