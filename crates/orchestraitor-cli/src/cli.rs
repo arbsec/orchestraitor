@@ -312,6 +312,12 @@ pub enum BoardCommand {
     /// separate follow-up (#318 split), so this slice reads the deterministic
     /// fixture board.
     Query(BoardQueryArgs),
+    /// Run the `board.move` decision tool against the in-memory fixture
+    /// board (spec `10-orchestrator.md` §9.39; issue #333): a guarded
+    /// status transition — workflow-policy validated, lease-checked,
+    /// reconcile-visible; refusals are typed and leave the board
+    /// unchanged. The sqlite/GitHub provider wiring is the #318 split.
+    GuardedMove(BoardGuardedMoveArgs),
 }
 
 /// Arguments for `orc board ready`.
@@ -349,6 +355,22 @@ pub struct BoardQueryArgs {
     #[arg(long = "field", value_name = "NAME=VALUE")]
     pub fields: Vec<String>,
     /// Emit the typed result as stable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `orc board guarded-move` (the `board.move` decision tool).
+#[derive(Debug, Clone, Args)]
+pub struct BoardGuardedMoveArgs {
+    /// Board item id to move (fixture board ids in this slice).
+    pub item: String,
+    /// Target status name (exact, case-sensitive, e.g. "In Progress").
+    #[arg(long)]
+    pub status: String,
+    /// The invoking session label (leases and attribution key on it).
+    #[arg(long)]
+    pub session: String,
+    /// Emit the typed outcome as stable JSON.
     #[arg(long)]
     pub json: bool,
 }
