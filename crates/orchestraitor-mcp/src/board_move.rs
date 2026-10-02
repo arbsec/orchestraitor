@@ -261,32 +261,21 @@ impl ItemLease {
 /// §9.43: runtime state is local-only). The tool takes this as a
 /// caller-supplied dependency — like the audit store, it never mints
 /// authority; the daemon/campaign layer owns the real registry.
-///
-/// The claim operation is ATOMIC (check + acquire under one lock,
-/// [`LeaseRegistry::try_claim`]): a state check separated from the guarded
-/// write by async I/O is a TOCTOU race — two sessions could both observe
-/// an unleased item and both move it (PR #475 review). The claim IS the
-/// check.
 pub trait LeaseRegistry: Send + Sync {
-    /// Atomically checks the item's lease state and, when free or already
-    /// own-and-live, claims/renews it for `session` until
-    /// `expires_at_unix_secs` — under ONE lock, so concurrent invocations
-    /// serialize (issue #475 review: the check must never be separable
-    /// from the acquire).
+    /// Returns the live lease on an item, if any. An expired lease is
+    /// reported as `None` (it no longer confers authority) — but the
+    /// requesting session's OWN expired lease is still discoverable via
+    /// [`LeaseRegistry::held_by`], so expiry is refused typed instead of
+    /// silently treated as unleased.
     ///
     /// # Errors
     ///
     /// Implementations may fail on backend errors; the tool fails closed.
-    fn try_claim(
-        &mut self,
-        item: &BoardItemId,
-        session: &str,
-        expires_at_unix_secs: u64,
-    ) -> Result<ClaimOutcome, BoardMoveError>;
+    fn lease_on(&self, item: &BoardItemId) -> Result<Option<ItemLease>, BoardMoveError>;
 
-    /// Returns the lease a given session holds on the item, if any —
-    /// including its own EXPIRED lease (observability for tests and the
-    /// recovery path).
+    /// Returns the lease the given session holds on the item, if any —
+    /// including its own EXPIRED lease (so the guard can refuse with
+    /// `lease-expired` instead of misreporting a conflict).
     ///
     /// # Errors
     ///
@@ -297,34 +286,27 @@ pub trait LeaseRegistry: Send + Sync {
         session: &str,
     ) -> Result<Option<ItemLease>, BoardMoveError>;
 
-    /// Releases the session's lease on the item (after a move OUT of a
-    /// lease-holding state, or as compensation when a claimed write
-    /// fails). Releasing a non-held lease is a no-op.
+    /// Records that `session` now holds the item (acquire/renew on a
+    /// successful move INTO an active state; lease-aligned expiry,
+    /// §9.24.2).
+    ///
+    /// # Errors
+    ///
+    /// Implementations may fail on backend errors; the tool fails closed.
+    fn acquire(
+        &mut self,
+        item: &BoardItemId,
+        session: &str,
+        expires_at_unix_secs: u64,
+    ) -> Result<(), BoardMoveError>;
+
+    /// Releases the session's lease on the item (on move OUT of an active
+    /// state or on completion). Releasing a non-held lease is a no-op.
     ///
     /// # Errors
     ///
     /// Implementations may fail on backend errors; the tool fails closed.
     fn release(&mut self, item: &BoardItemId, session: &str) -> Result<(), BoardMoveError>;
-}
-
-/// The outcome of an atomic [`LeaseRegistry::try_claim`]. The fresh/renewed
-/// distinction matters for compensation (PR #475 review gen-2): a FRESH
-/// claim is released when the write definitely did not land; a RENEWAL of
-/// the session's pre-existing lease is the session's own live lease and is
-/// never rolled back by this invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaimOutcome {
-    /// A FRESH claim: the session held no live lease before.
-    Claimed,
-    /// A RENEWAL: the session already held a live lease; its expiry moved.
-    Renewed,
-    /// A live lease held by ANOTHER session blocks the claim; the holder
-    /// is named for the typed refusal.
-    ForeignHolder(String),
-    /// The requesting session's OWN lease is expired: refused typed
-    /// (§9.24.2 — expiry orphans; renewal runs through the lifecycle
-    /// recovery path, never silently through this tool).
-    OwnExpired,
 }
 
 /// An in-memory [`LeaseRegistry`] for tests, the CLI surface, and the
@@ -343,63 +325,19 @@ impl InMemoryLeaseRegistry {
 }
 
 impl LeaseRegistry for InMemoryLeaseRegistry {
-    /// The in-memory claim: one lock section covers the expiry scan and
-    /// the insert, so two sessions can never both claim an unleased item.
-    fn try_claim(
-        &mut self,
-        item: &BoardItemId,
-        session: &str,
-        expires_at_unix_secs: u64,
-    ) -> Result<ClaimOutcome, BoardMoveError> {
+    fn lease_on(&self, item: &BoardItemId) -> Result<Option<ItemLease>, BoardMoveError> {
         let now = unix_secs_now();
-        let mut leases = self
+        let leases = self
             .leases
             .lock()
             .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-        // ONE lock section: the check and the insert cannot interleave with
-        // another session's claim (PR #475 review — TOCTOU).
-        let live: Option<ItemLease> = leases
+        Ok(leases
             .iter()
             .filter(|((locked_item, _), _)| locked_item == item.as_str())
             .map(|(_, lease)| lease.clone())
-            .find(|lease| !lease.is_expired_at(now));
-        let key = (item.as_str().to_string(), session.to_string());
-        match live {
-            Some(lease) if lease.holder != session => {
-                return Ok(ClaimOutcome::ForeignHolder(lease.holder));
-            }
-            // Live own lease: renewal (the session keeps its protection;
-            // the expiry moves to the requested bound).
-            Some(_) => {
-                leases.insert(
-                    key,
-                    ItemLease {
-                        holder: session.to_string(),
-                        expires_at_unix_secs,
-                    },
-                );
-                return Ok(ClaimOutcome::Renewed);
-            }
-            None => {
-                // No live lease at all. An expired OWN entry still exists?
-                // → typed expiry refusal (never a silent continue).
-                if leases.get(&key).is_some() {
-                    return Ok(ClaimOutcome::OwnExpired);
-                }
-            }
-        }
-        leases.insert(
-            key,
-            ItemLease {
-                holder: session.to_string(),
-                expires_at_unix_secs,
-            },
-        );
-        Ok(ClaimOutcome::Claimed)
+            .find(|lease| !lease.is_expired_at(now)))
     }
 
-    /// The in-memory lookup: the map is keyed by (item, session), so the
-    /// answer is the stored lease verbatim — expired or not.
     fn held_by(
         &self,
         item: &BoardItemId,
@@ -414,9 +352,26 @@ impl LeaseRegistry for InMemoryLeaseRegistry {
             .cloned())
     }
 
-    /// The in-memory release: removing the (item, session) entry, whether
-    /// or not one exists (idempotent — releasing an unheld lease is a
-    /// no-op, never an error).
+    fn acquire(
+        &mut self,
+        item: &BoardItemId,
+        session: &str,
+        expires_at_unix_secs: u64,
+    ) -> Result<(), BoardMoveError> {
+        let mut leases = self
+            .leases
+            .lock()
+            .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
+        leases.insert(
+            (item.as_str().to_string(), session.to_string()),
+            ItemLease {
+                holder: session.to_string(),
+                expires_at_unix_secs,
+            },
+        );
+        Ok(())
+    }
+
     fn release(&mut self, item: &BoardItemId, session: &str) -> Result<(), BoardMoveError> {
         let mut leases = self
             .leases
@@ -450,11 +405,9 @@ pub struct BoardMoveRequest {
     /// attribution key on it. Empty refuses closed.
     #[serde(default)]
     pub session: String,
-    /// Requested lease DURATION in seconds, applied when the move lands
-    /// in a lease-holding state (lease-aligned expiry, §9.24.2). Zero
-    /// takes the default one-hour lease; larger requests clamp to the
-    /// tool's maximum (24h) — leases never outlive their session by an
-    /// unbounded request.
+    /// Unix seconds the session's lease should run to when the move lands
+    /// in an active state (lease-aligned expiry, §9.24.2). Absent/zero
+    /// takes a default one-hour lease.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub lease_ttl_secs: u64,
     /// Optional field writes. NOT part of this tool's scope (issue #333
@@ -465,12 +418,6 @@ pub struct BoardMoveRequest {
     /// Optional edge writes. Same out-of-scope enforcement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<String>,
-    /// The §9.25.1 delegation-chain principal labels, root first
-    /// (client-asserted data, PR #475 review thread 7): recorded verbatim
-    /// (truncated + bounded, `claimed:`-prefixed) on the audit event —
-    /// never treated as authorization. Static labels only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delegation_chain: Vec<String>,
 }
 
 /// `0` check for `skip_serializing_if` on `lease_ttl_secs`. The serde
@@ -495,51 +442,16 @@ pub struct BoardMoveApplied {
     pub lease_acquired: bool,
 }
 
-/// A lease-bookkeeping failure AFTER a landed, read-back-verified write
-/// (PR #475 review thread 5): the status write landed, but the lease
-/// acquire/release failed. The outcome is honest about both facts —
-/// never a refusal claiming "nothing happened".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LeaseBookkeepingFailure {
-    /// The static failure class (`acquire-failed` / `release-failed`).
-    pub failure: String,
-    /// Whether the lease is now held by the requesting session.
-    pub lease_acquired: bool,
-}
-
 /// The typed result of one `board.move` invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum BoardMoveOutcome {
     /// The transition applied and verified.
-    Applied {
-        /// The applied transition details.
-        applied: BoardMoveApplied,
-        /// Present when the status write landed and verified but lease
-        /// bookkeeping failed afterwards — the board change is real, the
-        /// lease state must be reconciled (PR #475 review thread 5).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        lease_bookkeeping_failure: Option<LeaseBookkeepingFailure>,
-    },
+    Applied(BoardMoveApplied),
     /// The guard refused the transition; the board is unchanged.
     Refused {
         /// The typed refusal reason.
         refusal: BoardMoveRefusal,
-    },
-    /// The provider write LANDED but its outcome could not be verified:
-    /// the read-back failed or drifted (concurrent board-side change).
-    /// The board state is UNKNOWN, not unchanged — callers must
-    /// reconcile through a fresh read, never blind-retry (PR #475 review
-    /// thread 4; §9.43 board-wins).
-    Indeterminate {
-        /// The moved item.
-        item: String,
-        /// The requested status (what the write attempted).
-        requested_status: String,
-        /// The static failure class (`read-back-failed` /
-        /// `read-back-drifted` / `audit-append-failed` — an unrecordable
-        /// invocation leaves the event-store gap visible here too).
-        failure: String,
     },
 }
 
@@ -566,18 +478,12 @@ pub struct BoardMoveDelegationChain {
     pub principals: Vec<String>,
 }
 
-/// A summary of one invocation, recorded in the audit event. `kind`
-/// closes the domain (`applied` / `refused` / `indeterminate`): an
-/// unrecordable or unverifiable invocation is never summarized as a
-/// refusal (PR #475 review threads 1/4/5).
+/// A summary of one invocation, recorded in the audit event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct InvocationSummary {
-    kind: &'static str,
-    /// Static refusal-class label when refused (`""` otherwise).
+    applied: bool,
+    /// Static refusal-class label when refused (`""` when applied).
     refusal: &'static str,
-    /// Static indeterminate-failure class when indeterminate (`""`
-    /// otherwise).
-    indeterminate: &'static str,
 }
 
 /// Runs one guarded `board.move` (spec §9.39) against a provider and
@@ -607,18 +513,7 @@ pub async fn board_move(
     store: &mut (dyn AuditStore + Send),
 ) -> Result<BoardMoveResult, BoardMoveError> {
     let (outcome, summary) = execute(provider, registry, request).await;
-    if record_invocation(request, chain, summary, store).is_err() {
-        // The board mutation (when applied) already landed; the §9.25.1
-        // record could not be written (PR #475 review thread 1 — the two
-        // stores cannot share a transaction). The invocation fails with
-        // an indeterminate-class error: the event-store gap is visible
-        // and the board state must be reconciled through a fresh read —
-        // never a silent unrecorded success.
-        return Err(BoardMoveError::EventStore(
-            "invocation record rejected: board state for this move must be \
-             reconciled through a fresh read before retrying",
-        ));
-    }
+    record_invocation(request, chain, summary, store)?;
     Ok(BoardMoveResult {
         correlation_id: chain.correlation_id.to_string(),
         outcome,
@@ -653,17 +548,6 @@ fn refusal_class(refusal: &BoardMoveRefusal) -> &'static str {
 
 /// The guard + write core. Every refusal path returns BEFORE any provider
 /// mutation; the write itself is verified by read-back.
-///
-/// Lease flow (PR #475 review threads 2/5/6): the check-and-acquire is ONE
-/// atomic `try_claim` performed BEFORE the provider write (a check
-/// separated from the guarded action by async I/O is a TOCTOU race —
-/// concurrent gateway invocations share one registry). A claimed lease on
-/// a subsequently-failed write is released as compensation; a
-/// bookkeeping failure after a LANDED write never turns into a refusal —
-/// it is carried on the Applied outcome. Held states are lease-protected
-/// (§9.40: approval-required/input-required are stable, lease-protected
-/// pauses): entering Held keeps the lease; only leaving the
-/// lease-holding set releases it.
 async fn execute(
     provider: &dyn BoardProvider,
     registry: &mut dyn LeaseRegistry,
@@ -674,33 +558,39 @@ async fn execute(
         (
             BoardMoveOutcome::Refused { refusal },
             InvocationSummary {
-                kind: "refused",
+                applied: false,
                 refusal: class,
-                indeterminate: "",
-            },
-        )
-    };
-    let indeterminate = |item: &str, failure: &'static str| {
-        (
-            BoardMoveOutcome::Indeterminate {
-                item: item.to_string(),
-                requested_status: request.status.clone(),
-                failure: failure.to_string(),
-            },
-            InvocationSummary {
-                kind: "indeterminate",
-                refusal: "",
-                indeterminate: failure,
             },
         )
     };
 
-    // 1-3. Identity, scope, and target resolution (§9.25, issue #333
-    //      non-goals, §6.1 inert data).
-    let (item_id, item) = match resolve_target(provider, request).await {
-        Ok(resolved) => resolved,
-        Err(refusal) => return refused(refusal),
+    // 1. Session identity: an unattributed write is refused closed (§9.25).
+    if request.session.trim().is_empty() {
+        return refused(BoardMoveRefusal::MissingSession);
+    }
+    // 2. Scope: field/edge writes are non-goals (issue #333) — refused,
+    //    never silently narrowed.
+    if !request.fields.is_empty() || !request.edges.is_empty() {
+        return refused(BoardMoveRefusal::OutOfScope);
+    }
+    // 3. Resolve the item and the target status BEFORE any check that
+    //    depends on them. A blank/unknown id or status is inert data (§6.1).
+    let Ok(item_id) = BoardItemId::new(request.item.clone()) else {
+        return refused(BoardMoveRefusal::UnknownItem);
     };
+    let item = match provider.item(&item_id).await {
+        Ok(item) => item,
+        Err(BoardContractError::ItemNotFound { .. }) => {
+            return refused(BoardRefusal::unknown_item());
+        }
+        Err(_) => return refused(BoardMoveRefusal::ProviderRejected),
+    };
+    let Ok(statuses) = provider.statuses().await else {
+        return refused(BoardMoveRefusal::ProviderRejected);
+    };
+    if !statuses.iter().any(|known| known.name == request.status) {
+        return refused(BoardMoveRefusal::UnknownStatus);
+    }
 
     // 4. Workflow-policy matrix (including the unresolved-blocker rule).
     let from_class = StatusClass::of(&item.status);
@@ -709,176 +599,86 @@ async fn execute(
         return refused(refusal);
     }
 
-    // 5. ATOMIC lease claim (§9.24.2, PR #475 review thread 2): the check
-    //    and the acquire/renew are one registry operation, so two
-    //    concurrent invocations can never both pass.
-    let lease_holding_target = matches!(to_class, StatusClass::InProgress | StatusClass::Held);
-    // EVERY move holds a live lease across the write (PR #475 review
-    // gen-2 thread 9): a fresh claim for an unleased item, a renewal for
-    // the session's own live lease. No zero-expiry probe — a probe would
-    // disturb or drop the caller's live protection mid-write.
-    let Ok(claim) = atomic_claim(registry, &item_id, &request.session, request.lease_ttl_secs)
-    else {
+    // 5. Lease check (§9.24.2): the invoking session must hold the item's
+    //    lease (or the item must be unleased). Another session's live
+    //    lease conflicts; the session's OWN expired lease is a typed
+    //    expiry refusal, never a silent continue.
+    let now = unix_secs_now();
+    let Ok(own) = registry.held_by(&item_id, &request.session) else {
         return refused(LeaseFailure::registry());
     };
-    match claim {
-        ClaimOutcome::ForeignHolder(holder) => {
-            return refused(BoardMoveRefusal::LeaseConflict { holder });
+    let lease_ok = match own {
+        Some(lease) => !lease.is_expired_at(now),
+        None => {
+            // The session holds nothing: a live lease held by anyone else
+            // conflicts; an unleased item is free.
+            match registry.lease_on(&item_id) {
+                Ok(Some(holder)) => {
+                    let holder = holder.holder;
+                    return refused(BoardMoveRefusal::LeaseConflict { holder });
+                }
+                Ok(None) => true,
+                Err(_) => return refused(LeaseFailure::registry()),
+            }
         }
-        ClaimOutcome::OwnExpired => return refused(BoardMoveRefusal::LeaseExpired),
-        ClaimOutcome::Claimed | ClaimOutcome::Renewed => {}
+    };
+    if !lease_ok {
+        return refused(BoardMoveRefusal::LeaseExpired);
     }
-    // Compensation (PR #475 review gen-2 thread 8): ONLY a FRESH claim is
-    // rolled back, and ONLY when the write definitely did not land (a
-    // provider rejection before the mutation) — a renewal is the
-    // session's pre-existing live lease and is never released by this
-    // invocation; an indeterminate outcome (write may have landed)
-    // releases nothing and leaves reconciliation to a fresh read.
-    let fresh_claim = claim == ClaimOutcome::Claimed;
 
     // 6. Guarded write: through the provider, verified by read-back. A
     //    provider rejection here means the board is unchanged — the
-    //    refusal is honest about that (§21.4).
+    //    refusal is honest about that (§21.4: assert the forbidden effect
+    //    did not happen; the read-back IS that assertion for the write
+    //    path).
     if let Err(error) = provider.set_item_status(&item_id, &request.status).await {
-        if matches!(error, BoardContractError::Transport { .. }) {
-            // A TRANSPORT-class failure does NOT prove the mutation did
-            // not apply (PR #475 review gen-3: Transport is a backing
-            // failure, not a rejection): indeterminate, lease stays,
-            // reconciliation is a fresh read. Compensation runs only for
-            // rejections proving the write was refused/not attempted.
-            return indeterminate(&item_id.to_string(), "write-transport-failed");
-        }
-        if fresh_claim {
-            let _ = registry.release(&item_id, &request.session);
-        }
         return refused(BoardMoveRefusal::from(error));
     }
     let Ok(after) = provider.item(&item_id).await else {
-        // The write LANDED; the read-back failed: the board state is
-        // UNKNOWN, not unchanged (PR #475 review thread 4). No lease
-        // compensation: the item may genuinely be in the target state
-        // under this session's lease — reconciliation is a fresh read.
-        return indeterminate(&item_id.to_string(), "read-back-failed");
+        return refused(BoardMoveRefusal::ProviderRejected);
     };
     if after.status != request.status {
         // Board-side drift landed between write and read-back: the board
-        // wins (§9.43 reconcile). The requested transition MAY have
-        // landed and been overwritten, or never landed — the state is
-        // indeterminate either way, never reported as a clean refusal
-        // (PR #475 review threads 4/5). No lease compensation: the item
-        // may genuinely be held under this session's lease.
-        return indeterminate(&item_id.to_string(), "read-back-drifted");
+        // wins (§9.43 reconcile), the transition did NOT land as assumed,
+        // and the caller sees the typed refusal — never a false success.
+        return refused(BoardMoveRefusal::ProviderRejected);
     }
 
-    // 7. Post-write lease bookkeeping (PR #475 review thread 5): a
-    //    failure is carried on the Applied outcome, never turned into a
-    //    refusal claiming nothing happened.
-    let lease_bookkeeping_failure = post_write_bookkeeping(
-        registry,
-        &item_id,
-        &request.session,
-        from_class,
-        lease_holding_target,
-        fresh_claim,
-    );
+    // 7. Lease bookkeeping per the target class: entering an active state
+    //    acquires/renews the session's lease; leaving it releases. Failure
+    //    here fails the invocation closed (the write landed — the outcome
+    //    stays honest by reporting the error, not a fabricated success).
+    let lease_acquired = matches!(to_class, StatusClass::InProgress);
+    if lease_acquired {
+        let ttl = if request.lease_ttl_secs == 0 {
+            DEFAULT_LEASE_TTL_SECS
+        } else {
+            request.lease_ttl_secs
+        };
+        if registry
+            .acquire(&item_id, &request.session, now.saturating_add(ttl))
+            .is_err()
+        {
+            return refused(LeaseFailure::registry());
+        }
+    } else if matches!(from_class, StatusClass::InProgress)
+        && registry.release(&item_id, &request.session).is_err()
+    {
+        return refused(LeaseFailure::registry());
+    }
 
     (
-        BoardMoveOutcome::Applied {
-            applied: BoardMoveApplied {
-                item: item_id.to_string(),
-                from_status: item.status,
-                to_status: after.status,
-                lease_acquired: lease_holding_target,
-            },
-            lease_bookkeeping_failure,
-        },
+        BoardMoveOutcome::Applied(BoardMoveApplied {
+            item: item_id.to_string(),
+            from_status: item.status,
+            to_status: after.status,
+            lease_acquired,
+        }),
         InvocationSummary {
-            kind: "applied",
+            applied: true,
             refusal: "",
-            indeterminate: "",
         },
     )
-}
-
-/// Steps 1-3 of the guard: session identity, out-of-scope payload
-/// entries, and item/status resolution (§9.25, issue #333 non-goals, §6.1
-/// inert data). `Err(refusal)` refuses typed; `Ok` yields the resolved
-/// item for the policy + lease + write phases.
-async fn resolve_target(
-    provider: &dyn BoardProvider,
-    request: &BoardMoveRequest,
-) -> Result<(BoardItemId, orchestraitor_board_contract::BoardItem), BoardMoveRefusal> {
-    if request.session.trim().is_empty() {
-        return Err(BoardMoveRefusal::MissingSession);
-    }
-    if !request.fields.is_empty() || !request.edges.is_empty() {
-        return Err(BoardMoveRefusal::OutOfScope);
-    }
-    let Ok(item_id) = BoardItemId::new(request.item.clone()) else {
-        return Err(BoardMoveRefusal::UnknownItem);
-    };
-    let item = match provider.item(&item_id).await {
-        Ok(item) => item,
-        Err(BoardContractError::ItemNotFound { .. }) => return Err(BoardMoveRefusal::UnknownItem),
-        Err(_) => return Err(BoardMoveRefusal::ProviderRejected),
-    };
-    let Ok(statuses) = provider.statuses().await else {
-        return Err(BoardMoveRefusal::ProviderRejected);
-    };
-    if !statuses.iter().any(|known| known.name == request.status) {
-        return Err(BoardMoveRefusal::UnknownStatus);
-    }
-    Ok((item_id, item))
-}
-
-/// The atomic lease claim step (§9.24.2, PR #475 review thread 2; gen-2
-/// thread 9): EVERY move holds a live lease across the write — the check
-/// and the acquire/renew are ONE registry operation. An unleased item
-/// gets a fresh claim; the session's own live lease is renewed; a foreign
-/// live lease refuses.
-fn atomic_claim(
-    registry: &mut dyn LeaseRegistry,
-    item_id: &BoardItemId,
-    session: &str,
-    lease_ttl_secs: u64,
-) -> Result<ClaimOutcome, BoardMoveError> {
-    let ttl = match lease_ttl_secs {
-        0 => DEFAULT_LEASE_TTL_SECS,
-        requested => requested.min(MAX_LEASE_TTL_SECS),
-    };
-    registry.try_claim(item_id, session, unix_secs_now().saturating_add(ttl))
-}
-
-/// Post-write lease bookkeeping (PR #475 review thread 5): releases the
-/// lease when the move leaves the lease-holding set; a release failure is
-/// carried as a typed `LeaseBookkeepingFailure` on the APPLIED outcome —
-/// the status write already landed and verified.
-fn post_write_bookkeeping(
-    registry: &mut dyn LeaseRegistry,
-    item_id: &BoardItemId,
-    session: &str,
-    from_class: StatusClass,
-    lease_holding_target: bool,
-    fresh_claim: bool,
-) -> Option<LeaseBookkeepingFailure> {
-    if lease_holding_target {
-        return None; // claimed/renewed before the write; verified landed.
-    }
-    if matches!(from_class, StatusClass::InProgress | StatusClass::Held) {
-        return match registry.release(item_id, session) {
-            Ok(()) => None,
-            Err(_) => Some(LeaseBookkeepingFailure {
-                failure: "release-failed".to_string(),
-                lease_acquired: false,
-            }),
-        };
-    }
-    if fresh_claim {
-        // A fresh claim on a non-holding target must not linger: the move
-        // completed outside the lease-holding set.
-        let _ = registry.release(item_id, session);
-    }
-    None
 }
 
 /// Workflow-policy guard: `None` when the transition is allowed,
@@ -917,9 +717,6 @@ async fn policy_refusal(
 /// Default lease TTL for a move into an active state (spec §9.24.2:
 /// default 1h).
 const DEFAULT_LEASE_TTL_SECS: u64 = 60 * 60;
-/// Maximum lease TTL a single request may set (24h): a lease request is
-/// caller input, clamped so no invocation can mint an unbounded lease.
-const MAX_LEASE_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// The ids of items blocking `id` through unresolved native `blockedBy`
 /// edges (§9.40). "Unresolved" = the blocker is not in a terminal class
@@ -945,6 +742,14 @@ async fn unresolved_blockers(
     blockers.sort();
     blockers.dedup();
     Ok(blockers)
+}
+
+/// Recursion-safe alias used once above for readability.
+use BoardMoveRefusal as BoardRefusal;
+impl BoardRefusal {
+    const fn unknown_item() -> Self {
+        Self::UnknownItem
+    }
 }
 
 /// Static refusal for lease-registry failures (kept as a single site so
@@ -1253,7 +1058,7 @@ mod tests {
         )
         .await
         .expect("move succeeds");
-        let BoardMoveOutcome::Applied { applied, .. } = result.outcome else {
+        let BoardMoveOutcome::Applied(applied) = result.outcome else {
             panic!("expected applied outcome, got {:?}", result.outcome);
         };
         assert_eq!(applied.item, "ready-task");
@@ -1300,7 +1105,7 @@ mod tests {
         )
         .await
         .expect("second move applies");
-        let BoardMoveOutcome::Applied { applied, .. } = result.outcome else {
+        let BoardMoveOutcome::Applied(applied) = result.outcome else {
             panic!("expected applied outcome");
         };
         assert!(!applied.lease_acquired, "completion releases, not acquires");
@@ -1387,13 +1192,7 @@ mod tests {
         .await
         .expect("move succeeds");
         assert!(
-            matches!(
-                result.outcome,
-                BoardMoveOutcome::Applied {
-                    lease_bookkeeping_failure: None,
-                    ..
-                }
-            ),
+            matches!(result.outcome, BoardMoveOutcome::Applied(_)),
             "a Done blocker is resolved — the move applies"
         );
     }
@@ -1509,10 +1308,9 @@ mod tests {
         let mut store = empty_store();
         // session:sess_other holds a live lease on leased-task.
         let id = BoardItemId::new("leased-task").expect("valid id");
-        let claim = registry
-            .try_claim(&id, "session:sess_other", u64::MAX)
-            .expect("claim reads");
-        assert_eq!(claim, ClaimOutcome::Claimed, "fixture lease seeded");
+        registry
+            .acquire(&id, "session:sess_other", u64::MAX)
+            .expect("lease acquired");
         let result = board_move(
             &board,
             &mut registry,
@@ -1557,10 +1355,7 @@ mod tests {
         let mut store = empty_store();
         let id = BoardItemId::new("ready-task").expect("valid id");
         // Expired LONG ago (unix seconds 1).
-        let claim = registry
-            .try_claim(&id, "session:sess_a", 1)
-            .expect("claim reads");
-        assert_eq!(claim, ClaimOutcome::Claimed, "fixture lease seeded");
+        registry.acquire(&id, "session:sess_a", 1).expect("leased");
         let result = board_move(
             &board,
             &mut registry,
@@ -1737,7 +1532,7 @@ mod tests {
         assert_eq!(envelope.payload["tool"], "board.move");
         assert_eq!(envelope.payload["request"]["item"], "ready-task");
         assert_eq!(envelope.payload["request"]["status"], "In Progress");
-        assert_eq!(envelope.payload["outcome_summary"]["kind"], "applied");
+        assert_eq!(envelope.payload["outcome_summary"]["applied"], true);
         assert_eq!(envelope.payload["chain_source"], "client-asserted");
         assert_eq!(
             envelope.payload["delegation_chain"],
@@ -1765,8 +1560,8 @@ mod tests {
         assert_eq!(records.len(), 1, "the refusal records exactly one event");
         assert_eq!(records[0].envelope.payload["tool"], "board.move");
         assert_eq!(
-            records[0].envelope.payload["outcome_summary"]["kind"],
-            "refused"
+            records[0].envelope.payload["outcome_summary"]["applied"],
+            false
         );
         assert_eq!(
             records[0].envelope.payload["outcome_summary"]["refusal"],
@@ -1910,767 +1705,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // PR #475 review remediation regressions.
-    // ------------------------------------------------------------------
-
-    /// Thread 2 (TOCTOU): the lease check and acquire are ONE atomic
-    /// operation — a second session's `try_claim` against an item another
-    /// session just claimed is refused `ForeignHolder`, never double-claimed.
-    #[test]
-    fn try_claim_is_atomic_no_double_claim() {
-        let mut registry = empty_registry();
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        let first = registry
-            .try_claim(&id, "session:sess_a", u64::MAX)
-            .expect("first claim reads");
-        assert_eq!(first, ClaimOutcome::Claimed);
-        let second = registry
-            .try_claim(&id, "session:sess_b", u64::MAX)
-            .expect("second claim reads");
-        assert_eq!(
-            second,
-            ClaimOutcome::ForeignHolder(String::from("session:sess_a")),
-            "the atomic claim refuses the second session — no TOCTOU window"
-        );
-        // And exactly ONE live lease exists.
-        assert!(
-            registry
-                .held_by(&id, "session:sess_a")
-                .expect("reads")
-                .is_some()
-        );
-        assert!(
-            registry
-                .held_by(&id, "session:sess_b")
-                .expect("reads")
-                .is_none()
-        );
-    }
-
-    /// Thread 2 end-to-end: two concurrent `board_move` invocations sharing
-    /// one registry — exactly one applies, the other refuses
-    /// `lease-conflict` naming the winner. This is the regression the
-    /// check-then-write TOCTOU allowed.
-    /// A local adapter over `Arc<Mutex<..>>` replicating the gateway's
-    /// `GuardedRegistry` shape (the real one is crate-private).
-    struct SharedRegistry(std::sync::Arc<std::sync::Mutex<InMemoryLeaseRegistry>>);
-
-    impl LeaseRegistry for SharedRegistry {
-        fn try_claim(
-            &mut self,
-            item: &BoardItemId,
-            session: &str,
-            expires_at_unix_secs: u64,
-        ) -> Result<ClaimOutcome, BoardMoveError> {
-            let mut leases = self
-                .0
-                .lock()
-                .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-            leases.try_claim(item, session, expires_at_unix_secs)
-        }
-        fn held_by(
-            &self,
-            item: &BoardItemId,
-            session: &str,
-        ) -> Result<Option<ItemLease>, BoardMoveError> {
-            let leases = self
-                .0
-                .lock()
-                .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-            leases.held_by(item, session)
-        }
-        fn release(&mut self, item: &BoardItemId, session: &str) -> Result<(), BoardMoveError> {
-            let mut leases = self
-                .0
-                .lock()
-                .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
-            leases.release(item, session)
-        }
-    }
-
-    #[tokio::test]
-    async fn concurrent_moves_through_one_registry_produce_one_applied() {
-        use std::sync::{Arc, Mutex};
-        let board = Arc::new(board_fixture());
-        // ONE shared registry — the gateway's concurrency shape.
-        let registry = Arc::new(Mutex::new(empty_registry()));
-        let (a, b) = tokio::join!(
-            async {
-                let mut store = empty_store();
-                let mut guarded = SharedRegistry(Arc::clone(&registry));
-                board_move(
-                    board.as_ref(),
-                    &mut guarded,
-                    &request("ready-task", "In Progress", "session:sess_a"),
-                    &chain(),
-                    &mut store,
-                )
-                .await
-            },
-            async {
-                let mut store = empty_store();
-                let mut guarded = SharedRegistry(Arc::clone(&registry));
-                board_move(
-                    board.as_ref(),
-                    &mut guarded,
-                    &request("ready-task", "In Progress", "session:sess_b"),
-                    &chain(),
-                    &mut store,
-                )
-                .await
-            }
-        );
-        let (a, b) = (a.expect("a completes"), b.expect("b completes"));
-        // Exactly one APPLIES. The loser either refuses lease-conflict
-        // (lost the claim race) or policy-invalid (won the claim race but
-        // wrote second, into In Progress -> In Progress). Both prove the
-        // TOCTOU closed: never two APPLIED outcomes.
-        let applied_count = [&a.outcome, &b.outcome]
-            .iter()
-            .filter(|o| matches!(o, BoardMoveOutcome::Applied { .. }))
-            .count();
-        assert_eq!(applied_count, 1, "exactly one move applies");
-        for outcome in [&a.outcome, &b.outcome] {
-            if let BoardMoveOutcome::Refused { refusal } = outcome {
-                assert!(
-                    matches!(
-                        refusal,
-                        BoardMoveRefusal::LeaseConflict { .. }
-                            | BoardMoveRefusal::PolicyInvalid { .. }
-                    ),
-                    "the loser refuses typed (lease-conflict or policy), got {refusal:?}"
-                );
-            }
-        }
-        // Exactly one session holds the lease at the end.
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        let holders: Vec<String> = ["session:sess_a", "session:sess_b"]
-            .iter()
-            .filter(|s| {
-                registry
-                    .lock()
-                    .expect("registry reads")
-                    .held_by(&id, s)
-                    .expect("reads")
-                    .is_some()
-            })
-            .map(std::string::ToString::to_string)
-            .collect();
-        assert_eq!(holders.len(), 1, "exactly one live lease");
-    }
-
-    /// Thread 4: a read-back FAILURE after a landed write is INDETERMINATE
-    /// — the board state is unknown, never reported as an unchanged
-    /// refusal.
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)] // full BoardProvider test stub
-    async fn read_back_failure_is_indeterminate_not_a_refusal() {
-        /// A provider whose `item` reads fail after one successful write:
-        /// simulates read-back transport loss.
-        struct WriteThenBlind {
-            /// Reads succeed until the write lands, then fail (read-back
-            /// transport loss). One-shot flag behind a mutex.
-            reads_alive: std::sync::Mutex<bool>,
-        }
-        #[async_trait::async_trait]
-        impl BoardProvider for WriteThenBlind {
-            async fn item(
-                &self,
-                _id: &BoardItemId,
-            ) -> Result<orchestraitor_board_contract::BoardItem, BoardContractError> {
-                let mut alive = self
-                    .reads_alive
-                    .lock()
-                    .map_err(|_| BoardContractError::Transport { operation: "item" })?;
-                if *alive {
-                    *alive = false;
-                    Ok(orchestraitor_board_contract::BoardItem {
-                        id: BoardItemId::new("ready-task").expect("valid id"),
-                        item_type: BoardItemType::Task,
-                        title: String::from("Ready task"),
-                        body: String::from("b"),
-                        status: String::from("Ready"),
-                    })
-                } else {
-                    Err(BoardContractError::Transport { operation: "item" })
-                }
-            }
-            async fn items(
-                &self,
-            ) -> Result<Vec<orchestraitor_board_contract::BoardItem>, BoardContractError>
-            {
-                Err(BoardContractError::Transport { operation: "items" })
-            }
-            async fn create_item(
-                &self,
-                _item_type: BoardItemType,
-                _title: &str,
-                _body: &str,
-            ) -> Result<BoardItemId, BoardContractError> {
-                Err(BoardContractError::Transport {
-                    operation: "create_item",
-                })
-            }
-            async fn update_item_body(
-                &self,
-                _id: &BoardItemId,
-                _title: &str,
-                _body: &str,
-            ) -> Result<(), BoardContractError> {
-                Err(BoardContractError::Transport {
-                    operation: "update_item_body",
-                })
-            }
-            async fn statuses(
-                &self,
-            ) -> Result<Vec<orchestraitor_board_contract::BoardStatus>, BoardContractError>
-            {
-                Ok(vec![orchestraitor_board_contract::BoardStatus {
-                    id: BoardItemId::new(String::from("status-0")).expect("valid status id"),
-                    name: String::from("In Progress"),
-                }])
-            }
-            async fn set_item_status(
-                &self,
-                _id: &BoardItemId,
-                _status: &str,
-            ) -> Result<(), BoardContractError> {
-                Ok(()) // the write LANDS
-            }
-            async fn fields(
-                &self,
-            ) -> Result<Vec<orchestraitor_board_contract::BoardField>, BoardContractError>
-            {
-                Ok(Vec::new())
-            }
-            async fn field_value(
-                &self,
-                _id: &BoardItemId,
-                _field: &str,
-            ) -> Result<Option<orchestraitor_board_contract::BoardFieldValue>, BoardContractError>
-            {
-                Ok(None)
-            }
-            async fn set_field_value(
-                &self,
-                _id: &BoardItemId,
-                _field: &str,
-                _value: orchestraitor_board_contract::BoardFieldValue,
-            ) -> Result<(), BoardContractError> {
-                Err(BoardContractError::Transport {
-                    operation: "set_field_value",
-                })
-            }
-            async fn dependency_edges(
-                &self,
-            ) -> Result<Vec<orchestraitor_board_contract::DependencyEdge>, BoardContractError>
-            {
-                Ok(Vec::new())
-            }
-            async fn add_dependency_edge(
-                &self,
-                _blocked: &BoardItemId,
-                _blocks: &BoardItemId,
-            ) -> Result<(), BoardContractError> {
-                Err(BoardContractError::Transport {
-                    operation: "add_dependency_edge",
-                })
-            }
-            async fn remove_dependency_edge(
-                &self,
-                _blocked: &BoardItemId,
-                _blocks: &BoardItemId,
-            ) -> Result<(), BoardContractError> {
-                Ok(())
-            }
-            async fn cross_references(
-                &self,
-                _id: &BoardItemId,
-            ) -> Result<Vec<orchestraitor_board_contract::CrossReference>, BoardContractError>
-            {
-                Ok(Vec::new())
-            }
-            async fn add_cross_reference(
-                &self,
-                _from: &BoardItemId,
-                _to: &str,
-            ) -> Result<(), BoardContractError> {
-                Err(BoardContractError::Transport {
-                    operation: "add_cross_reference",
-                })
-            }
-            async fn search(
-                &self,
-                _filter: &orchestraitor_board_contract::BoardSearch,
-            ) -> Result<Vec<orchestraitor_board_contract::BoardItem>, BoardContractError>
-            {
-                Ok(Vec::new())
-            }
-        }
-        let board = WriteThenBlind {
-            reads_alive: std::sync::Mutex::new(true),
-        };
-        let mut registry = empty_registry();
-        let mut store = empty_store();
-        let result = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("indeterminate is a recorded decision, not an error");
-        let BoardMoveOutcome::Indeterminate {
-            item,
-            requested_status,
-            failure,
-        } = result.outcome
-        else {
-            panic!("expected indeterminate, got {:?}", result.outcome);
-        };
-        assert_eq!(item, "ready-task");
-        assert_eq!(requested_status, "In Progress");
-        assert_eq!(failure, "read-back-failed");
-        // The audit record carries the indeterminate class, never a refusal.
-        let records = store.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].envelope.payload["outcome_summary"]["kind"],
-            "indeterminate"
-        );
-        assert_eq!(
-            records[0].envelope.payload["outcome_summary"]["indeterminate"],
-            "read-back-failed"
-        );
-    }
-
-    /// Thread 6: `InProgress` -> `Held` KEEPS the lease (§9.40: approval-
-    /// required/input-required are lease-protected pauses) — after the
-    /// pause, a foreign session's move is refused lease-conflict.
-    #[tokio::test]
-    async fn held_is_lease_protected_foreign_move_refused() {
-        let board = board_fixture();
-        let mut registry = empty_registry();
-        let mut store = empty_store();
-        // Land in In Progress (claims the lease).
-        let first = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("first move applies");
-        assert!(matches!(first.outcome, BoardMoveOutcome::Applied { .. }));
-        // Pause into Held (Blocked).
-        let pause = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "Blocked", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("pause applies");
-        let BoardMoveOutcome::Applied { applied, .. } = pause.outcome else {
-            panic!("pause must apply");
-        };
-        assert_eq!(applied.to_status, "Blocked");
-        // The lease SURVIVES the pause.
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        assert!(
-            registry
-                .held_by(&id, "session:sess_a")
-                .expect("registry reads")
-                .is_some(),
-            "Held is lease-protected (§9.40) — the lease is NOT released on pause"
-        );
-        // A foreign session cannot now grab the item.
-        let before = all_statuses(&board).await;
-        let hijack = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_evil"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("refusal is a decision");
-        let BoardMoveOutcome::Refused { refusal } = hijack.outcome else {
-            panic!("foreign move into a held item must refuse");
-        };
-        let BoardMoveRefusal::LeaseConflict { holder } = refusal else {
-            panic!("expected lease-conflict, got {refusal:?}");
-        };
-        assert_eq!(holder, "session:sess_a");
-        assert_eq!(all_statuses(&board).await, before, "board unchanged");
-        // The legitimate owner resumes (Held -> In Progress renews own lease).
-        let resume = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("owner resume applies");
-        assert!(matches!(resume.outcome, BoardMoveOutcome::Applied { .. }));
-    }
-
-    /// Thread 5: a lease-bookkeeping failure after a LANDED write is
-    /// carried on the Applied outcome (applied: true in the audit) —
-    /// never a refusal claiming nothing happened.
-    #[tokio::test]
-    async fn bookkeeping_failure_after_landed_write_reports_applied() {
-        /// A registry that succeeds at claim time but fails the release:
-        /// simulates the post-write bookkeeping failure.
-        struct ClaimOnlyRegistry;
-        impl LeaseRegistry for ClaimOnlyRegistry {
-            fn try_claim(
-                &mut self,
-                _item: &BoardItemId,
-                _session: &str,
-                _expires_at_unix_secs: u64,
-            ) -> Result<ClaimOutcome, BoardMoveError> {
-                Ok(ClaimOutcome::Claimed)
-            }
-            fn held_by(
-                &self,
-                _item: &BoardItemId,
-                _session: &str,
-            ) -> Result<Option<ItemLease>, BoardMoveError> {
-                Ok(None)
-            }
-            fn release(
-                &mut self,
-                _item: &BoardItemId,
-                _session: &str,
-            ) -> Result<(), BoardMoveError> {
-                Err(BoardMoveError::EventStore("release-failed-stub"))
-            }
-        }
-        let board = board_fixture();
-        let mut registry = ClaimOnlyRegistry;
-        let mut store = empty_store();
-        // Claim the lease first (Ready -> In Progress; claim succeeds).
-        let first = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("claim move is a recorded decision");
-        assert!(matches!(first.outcome, BoardMoveOutcome::Applied { .. }));
-        // In Progress -> Done: write lands, release fails afterwards.
-        let result = board_move(
-            &board,
-            &mut registry,
-            &request("ready-task", "Done", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("completion is a recorded decision");
-        let BoardMoveOutcome::Applied {
-            applied,
-            lease_bookkeeping_failure,
-        } = result.outcome
-        else {
-            panic!(
-                "expected applied with bookkeeping failure, got {:?}",
-                result.outcome
-            );
-        };
-        assert_eq!(applied.to_status, "Done");
-        let failure = lease_bookkeeping_failure.expect("release failure is carried, not swallowed");
-        assert_eq!(failure.failure, "release-failed");
-        assert!(!failure.lease_acquired);
-        // The audit summary says APPLIED — the board change is real.
-        let records = store.records();
-        let applied_records = records
-            .iter()
-            .filter(|r| r.envelope.payload["outcome_summary"]["kind"] == "applied")
-            .count();
-        assert!(applied_records >= 1, "the landed write records as applied");
-        assert_eq!(status_of(&board, "ready-task").await, "Done");
-    }
-
-    /// Thread 7: the caller's delegation-chain labels ride the gateway
-    /// request and land in the audit event (client-asserted,
-    /// claimed:-prefixed) — the gateway merges `request.delegation_chain`
-    /// into the recorded chain.
-    #[tokio::test]
-    async fn request_delegation_chain_is_recorded() {
-        use std::sync::{Arc, Mutex};
-        let board = Arc::new(board_fixture());
-        let shared = Arc::new(Mutex::new(InMemoryAuditStore::default()));
-        let mut req = request("ready-task", "In Progress", "session:sess_a");
-        req.delegation_chain = vec![
-            String::from("user:operator"),
-            String::from("session:sess_a"),
-        ];
-        crate::gateway::run_board_move_shared(
-            board.as_ref(),
-            Arc::new(Mutex::new(empty_registry())),
-            req,
-            Some(Arc::clone(&shared)),
-        )
-        .await
-        .expect("move applies through the shared path");
-        let records = shared.lock().expect("store reads").records().to_vec();
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].envelope.payload["delegation_chain"],
-            serde_json::json!(["claimed:user:operator", "claimed:session:sess_a"])
-        );
-    }
-
-    /// A provider that fails every `set_item_status` (transient write
-    /// failure); all reads delegate to the wrapped fixture.
-    #[allow(clippy::items_after_statements)]
-    struct WriteFails(InMemoryBoardProvider);
-
-    #[async_trait::async_trait]
-    impl BoardProvider for WriteFails {
-        async fn item(
-            &self,
-            id: &BoardItemId,
-        ) -> Result<orchestraitor_board_contract::BoardItem, BoardContractError> {
-            self.0.item(id).await
-        }
-        async fn items(
-            &self,
-        ) -> Result<Vec<orchestraitor_board_contract::BoardItem>, BoardContractError> {
-            self.0.items().await
-        }
-        async fn create_item(
-            &self,
-            t: BoardItemType,
-            ti: &str,
-            b: &str,
-        ) -> Result<BoardItemId, BoardContractError> {
-            self.0.create_item(t, ti, b).await
-        }
-        async fn update_item_body(
-            &self,
-            id: &BoardItemId,
-            t: &str,
-            b: &str,
-        ) -> Result<(), BoardContractError> {
-            self.0.update_item_body(id, t, b).await
-        }
-        async fn statuses(
-            &self,
-        ) -> Result<Vec<orchestraitor_board_contract::BoardStatus>, BoardContractError> {
-            self.0.statuses().await
-        }
-        async fn set_item_status(
-            &self,
-            _id: &BoardItemId,
-            _status: &str,
-        ) -> Result<(), BoardContractError> {
-            Err(BoardContractError::WriteRejected {
-                operation: "set_item_status",
-            })
-        }
-        async fn fields(
-            &self,
-        ) -> Result<Vec<orchestraitor_board_contract::BoardField>, BoardContractError> {
-            self.0.fields().await
-        }
-        async fn field_value(
-            &self,
-            id: &BoardItemId,
-            f: &str,
-        ) -> Result<Option<BoardFieldValue>, BoardContractError> {
-            self.0.field_value(id, f).await
-        }
-        async fn set_field_value(
-            &self,
-            id: &BoardItemId,
-            f: &str,
-            v: BoardFieldValue,
-        ) -> Result<(), BoardContractError> {
-            self.0.set_field_value(id, f, v).await
-        }
-        async fn dependency_edges(
-            &self,
-        ) -> Result<Vec<orchestraitor_board_contract::DependencyEdge>, BoardContractError> {
-            self.0.dependency_edges().await
-        }
-        async fn add_dependency_edge(
-            &self,
-            b: &BoardItemId,
-            bl: &BoardItemId,
-        ) -> Result<(), BoardContractError> {
-            self.0.add_dependency_edge(b, bl).await
-        }
-        async fn remove_dependency_edge(
-            &self,
-            b: &BoardItemId,
-            bl: &BoardItemId,
-        ) -> Result<(), BoardContractError> {
-            self.0.remove_dependency_edge(b, bl).await
-        }
-        async fn cross_references(
-            &self,
-            id: &BoardItemId,
-        ) -> Result<Vec<orchestraitor_board_contract::CrossReference>, BoardContractError> {
-            self.0.cross_references(id).await
-        }
-        async fn add_cross_reference(
-            &self,
-            f: &BoardItemId,
-            t: &str,
-        ) -> Result<(), BoardContractError> {
-            self.0.add_cross_reference(f, t).await
-        }
-        async fn search(
-            &self,
-            f: &orchestraitor_board_contract::BoardSearch,
-        ) -> Result<Vec<orchestraitor_board_contract::BoardItem>, BoardContractError> {
-            self.0.search(f).await
-        }
-    }
-
-    /// Gen-2 thread 8: a RENEWED lease is NOT released when the write
-    /// fails — the session's pre-existing live lease survives a failed
-    /// move (compensation only for fresh claims on a not-landed write).
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn failed_write_after_renewal_keeps_the_lease() {
-        let board = board_fixture();
-        let mut registry = empty_registry();
-        let mut store = empty_store();
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        // sess_a holds a live lease (as if it moved the item earlier).
-        let claim = registry
-            .try_claim(&id, "session:sess_a", u64::MAX)
-            .expect("claim reads");
-        assert_eq!(claim, ClaimOutcome::Claimed);
-        // The move is policy-valid (Ready -> In Progress) but the write
-        // fails at the provider — exercising the compensation path.
-        let wrapper = WriteFails(board);
-        let result = board_move(
-            &wrapper,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_a"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("refusal is a decision");
-        let BoardMoveOutcome::Refused { refusal } = result.outcome else {
-            panic!("expected provider rejection");
-        };
-        assert_eq!(refusal, BoardMoveRefusal::ProviderRejected);
-        // GEN-2 ASSERTION: the RENEWED (pre-existing) lease survives —
-        // sess_a still holds it, so nobody else can grab the item while
-        // sess_a retries.
-        let lease = registry
-            .held_by(&id, "session:sess_a")
-            .expect("registry reads");
-        assert!(
-            lease.is_some(),
-            "a renewed lease is NOT released on a failed write (compensation is fresh-claim-only)"
-        );
-    }
-
-    /// Gen-2 thread 9: the write path NEVER drops the caller's live lease
-    /// — after a failed move on an item the session already holds (via a
-    /// fresh claim in the SAME invocation), the lease... is compensated
-    /// (fresh claim, not-landed write). But a FOREIGN session cannot
-    /// interleave mid-write: the lease stays live for the whole write
-    /// window. Proven here by the write-failure compensation returning the
-    /// item to UNLEASED only because the claim was fresh — no stale
-    /// zero-expiry entry remains to cause false refusals later.
-    #[tokio::test]
-    async fn failed_fresh_claim_leaves_no_stale_entry() {
-        let board = board_fixture();
-        let mut registry = empty_registry();
-        let mut store = empty_store();
-        let wrapper = WriteFails(board);
-        // ready-task is leased by nobody: the move claims FRESH, then the
-        // write fails → compensation releases the fresh claim.
-        let result = board_move(
-            &wrapper,
-            &mut registry,
-            &request("ready-task", "In Progress", "session:sess_b"),
-            &chain(),
-            &mut store,
-        )
-        .await
-        .expect("refusal is a decision");
-        assert!(matches!(
-            result.outcome,
-            BoardMoveOutcome::Refused {
-                refusal: BoardMoveRefusal::ProviderRejected
-            }
-        ));
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        // NO stale entry: a later claim by the same session is a CLEAN
-        // fresh claim (gen-2 thread 9: stale zero-expiry entries caused
-        // false lease-expired refusals).
-        let retry = registry
-            .try_claim(&id, "session:sess_b", u64::MAX)
-            .expect("claim reads");
-        assert_eq!(retry, ClaimOutcome::Claimed, "no stale entry remains");
-    }
-
-    /// Gen-2 thread 9 (lease protection during the write window): the
-    /// lease is LIVE across the whole move — a foreign `try_claim` during a
-    /// completed move is refused. The concurrent test
-    /// `concurrent_moves_through_one_registry_produce_one_applied`
-    /// proves the interleaving case; this asserts the post-state.
-    #[test]
-    fn own_claim_is_a_renewal_and_foreign_claim_is_refused() {
-        let mut registry = empty_registry();
-        let id = BoardItemId::new("ready-task").expect("valid id");
-        // sess_a holds a live lease.
-        let claim = registry
-            .try_claim(&id, "session:sess_a", u64::MAX)
-            .expect("claim reads");
-        assert_eq!(claim, ClaimOutcome::Claimed);
-        // A probe (expiry 0) from anyone must not disturb or drop it.
-        let probe = registry
-            .try_claim(&id, "session:sess_b", 0)
-            .expect("probe reads");
-        assert_eq!(
-            probe,
-            ClaimOutcome::ForeignHolder(String::from("session:sess_a"))
-        );
-        assert!(
-            registry
-                .held_by(&id, "session:sess_a")
-                .expect("reads")
-                .is_some(),
-            "the live lease survives a foreign probe untouched"
-        );
-        assert!(
-            registry
-                .held_by(&id, "session:sess_b")
-                .expect("reads")
-                .is_none()
-        );
-        // The holder's own claim with a live expiry is a RENEWAL — the
-        // lease stays intact and the expiry moves.
-        let own = registry
-            .try_claim(&id, "session:sess_a", u64::MAX)
-            .expect("claim reads");
-        assert_eq!(own, ClaimOutcome::Renewed);
-        assert!(
-            registry
-                .held_by(&id, "session:sess_a")
-                .expect("reads")
-                .is_some()
-        );
-    }
-
     /// The policy matrix allows exactly the documented transitions.
     #[test]
     fn policy_matrix_allows_exactly_the_documented_transitions() {
@@ -2694,5 +1728,3 @@ mod tests {
         assert!(!policy_allows(StatusClass::Ready, StatusClass::Other));
     }
 }
-// NOTE: appended remediation tests live in the tests module above via
-// cfg(test); see tests module for the PR #475 review-thread regressions.

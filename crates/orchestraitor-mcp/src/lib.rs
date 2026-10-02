@@ -20,8 +20,8 @@ pub mod board_query;
 
 pub use board_move::{
     BoardMoveApplied, BoardMoveDelegationChain, BoardMoveError, BoardMoveOutcome, BoardMoveRefusal,
-    BoardMoveRequest, BoardMoveResult, ClaimOutcome, InMemoryLeaseRegistry, ItemLease,
-    LeaseBookkeepingFailure, LeaseRegistry, StatusClass, board_move,
+    BoardMoveRequest, BoardMoveResult, InMemoryLeaseRegistry, ItemLease, LeaseRegistry,
+    StatusClass, board_move,
 };
 
 pub use board_query::{

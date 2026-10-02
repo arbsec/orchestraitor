@@ -95,33 +95,17 @@ orc board guarded-move <item-id> --status "<Status option name>" --session <sess
   holder; the session's own expired lease refuses with `lease-expired`. An applied
   transition writes through the provider and is verified by read-back —
   reconcile-visible, board-wins on the next tick (§9.43). Every invocation —
-  applied, refused, OR indeterminate — records to the event store as a `ToolRequest`
-  event with the §9.25.1 delegation chain (`chain_source: client-asserted`,
-  `claimed:`-prefixed labels), same mechanism as `board.query`. Refusals are typed outcomes with static
+  applied OR refused — records to the event store as a `ToolRequest` event with the
+  §9.25.1 delegation chain (`chain_source: client-asserted`, `claimed:`-prefixed
+  labels), same mechanism as `board.query`. Refusals are typed outcomes with static
   log-safe reason classes (`policy-invalid` with the blocker ids, `lease-conflict`,
   `lease-expired`, `missing-session`, `unknown-status`, `unknown-item`,
   `provider-rejected`, `out-of-scope`); the board is unchanged after any refusal.
-  Refusals are completed decisions, not process failures: the CLI renders them and
-  exits 0 in both text and `--json` modes (automation reads the typed `REFUSED`
-  line / the `outcome` field, not the exit status). A write that LANDS but cannot
-  be verified (read-back failure or concurrent drift) is reported as a typed
-  `INDETERMINATE` outcome — the board state is unknown, never reported as an
-  unchanged refusal; re-read the board before retrying. A landed write whose lease
-  bookkeeping fails afterwards reports the applied transition plus a typed
-  lease-bookkeeping warning. Scope is status-class transitions only — request
-  payload fields for field or edge
+  Scope is status-class transitions only — request payload fields for field or edge
   writes are refused `out-of-scope`, never silently narrowed (issue #333
   non-goals). Item ids, status names, and session labels are untrusted input (§6.1):
   matched as opaque data — a hostile status name matches nothing and refuses
-  `unknown-status`; its text never executes. **Lease semantics (§9.24.2, §9.40):**
-  the check-and-claim is ONE atomic registry operation (concurrent sessions can
-  never both move an unleased item); `In Progress` AND the held states
-  (`Blocked`, `Approval Required`, `Input Required`) are lease-protected — a pause
-  into a held state KEEPS the session's lease, so another session cannot claim the
-  paused item; the lease releases on completion, retirement, or returning to Ready.
-  The caller's §9.25.1 delegation-chain labels ride the request (`delegation_chain`
-  on the gateway tool; `claimed:`-prefixed, truncated, bounded in the audit record —
-  client-asserted data, never authorization). **Provider note:** in this slice the
+  `unknown-status`; its text never executes. **Provider note:** in this slice the
   tool runs against the deterministic in-memory fixture board (the sqlite provider
   is the #318 follow-up and the live GitHub provider wiring lands separately). The
   MCP gateway exposes the same tool as `board.move` when a board provider AND lease
