@@ -45,4 +45,7 @@ jobs:
         with:
           tool: cargo-audit
       - name: Run cargo-audit
-        run: cargo audit
+        # Same ignores as arbitraitor's own security.yml at the pinned rev:
+        # the advisories ride the yara-x transitive wasmtime/bincode graph
+        # that arbitraitor ab7af5e introduces.
+        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0222 --ignore RUSTSEC-2026-0269 --ignore RUSTSEC-2026-0316
