@@ -25,9 +25,20 @@ Every finding MUST include:
   "proposed_remediation": "Replace with proper error propagation using thiserror",
   "generation": 2,
   "thread_id": "PRRT_kw...",
-  "status": "open|fixed|resolved-with-reasoning|deferred"
+  "status": "open|fixed|resolved-with-reasoning|deferred",
+  "cwe": "CWE-284",
+  "evidence_command": "cargo clippy --all-targets -- -D warnings"
 }
 ```
+
+Every finding MAY additionally include these OPTIONAL fields. Reports that omit
+them stay valid; no consumer treats their absence as an error:
+
+- `cwe` — CWE identifier when the finding maps to a known weakness class
+  (e.g. `CWE-284`). Omit when the finding does not map to a CWE entry.
+- `evidence_command` — the single probe command whose output grounds the
+  finding (e.g. a gate run, a grep, a targeted test). Omit when the evidence
+  is a static file:line quote alone.
 
 ## Deduplication across loops
 
