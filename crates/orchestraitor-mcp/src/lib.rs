@@ -16,6 +16,7 @@ mod project;
 mod workflow;
 
 pub mod board_query;
+pub mod decision_record;
 
 pub use board_query::{
     BlockedCycle, BlockedGraph, BoardQueryField, BoardQueryFieldValue, BoardQueryFilter,
@@ -25,6 +26,11 @@ pub use board_query::{
 pub use config::{
     McpConfig, McpConfigLayer, McpServerConfig, McpServerLifetime, McpTransportConfig,
     ResolvedMcpServers, load_canonical_mcp_config, resolve_mcp_servers,
+};
+pub use decision_record::{
+    DecisionRecordAlternative, DecisionRecordError, DecisionRecordInput, DecisionRecordKind,
+    DecisionRecordNoOpReason, DecisionRecordSelectedTask, DecisionRecordSkip,
+    contains_secret_shaped, record_decision, validate_decision,
 };
 pub use drift::{
     CapabilityCrossCheck, CapabilitySnapshot, DriftFingerprint, FingerprintChange,

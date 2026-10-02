@@ -43,6 +43,30 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
+- The `decision.record` coordinator decision tool (spec `10-orchestrator.md`
+  §9.39, §9.35; #334): persists one append-only, replayable decision record
+  (kind, selected task, role, model+provider, worker arguments, rationale,
+  alternatives considered) into the campaign crate's §9.35 store — the same
+  record shape and store `orc campaign run --once` writes, never a second
+  format. Append-only: no update or delete path exists on the tool; a
+  re-append creates a new row and the original row is never touched.
+  Malformed records (missing required fields, kind/reason inconsistencies,
+  field-bound overflows) are refused with typed reasons, leaving the store
+  and audit log untouched. Records carrying secret-shaped material
+  (`secret://` URIs, `sk-`-prefixed keys, Bearer tokens, GitHub tokens, long
+  hex/base64 runs) are REFUSED fail-closed — never silently redacted — via a
+  conservative local heuristic mirroring §9.23.4 until Arbitraitor owns
+  decision-payload classification (recorded gap). Instruction-shaped content
+  is inert data: stored and replayed verbatim, never executed. Every
+  successful append records a `ToolRequest` event with the §9.25.1
+  delegation chain (`chain_source: client-asserted`, `claimed:`-prefixed
+  labels); the audit event carries only a summary, never record content.
+  In this slice the MCP tool runs against the §9.35 store in memory (a
+  session-scoped store when the connection carries one — append-only row ids
+  observable across the session — otherwise per invocation; same shape and
+  code path as the durable `orc campaign run --once` store);
+  on-disk MCP wiring lands with the daemon decision-tool wiring (§9.17).
+  Documented in [docs/cli/orc-decision-record.md](docs/cli/orc-decision-record.md).
 - The `board.query` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
   with two modes — a conjunctive filter search (item type, status, typed

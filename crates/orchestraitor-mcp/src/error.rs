@@ -73,6 +73,11 @@ pub enum McpGatewayError {
     /// content (spec `40-arbitraitor-integration.md` §9.23.4).
     #[error("board.query failed: {0}")]
     BoardQuery(String),
+    /// The `decision.record` decision tool failed (validation refusal,
+    /// store failure, or event-recording failure). Message text is a
+    /// static, log-safe label — never record content (§9.23.4).
+    #[error("decision.record failed: {0}")]
+    DecisionRecord(String),
 }
 
 impl From<std::io::Error> for McpGatewayError {

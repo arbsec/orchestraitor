@@ -15,6 +15,7 @@ use crate::board_query::{
     execute_query, invocation_summary,
 };
 use crate::config::ResolvedMcpServers;
+use crate::decision_record::{DecisionRecordError, DecisionRecordInput, record_decision};
 use crate::error::{McpGatewayError, McpGatewayResult};
 use crate::fs::FileSystemTools;
 use crate::fs_types::ApplyPatchRequest;
@@ -43,6 +44,12 @@ pub struct GatewayContext {
     /// event-store wiring (§9.17).
     pub board_audit_store:
         Option<std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>>,
+    /// Session-scoped decision-record store for `decision.record` (§9.35,
+    /// issue #334). Shared across the connection's invocations so row ids
+    /// strictly increase within the session — the append-only guarantee is
+    /// observable, not just claimed. `None` uses a per-invocation store.
+    pub decision_store:
+        Option<std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>>,
 }
 
 /// rmcp server exposing Orchestraitor built-in tools for one project scope.
@@ -260,6 +267,47 @@ impl McpGateway {
         self.structured(self.workflow.run(WorkflowKind::Task, &input))
     }
 
+    /// `decision.record` (spec `10-orchestrator.md` §9.39, §9.35; issue
+    /// #334): persist ONE append-only, replayable decision record into the
+    /// campaign crate's §9.35 store — the SAME store `orc campaign run
+    /// --once` writes. Malformed records are refused with typed reasons
+    /// (nothing is appended); secret-shaped material is refused
+    /// (fail-closed). Every successful append is recorded as a `ToolRequest`
+    /// event with the §9.25.1 delegation chain. There is no update or
+    /// delete path: re-recording appends a NEW row.
+    #[tool(
+        name = "decision.record",
+        description = "Persist one append-only, replayable campaign decision record (kind, selected task, role, model+provider, worker arguments, rationale, alternatives) per spec §9.35"
+    )]
+    fn decision_record_tool(
+        &self,
+        Parameters(input): Parameters<DecisionRecordRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let chain = DelegationChain {
+            correlation_id: OperationId::new(),
+            parent_op_id: None,
+            principals: input.delegation_chain.clone(),
+        };
+        let input = DecisionRecordInput {
+            kind: input.kind,
+            no_op_reason: input.no_op_reason,
+            selected: input.selected,
+            role: input.role,
+            provider: input.provider,
+            model: input.model,
+            precedence_path: input.precedence_path,
+            fallback_reason: input.fallback_reason,
+            worker_args: input.worker_args,
+            rationale: input.rationale,
+            alternatives: input.alternatives,
+            blocked_graph: input.blocked_graph,
+            skipped: input.skipped,
+        };
+        let result =
+            run_decision_record_shared(&input, &chain, self.context.decision_store.as_ref());
+        self.structured(result)
+    }
+
     /// Query board state through the configured [`BoardProvider`]: typed
     /// conjunctive search or the transitive blocked graph (spec
     /// `10-orchestrator.md` §9.39, §9.40, §9.43; issue #332). Read-only;
@@ -367,6 +415,105 @@ struct BoardQueryRequest {
     delegation_chain: Vec<String>,
 }
 
+/// `decision.record` request shape: the §9.35 record fields plus the
+/// §9.25.1 delegation-chain labels supplied by the invoking session
+/// (recorded as data on the audit event, never treated as authority).
+#[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+struct DecisionRecordRequest {
+    /// Whether the pass selected a task or was a typed no-op.
+    kind: crate::decision_record::DecisionRecordKind,
+    /// Typed no-op reason; required on `no-op`, refused on `selected`.
+    #[serde(default)]
+    no_op_reason: Option<crate::decision_record::DecisionRecordNoOpReason>,
+    /// The selected task; required on `selected`, refused on `no-op`.
+    #[serde(default)]
+    selected: Option<crate::decision_record::DecisionRecordSelectedTask>,
+    /// Orchestration role the worker runs as (from the role registry).
+    role: String,
+    /// Resolved provider for the role.
+    provider: String,
+    /// Resolved model for the role.
+    model: String,
+    /// Precedence path that produced the routing resolution (§9.19.2).
+    #[serde(default)]
+    precedence_path: String,
+    /// Documented fallback reason, when routing fell back.
+    #[serde(default)]
+    fallback_reason: Option<String>,
+    /// The concrete worker argv the pass planned.
+    #[serde(default)]
+    worker_args: Vec<String>,
+    /// Why this task, this role, this model. Required, non-empty.
+    rationale: String,
+    /// Alternatives considered, in priority-first order.
+    #[serde(default)]
+    alternatives: Vec<crate::decision_record::DecisionRecordAlternative>,
+    /// Eligible candidates blocked by unresolved dependencies.
+    #[serde(default)]
+    blocked_graph: Vec<crate::decision_record::DecisionRecordAlternative>,
+    /// Board items the read could not safely evaluate.
+    #[serde(default)]
+    skipped: Vec<crate::decision_record::DecisionRecordSkip>,
+    /// Delegation-chain principal labels, root first. Client-asserted data
+    /// only — the tool never mints or verifies identity.
+    #[serde(default)]
+    delegation_chain: Vec<String>,
+}
+
+/// Drives one `decision.record` append, recording the invocation into a
+/// per-invocation audit store (issue #334).
+///
+/// The store is the campaign crate's append-only §9.35 `SQLite` store. With
+/// a session-scoped store on the context, every invocation on the
+/// connection appends into THAT store (row ids strictly increase across the
+/// session — the append-only guarantee is observable); with none, the
+/// invocation opens its own in-memory store. DURABLE persistence stays
+/// owned by `orc campaign run --once` (which opens the same store at
+/// `<config-dir>/campaign.db`); wiring the MCP tool to that same on-disk
+/// store lands with the daemon decision-tool wiring (§9.17/§9.39) — the
+/// record shape and code path are identical, only the store handle differs.
+pub(crate) fn run_decision_record_shared(
+    input: &DecisionRecordInput,
+    chain: &DelegationChain,
+    shared_store: Option<
+        &std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>,
+    >,
+) -> Result<orchestraitor_campaign::StoredCampaignDecision, McpGatewayError> {
+    // With a session-scoped store the append lands in THAT store (row ids
+    // strictly increase across the session's invocations); with none, the
+    // invocation opens its own in-memory store (per-invocation row space).
+    // Durable persistence stays owned by `orc campaign run --once` until the
+    // daemon decision-tool wiring (§9.17) lands. The store mutex serializes
+    // concurrent appends; the audit event is written after the record, so a
+    // crash between them leaves a record without its §9.25.1 event (visible,
+    // never silent).
+    let mut audit = orchestraitor_events::InMemoryAuditStore::default();
+    if let Some(shared_store) = &shared_store {
+        let mut store = shared_store.lock().map_err(|_| {
+            McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
+        })?;
+        return record_decision(input, chain, &mut store, &mut audit)
+            .map_err(|error| decision_record_error(&error));
+    }
+    let mut store = orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
+        .map_err(decision_store_error)?;
+    record_decision(input, chain, &mut store, &mut audit)
+        .map_err(|error| decision_record_error(&error))
+}
+
+/// Maps a campaign store failure onto the typed gateway error. The message
+/// is the store's log-safe label (path + `SQLite` class), never record
+/// content.
+fn decision_store_error(error: orchestraitor_campaign::CampaignError) -> McpGatewayError {
+    McpGatewayError::DecisionRecord(DecisionRecordError::Store(error).to_string())
+}
+
+/// Maps a `decision.record` failure onto the typed gateway error. The
+/// message is a static, log-safe label — never record content (§9.23.4).
+fn decision_record_error(error: &DecisionRecordError) -> McpGatewayError {
+    McpGatewayError::DecisionRecord(error.to_string())
+}
+
 /// Drives the typed board query against a provider, recording into the
 /// context's audit store when one is shared, otherwise a fresh in-memory
 /// store (issue #458 F3).
@@ -450,6 +597,7 @@ fn error_payload(error: &McpGatewayError) -> serde_json::Value {
             McpGatewayError::CanonicalJson { .. } => "fingerprint_canonicalization_failed",
             McpGatewayError::Io(_) => "io_error",
             McpGatewayError::BoardQuery(_) => "board_query_failed",
+            McpGatewayError::DecisionRecord(_) => "decision_record_failed",
         }
     })
 }
@@ -476,6 +624,7 @@ mod tests {
             arbitraitor: ArbitraitorClient::default(),
             board: None,
             board_audit_store: None,
+            decision_store: None,
         });
         let _ = gateway;
         Ok(())
@@ -495,6 +644,7 @@ mod tests {
             arbitraitor: ArbitraitorClient::default(),
             board: None,
             board_audit_store: None,
+            decision_store: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -531,6 +681,7 @@ mod tests {
                 orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
             )),
             board_audit_store: None,
+            decision_store: None,
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -543,6 +694,107 @@ mod tests {
             "board.query must be listed when a provider is configured: {listed:?}"
         );
         assert!(configured.tool_router.has_route("board.query"));
+        Ok(())
+    }
+
+    /// `decision.record` (issue #334) is always listed and callable: unlike
+    /// `board.query` it has no external dependency to configure — its store
+    /// opens per invocation (in-memory) until the daemon event-store wiring
+    /// (§9.17) lands.
+    #[test]
+    fn decision_record_is_listed_and_callable() -> McpGatewayResult<()> {
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let gateway = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+            decision_store: None,
+        });
+        let listed: Vec<String> = gateway
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            listed.iter().any(|name| name == "decision.record"),
+            "decision.record must be listed on the gateway: {listed:?}"
+        );
+        assert!(gateway.tool_router.has_route("decision.record"));
+        assert!(
+            !gateway.tool_router.is_disabled("decision.record"),
+            "decision.record has no disable path: append-only state is always available"
+        );
+        Ok(())
+    }
+
+    /// `decision.record` end to end through the shared runner (issue #334):
+    /// two invocations against ONE session-scoped store append two rows with
+    /// strictly increasing ids and identical payloads, and the original row
+    /// is byte-identical after the second append — the forbidden effect (a
+    /// mutation of stored state) did not happen.
+    #[test]
+    fn decision_record_session_store_appends_without_mutating() -> McpGatewayResult<()> {
+        use crate::decision_record::{DecisionRecordInput, DecisionRecordKind};
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
+                .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?,
+        ));
+        let _gateway = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+            decision_store: Some(shared.clone()),
+        });
+        let input = DecisionRecordInput {
+            kind: DecisionRecordKind::NoOp,
+            no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
+            selected: None,
+            role: String::from("implement"),
+            provider: String::from("neuralwatt"),
+            model: String::from("glm-5.2"),
+            precedence_path: String::from("bootstrap-default"),
+            fallback_reason: None,
+            worker_args: Vec::new(),
+            rationale: String::from("session-scoped append probe"),
+            alternatives: Vec::new(),
+            blocked_graph: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let chain = DelegationChain {
+            correlation_id: OperationId::new(),
+            parent_op_id: None,
+            principals: vec![String::from("user:test")],
+        };
+        let first = run_decision_record_shared(&input, &chain, Some(&shared))
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+        let second = run_decision_record_shared(&input, &chain, Some(&shared))
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+        assert!(
+            second.id > first.id,
+            "append-only: ids strictly increase across session invocations"
+        );
+        assert_eq!(
+            first.decision, second.decision,
+            "identical input persists an identical payload"
+        );
+        let listed = shared
+            .lock()
+            .map_err(|_| McpGatewayError::DecisionRecord(String::from("store poisoned")))?
+            .list()
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+        assert_eq!(listed.len(), 2, "both rows replay; nothing was replaced");
+        assert_eq!(
+            listed[0].decision, first.decision,
+            "the original row is untouched after the second append"
+        );
         Ok(())
     }
 

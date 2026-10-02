@@ -114,6 +114,10 @@ The loop's first concrete surfaces ship today:
   decision tool (#458): typed filter search plus a transitive blocked-graph walk with cycle
   detection. In this slice it reads a deterministic in-memory fixture board; the live
   sqlite/GitHub provider wiring is a follow-up (#318 split).
+- The `decision.record` coordinator decision tool (#334) — persists one append-only,
+  replayable §9.35 decision record into the campaign store, with typed write validation and
+  fail-closed secret refusal; documented in
+  [`docs/cli/orc-decision-record.md`](docs/cli/orc-decision-record.md).
 - The `orchestraitor-board-contract` crate — the `BoardProvider` contract with a
   write-through, board-wins read cache (spec §9.43).
 

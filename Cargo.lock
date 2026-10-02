@@ -4142,6 +4142,7 @@ dependencies = [
  "hex",
  "orchestraitor-arbitraitor-client",
  "orchestraitor-board-contract",
+ "orchestraitor-campaign",
  "orchestraitor-core",
  "orchestraitor-events",
  "orchestraitor-model",
