@@ -277,6 +277,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc loop` now bounds board polling by the remaining run budget: the budget could
+  previously expire while the loop sat inside a board request (up to the board client's
+  60s timeout), leaving in-flight work unsupervised and letting the pass plan or start
+  work on an already-spent budget. The pass now races the poll against the remaining
+  budget and re-checks it after the poll — expiry enters the normal
+  `run-budget-exhausted` drain, and nothing is planned or spawned after expiry (#434).
+  Transient poll failures keep their existing backoff-and-retry semantics (counted in
+  the summary, journaled as `poll-failed`, next pass paced out — never fatal).
 - `orc github commit-author` authenticates `GET /app` with a freshly minted
   App JWT instead of an installation token: `GET /app` is an App-level
   endpoint that GitHub answers with 401 for installation tokens, so the

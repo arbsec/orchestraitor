@@ -1024,3 +1024,127 @@ async fn a_second_signal_short_circuits_the_remaining_grace() {
     );
     assert_eq!(rows[0].detail, "shutdown-abort");
 }
+
+// The run budget must bound the board poll, not only the checks between
+// passes: the board client can block up to its 60s total timeout, so a
+// small remaining budget would otherwise expire while the loop sits inside
+// `poll()` — unsupervised, unable to drain, and able to plan/start work
+// after the budget is spent.
+/// A poller that delays each snapshot beyond the remaining run budget.
+struct SlowPoller {
+    snapshot: BoardSnapshot,
+    delay: Duration,
+}
+
+#[async_trait]
+impl BoardPoller for SlowPoller {
+    /// Returns the snapshot after a fixed (virtual) delay.
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.snapshot.clone())
+    }
+}
+
+/// Checks that a budget expiring during a poll stops the loop with
+/// `RunBudgetExhausted` — no work is planned or started after expiry.
+#[tokio::test(start_paused = true)]
+async fn a_budget_expiring_during_a_poll_stops_without_spawning() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        run_budget: Duration::from_secs(3),
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // The poll needs 10s — the 3s budget expires mid-poll. Budget-bounded
+    // polling must end the loop at ~3s, not at ~10s (or the board's 60s
+    // timeout); the pending snapshot is dropped unspawned.
+    let poller = SlowPoller {
+        snapshot: snapshot_with(&[1]),
+        delay: Duration::from_secs(10),
+    };
+    let runner = LoopRunner::new(
+        config,
+        poller,
+        FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1))),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::RunBudgetExhausted);
+    // Forbidden effect: the pass returned nothing to plan or spawn — no
+    // decision record, no run row, no worker process. An "error occurred"
+    // assertion would not catch a spawn racing past the budget.
+    assert_eq!(summary.spawns, 0, "no worker started after budget expiry");
+    assert!(
+        runs.runs_for_invocation("inv").unwrap().is_empty(),
+        "no run row recorded after budget expiry"
+    );
+    assert!(
+        decisions.list().unwrap().is_empty(),
+        "no decision planned after budget expiry"
+    );
+    // The budget expired mid-poll; a loop blocked inside the board client's
+    // 60s timeout would report ~10s (poll completion) or worse.
+    assert!(
+        summary.elapsed_secs <= 5,
+        "the loop must stop at the budget, not the poll: {}",
+        summary.elapsed_secs
+    );
+    assert_eq!(summary.aborted_on_stop, 0, "nothing in flight to abort");
+}
+
+/// Checks that a snapshot arriving just as the budget expires is never
+/// planned or spawned — the fresh post-poll check owns the boundary.
+#[tokio::test(start_paused = true)]
+async fn a_poll_completing_after_budget_expiry_never_spawns() {
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
+    let budgets = WorkerBudgets {
+        run_budget: Duration::from_secs(2),
+        worker_timeout: Duration::from_hours(2),
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    // The poll returns at 3s — after the 2s budget expired (the race only
+    // bounds the in-flight wait; this snapshot completes the request). A
+    // spawn from a snapshot polled past the budget is the forbidden effect:
+    // work started on a budget the loop already overshot.
+    let poller = SlowPoller {
+        snapshot: snapshot_with(&[1]),
+        delay: Duration::from_secs(3),
+    };
+    let runner = LoopRunner::new(
+        config,
+        poller,
+        FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1))),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.stop_reason, StopReason::RunBudgetExhausted);
+    assert_eq!(summary.spawns, 0, "no worker started after budget expiry");
+    assert!(
+        runs.runs_for_invocation("inv").unwrap().is_empty(),
+        "no run row recorded after budget expiry"
+    );
+    assert!(
+        decisions.list().unwrap().is_empty(),
+        "no decision planned after budget expiry"
+    );
+    // Without the fresh post-poll check the loop would plan, spawn, and
+    // only then drain past the budget; with it, the stop is declared the
+    // moment the overshoot is observed.
+    assert_eq!(summary.aborted_on_stop, 0, "nothing in flight to abort");
+}
