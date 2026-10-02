@@ -43,7 +43,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
-- The `decision.record` coordinator decision tool (#334): persists one
+- The `decision.record` coordinator decision tool: persists one
   append-only, replayable decision record (kind, selected task, role,
   model+provider, worker arguments, rationale, alternatives considered) into
   the campaign store — the same record shape and store `orc campaign run

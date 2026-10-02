@@ -561,8 +561,10 @@ pub fn contains_secret_shaped(value: &str) -> bool {
     }
     // `sk-`-prefixed keys (§9.23.4) — a real key continues with a long run
     // of token characters; prose containing the bare prefix stays allowed.
-    if let Some(rest) = lower.find("sk-").map(|index| &lower[index + 3..]) {
-        let token_chars: usize = rest
+    // EVERY occurrence is inspected: an early short "sk-" in prose must not
+    // mask a later real key.
+    for (index, _) in lower.match_indices("sk-") {
+        let token_chars: usize = lower[index + 3..]
             .chars()
             .take_while(|character| {
                 character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
@@ -593,21 +595,34 @@ pub fn contains_secret_shaped(value: &str) -> bool {
     is_long_base64_run(value)
 }
 
-/// Whether the token-shaped run immediately after `marker` is at least 16
-/// characters long.
+/// Whether any occurrence of `marker` is followed by a credential-shaped
+/// token run of at least 16 characters. For credential headers the token
+/// may be preceded by one authentication-scheme word (`Basic`, `Bearer`,
+/// `token`, …), so one leading whitespace-delimited word is skipped before
+/// measuring — `Authorization: Basic dXNlcjpwYXNzd29yZA==` measures the
+/// base64 credential, not the scheme.
 fn long_token_after(lower: &str, marker: &str) -> bool {
-    lower
-        .find(marker)
-        .map(|index| &lower[index + marker.len()..])
-        .is_some_and(|rest| {
-            rest.chars()
-                .skip_while(|character| character.is_whitespace())
-                .take_while(|character| {
-                    !character.is_whitespace() && *character != '"' && *character != '\''
-                })
-                .count()
-                >= 16
-        })
+    lower.match_indices(marker).any(|(index, matched)| {
+        let rest = &lower[index + matched.len()..];
+        let mut words = rest
+            .split(|character: char| {
+                character.is_whitespace() || character == '"' || character == '\''
+            })
+            .filter(|word| !word.is_empty());
+        // One optional leading auth-scheme word (e.g. `basic`), then the
+        // credential token itself.
+        let credential = match words.next() {
+            Some(first) if is_auth_scheme_word(first) => words.next(),
+            other => other,
+        };
+        credential.is_some_and(|word| word.chars().count() >= 16)
+    })
+}
+
+/// Whether a whitespace-delimited word is an authentication-scheme label
+/// that may precede the credential token in a header value.
+fn is_auth_scheme_word(word: &str) -> bool {
+    matches!(word, "basic" | "bearer" | "token" | "digest" | "negotiate" | "ntlm" | "oauth")
 }
 
 /// Returns the lengths of maximal runs of ASCII hex characters in `value`.
@@ -1262,5 +1277,50 @@ mod tests {
         assert!(validate_decision(&benign).is_ok());
         // A short token-continuation after sk- is prose, not a key.
         assert!(!contains_secret_shaped("the task is sk-, see docs"));
+    }
+
+    /// Regression tests for the secret-heuristic bypasses found in review
+    /// (PR #479): a decoy marker occurrence must not hide a LATER
+    /// credential, and a scheme word before the credential must not mask
+    /// it.
+    #[test]
+    fn secret_heuristic_bypasses_are_detected() {
+        // (a) A first, short `sk-` occurrence in prose must not stop the
+        // scan before a later real key.
+        assert!(
+            contains_secret_shaped("see sk- docs; then use sk-proj-abcdef1234567890abcdef"),
+            "a later sk- key after an earlier short occurrence must be detected"
+        );
+        // (b) A decoy `bearer ` (no token) must not hide a later bearer
+        // credential.
+        assert!(
+            contains_secret_shaped(
+                "bearer was the class name; send Authorization: bearer eyJhbGciOiJIUzI1NiJ9.sig",
+            ),
+            "a later bearer token after an earlier bare occurrence must be detected"
+        );
+        // (c) `Authorization: <scheme> <credential>`: the scheme word is
+        // skipped, the base64 credential itself is measured.
+        assert!(
+            contains_secret_shaped("Authorization: Basic dXNlcjpwYXNzd29yZA=="),
+            "a Basic credential after the scheme word must be detected"
+        );
+        // The scheme-word skip does not itself mint a false positive: a
+        // header carrying only scheme-label words stays allowed.
+        assert!(
+            !contains_secret_shaped("Authorization: basic scheme"),
+            "a scheme word without a credential must not be flagged"
+        );
+        // sk- keys shorter than 16 characters stay allowed.
+        assert!(
+            !contains_secret_shaped("key sk-abc123 is a toy"),
+            "a short sk- token stays allowed"
+        );
+        // sk- detection is independent of the hex/base64 checks: this
+        // token is too short for the base64 rule but 16+ token chars.
+        assert!(
+            contains_secret_shaped("sk-abcdefghijklmnop"),
+            "a 16+ char sk- token is detected without any hex/base64 run"
+        );
     }
 }
