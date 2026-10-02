@@ -43,6 +43,33 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
+||||||| parent of 98f84f2 (feat(tools): board.move guarded transitions with typed refusals)
+- The `board.move` coordinator decision tool (spec `10-orchestrator.md`
+  §9.39, §9.40, §9.43; #333): guarded board status-class transitions —
+  never a raw provider write. Transitions validate against the
+  workflow-policy matrix (scheduling forward, pause/resume, completion,
+  retirement; `Triage` is a human/PM gate both ways, reopening `Done` and
+  unclassified columns refuse), enforce the §9.40 unresolved-blocker rule
+  (an item with unresolved `blockedBy` edges cannot enter In Progress), and
+  lease-check against a session lease registry (§9.24.2): another session's
+  live lease refuses `lease-conflict` naming the holder; the session's own
+  expired lease refuses `lease-expired`. An applied transition writes
+  through the provider and is verified by read-back — reconcile-visible,
+  board-wins on the next tick (§9.43). Every invocation — applied OR
+  refused — records to the event store as a `ToolRequest` event with the
+  §9.25.1 delegation chain (`chain_source: client-asserted`,
+  `claimed:`-prefixed labels), same mechanism as `board.query`. Refusals
+  are typed outcomes with static log-safe reason classes; the board is
+  unchanged after any refusal. Scope is status-class transitions only:
+  requested field or edge writes refuse `out-of-scope`, never silently
+  narrowed. Request values are untrusted input (§6.1) — a hostile status
+  name matches nothing and refuses `unknown-status`. Surfaced as
+  `orc board guarded-move` (against the deterministic in-memory fixture
+  board in this slice — the sqlite provider is the #318 follow-up) and as
+  the `board.move` MCP gateway tool when a board provider AND lease
+  registry are configured; when either is missing, the gateway's tool
+  router disables both board tool routes. Documented in
+  [docs/cli/orc-board.md](docs/cli/orc-board.md).
 - The `board.query` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
   with two modes — a conjunctive filter search (item type, status, typed
