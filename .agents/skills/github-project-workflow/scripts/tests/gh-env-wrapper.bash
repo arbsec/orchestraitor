@@ -710,3 +710,83 @@ grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor -
 grep -qx 'rc:0' "$GH_LOG" || fail "pr-review-post bodyless --comment must not fail: $(cat "$GH_LOG")"
 
 echo "PASS bot self-approval refusal + verdict body requirements"
+
+
+# --- pr-mutate service-identity routing (gh-capabilities review finding: the
+#     documented `gh pr edit|ready|close` writes must go through the wrapper
+#     like pr-create/pr-comment, never ambient personal auth) ---
+PRMUTATE="$HERE/../../../github-pr-lifecycle/scripts/pr-mutate"
+
+# --- 24. service path: pr-mutate edit routes through gh-env with the
+#         intended gh subcommand; the stub gh is never invoked directly.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRMUTATE" required edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' "$ORC_LOG" \
+  || fail "pr-mutate edit must take the service path: orc=[$(cat "$ORC_LOG")] out=[$OUT]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-mutate edit ran gh directly (personal auth)"; fi
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate edit service path must not fail: $(cat "$GH_LOG")"
+
+# --- 25. ready and close route the same way.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRMUTATE" required ready 42 -R arbsec/orchestraitor 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr ready 42 --repo arbsec/orchestraitor' "$ORC_LOG" \
+  || fail "pr-mutate ready must take the service path: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate ready must not fail: $(cat "$GH_LOG")"
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRMUTATE" required close 42 -R arbsec/orchestraitor --comment "closing" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr close 42 --repo arbsec/orchestraitor --comment closing' "$ORC_LOG" \
+  || fail "pr-mutate close must pass extra flags through: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate close must not fail: $(cat "$GH_LOG")"
+
+# --- 26. missing config + enforcement=required: pr-mutate FAILS CLOSED
+#         (typed refusal, exit 2); gh is never reached — the forbidden
+#         effect (a personal-attribution PR write) does not occur.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'ORCEOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${2:-}" = get ]; then exit 1; fi   # no github_app.* key resolves
+exit 1
+ORCEOF
+chmod +x "$WORK/orc"
+OUT="$(run_script "$PRMUTATE" required ready 42 -R arbsec/orchestraitor 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-mutate missing-config+required must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-mutate missing-config+required must exit 2: $(cat "$GH_LOG")"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-mutate reached gh or orc gh-env despite required + missing config: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 27. dry-run: previews the gh command, writes nothing.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRMUTATE" required --dry-run edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
+grep -q '\[dry-run\] gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' <<<"$OUT" \
+  || fail "pr-mutate --dry-run must preview the gh command: $OUT"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-mutate --dry-run must not reach orc gh-env or gh: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 28. argument validation: unknown subcommand, missing PR number,
+#         non-numeric PR, and edit-without-flags are typed errors (exit 2),
+#         never a bash nounset crash, and never a gh invocation.
+for bad_case in \
+  "ready" \
+  "ready abc" \
+  "edit 42" \
+  "mutate 42"; do
+  : > "$ORC_LOG"; : > "$GH_LOG"
+  # shellcheck disable=SC2086
+  OUT="$(arg_err_case "$PRMUTATE" -R arbsec/orchestraitor $bad_case)" || true
+  grep -q 'error:' <<<"$OUT" || fail "pr-mutate $bad_case must print a typed error: $OUT"
+  grep -q 'rc:2' "$GH_LOG" || fail "pr-mutate $bad_case must exit 2: $(cat "$GH_LOG")"
+  if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
+    fail "pr-mutate $bad_case crashed with a bash nounset error: $OUT"
+  fi
+  if grep -q 'orc:github gh-env' "$ORC_LOG"; then
+    fail "pr-mutate $bad_case must be refused BEFORE any gh-env invocation: $(cat "$ORC_LOG")"
+  fi
+done
+
+echo "PASS pr-mutate service-identity routing + argument validation"
