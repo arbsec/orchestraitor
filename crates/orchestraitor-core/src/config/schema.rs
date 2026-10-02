@@ -55,9 +55,31 @@ pub struct RoutingDecisionProviderConfig {
     pub provider: Option<String>,
 }
 
+/// Enforcement mode for the GitHub App service identity (AGENTS.md; spec
+/// `10-orchestrator.md` §9.41).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceIdentityEnforcement {
+    /// Labelled bootstrap mode: when the `github_app` config does not resolve,
+    /// mutating GitHub operations take the personal-auth fallback with a loud
+    /// WARNING — a named bootstrap deviation, never a weakening of the org
+    /// rule for human operators.
+    #[default]
+    Recommended,
+    /// Fail-closed mode: when the `github_app` config does not resolve,
+    /// mutating GitHub operations fail with a typed error instead of falling
+    /// back to personal auth, and agent `git commit` paths refuse to produce
+    /// personal-identity commits.
+    Required,
+}
+
 /// GitHub App service identity configuration block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GitHubAppConfig {
+    /// How strictly the service identity is enforced when the `github_app`
+    /// config does not resolve. Default `recommended` (labelled bootstrap
+    /// deviation); `required` fails closed with a typed error.
+    pub enforcement: Option<ServiceIdentityEnforcement>,
     /// GitHub App slug (e.g. `arbsec-agent`).
     pub slug: Option<String>,
     /// GitHub App client ID, used as the JWT `iss` claim. The numeric app ID

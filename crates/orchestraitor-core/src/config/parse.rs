@@ -106,6 +106,7 @@ fn is_known_key(key: &str) -> bool {
         || matches!(
             key,
             "github_app.slug"
+                | "github_app.enforcement"
                 | "github_app.client_id"
                 | "github_app.installation_id"
                 | "github_app.private_key_uri"
@@ -231,6 +232,41 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"
             Some(["arbsec-agent".to_string()].as_slice())
         );
         Ok(())
+    }
+
+    #[test]
+    fn github_app_enforcement_defaults_to_recommended_and_roundtrips()
+    -> Result<(), OrchestraitorError> {
+        let report = parse_toml_config("[github_app]\nslug = \"arbsec-agent\"\n")?;
+        let github_app = report.config.github_app.as_ref();
+        assert_eq!(
+            github_app.and_then(|app| app.enforcement.as_ref()),
+            None,
+            "absent key must leave the field unset; consumers default to recommended"
+        );
+        let report = parse_toml_config("[github_app]\nenforcement = \"required\"\n")?;
+        assert_eq!(
+            report.config.github_app.and_then(|app| app.enforcement),
+            Some(crate::config::ServiceIdentityEnforcement::Required)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn github_app_enforcement_rejects_invalid_values() {
+        let error = parse_toml_config("[github_app]\nenforcement = \"optional\"\n");
+        assert!(
+            matches!(error, Err(OrchestraitorError::Config(_))),
+            "invalid enforcement value must be a typed config parse error"
+        );
+        let message = match error {
+            Err(err) => err.to_string().to_lowercase(),
+            Ok(_) => String::new(),
+        };
+        assert!(
+            message.contains("expected") || message.contains("invalid"),
+            "error must identify the enum domain: {message}"
+        );
     }
 
     #[test]

@@ -25,8 +25,14 @@ orc_lib_require_gh_scope "project"
 REPO="$(orc_lib_resolve_repo)"
 
 # Read current state to validate: caller must be the assignee.
-CURRENT="$(orc_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees)"
-MY_LOGIN="$(orc_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+CURRENT="$(orc_lib_gh_service issue view "$ISSUE" --repo "$REPO" --json number,assignees)"
+# `gh api user` fails with an installation token (user-context only), so the
+# service path resolves the bot identity via `orc github commit-author`.
+MY_LOGIN="$(orc_lib_resolve_my_login)"
+if [ -z "$MY_LOGIN" ]; then
+  echo "error: could not resolve the caller's GitHub identity (bot via orc github commit-author, personal via gh api user)." >&2
+  exit "$ORC_ERR_CONFIG"
+fi
 IS_ASSIGNED="$(echo "$CURRENT" | jq --arg me "$MY_LOGIN" '.assignees | any(.login == $me)')"
 
 if [ "$IS_ASSIGNED" != "true" ]; then

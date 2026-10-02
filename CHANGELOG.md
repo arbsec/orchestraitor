@@ -13,6 +13,36 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orc github` service-identity enforcement is now configurable through the
+  layered config key `github_app.enforcement` (`recommended` | `required`,
+  default `recommended`). In `recommended` mode, when the `github_app` config
+  is absent or partial, mutating GitHub operations from the skill-script
+  wrapper take the labelled personal-auth fallback with a loud WARNING;
+  direct `orc github` subcommands fail closed when complete configuration is
+  unavailable, as do configuration-resolution errors and failed
+  enforcement-config reads. In `required` mode the fail-closed behavior
+  applies everywhere and `orc github gh-env` additionally pins the bot
+  identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) into the child environment, so
+  a delegated child cannot stamp personal attribution even via
+  `git -c user.email=… commit` (the env vars beat per-invocation config):
+  the command refuses to delegate with a typed error naming the missing
+  `github_app.*` keys (no personal fallback), the skill-script wrapper
+  returns its typed config error without reaching `gh`, and delegation is
+  refused when the repo git identity (`git config user.email`) is not the
+  service-identity bot's canonical noreply email
+  (`<bot-id>+<slug>[bot]@users.noreply.github.com`,
+  resolved live from the App identity — a generic noreply address or a
+  suffix look-alike does not pass) — so agent-driven `git commit` paths
+  cannot stamp personal attribution onto commits. Wrapper-only deployments
+  may pin the mode with `ORC_GITHUB_APP_ENFORCEMENT=required`; a declared
+  `required` fails closed even when the `orc` binary is unavailable, and
+  `orc github gh-env` honors the same pin inside orc: an env-pinned
+  `required` runs the full required-mode gate (complete-config check plus
+  the canonical git-identity check) even when the layered config does not
+  declare it; invalid pin values fail closed. Invalid config values fail
+  closed at parse time. The default is a documented bootstrap
+  deviation (spec `10-orchestrator.md` §9.41): enforcement must be
+  `required` at public release.
 - The `board.query` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
   with two modes — a conjunctive filter search (item type, status, typed
@@ -57,6 +87,18 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   "The delivery loop" section describing the stage cycle, the guard set, and
   durable run state, and a "Now running" subsection listing the surfaces that
   ship today.
+- GitHub App service-identity write path (#445): `orc github api` executes one
+  authenticated GitHub REST call as the App installation (`gh api`-shaped
+  `--input`/`--field` body — `-f` values are always strings and GET/DELETE
+  fields ride the URL query string — verbatim body on stdout, exit code from
+  the HTTP status class), `orc github gh-env -- <command…>` runs one child with
+  `GH_TOKEN` set to a freshly minted installation token (token never printed by
+  `orc`; child exit code propagates), and `orc github commit-author` prints the
+  App's canonical commit identity (`name=`/`email=`) derived from `GET /app`,
+  not hardcoded. Every diagnostic stays token-free: the installation token is
+  held in memory only, injected solely into the `Authorization` header or the
+  child environment, and never printed, logged, or persisted. Removing the
+  `github_app` configuration fails all four `orc github` subcommands closed.
 - Pluggable decision-model selection behind the `DecisionProvider` trait
   (spec `30-model-routing.md` §9.45; #329): decision providers return typed
   structured outputs with calibrated confidence (`0.0..=1.0`, validated at
@@ -220,6 +262,66 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc github commit-author` authenticates `GET /app` with a freshly minted
+  App JWT instead of an installation token: `GET /app` is an App-level
+  endpoint that GitHub answers with 401 for installation tokens, so the
+  subcommand previously could never deliver its documented output. The bot
+  user id is resolved with a follow-up `GET /users/{slug}[bot]` authenticated
+  with the installation token (the `GET /app` payload carries the slug but
+  not the bot user; GitHub rejects the App JWT on `GET /users`, and on an
+  Enterprise Managed Users organization the bot profile is not publicly
+  visible, so an unauthenticated request would answer 404). The JWT is
+  secret material under the same guarantees as the token: held in memory
+  only, injected solely into the one `Authorization` header, never printed,
+  logged, or persisted.
+- `orc github gh-env` now rejects a child command that exists but lacks the
+  executable bit BEFORE minting a token; previously the token was minted and
+  then the spawn was guaranteed to fail.
+- Skill-script service-identity routing (`orc_lib_gh_service` in the
+  github-project-workflow / github-pr-lifecycle skills) now routes ALL
+  `gh` call sites that flow through the mutating scripts — the write
+  commands (merge-gate, claim-issue assignment, release-issue,
+  create-blocker, create-follow-up, decompose-issue) AND their per-script
+  precondition reads (issue view/list before a mutation, the create-blocker
+  cross-repo node-id lookups) — through the App installation token; only
+  the read-only helper `orc_lib_gh` stays on the ambient `gh` auth. The
+  caller identity for assignee-ownership checks is resolved from
+  `orc github commit-author` on the service path (`gh api user` is
+  user-context only and fails with an installation token); the
+  `gh api user` probe remains only on the labelled personal fallback. The
+  github_app config probe requires all three keys (`client_id`,
+  `installation_id`, `private_key_uri`), distinguishes config-absent
+  (labelled personal fallback) from a config resolution error (typed
+  failure — never a silent personal-auth fallback), and the gh-env handoff
+  no longer passes a stray `command` token into the child argv, which made
+  every routed call fail. A failed `orc config get
+  github_app.enforcement` read fails closed instead of permitting the
+  personal fallback (an unset key still falls back in recommended mode).
+- An invalid `ORC_GITHUB_APP_ENFORCEMENT` value in the skill-script wrapper
+  (anything other than `recommended` or `required`, e.g. `Required`) now
+  fails closed with a typed config error: previously an unrecognized pin
+  compared false against `required` and — with the `github_app` config
+  absent — silently took the labelled personal fallback, the fail-open
+  outcome the pin exists to prevent.
+- The skill-script caller-identity resolver
+  (`orc_lib_resolve_my_login`) now picks the ambient-vs-service route with
+  the SAME `github_app` config probe as the service wrapper instead of the
+  `orc` binary's presence: with `orc` installed but the `github_app` config
+  absent, mutating operations take the labelled personal fallback while the
+  identity resolver previously demanded the bot login (which the
+  mis-matched route could not resolve), breaking claim/release on exactly
+  the machines the fallback exists for. The config-absent case now resolves
+  the personal login via `gh api user`, matching the route the writes take;
+  a config-probe resolution error yields an empty identity (typed failure,
+  never a wildcard match).
+- `orc github api` `-f/--field` now behaves like `gh api -f/--raw-field`:
+  the value is ALWAYS sent as a string (previously values that happened to
+  parse as JSON — `123`, `null`, `{"x":1}` — were sent as that JSON type,
+  corrupting comment bodies that are valid JSON). GET/DELETE requests
+  encode `--field` pairs as percent-encoded URL query parameters (the `gh
+  api` shape) instead of silently dropping them into a JSON body the
+  endpoint ignores, and `--input` on GET/DELETE is a typed error rather
+  than a body GitHub never reads.
 - `orc routing resolve` no longer dirties `git status` when run at the default store
   path: `.orchestraitor/routing.db` and its WAL sidecars are gitignored. Routing
   decision store errors now include the underlying cause in their `Display`

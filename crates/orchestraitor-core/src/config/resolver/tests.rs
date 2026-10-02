@@ -190,6 +190,7 @@ fn github_app_fields_merge_across_layers() -> Result<(), OrchestraitorError> {
     let defaults = OrchestraitorConfig {
         github_app: Some(GitHubAppConfig {
             slug: Some(String::from("arbsec-agent")),
+            enforcement: None,
             client_id: None,
             installation_id: None,
             private_key_uri: None,
@@ -200,6 +201,7 @@ fn github_app_fields_merge_across_layers() -> Result<(), OrchestraitorError> {
     let user = OrchestraitorConfig {
         github_app: Some(GitHubAppConfig {
             slug: None,
+            enforcement: None,
             client_id: Some(String::from("Iv23linxUDbcc53QbFVK")),
             installation_id: Some(165_043_398),
             private_key_uri: Some("secret://keyring/orchestraitor-app-pem".parse()?),

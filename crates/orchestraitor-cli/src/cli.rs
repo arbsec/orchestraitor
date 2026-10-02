@@ -133,11 +133,57 @@ pub struct CampaignRunArgs {
 }
 
 /// `orc github` subcommands.
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum GitHubCommand {
     /// Mint one installation access token and print only non-secret metadata
     /// (expiry, installation id, SHA-256 fingerprint prefix — never the token).
     MintToken,
+    /// Execute one authenticated GitHub REST API call as the App installation.
+    ///
+    /// Mirrors `gh api` minimally: METHOD plus a repository-relative API path,
+    /// an optional JSON body from `--input FILE` (`-` = stdin) or `--field
+    /// key=value` pairs (always string values, like `gh api -f`; on GET/DELETE
+    /// the pairs ride the URL query string). Prints the response body verbatim
+    /// on stdout; exits 0 on 2xx, non-zero otherwise. The minted token is
+    /// never printed.
+    Api(ApiArgs),
+    /// Run one child command with `GH_TOKEN` set to a freshly minted
+    /// installation token (never printed by orc; the child's environment is
+    /// the child's responsibility). Child stdout/stderr pass through and the
+    /// child's exit code propagates.
+    GhEnv(GhEnvArgs),
+    /// Print the App's canonical commit identity as `name=…` / `email=…`
+    /// lines, derived from the authenticated App (`GET /app`) — never
+    /// hardcoded.
+    CommitAuthor,
+}
+
+/// Arguments for `orc github api`.
+#[derive(Debug, Clone, Args)]
+pub struct ApiArgs {
+    /// HTTP method: GET, POST, PATCH, PUT, or DELETE.
+    pub method: String,
+    /// API path relative to the configured base URL (e.g.
+    /// `/repos/OWNER/REPO/pulls`).
+    pub path: String,
+    /// Read the JSON request body from a file (`-` reads stdin). Not valid
+    /// with GET/DELETE (GitHub ignores bodies there).
+    #[arg(long)]
+    pub input: Option<String>,
+    /// Add a request field `key=value` (repeatable). The value is ALWAYS a
+    /// string, like `gh api -f/--raw-field` (`-f body=123` sends `"123"`,
+    /// never the number `123`). On GET/DELETE the pairs become URL query
+    /// parameters; otherwise they merge into an `--input` object body.
+    #[arg(long = "field", short = 'f')]
+    pub fields: Vec<String>,
+}
+
+/// Arguments for `orc github gh-env`.
+#[derive(Debug, Clone, Args)]
+pub struct GhEnvArgs {
+    /// Child command and arguments, after `--`.
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
 
 /// Arguments for `orc init`.

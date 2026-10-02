@@ -37,6 +37,42 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"  # or secret://env/<V
   (`.agents/project/github-project.local.toml`), or `$ORC_SERVICE_IDENTITIES`,
   defaulting to `arbsec-agent`.
 
+### Enforcement (`github_app.enforcement`)
+
+The layered config key `github_app.enforcement` controls how strictly the
+service identity is enforced when the `github_app` block does not resolve
+(absent, partial, or unresolvable). Values:
+
+- `recommended` (default): current behaviour — the skill-script wrapper
+  (`orc_lib_gh_service`) takes the labelled personal-auth fallback with a loud
+  `WARNING` on stderr. This is a **named bootstrap deviation** (spec
+  `10-orchestrator.md` §9.41): the org rule stays "never personal account";
+  the fallback is a labelled, temporary bridge until the App identity is
+  configured everywhere, never an equal option.
+- `required`: fail closed. `orc github gh-env` refuses to delegate (typed
+  error naming the missing `github_app.*` keys) — no personal fallback, no
+  WARNING; the skill-script wrapper returns its typed config error (exit 2)
+  without reaching `gh`. In this mode the wrapper also verifies the repo git
+  identity before delegating: `git config user.email` must EQUAL the bot's
+  canonical noreply email (`<bot-id>+<slug>[bot]@users.noreply.github.com`),
+  resolved live from the App identity (`GET /app` → slug,
+  `GET /users/{slug}[bot]` → id) — a suffix match would accept look-alikes
+  like `anything+<slug>[bot]@…`, so the comparison is exact. Set the per-repo
+  gitconfig to the bot identity (`user.name = arbsec-agent[bot]`,
+  `user.email` = the canonical email printed by
+  `orc github commit-author`) when operating under `required`.
+
+Invalid values fail closed at parse time (typed configuration error). The
+effective value is visible through `orc config get github_app.enforcement`
+and `orc config explain github_app.enforcement`. Wrapper-only deployments
+(where the skill scripts run without `orc` on `PATH`) may pin the mode with
+`ORC_GITHUB_APP_ENFORCEMENT=required`, which takes precedence over the
+layered config; when it declares `required`, a missing `orc` binary fails
+closed instead of falling back to personal auth. `orc github gh-env` honors
+the same pin: an env-pinned `required` runs the full required-mode gate
+(complete-config check plus the canonical git-identity check) even when the
+layered config does not declare it, and an invalid pin value fails closed.
+
 ### Why two `service_identities` surfaces (recorded decision)
 
 The ready-queue skill script runs outside the daemon today and owns its local
@@ -86,3 +122,120 @@ token is held in memory only; it is never printed, logged, or persisted
 Failures exit non-zero with a diagnostic that names the failing layer
 (config key, `secret://` reference, transport kind, or HTTP status) and never
 contains the PEM, JWT, or token (spec `40-arbitraitor-integration.md` §9.23.4).
+
+## `orc github api`
+
+One authenticated GitHub REST call as the App installation — the service-identity
+write path (AGENTS.md "Never operate on GitHub as a personal account"; workflow
+policy `.agents/project/orchestraitor-workflow.md`). Mirrors `gh api` minimally:
+
+```sh
+orc github api GET /repos/arbsec/orchestraitor/pulls/446
+orc github api POST repos/arbsec/orchestraitor/issues/445/comments \
+    --field body="Reviewed by arbsec-agent"
+orc github api POST /repos/arbsec/orchestraitor/pulls --input body.json
+orc github api PATCH /repos/arbsec/orchestraitor/issues/445 --input - <<'JSON'
+{"state": "closed"}
+JSON
+```
+
+Acceptance check for issue #445 (record it as evidence when complete): post a
+comment or a review on a REAL pull request as `arbsec-agent[bot]` — an issue
+comment does not satisfy it. For example, against an actual PR number:
+
+```sh
+orc github api POST repos/arbsec/orchestraitor/issues/<PR-NUMBER>/comments \
+    --field body="Identity check: posted by arbsec-agent[bot] via the App installation token."
+```
+
+- `METHOD` is one of `GET`, `POST`, `PATCH`, `PUT`, `DELETE`; `PATH` is relative
+  to the configured base URL (leading `/` optional).
+- The JSON body comes from `--input FILE` (`-` = stdin; not valid with
+  GET/DELETE — GitHub ignores request bodies there) and/or repeatable
+  `--field key=value` pairs (`value` is ALWAYS a string, like `gh api
+  -f/--raw-field` — `-f body=123` sends `"123"`, never the number `123`;
+  `-f body={"x":1}` sends the literal text, not an object). On GET/DELETE the
+  pairs become percent-encoded URL query parameters (the `gh api` shape);
+  otherwise `--field` merges into an `--input` object body, and combining it
+  with a non-object body is a typed error.
+- The minted installation token is attached as `Authorization: Bearer …` only.
+  The response body prints to stdout verbatim: it is the caller's business,
+  including on failures. The exit code is 0 for 2xx, non-zero otherwise; the
+  non-zero diagnostic carries the HTTP status and endpoint shape — never the
+  Authorization header, and never the response body (the body was already
+  printed once, on stdout).
+- Every diagnostic is token-free. The token lives in memory
+  (`secrecy::SecretString`) for the duration of the process and is never
+  printed, logged, or persisted.
+
+## `orc github gh-env`
+
+Executes ONE child command with `GH_TOKEN` set to a freshly minted
+installation token — the handoff for `gh`-based flows (PR creation, review
+threads) that predate the API passthrough:
+
+```sh
+orc github gh-env -- gh pr create --draft --title "…" --body "…"
+orc github gh-env -- gh pr view 446 --json state
+```
+
+- The child's stdout/stderr pass through unchanged and the child's exit code
+  propagates (a missing exit code maps to 1).
+- In `required` enforcement mode the child's git identity is PINNED via
+  `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/
+  `GIT_COMMITTER_EMAIL` (the canonical bot identity from `commit-author`).
+  These environment variables take precedence over repo config AND over
+  per-invocation `git -c user.email=…` overrides, so a delegated child cannot
+  stamp personal attribution onto commits even if it rewrites its identity.
+  Identity values are non-secret (public bot login + noreply email).
+- The token never appears in `orc`'s own output: it exists only in the child
+  process environment. **Trust model:** the child can read and leak its own
+  environment — that is the operator's responsibility, the same model as
+  `gh auth token | xargs`. Do not point `gh-env` at commands you do not trust.
+- The child command is validated to exist on `PATH` (or as a direct path) AND
+  carry the executable bit BEFORE minting; a missing or non-executable command
+  is a typed error and no token is minted.
+
+## `orc github commit-author`
+
+Prints ONLY the App's canonical commit identity as two lines, derived from the
+authenticated App (`GET /app` → `slug`, then
+`GET /users/{slug}[bot]` → the bot user id → the GitHub noreply email
+convention) — never hardcoded. `GET /app` is an **App-level endpoint**:
+GitHub rejects installation tokens with 401, so this subcommand authenticates
+it with a freshly minted **App JWT** (RS256, `iss = client_id`, 10-minute
+lifetime) signed from the App private key — the same secret material and the
+same secrecy rules as the mint path. The JWT is held in memory only, injected
+solely into the one `Authorization` header, and never printed, logged, or
+persisted. The bot-user lookup is authenticated with the installation token
+for the configured organization's installation (GitHub rejects the App JWT on
+`GET /users`, and on an Enterprise Managed Users organization the bot profile
+is not publicly visible — an unauthenticated request would answer 404). The
+other three subcommands (`mint-token`, `api`, `gh-env`) keep using
+installation tokens.
+
+```sh
+$ orc github commit-author
+name=arbsec-agent[bot]
+email=334074867+arbsec-agent[bot]@users.noreply.github.com
+```
+
+The output above is the contract for a correctly configured App. It requires
+live GitHub access with the registered App's private key: the request
+authenticates the App itself, not an installation, so a stubbed
+installation-token endpoint cannot VERIFY the JWT — verifying the signature
+needs the real App. A stub that also serves `GET /app` and
+`GET /users/{slug}[bot]` CAN satisfy the CLI test (the CLI only needs
+well-formed responses over HTTP); it just proves response handling, not App
+identity. Failures (unresolvable private key, unreachable API, HTTP 401 on a
+malformed JWT) exit non-zero with a typed diagnostic that never contains the
+PEM, the JWT, or any token. Any malformation in the `/app` or
+`/users/{slug}[bot]` payload is a typed error; the payload is never echoed.
+
+## Rollback
+
+Removing the `github_app` configuration (or unsetting any of `client_id`,
+`installation_id`, `private_key_uri`) makes all four subcommands fail closed
+with a typed `github_app.*` configuration error — the commands mint nothing and
+fall back to nothing. Roll back the binary by reverting this change; there is
+no persisted state to clean up.

@@ -101,6 +101,195 @@ orc_lib_gh() {
   command "${GH_BIN:-gh}" "$@"
 }
 
+# --- Service-identity gh routing (AGENTS.md; .agents/project/orchestraitor-workflow.md) ---
+# Agent-driven GitHub operations MUST authenticate as the arbsec-agent GitHub
+# App service identity, never a personal account. Mutating call sites (the
+# `orc_lib_run_or_dry_run` execution path, plus per-script precondition reads
+# and the create-blocker cross-repo edge write) route through
+# `orc_lib_gh_service`, which runs `orc github gh-env --` so the child's
+# GH_TOKEN is a freshly minted installation token (the token is never printed
+# by orc; it exists only in the child's environment). Read-only helpers
+# (`orc_lib_gh`) stay on the ambient `gh` auth.
+#
+# Identity resolution: `gh api user` is a USER-context endpoint and fails with
+# an installation token (401), silently yielding an empty login that breaks
+# assignee-ownership checks. The route is chosen with the SAME probe
+# `orc_lib_gh_service` uses (`orc_lib_has_github_app_config`): when the
+# github_app config resolves (service route), the caller's identity is the App
+# bot user, resolved from `orc github commit-author` (the canonical
+# `name=<slug>[bot]` line); the `gh api user` probe is used ONLY when the
+# AMBIENT route is selected (config absent — the same state that sends the
+# mutations to the labelled personal fallback) — never as a fallback for a
+# failing service-route resolution: with complete App config the operations run
+# as the App installation, so mixing in the personal login would create a
+# principal mismatch (claim/release ownership checks evaluated against the
+# wrong identity). A probe resolution error or a failing service-route
+# resolution yields an EMPTY result (fail closed), which the calling scripts
+# treat as a typed config failure.
+#
+# Usage: orc_lib_resolve_my_login -> prints the caller's login (bot or human).
+#   - config absent (ambient route)   -> login from `gh api user`.
+#   - config resolves (service route) -> `<slug>[bot]` from commit-author;
+#     commit-author failure           -> EMPTY output (callers fail closed).
+#   - config probe resolution error   -> EMPTY output (callers fail closed).
+#   - callers must treat an empty login as a typed failure, never a wildcard
+#     match.
+orc_lib_resolve_my_login() {
+  local login="" probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  if [ "$probe_status" -eq 1 ]; then
+    # Ambient route — the same route orc_lib_gh_service takes for absent
+    # config: `gh api user` is user-context and works with the ambient
+    # personal auth; the service identity plays no role here.
+    login="$(orc_lib_gh api user --jq '.login' 2>/dev/null || true)"
+    printf '%s' "$login"
+    return 0
+  fi
+  [ "$probe_status" -eq 0 ] || return 0 # probe error -> EMPTY (fail closed)
+  # Service route: the principal is the App bot user, full stop.
+  login="$("${ORC_BIN:-orc}" github commit-author 2>/dev/null | sed -n 's/^name=//p' || true)"
+  printf '%s' "$login"
+}
+#
+# Enforcement mode comes from the layered config key
+# `github_app.enforcement`:
+#   - `recommended` (default): config absent/partial -> labelled
+#     personal-auth fallback, loud WARNING.
+#   - `required`: config absent/partial -> typed failure, no fallback, no
+#     personal auth. In this mode the wrapper also verifies the repo git
+#     identity matches the service-identity bot pattern before delegating
+#     (agent `git commit` paths must not produce personal-identity commits).
+# Wrapper-only deployments may pin the mode via $ORC_GITHUB_APP_ENFORCEMENT
+# (takes precedence over the layered config; when set to `required`, even a
+# missing orc binary fails closed instead of falling back).
+#
+# Usage: orc_lib_gh_service <args...>
+#   - complete github_app config -> gh runs as the App installation.
+#   - recommended + absent/partial -> labelled personal-auth fallback, loud warning.
+#   - required + absent/partial    -> typed config failure (exit 2).
+#   - config resolution error      -> typed failure; never silently personal.
+orc_lib_gh_service() {
+  # `|| probe_status=$?` keeps the capture safe under `set -e` regardless of
+  # the caller's context, and is always the status of THIS probe call.
+  local probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  if [ "$probe_status" -eq 0 ]; then
+    command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" "$@"
+  elif [ "$probe_status" -eq 2 ]; then
+    echo "error: github_app configuration is present but could not be resolved;" >&2
+    echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+    return "$ORC_ERR_CONFIG"
+  elif orc_lib_enforcement_required; then
+    echo "error: service-identity enforcement is \`required\` (github_app.enforcement);" >&2
+    echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+    echo "       resolve the github_app config (client_id, installation_id, private_key_uri)" >&2
+    echo "       or set github_app.enforcement = \"recommended\"; see docs/cli/orc-github.md" >&2
+    return "$ORC_ERR_CONFIG"
+  elif [ "$(orc_lib_enforcement_probe_status)" -eq 2 ]; then
+    # The enforcement read itself failed (orc available, config get errored):
+    # fail closed — a broken read must never widen into the personal fallback.
+    return "$ORC_ERR_CONFIG"
+  else
+    echo "WARNING: service-identity fallback — github_app config is not set;" >&2
+    echo "         running gh as the PERSONAL account (policy: labelled fallback only)." >&2
+    command "${GH_BIN:-gh}" "$@"
+  fi
+}
+
+# Reads the effective `github_app.enforcement` for this deployment. Exit
+# codes: 0 = `required` (fail closed), 1 = `recommended`/unset/unknown,
+# 2 = the `orc config get` probe itself failed (orc crash, unreadable
+# layered config) — a state the caller must fail closed on, never read as
+# "recommended". The status of the most recent probe is also available via
+# `orc_lib_enforcement_probe_status` so callers can distinguish the three.
+# Precedence: $ORC_GITHUB_APP_ENFORCEMENT (wrapper-only deployments where the
+# declaration must survive a missing orc binary) > `orc config get
+# github_app.enforcement`. A missing orc binary is NOT "recommended": when
+# the declaration says `required`, failing closed is the only safe reading —
+# a labelled personal fallback must never depend on tool availability.
+#
+# A FAILED `orc config get` (non-zero exit) is NOT the same as an UNSET key
+# (exit 0, empty output): unset keeps the recommended fallback, a read
+# failure fails closed — in required mode a broken read must never widen
+# into the personal fallback.
+ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+orc_lib_enforcement_probe_status() {
+  printf '%s' "$ORC_LIB_ENFORCEMENT_PROBE_STATUS"
+}
+
+orc_lib_enforcement_required() {
+  if [ -n "${ORC_GITHUB_APP_ENFORCEMENT:-}" ]; then
+    # The pin is authoritative: `required` fails closed, `recommended` keeps
+    # the labelled fallback, and ANY other value is an operator error — the
+    # pin exists to fail closed, so an unrecognized value must never widen
+    # into the personal fallback (that would be the fail-open outcome the
+    # pin prevents).
+    case "$ORC_GITHUB_APP_ENFORCEMENT" in
+      required)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+        return 0
+        ;;
+      recommended)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+        return 1
+        ;;
+      *)
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+        echo "error: invalid ORC_GITHUB_APP_ENFORCEMENT value \`$ORC_GITHUB_APP_ENFORCEMENT\`" >&2
+        echo "       (expected \`recommended\` or \`required\`); refusing to fall back to" >&2
+        echo "       personal auth under an ambiguous enforcement declaration." >&2
+        return 2
+        ;;
+    esac
+  fi
+  ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
+  command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1
+  local mode probe_status=0
+  mode="$("${ORC_BIN:-orc}" config get github_app.enforcement 2>/dev/null)" || probe_status=$?
+  if [ "$probe_status" -ne 0 ]; then
+    # A failed `orc config get` is ambiguous between "key unset" (a legal
+    # deployment state: real `orc` exits non-zero for an unset key with no
+    # diagnostic) and "read failure" (unreadable layers, provider crash: a
+    # diagnostic is printed to stderr). Distinguish by the diagnostic: a
+    # silent non-zero exit is the documented unset shape; anything that
+    # printed an error is a read failure -> fail closed.
+    if [ -n "$("${ORC_BIN:-orc}" config get github_app.enforcement 2>&1 >/dev/null)" ]; then
+      ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+      echo "error: failed to read github_app.enforcement from the layered config;" >&2
+      echo "       refusing to default to the personal-auth fallback — fix the" >&2
+      echo "       configuration or set ORC_GITHUB_APP_ENFORCEMENT explicitly." >&2
+      return 2
+    fi
+  fi
+  [ "$mode" = "required" ]
+}
+
+# Detects whether the layered orc config resolves a COMPLETE github_app block
+# (all of client_id, installation_id, private_key_uri). Exit codes:
+#   0 (yes)    -> the caller may take the service-identity path.
+#   1 (absent) -> no github_app key resolves anywhere: the labelled personal
+#                 fallback is allowed (config-absent, not an orc failure).
+#   2 (error)  -> orc is available but the layered config could not be
+#                 resolved: fail closed (never silently fall back to personal
+#                 auth on a broken configuration).
+orc_lib_has_github_app_config() {
+  if ! command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! "${ORC_BIN:-orc}" config validate >/dev/null 2>&1; then
+    return 2
+  fi
+  local key
+  for key in client_id installation_id private_key_uri; do
+    if ! "${ORC_BIN:-orc}" config get "github_app.${key}" >/dev/null 2>&1; then
+      # A partial config is incomplete for minting, but it is a deployment
+      # state, not a resolution error: the caller takes the labelled fallback.
+      return 1
+    fi
+  done
+  return 0
+}
+
 # --- jq wrapper: parse gh --json safely ----------------------------------------
 # Usage: orc_lib_jq_filter <gh-json-stdin> <jq-filter>  -> prints filtered result
 orc_lib_jq_filter() {
@@ -160,8 +349,8 @@ orc_lib_run_or_dry_run() {
     return 0
   fi
   case "$kind" in
-    gh)        command "${GH_BIN:-gh}" "${_arr[@]}" ;;
-    graphql)   command "${GH_BIN:-gh}" api graphql "${_arr[@]}" ;;
+    gh)        orc_lib_gh_service "${_arr[@]}" ;;
+    graphql)   orc_lib_gh_service api graphql "${_arr[@]}" ;;
     *)         printf 'error: unknown run kind %q\n' "$kind" >&2; return "$ORC_ERR_CONFIG" ;;
   esac
 }

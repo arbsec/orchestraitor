@@ -39,7 +39,9 @@ jobs:
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Skill script self-tests
-        run: .agents/skills/github-project-workflow/scripts/tests/ready-queue-filter.bash
+        run: |
+          bash .agents/skills/github-project-workflow/scripts/tests/ready-queue-filter.bash
+          bash .agents/skills/github-project-workflow/scripts/tests/gh-env-wrapper.bash
 
   test:
     name: Test (${{ matrix.os }})

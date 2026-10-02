@@ -162,6 +162,7 @@ impl RoutingDecisionProviderConfig {
 
 impl GitHubAppConfig {
     fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.enforcement, next.enforcement);
         merge_scalar(&mut self.slug, next.slug);
         merge_scalar(&mut self.client_id, next.client_id);
         merge_scalar(&mut self.installation_id, next.installation_id);

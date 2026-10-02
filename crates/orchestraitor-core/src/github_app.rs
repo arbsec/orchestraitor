@@ -369,10 +369,19 @@ impl GitHubAppAuth {
         }
     }
 
-    fn mint_once(
-        &self,
-        transport: &dyn InstallationTokenTransport,
-    ) -> Result<InstallationToken, GitHubAppError> {
+    /// Returns a freshly signed App JWT for direct App-level API calls
+    /// (`GET /app`), resolving the private key through its `secret://` URI.
+    /// The JWT is secret material like the PEM it is derived from: it is
+    /// wrapped in a [`SecretString`], never printed, logged, or persisted,
+    /// and injected only into an `Authorization` header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitHubAppError::PrivateKeyResolution`] when the secret
+    /// reference cannot be resolved (fail-closed, no ambient credential),
+    /// [`GitHubAppError::InvalidPrivateKeyPem`] when the PEM cannot be
+    /// parsed, and [`GitHubAppError::JwtSigning`] when signing fails.
+    pub fn app_jwt(&self) -> Result<SecretString, GitHubAppError> {
         let pem = (self.pem_resolver)(&self.private_key_uri, &self.keyring_service).map_err(
             |source| GitHubAppError::PrivateKeyResolution {
                 uri: self.private_key_uri.as_uri(),
@@ -381,6 +390,14 @@ impl GitHubAppAuth {
         )?;
         let jwt = mint_app_jwt((self.clock)(), &self.client_id, &pem)?;
         drop(pem);
+        Ok(jwt)
+    }
+
+    fn mint_once(
+        &self,
+        transport: &dyn InstallationTokenTransport,
+    ) -> Result<InstallationToken, GitHubAppError> {
+        let jwt = self.app_jwt()?;
         let response = transport.create_access_token(self.installation_id, &jwt)?;
         response.into_validated((self.clock)())
     }
