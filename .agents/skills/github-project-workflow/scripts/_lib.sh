@@ -204,9 +204,17 @@ orc_lib_gh_service() {
 # `orc_lib_enforcement_probe_status` so callers can distinguish the three.
 # Precedence: $ORC_GITHUB_APP_ENFORCEMENT (wrapper-only deployments where the
 # declaration must survive a missing orc binary) > `orc config get
-# github_app.enforcement`. A missing orc binary is NOT "recommended": when
-# the declaration says `required`, failing closed is the only safe reading —
-# a labelled personal fallback must never depend on tool availability.
+# github_app.enforcement` > the pinned TOML. When orc is UNAVAILABLE, the
+# probe falls back to grepping the repo's orchestraitor.toml directly for the
+# `github_app.enforcement` declaration (resolved from $ORC_REPO_TOML or the
+# working tree root `$(git rev-parse --show-toplevel)/orchestraitor.toml`): a repo that has pinned `required` must stay
+# fail closed even without the tooling — a labelled personal fallback must
+# never depend on tool availability. A missing pin line is "recommended"
+# (exit 1); the file is readable but declares an unrecognized value, or the
+# file exists yet cannot be read, is ambiguous (exit 2, fail closed).
+# An absent/no-repo context is "recommended" (exit 1): the wrapper-wide
+# default still applies and $ORC_GITHUB_APP_ENFORCEMENT remains the
+# deployment-independent escape hatch.
 #
 # A FAILED `orc config get` (non-zero exit) is NOT the same as an UNSET key
 # (exit 0, empty output): unset keeps the recommended fallback, a read
@@ -243,7 +251,51 @@ orc_lib_enforcement_required() {
     esac
   fi
   ORC_LIB_ENFORCEMENT_PROBE_STATUS=0
-  command -v "${ORC_BIN:-orc}" >/dev/null 2>&1 || return 1
+  if ! command -v "${ORC_BIN:-orc}" >/dev/null 2>&1; then
+    # orc is unavailable: read the pinned declaration straight from the repo
+    # TOML (path documented in the block comment above). Fail closed when the
+    # pin says `required`; the un-pinned/absent default stays "recommended".
+    local toml pin
+    if [ -n "${ORC_REPO_TOML:-}" ]; then
+      toml="$ORC_REPO_TOML"
+    else
+      # The pin is a checked-in repo file: resolve it against the WORKING TREE
+      # (not the git dir — a linked worktree's git dir is under the main
+      # repo's .git/worktrees/ and does not contain the TOML).
+      toml="$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null)/orchestraitor.toml"
+    fi
+    if [ ! -f "$toml" ]; then
+      return 1 # no pinned declaration: wrapper-wide default applies
+    fi
+    pin="$(awk '
+      /^[[:space:]]*\[github_app\][[:space:]]*$/ { inblock = 1; next }
+      inblock && /^[[:space:]]*\[/ { inblock = 0 }
+      inblock && match($0, /^[[:space:]]*enforcement[[:space:]]*=/) {
+        sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, "")
+        gsub(/^"|"$/, ""); gsub(/^'"'"'|'"'"'$/, ""); print; exit
+      }
+    ' "$toml" 2>/dev/null)" || {
+      ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+      echo "error: failed to read github_app.enforcement from $toml;" >&2
+      echo "       refusing to default to the personal-auth fallback — fix the" >&2
+      echo "       file or set ORC_GITHUB_APP_ENFORCEMENT explicitly." >&2
+      return 2
+    }
+    if [ -z "$pin" ]; then
+      return 1 # TOML exists but the pin line is absent: recommended default
+    fi
+    if [ "$pin" = "required" ]; then
+      return 0
+    fi
+    if [ "$pin" != "recommended" ]; then
+      ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+      echo "error: invalid github_app.enforcement value \`$pin\` in $toml" >&2
+      echo "       (expected \`recommended\` or \`required\`); refusing to fall back to" >&2
+      echo "       personal auth under an ambiguous enforcement declaration." >&2
+      return 2
+    fi
+    return 1
+  fi
   local mode probe_status=0
   mode="$("${ORC_BIN:-orc}" config get github_app.enforcement 2>/dev/null)" || probe_status=$?
   if [ "$probe_status" -ne 0 ]; then
@@ -312,15 +364,27 @@ orc_lib_resolve_repo() {
 }
 
 # --- Pre-flight check ----------------------------------------------------------
-# Verifies gh is installed + authenticated for the required scope.
+# Verifies gh is installed and that the gh route that will actually run the
+# calls is authenticated. Under service-identity enforcement (github_app
+# config resolves, or enforcement is pinned `required`) mutations run with an
+# App installation token inside `orc github gh-env --` — the AMBIENT
+# `gh auth status` says nothing about that route (an installation token never
+# appears there), so the ambient check is skipped rather than failing a valid
+# service-only deployment. On the ambient route (no github_app config,
+# `recommended` enforcement) the ambient `gh auth` state is the real auth.
 orc_lib_require_gh_scope() {
   local required_scope="${1:-}"
   if ! command -v gh >/dev/null 2>&1; then
     echo "error: gh CLI not found. Install from https://cli.github.com/" >&2
     exit "$ORC_ERR_CONFIG"
   fi
+  if orc_lib_has_github_app_config; then
+    return 0 # service route: the installation token minted by orc gh-env carries the App permissions
+  fi
   if ! gh auth status >/dev/null 2>&1; then
-    echo "error: not authenticated to gh. Run 'gh auth login'." >&2
+    echo "error: not authenticated to gh and no github_app service config is set." >&2
+    echo "       Either resolve the github_app config (service route) or run 'gh auth login'" >&2
+    echo "       for the labelled fallback (only where enforcement is 'recommended')." >&2
     exit "$ORC_ERR_CONFIG"
   fi
   if [ -n "$required_scope" ]; then
