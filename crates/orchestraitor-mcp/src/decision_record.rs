@@ -159,8 +159,12 @@ pub struct DecisionRecordSkip {
 }
 
 /// The tool-boundary §9.35 decision record input. Required fields are
-/// non-`Option`; a missing required field fails deserialization with a
-/// typed [`DecisionRecordError::InvalidShape`] refusal — never a default.
+/// non-`Option`; a missing required field fails DESERIALIZATION before the
+/// tool runs — rmcp converts the serde error into an `invalid_params`
+/// protocol error (`failed to deserialize parameters: missing field …`),
+/// never a default. A present-but-invalid value is refused inside the tool
+/// with a typed [`DecisionRecordError`] and a structured
+/// `decision_record_failed` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DecisionRecordInput {
     /// Whether the pass selected a task or was a typed no-op.
@@ -205,9 +209,12 @@ pub struct DecisionRecordInput {
 /// NEVER enters an error string (§9.23.4).
 #[derive(Debug, thiserror::Error)]
 pub enum DecisionRecordError {
-    /// The input is not a valid §9.35 record shape (missing required field
-    /// or mistyped value). The message carries serde's shape description
-    /// only — never record content.
+    /// The input is not a valid §9.35 record shape (mistyped value). The
+    /// message carries serde's shape description only — never record
+    /// content. Note: a MISSING required field never reaches this variant —
+    /// it fails deserialization before the tool runs and surfaces as an
+    /// rmcp `invalid_params` protocol error, not a structured
+    /// `decision_record_failed` payload.
     #[error("decision.record input is not a valid §9.35 record shape: {message}")]
     InvalidShape {
         /// Static shape description (field names, expected types).
@@ -716,19 +723,15 @@ fn record_invocation(
     chain: &DelegationChain,
     audit: &mut (dyn AuditStore + Send),
 ) -> Result<(), DecisionRecordError> {
-    let previous = audit
-        .query(&orchestraitor_events::EventQuery {
-            category: None,
-            since_seq: None,
-            until_seq: None,
-            include_uninterpreted: true,
-        })
+    // Chain head only (PR #479 review round 4): the envelope needs the
+    // store's current length and the last hash — never the whole history.
+    // `AuditStore::head` serves that without cloning the records.
+    let head = audit
+        .head()
         .map_err(|_| DecisionRecordError::EventStore {
             reason: "audit query failed",
         })?;
-    let seq_base = previous.len();
-    let prev_hash = previous.last().map(|record| record.hash.clone());
-    let envelope = build_invocation_event(stored, chain, seq_base, prev_hash)?;
+    let envelope = build_invocation_event(stored, chain, head.seq_base, head.prev_hash)?;
     audit
         .append(envelope)
         .map(|_| ())
@@ -1171,8 +1174,14 @@ mod tests {
         ));
     }
 
-    /// Deserialization refuses a record missing a REQUIRED §9.35 field with
-    /// a typed shape error — the tool never defaults a required field.
+    /// Deserialization refuses a record missing a REQUIRED §9.35 field —
+    /// the tool never defaults a required field. The failure is serde's
+    /// `missing field` error: on the real gateway path rmcp converts it
+    /// into an `invalid_params` protocol error
+    /// (`failed to deserialize parameters: missing field …`) BEFORE the
+    /// tool runs — it never becomes a `DecisionRecordError::InvalidShape`
+    /// refusal or a structured `decision_record_failed` payload (PR #479
+    /// review round 4 corrected this doc claim).
     #[test]
     fn missing_required_json_field_is_a_typed_shape_refusal() {
         let json = serde_json::json!({
@@ -1185,8 +1194,8 @@ mod tests {
         });
         let parsed: Result<DecisionRecordInput, serde_json::Error> = serde_json::from_value(json);
         let error = parsed.expect_err("missing required fields must fail deserialization");
-        // The refusal is typed (`InvalidShape`) and the serde description
-        // names the missing field — never record content.
+        // The serde description names the missing field — never record
+        // content — and is a plain serde error, not the typed enum.
         assert!(
             error.to_string().contains("missing field"),
             "serde reports the missing field by name: {error}"
