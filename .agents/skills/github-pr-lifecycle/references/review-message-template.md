@@ -34,7 +34,7 @@ VERIFY
 1. Read the full diff of {{base_sha}}..{{head_sha}}.
 2. Read the complete current content of every changed file — do not judge from
    diff hunks alone.
-3. Run the repository gates: fmt, clippy, nextest, doc. Record real counts.
+3. Run the applicable repository gates: fmt, clippy, nextest, doc. Record real counts; mark a gate that does not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
 4. Check CI status for {{head_sha}} with `pr-checks`.
 
 SCOPE{{scope_note_line}}
@@ -76,7 +76,7 @@ VERIFY
 1. Read the full diff of 0ee4c8f..aca12e5.
 2. Read the complete current content of every changed file — do not judge from
    diff hunks alone.
-3. Run the repository gates: fmt, clippy, nextest, doc. Record real counts.
+3. Run the applicable repository gates: fmt, clippy, nextest, doc. Record real counts; mark a gate that does not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
 4. Check CI status for aca12e5 with `pr-checks`.
 
 SCOPE: focus on crates/orchestraitor-routing and any change to DecisionProvider
