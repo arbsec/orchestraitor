@@ -37,7 +37,7 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
   CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
   MARKER="$(echo "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
-  DESC="$(echo "$line" | sed 's/.*orc:[A-Za-z0-9_-]*\s*-->\s*//' || true)"
+  DESC="$(echo "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
 done)"
 
