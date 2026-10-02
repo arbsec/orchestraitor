@@ -60,8 +60,12 @@ boundary; the error text is a static label — record content never enters an
 error string). Refusals leave the store AND the audit log untouched:
 
 - missing required fields (`role`, `provider`, `model`, `precedence_path`,
-  `rationale`) — including the JSON-shape refusal when a required field is
-  absent from the call entirely;
+  `rationale`) — a required field absent from the call entirely fails
+  deserialization BEFORE the tool runs and surfaces as an MCP
+  `invalid_params` protocol error (`failed to deserialize parameters:
+  missing field …`); present-but-invalid values are refused inside the
+  tool with typed reasons and a structured `decision_record_failed`
+  payload;
 - a `selected` decision without the selected task, or with a no-op reason;
 - a `no-op` decision without one of the three typed reasons, or with a
   selected task;

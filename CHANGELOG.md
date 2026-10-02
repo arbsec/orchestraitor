@@ -49,7 +49,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   the campaign store — the same record shape and store `orc campaign run
   --once` writes, never a second format. Append-only: no update or delete
   path exists on the tool; a re-append creates a new row and the original
-  row is never touched. Malformed records (missing required fields,
+  row is never touched. Malformed records (missing required fields — which
+  fail deserialization as MCP `invalid_params` errors before the tool runs,
   kind/reason inconsistencies, field-bound overflows) are refused with typed
   reasons, leaving the store and audit log untouched. Records carrying
   secret-shaped material (`secret://` URIs, `sk-`-prefixed keys, Bearer
