@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use orchestraitor_agent_catalog::RoleRoutingDecision;
-use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerRun};
+use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 
 use crate::decision::NoOpReason;
 use crate::error::CampaignError;
@@ -54,8 +54,12 @@ pub struct WorkerProcess {
     /// supervisor's stall signal — see `WorkerConfig::progress`).
     pub beats: tokio::sync::watch::Receiver<u64>,
     /// The worker run itself. Killing is `abort()`; the runner owns the
-    /// handle and arbitrates the final status from its result.
-    pub run: tokio::task::JoinHandle<WorkerRun>,
+    /// handle and arbitrates the final status from its result. The inner
+    /// `Result` carries the worker's fail-closed "no run could be produced
+    /// at all" case (unusable worktree, transport construction failure) —
+    /// it never carries classifiable task failures, which arrive as typed
+    /// failures inside the produced run.
+    pub run: tokio::task::JoinHandle<Result<WorkerRun, WorkerError>>,
 }
 
 /// Reads the reconciled board state for one pass. Production wraps the
@@ -182,7 +186,8 @@ impl LoopConfig {
 /// Why the loop stopped. Terminal budget stops and clean shutdowns are
 /// distinct: budget stops are recorded on the summary and the run-state
 /// rows; shutdown is the operator's signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum StopReason {
     /// The whole-run budget elapsed; in-flight runs were aborted and
     /// recorded.
@@ -199,7 +204,8 @@ pub enum StopReason {
 
 /// One observed loop event (the journal the QA evidence renders). Events
 /// carry identifiers only — never board content or task payloads.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LoopEvent {
     /// A pass was planned: the decision record id, whether a task was
     /// selected, the typed no-op reason on no-op passes, and the selected
@@ -271,7 +277,7 @@ pub enum LoopEvent {
 }
 
 /// The end-of-run report: typed counts plus the event journal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LoopSummary {
     /// Why the loop stopped.
     pub stop_reason: StopReason,
@@ -462,8 +468,9 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         self.started.elapsed()
     }
 
-    /// Runs the loop until a terminal stop or shutdown. The shutdown future
-    /// must be `Unpin` (the CLI pins the signal stream); a second signal
+    /// Runs the loop until a terminal stop or shutdown. The shutdown channel
+    /// carries one increment per received signal (SIGTERM/SIGINT in the CLI
+    /// production wiring): the first starts the graceful drain, a second
     /// short-circuits any remaining grace window.
     ///
     /// # Errors
@@ -473,7 +480,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// NOT errors — they are recorded, typed run outcomes.
     pub async fn run(
         mut self,
-        mut shutdown: impl std::future::Future<Output = ()> + Send + Unpin,
+        mut shutdown: tokio::sync::watch::Receiver<u64>,
     ) -> Result<LoopSummary, CampaignError> {
         self.config.validate()?;
         // Crash reconciliation before any guard reads slots: a previous
@@ -487,7 +494,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         let mut events = Vec::new();
         let mut stop: Option<StopReason> = None;
         let mut drain_deadline = Duration::ZERO;
-        let mut shutdown_fired = false;
+        let mut signal_source_gone = false;
 
         // `loop`, not `while stop.is_none()`: setting `stop` must NOT exit
         // the loop — the drain (grace window, straggler aborts, final
@@ -525,24 +532,31 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 }
             }
 
-            // -- Wait one tick. The shutdown select only runs until the
-            //    first signal; afterwards ticks keep the supervision live.
-            if shutdown_fired {
+            // -- Wait one tick. The shutdown channel stays armed for the
+            //    whole run: the first signal starts the drain, a second
+            //    short-circuits the remaining grace.
+            if signal_source_gone {
                 tokio::time::sleep(tick).await;
             } else {
                 tokio::select! {
-                    () = &mut shutdown => {
-                        shutdown_fired = true;
-                        let elapsed = self.elapsed();
-                        if stop.is_none() {
-                            stop = Some(StopReason::Shutdown);
-                            drain_deadline = elapsed + self.config.shutdown_budget;
-                        } else if stop == Some(StopReason::Shutdown) {
-                            // Second signal: skip the remaining grace.
-                            drain_deadline = elapsed;
-                        } else {
-                            // Shutdown preempts another drain's deadline.
-                            drain_deadline = drain_deadline.min(elapsed + self.config.shutdown_budget);
+                    changed = shutdown.changed() => {
+                        match changed {
+                            Ok(()) => {
+                                shutdown.borrow_and_update();
+                                let elapsed = self.elapsed();
+                                if stop.is_none() {
+                                    stop = Some(StopReason::Shutdown);
+                                    drain_deadline = elapsed + self.config.shutdown_budget;
+                                } else if stop == Some(StopReason::Shutdown) {
+                                    // Second signal: skip the remaining grace.
+                                    drain_deadline = elapsed;
+                                } else {
+                                    // Shutdown preempts another drain's deadline.
+                                    drain_deadline = drain_deadline.min(elapsed + self.config.shutdown_budget);
+                                }
+                            }
+                            // Sender dropped: no signals will ever arrive.
+                            Err(_) => signal_source_gone = true,
                         }
                     }
                     () = tokio::time::sleep(tick) => {}
@@ -775,7 +789,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             let outcome = slot.process.run.await;
             let spend = spend_of(&self.config.budgets, &outcome);
             let (status, detail, completed_flag) = match outcome {
-                Ok(run) => match run.status {
+                Ok(Ok(run)) => match run.status {
                     RunStatus::Completed => (
                         RunRowStatus::Completed,
                         "natural-completion".to_string(),
@@ -789,6 +803,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                         (RunRowStatus::Failed, class, false)
                     }
                 },
+                // The worker produced no run at all (fail-closed infra
+                // case); the error text is store-assigned and log-safe.
+                Ok(Err(error)) => (
+                    RunRowStatus::Failed,
+                    format!("worker-loop-unusable: {error}"),
+                    false,
+                ),
                 Err(join_error) if join_error.is_cancelled() => match slot.intent {
                     Some(StopIntent::Stall) => {
                         (RunRowStatus::Stalled, "stall-timeout".to_string(), false)
@@ -847,14 +868,17 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
 /// Estimated run spend: tokens × the configured per-token estimate (`0.0`
 /// disables accrual — the documented default until the cost-ledger lane
 /// wires provider pricing in).
-fn spend_of(budgets: &WorkerBudgets, outcome: &Result<WorkerRun, tokio::task::JoinError>) -> f64 {
+fn spend_of(
+    budgets: &WorkerBudgets,
+    outcome: &Result<Result<WorkerRun, WorkerError>, tokio::task::JoinError>,
+) -> f64 {
     #[expect(
         clippy::cast_precision_loss,
         reason = "token counts are far below 2^53; the estimate only feeds a soft-cap comparison"
     )]
     let tokens = match outcome {
-        Ok(run) => run.usage.input_tokens + run.usage.output_tokens,
-        Err(_) => 0,
+        Ok(Ok(run)) => run.usage.input_tokens + run.usage.output_tokens,
+        _ => 0,
     } as f64;
     tokens * budgets.usd_per_token_estimate
 }

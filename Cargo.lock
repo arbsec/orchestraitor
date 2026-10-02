@@ -3991,6 +3991,7 @@ dependencies = [
 name = "orchestraitor-cli"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "clap",
  "miette",
  "orchestraitor-agent-catalog",

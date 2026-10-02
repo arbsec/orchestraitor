@@ -4,6 +4,7 @@ pub mod board;
 pub mod campaign;
 pub mod config;
 pub mod github;
+pub mod loop_runner;
 pub mod models;
 pub mod routing;
 pub mod worker;
