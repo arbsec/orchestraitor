@@ -467,7 +467,10 @@ fn guarded_move<W: Write>(args: &BoardGuardedMoveArgs, writer: &mut W) -> Result
         return Ok(());
     }
     match result.outcome {
-        BoardMoveOutcome::Applied(applied) => {
+        BoardMoveOutcome::Applied {
+            applied,
+            lease_bookkeeping_failure,
+        } => {
             writeln!(
                 writer,
                 "moved {} from \"{}\" to \"{}\"{}",
@@ -481,9 +484,31 @@ fn guarded_move<W: Write>(args: &BoardGuardedMoveArgs, writer: &mut W) -> Result
                 }
             )
             .into_diagnostic()?;
+            if let Some(failure) = lease_bookkeeping_failure {
+                writeln!(
+                    writer,
+                    "WARNING (lease bookkeeping failure: {}): the board change landed, \
+                     but the lease state must be reconciled",
+                    failure.failure
+                )
+                .into_diagnostic()?;
+            }
         }
         BoardMoveOutcome::Refused { refusal } => {
             write_refusal(writer, &refusal)?;
+        }
+        BoardMoveOutcome::Indeterminate {
+            item,
+            requested_status,
+            failure,
+        } => {
+            writeln!(
+                writer,
+                "INDETERMINATE ({failure}): the write of {item} to \"{requested_status}\" \
+                 landed but its outcome could not be verified — re-read the board state \
+                 before retrying"
+            )
+            .into_diagnostic()?;
         }
     }
     Ok(())
