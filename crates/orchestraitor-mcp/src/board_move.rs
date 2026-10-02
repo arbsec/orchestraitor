@@ -318,9 +318,6 @@ pub enum ClaimOutcome {
     Claimed,
     /// A RENEWAL: the session already held a live lease; its expiry moved.
     Renewed,
-    /// A PROBE: no lease inserted (the caller does not hold the target);
-    /// the item had no foreign live lease at claim time.
-    Probed,
     /// A live lease held by ANOTHER session blocks the claim; the holder
     /// is named for the typed refusal.
     ForeignHolder(String),
@@ -369,10 +366,8 @@ impl LeaseRegistry for InMemoryLeaseRegistry {
             Some(lease) if lease.holder != session => {
                 return Ok(ClaimOutcome::ForeignHolder(lease.holder));
             }
-            // Live own lease: RENEWAL when the caller asks for a live
-            // expiry; a PROBE (expiry 0) never touches it (PR #475 review
-            // gen-2 thread 9 — the probe must not disturb a live lease).
-            Some(_) if expires_at_unix_secs == 0 => return Ok(ClaimOutcome::Probed),
+            // Live own lease: renewal (the session keeps its protection;
+            // the expiry moves to the requested bound).
             Some(_) => {
                 leases.insert(
                     key,
@@ -388,10 +383,6 @@ impl LeaseRegistry for InMemoryLeaseRegistry {
                 // → typed expiry refusal (never a silent continue).
                 if leases.get(&key).is_some() {
                     return Ok(ClaimOutcome::OwnExpired);
-                }
-                // A PROBE (expiry 0) on an unleased item inserts nothing.
-                if expires_at_unix_secs == 0 {
-                    return Ok(ClaimOutcome::Probed);
                 }
             }
         }
@@ -452,9 +443,11 @@ pub struct BoardMoveRequest {
     /// attribution key on it. Empty refuses closed.
     #[serde(default)]
     pub session: String,
-    /// Unix seconds the session's lease should run to when the move lands
-    /// in an active state (lease-aligned expiry, §9.24.2). Absent/zero
-    /// takes a default one-hour lease.
+    /// Requested lease DURATION in seconds, applied when the move lands
+    /// in a lease-holding state (lease-aligned expiry, §9.24.2). Zero
+    /// takes the default one-hour lease; larger requests clamp to the
+    /// tool's maximum (24h) — leases never outlive their session by an
+    /// unbounded request.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub lease_ttl_secs: u64,
     /// Optional field writes. NOT part of this tool's scope (issue #333
@@ -726,7 +719,7 @@ async fn execute(
             return refused(BoardMoveRefusal::LeaseConflict { holder });
         }
         ClaimOutcome::OwnExpired => return refused(BoardMoveRefusal::LeaseExpired),
-        ClaimOutcome::Claimed | ClaimOutcome::Renewed | ClaimOutcome::Probed => {}
+        ClaimOutcome::Claimed | ClaimOutcome::Renewed => {}
     }
     // Compensation (PR #475 review gen-2 thread 8): ONLY a FRESH claim is
     // rolled back, and ONLY when the write definitely did not land (a
@@ -740,6 +733,14 @@ async fn execute(
     //    provider rejection here means the board is unchanged — the
     //    refusal is honest about that (§21.4).
     if let Err(error) = provider.set_item_status(&item_id, &request.status).await {
+        if matches!(error, BoardContractError::Transport { .. }) {
+            // A TRANSPORT-class failure does NOT prove the mutation did
+            // not apply (PR #475 review gen-3: Transport is a backing
+            // failure, not a rejection): indeterminate, lease stays,
+            // reconciliation is a fresh read. Compensation runs only for
+            // rejections proving the write was refused/not attempted.
+            return indeterminate(&item_id.to_string(), "write-transport-failed");
+        }
         if fresh_claim {
             let _ = registry.release(&item_id, &request.session);
         }
@@ -834,10 +835,9 @@ fn atomic_claim(
     session: &str,
     lease_ttl_secs: u64,
 ) -> Result<ClaimOutcome, BoardMoveError> {
-    let ttl = if lease_ttl_secs == 0 {
-        DEFAULT_LEASE_TTL_SECS
-    } else {
-        lease_ttl_secs
+    let ttl = match lease_ttl_secs {
+        0 => DEFAULT_LEASE_TTL_SECS,
+        requested => requested.min(MAX_LEASE_TTL_SECS),
     };
     registry.try_claim(item_id, session, unix_secs_now().saturating_add(ttl))
 }
@@ -910,6 +910,9 @@ async fn policy_refusal(
 /// Default lease TTL for a move into an active state (spec §9.24.2:
 /// default 1h).
 const DEFAULT_LEASE_TTL_SECS: u64 = 60 * 60;
+/// Maximum lease TTL a single request may set (24h): a lease request is
+/// caller input, clamped so no invocation can mint an unbounded lease.
+const MAX_LEASE_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// The ids of items blocking `id` through unresolved native `blockedBy`
 /// edges (§9.40). "Unresolved" = the blocker is not in a terminal class
@@ -2543,13 +2546,8 @@ mod tests {
             .try_claim(&id, "session:sess_a", u64::MAX)
             .expect("claim reads");
         assert_eq!(claim, ClaimOutcome::Claimed);
-        // A move that will fail at the provider: unknown status is
-        // refused BEFORE the claim... use a status that passes policy but
-        // fails at write time — use a provider-less failure via the
-        // FailingProvider-style stub on set_item_status only.
-        // Wait — policy first: held -> in-progress on ready-task? ready-task
-        // is Ready; the write failure path needs a POLICY-VALID move. The
-        // item is Ready; target In Progress is valid; the write fails.
+        // The move is policy-valid (Ready -> In Progress) but the write
+        // fails at the provider — exercising the compensation path.
         let wrapper = WriteFails(board);
         let result = board_move(
             &wrapper,
@@ -2623,7 +2621,7 @@ mod tests {
     /// `concurrent_moves_through_one_registry_produce_one_applied`
     /// proves the interleaving case; this asserts the post-state.
     #[test]
-    fn probe_claim_never_disturbs_a_live_lease() {
+    fn own_claim_is_a_renewal_and_foreign_claim_is_refused() {
         let mut registry = empty_registry();
         let id = BoardItemId::new("ready-task").expect("valid id");
         // sess_a holds a live lease.
@@ -2652,11 +2650,12 @@ mod tests {
                 .expect("reads")
                 .is_none()
         );
-        // The holder's own probe is also a no-op (Probed, lease intact).
-        let own_probe = registry
-            .try_claim(&id, "session:sess_a", 0)
-            .expect("probe reads");
-        assert_eq!(own_probe, ClaimOutcome::Probed);
+        // The holder's own claim with a live expiry is a RENEWAL — the
+        // lease stays intact and the expiry moves.
+        let own = registry
+            .try_claim(&id, "session:sess_a", u64::MAX)
+            .expect("claim reads");
+        assert_eq!(own, ClaimOutcome::Renewed);
         assert!(
             registry
                 .held_by(&id, "session:sess_a")
