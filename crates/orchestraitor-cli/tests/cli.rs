@@ -1030,8 +1030,11 @@ fn github_commit_author_derives_identity_from_app_and_bot_user_responses() -> mi
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_github_app_project_config(&temp)?;
     // GET /app carries the slug but NOT the bot user id (live GitHub shape);
-    // the id comes from the follow-up GET /users/{slug}[bot] profile.
-    let server = spawn_two_response_server(
+    // the id comes from the follow-up GET /users/{slug}[bot] profile. The
+    // lookup needs an installation token (GitHub rejects the App JWT on
+    // GET /users, and EMU bot profiles are not publicly visible), so the
+    // flow mints FIRST.
+    let server = spawn_mint_then_two_api_server(
         r#"{"id":5082653,"slug":"arbsec-agent"}"#,
         r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
     )?;
@@ -1053,9 +1056,11 @@ fn github_commit_author_derives_identity_from_app_and_bot_user_responses() -> mi
         ]
     );
     assert!(!stdout.contains(GITHUB_APP_TOKEN_MARKER));
-    // Request order and credentials: the App-JWT bearer goes ONLY to /app;
-    // the bot-user lookup is unauthenticated (no Authorization header), and
-    // NO installation-token mint happens on this subcommand.
+    // Request order and credentials: GET /app carries the App JWT; the mint
+    // happens AFTER /app and feeds the bot-user lookup, which carries the
+    // installation token — never the App JWT (GitHub rejects JWTs on
+    // GET /users) and never no credential (EMU bot profiles are not
+    // publicly visible).
     let first = server
         .auth_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1064,78 +1069,24 @@ fn github_commit_author_derives_identity_from_app_and_bot_user_responses() -> mi
         first.starts_with("/app\tBearer eyJ"),
         "commit-author must send the App JWT to GET /app: {first}"
     );
+    let mint = server
+        .auth_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .into_diagnostic()?;
+    assert!(
+        mint.starts_with("/app/installations/165043398/access_tokens\tBearer eyJ"),
+        "commit-author must mint an installation token for the bot lookup: {mint}"
+    );
     let second = server
         .auth_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .into_diagnostic()?;
     assert_eq!(
-        second, "/users/arbsec-agent[bot]\t",
-        "bot-user lookup must be unauthenticated: {second}"
+        second,
+        format!("/users/arbsec-agent[bot]\tBearer {GITHUB_APP_TOKEN_MARKER}"),
+        "bot-user lookup must carry the installation token, not the JWT: {second}"
     );
     Ok(())
-}
-
-/// Serves two distinct JSON responses on successive connections and records
-/// each request's path + Authorization header (same recording shape as
-/// [`spawn_mint_then_api_server`]).
-fn spawn_two_response_server(
-    first_body: &str,
-    second_body: &str,
-) -> miette::Result<TwoResponseServer> {
-    spawn_sequence_server(&[first_body, second_body])
-}
-
-/// Serves the given JSON bodies on successive connections (the last body
-/// repeats for any further connections) and records each request's path +
-/// Authorization header. Unlike [`spawn_mint_then_api_server`] this serves
-/// NO mint response: every connection gets the next scripted body.
-fn spawn_sequence_server(bodies: &[&str]) -> miette::Result<TwoResponseServer> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
-    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
-    let mut bodies: Vec<String> = bodies.iter().map(ToString::to_string).collect();
-    let (auth_tx, auth_rx) = std::sync::mpsc::channel::<String>();
-    thread::spawn(move || {
-        for (index, connection) in listener.incoming().enumerate() {
-            let Ok(mut stream) = connection else { break };
-            let mut request_bytes = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        request_bytes.extend_from_slice(&chunk[..n]);
-                        let text = String::from_utf8_lossy(&request_bytes);
-                        if text.contains("\r\n\r\n") {
-                            break;
-                        }
-                    }
-                }
-            }
-            let request = String::from_utf8_lossy(&request_bytes).to_string();
-            let request_line = request.lines().next().unwrap_or_default();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            let auth = request
-                .lines()
-                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-                .and_then(|line| line.split_once(':'))
-                .map(|(_, value)| value.trim().to_string())
-                .unwrap_or_default();
-            let _ = auth_tx.send(format!("{path}\t{auth}"));
-            let body = bodies
-                .get_mut(index)
-                .map_or_else(|| "{}".to_string(), std::mem::take);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _write_result = stream.write_all(response.as_bytes());
-        }
-    });
-    Ok(TwoResponseServer { endpoint, auth_rx })
 }
 
 struct TwoResponseServer {
@@ -1144,9 +1095,10 @@ struct TwoResponseServer {
 }
 
 /// Serves one mint response (the recorded fixture token), then two scripted
-/// API responses on the following connections — the flow
-/// `gh-env -- required` performs: mint (installation token), `GET /app`
-/// (App JWT), `GET /users/{slug}[bot]` (unauthenticated).
+/// API responses on the following connections — the flow `gh-env --` in
+/// required mode and `github commit-author` perform: mint (installation
+/// token), `GET /app` (App JWT), `GET /users/{slug}[bot]` (installation
+/// token).
 fn spawn_mint_then_two_api_server(
     first_api_body: &str,
     second_api_body: &str,
@@ -1601,8 +1553,9 @@ fn github_gh_env_required_enforcement_refuses_personal_git_identity() -> miette:
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
     let child_str = child.display().to_string();
     // The required-mode gate resolves the expected bot identity from the live
-    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating.
-    let server = spawn_two_response_server(
+    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating;
+    // the lookup authenticates with a minted installation token.
+    let server = spawn_mint_then_two_api_server(
         r#"{"id":5082653,"slug":"arbsec-agent"}"#,
         r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
     )?;
@@ -1706,8 +1659,9 @@ fn github_gh_env_required_enforcement_rejects_generic_noreply_identity() -> miet
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
     let child_str = child.display().to_string();
     // The required-mode gate resolves the expected bot identity from the live
-    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating.
-    let server = spawn_two_response_server(
+    // App (GET /app -> slug, GET /users/{slug}[bot] -> id) before delegating;
+    // the lookup authenticates with a minted installation token.
+    let server = spawn_mint_then_two_api_server(
         r#"{"id":5082653,"slug":"arbsec-agent"}"#,
         r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
     )?;
@@ -1790,7 +1744,7 @@ fn github_gh_env_required_enforcement_rejects_suffix_lookalike_bot_email() -> mi
     fs::write(&child, "#!/bin/sh\nexit 0\n").into_diagnostic()?;
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
     let child_str = child.display().to_string();
-    let server = spawn_two_response_server(
+    let server = spawn_mint_then_two_api_server(
         r#"{"id":5082653,"slug":"arbsec-agent"}"#,
         r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
     )?;

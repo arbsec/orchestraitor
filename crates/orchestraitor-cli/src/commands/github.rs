@@ -406,7 +406,10 @@ fn which_executable(program: &str) -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
             std::fs::metadata(path).is_ok_and(|metadata| {
-                std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0
+                // A directory with an execute bit would mint a token for a
+                // child that can never spawn: require a regular file too.
+                metadata.is_file()
+                    && std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0
             })
         }
         #[cfg(not(unix))]
@@ -438,8 +441,9 @@ fn commit_author<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
 }
 
 /// Resolves the App's canonical commit identity: `GET /app` (App JWT bearer)
-/// for the slug, then an unauthenticated `GET /users/{slug}[bot]` for the bot
-/// user id. Both responses are validated; failures are typed and token-free.
+/// for the slug, then an installation-token-authenticated
+/// `GET /users/{slug}[bot]` for the bot user id. Both responses are
+/// validated; failures are typed and token-free.
 fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
     let config = resolved_config(paths)?;
     let auth = github_app_auth(&config)?;
@@ -455,10 +459,15 @@ fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
     let slug = app_slug(&app)?;
     let bot_login = format!("{slug}[bot]");
     // The bot user id is not part of the `GET /app` payload: resolve it from
-    // the public bot-user profile. Unauthenticated: no credential material
-    // travels with this request.
+    // the bot-user profile. Authenticated with the installation token for
+    // the configured organization's installation: GitHub rejects the App
+    // JWT on `GET /users` (401), and on an Enterprise Managed Users
+    // organization the profile is NOT publicly visible — an unauthenticated
+    // request answers 404 even though the App is correctly configured. The
+    // token stays in memory and rides only this one Authorization header.
+    let (_, token) = mint_installation_token(paths)?;
     let (user_status, user_body) =
-        transport.request_bearer("GET", &format!("users/{bot_login}"), "", None)?;
+        transport.request("GET", &format!("users/{bot_login}"), &token, None)?;
     if !user_status.is_success() {
         bail!("github api request returned HTTP {user_status} (GET /users/{bot_login})");
     }
@@ -1071,6 +1080,31 @@ mod tests {
         assert!(
             on_path.is_none(),
             "non-executable file on PATH must not resolve"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn which_executable_rejects_directories_even_with_execute_bit() -> Result<()> {
+        // A directory with the execute bit set would pass a bare mode check;
+        // the pre-mint validation must reject it so no token is minted for a
+        // child that can never spawn.
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let dir = temp.path().join("executable-directory-fixture");
+        std::fs::create_dir(&dir).into_diagnostic()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+                .into_diagnostic()?;
+        }
+        let direct = which_executable(&dir.display().to_string());
+        assert!(direct.is_none(), "executable directory must not resolve");
+
+        let on_path = which_executable("executable-directory-fixture");
+        assert!(
+            on_path.is_none(),
+            "executable directory on PATH must not resolve"
         );
         Ok(())
     }

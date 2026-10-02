@@ -199,7 +199,7 @@ orc github gh-env -- gh pr view 446 --json state
 ## `orc github commit-author`
 
 Prints ONLY the App's canonical commit identity as two lines, derived from the
-authenticated App (`GET /app` → `slug`, then an unauthenticated
+authenticated App (`GET /app` → `slug`, then
 `GET /users/{slug}[bot]` → the bot user id → the GitHub noreply email
 convention) — never hardcoded. `GET /app` is an **App-level endpoint**:
 GitHub rejects installation tokens with 401, so this subcommand authenticates
@@ -207,9 +207,12 @@ it with a freshly minted **App JWT** (RS256, `iss = client_id`, 10-minute
 lifetime) signed from the App private key — the same secret material and the
 same secrecy rules as the mint path. The JWT is held in memory only, injected
 solely into the one `Authorization` header, and never printed, logged, or
-persisted. The bot-user lookup is unauthenticated (a public profile; no
-credential travels with it). The other three subcommands (`mint-token`,
-`api`, `gh-env`) keep using installation tokens.
+persisted. The bot-user lookup is authenticated with the installation token
+for the configured organization's installation (GitHub rejects the App JWT on
+`GET /users`, and on an Enterprise Managed Users organization the bot profile
+is not publicly visible — an unauthenticated request would answer 404). The
+other three subcommands (`mint-token`, `api`, `gh-env`) keep using
+installation tokens.
 
 ```sh
 $ orc github commit-author

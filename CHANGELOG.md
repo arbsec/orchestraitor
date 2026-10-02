@@ -266,11 +266,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   App JWT instead of an installation token: `GET /app` is an App-level
   endpoint that GitHub answers with 401 for installation tokens, so the
   subcommand previously could never deliver its documented output. The bot
-  user id is resolved with a follow-up unauthenticated
-  `GET /users/{slug}[bot]` (the `GET /app` payload carries the slug but not
-  the bot user). The JWT is secret material under the same guarantees as the
-  token: held in memory only, injected solely into the one `Authorization`
-  header, never printed, logged, or persisted.
+  user id is resolved with a follow-up `GET /users/{slug}[bot]` authenticated
+  with the installation token (the `GET /app` payload carries the slug but
+  not the bot user; GitHub rejects the App JWT on `GET /users`, and on an
+  Enterprise Managed Users organization the bot profile is not publicly
+  visible, so an unauthenticated request would answer 404). The JWT is
+  secret material under the same guarantees as the token: held in memory
+  only, injected solely into the one `Authorization` header, never printed,
+  logged, or persisted.
 - `orc github gh-env` now rejects a child command that exists but lacks the
   executable bit BEFORE minting a token; previously the token was minted and
   then the spawn was guaranteed to fail.
