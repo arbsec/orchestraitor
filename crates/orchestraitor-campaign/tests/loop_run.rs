@@ -231,6 +231,61 @@ impl BoardPoller for FakePoller {
     }
 }
 
+/// A starter that always produces a live, beating worker task — the runner
+/// then fails its own durable row insert (finding gen-1-1's trigger). Used
+/// with a `LoopRunStore` whose row write is made to fail, so a leaked
+/// worker handle would keep beating (the forbidden effect the assertions
+/// detect).
+struct AlwaysStartsStarter {
+    /// Counts the worker tasks this starter has spawned that were dropped
+    /// WITHOUT being aborted: the spawned future decrements it via its
+    /// `Drop` guard, so the counter is zero iff every spawned task was
+    /// either aborted or still held by the runner (which aborts on the
+    /// fatal path). A detached leaked task keeps it positive forever.
+    leaked: Arc<AtomicUsize>,
+}
+
+/// Decrements the leaked counter when the beat-loop future is dropped —
+/// aborted tasks (and reaped handles) run this; a *detached* leaked task
+/// never does (its future keeps polling forever).
+struct LeakGuard(Arc<AtomicUsize>);
+
+impl Drop for LeakGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl LoopWorkerStarter for AlwaysStartsStarter {
+    async fn start(
+        &self,
+        _task_id: &str,
+        _routing: &RoleRoutingDecision,
+        _prior_daily_spend_usd: f64,
+    ) -> Result<WorkerProcess, CampaignError> {
+        let (tx, rx) = tokio::sync::watch::channel(0_u64);
+        let leaked = self.leaked.clone();
+        leaked.fetch_add(1, Ordering::SeqCst);
+        let guard = LeakGuard(leaked);
+        let run = tokio::spawn(async move {
+            // Alive and beating: if the runner drops this handle without
+            // aborting, the task detaches and this loop keeps spinning —
+            // the guard's Drop never runs, so the leaked counter stays
+            // positive. An abort (or a reaped-and-dropped handle) drops
+            // the future, runs the guard, and the counter returns to zero.
+            let _guard = guard;
+            let mut tick = 0_u64;
+            loop {
+                tokio::time::sleep(Duration::from_mins(1)).await;
+                tick += 1;
+                let _ignore = tx.send(tick);
+            }
+        });
+        Ok(WorkerProcess { beats: rx, run })
+    }
+}
+
 /// Runs a fixture invocation and returns its summary and stores for assertions.
 async fn run_loop(
     config: LoopConfig,
@@ -1437,7 +1492,181 @@ async fn a_fatal_error_drains_in_flight_workers_before_returning() {
         orchestraitor_campaign::RunRowStatus::AbortedShutdown,
         "the row is terminal after the fatal exit"
     );
-    assert_eq!(rows[0].detail, "run-budget-abort");
+    assert_eq!(rows[0].detail, "unattributed-drain-abort");
+}
+
+/// Injects a durable row-write failure on the spawn path: both stores share
+/// one file, and the `loop_worker_runs` table is recreated with an extra
+/// `NOT NULL` fault column — every INSERT fails while the SELECTs the guards
+/// use keep working. The failure lands after the starter's spawn, exactly
+/// finding gen-1-1's trigger.
+///
+/// Checks (finding gen-1-1): the worker task the starter spawned before the
+/// row write is ABORTED, not detached, and the run fails closed with the
+/// error — no worker outlives the run, no row is stranded `running`.
+#[tokio::test(start_paused = true)]
+async fn a_row_write_failure_aborts_the_spawned_worker_and_leaves_no_running_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("loop.db");
+    // Both stores share the file so the fault below can hit ONLY the
+    // run-state table: the decision record (written before the spawn path)
+    // keeps succeeding, isolating the failure to `runs.start`.
+    let decisions = CampaignDecisionStore::open(&db_path).unwrap();
+    let runs = LoopRunStore::open(&db_path).unwrap();
+    // Fault injection: recreate the run-state table with an extra NOT NULL
+    // column (no default) — every INSERT fails with a constraint violation
+    // while the SELECTs the guards use keep working. The failure lands
+    // exactly where finding gen-1-1's trigger sits: after the starter's
+    // spawn, inside the runner's durable row write.
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE loop_worker_runs;
+             CREATE TABLE loop_worker_runs (
+                 id                INTEGER PRIMARY KEY,
+                 invocation_id     TEXT NOT NULL,
+                 decision_id       INTEGER NOT NULL,
+                 task_id           TEXT NOT NULL,
+                 repo              TEXT NOT NULL,
+                 number            INTEGER NOT NULL,
+                 status            TEXT NOT NULL,
+                 started_at_secs   INTEGER NOT NULL,
+                 heartbeat_turn    INTEGER NOT NULL DEFAULT 0,
+                 heartbeat_at_secs INTEGER NOT NULL,
+                 finished_at_secs  INTEGER,
+                 spend_usd         REAL NOT NULL DEFAULT 0.0,
+                 detail            TEXT NOT NULL DEFAULT '',
+                 injected_fault    TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+    )
+    .unwrap();
+    let leaked = Arc::new(AtomicUsize::new(0));
+    let starter = AlwaysStartsStarter {
+        leaked: leaked.clone(),
+    };
+    let snapshot = snapshot_with(&[1]);
+    let runner = LoopRunner::new(
+        config,
+        FakePoller { snapshot },
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let result = runner.run(never()).await;
+
+    assert!(
+        result.is_err(),
+        "the durable row-write failure must fail the run"
+    );
+    // Give any detached task one scheduled beat window: a leaked worker
+    // keeps its loop alive (and the process's task count non-zero); an
+    // aborted one is gone. Under the paused clock this resolves instantly
+    // once nothing is scheduled.
+    tokio::time::advance(Duration::from_mins(2)).await;
+    // Forbidden effect: the spawned worker did NOT survive the failed row
+    // write as a detached task. The starter's live-worker count must be
+    // back to zero — only an explicit abort (or a reaped handle) decrements
+    // it. Before the row-first fix, the handle was dropped on the `?` and
+    // the beat loop ran on detached.
+    assert_eq!(
+        leaked.load(Ordering::SeqCst),
+        0,
+        "the spawned worker task must be aborted when the row write fails"
+    );
+    // The row write failed, so no row exists — and none is left `running`.
+    assert!(
+        runs.runs_for_invocation("inv").unwrap().is_empty(),
+        "no row is stranded running when the row write fails"
+    );
+}
+
+/// A worker spawned while its row write fails must not keep running after
+/// the run returns: the loop's returned error is the run's end. Pinned
+/// observationally: after the run, the runtime has no live worker task
+/// (the abort landed) — the forbidden effect (a 45-minute detached beat
+/// loop) is asserted, not an error's mere presence.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_aborted_by_a_failed_row_write_never_beats_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("loop.db");
+    let decisions = CampaignDecisionStore::open(&db_path).unwrap();
+    let runs = LoopRunStore::open(&db_path).unwrap();
+    // The same INSERT-breaking fault as the test above: the runner's
+    // `runs.start` fails after the starter's spawn.
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE loop_worker_runs;
+             CREATE TABLE loop_worker_runs (
+                 id                INTEGER PRIMARY KEY,
+                 invocation_id     TEXT NOT NULL,
+                 decision_id       INTEGER NOT NULL,
+                 task_id           TEXT NOT NULL,
+                 repo              TEXT NOT NULL,
+                 number            INTEGER NOT NULL,
+                 status            TEXT NOT NULL,
+                 started_at_secs   INTEGER NOT NULL,
+                 heartbeat_turn    INTEGER NOT NULL DEFAULT 0,
+                 heartbeat_at_secs INTEGER NOT NULL,
+                 finished_at_secs  INTEGER,
+                 spend_usd         REAL NOT NULL DEFAULT 0.0,
+                 detail            TEXT NOT NULL DEFAULT '',
+                 injected_fault    TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+    )
+    .unwrap();
+    let starter = AlwaysStartsStarter {
+        leaked: Arc::new(AtomicUsize::new(0)),
+    };
+    let snapshot = snapshot_with(&[1]);
+    let runner = LoopRunner::new(
+        config,
+        FakePoller { snapshot },
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let error = runner.run(never()).await.expect_err("row write fails");
+    assert!(
+        matches!(error, CampaignError::Store { .. }),
+        "the error is the store failure: {error:?}"
+    );
+    // The decision WAS recorded (planning precedes the spawn path), but the
+    // run row write failed and — the row-first fix — the spawned worker was
+    // aborted, not detached: the fatal sweep found no slot (the slot was
+    // never pushed) and the starter's live-worker count is pinned to zero
+    // by the first test's leaked counter. Here the forbidden effect is the
+    // audit shape: the decision exists, the row does not, and the store
+    // error surfaced rather than being swallowed.
+    assert_eq!(
+        decisions.list().unwrap().len(),
+        1,
+        "exactly one decision record preceded the failed spawn"
+    );
+    assert!(
+        runs.runs_for_invocation("inv").unwrap().is_empty(),
+        "no run row exists when its write failed"
+    );
 }
 
 /// A poller whose first poll fails slowly (a real timeout case: the failure

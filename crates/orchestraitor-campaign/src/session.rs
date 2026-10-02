@@ -161,9 +161,19 @@ pub fn plan_pass(
     routing: &RoleRoutingDecision,
     store: &CampaignDecisionStore,
 ) -> Result<StoredCampaignDecision, CampaignError> {
+    let decision = campaign_decision(snapshot, routing);
+    store.record(&decision)
+}
+
+/// Constructs the exactly-one §9.35 decision record for a pass: the
+/// Selected branch for the first eligible item, else the typed no-op
+/// classification. The single construction path shared by [`plan_pass`]
+/// (loop runner) and [`run_once`] (one-shot CLI) — the two consumers can
+/// never drift apart.
+fn campaign_decision(snapshot: &BoardSnapshot, routing: &RoleRoutingDecision) -> CampaignDecision {
     let ordered = compute_selection(&snapshot.ready, &snapshot.open);
     let skipped = skipped_records(snapshot);
-    let decision = if let Some(selected) = ordered.first() {
+    if let Some(selected) = ordered.first() {
         let task_id = task_id_for(&selected.repo, selected.number);
         let alternatives = ordered
             .iter()
@@ -221,8 +231,7 @@ pub fn plan_pass(
             blocked_graph: blocked_candidate_nodes(snapshot),
             skipped,
         }
-    };
-    store.record(&decision)
+    }
 }
 
 /// Runs exactly one pass: reads the snapshot, selects at most one task,

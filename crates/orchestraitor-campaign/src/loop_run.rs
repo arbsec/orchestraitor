@@ -301,6 +301,11 @@ enum StopIntent {
     WorkerTimeout,
     /// A graceful stop reaped the run; the payload is the summary reason.
     Drain(StopReason),
+    /// A graceful stop aborted the run while no summary stop reason was
+    /// declared (a fatal-exit sweep). `Drain(_)` would fabricate a terminal
+    /// budget cause that never held — the unattributed variant keeps the
+    /// fabricated reason unrepresentable.
+    Drained,
 }
 
 /// One supervised slot: the process handle plus the beat bookkeeping.
@@ -314,16 +319,6 @@ struct Slot {
     started_elapsed: Duration,
     /// The kill intent, recorded before `abort()` is called.
     intent: Option<StopIntent>,
-}
-
-/// The intent for slots aborted by a graceful stop: a drain carries the
-/// summary reason it served; a drain without a recorded reason cannot
-/// happen and resolves to the conservative run-budget terminal.
-fn drain_intent(stop: Option<StopReason>) -> StopIntent {
-    match stop {
-        Some(reason) => StopIntent::Drain(reason),
-        None => StopIntent::Drain(StopReason::RunBudgetExhausted),
-    }
 }
 
 /// The tick cadence: short enough that SIGTERM is honored inside the daemon
@@ -719,15 +714,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         if run_result.is_err() && !self.slots.is_empty() {
             // Fatal exit: never strand a `running` row. Abort every
             // in-flight slot (intent recorded pre-abort — the arbitration
-            // records the recorded intent, conservatively the
-            // run-budget terminal) and reap what is reapable. The sweep is
-            // best-effort: its own clock/store failure cannot make things
+            // records them as aborted-unattributed: no summary stop reason
+            // was declared, so inventing a budget cause on the audit row
+            // would be a fabrication) and reap what is reapable. The sweep
+            // is best-effort: its own clock/store failure cannot make things
             // more terminal than the fatal error already is, and the
             // original error is returned either way.
-            self.kill_where(
-                |slot, _| slot.intent.is_none(),
-                StopIntent::Drain(StopReason::RunBudgetExhausted),
-            );
+            self.kill_where(|slot, _| slot.intent.is_none(), StopIntent::Drained);
             // Remove the slots first: awaiting each handle needs the slot
             // owned, and `self.runs` borrows `self` immutably.
             let stranded = std::mem::take(&mut self.slots);
@@ -748,7 +741,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     RunRowStatus::AbortedShutdown,
                     stamp,
                     0.0,
-                    drain_detail(StopReason::RunBudgetExhausted),
+                    "unattributed-drain-abort",
                 );
                 counters.aborted_on_stop += 1;
                 events.push(LoopEvent::WorkerAbortedOnStop {
@@ -848,7 +841,14 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         let elapsed = self.elapsed();
         let deadline_reached = elapsed >= *drain_deadline;
         if self.slots.is_empty() || deadline_reached {
-            self.kill_where(|slot, _| slot.intent.is_none(), drain_intent(drain_reason));
+            // `drain_reason` is `Some` whenever a stop is declared (see
+            // `run`) — the unattributed arm is unreachable, but the type
+            // still refuses to invent a terminal reason here.
+            let intent = match drain_reason {
+                Some(reason) => StopIntent::Drain(reason),
+                None => StopIntent::Drained,
+            };
+            self.kill_where(|slot, _| slot.intent.is_none(), intent);
             self.record_reaps(counters, events).await?;
             if !self.slots.is_empty() {
                 // Aborts land as cancellations; give them the next tick.
@@ -1053,34 +1053,40 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         });
         if let Some(selected) = selected {
             let spend = self.runs.daily_spend(now)?;
+            // Row first, then spawn: a durable insert failure must never
+            // strand a running worker (a dropped handle detaches the task to
+            // its 45m timeout, invisible to every sweep). The row itself is
+            // the audit record; if the spawn then fails, the row is finished
+            // below — no window exists where a live worker has no row.
+            let row = self.runs.start(&StartRun {
+                invocation_id: self.invocation_id.clone(),
+                decision_id: stored.id,
+                task_id: selected.task_id.clone(),
+                repo: selected.repo.clone(),
+                number: selected.number,
+                started_at_secs: now,
+            })?;
             // Spawn failures are per-task outcomes, not run-killers: the
             // production starter fails on ordinary per-task conditions
             // (missing fixture, unsupported provider, transport build) —
             // propagating would strand in-flight workers and re-select the
             // same dying task next invocation. Record a terminal `failed`
             // row, pace, and keep supervising. Store/clock errors still
-            // propagate (durable-state failure is fatal).
+            // propagate (durable-state failure is fatal); the row written
+            // above is then swept terminal by the fatal-exit guard.
             let process = match self
                 .starter
                 .start(&selected.task_id, &self.routing, spend)
                 .await
             {
                 Ok(process) => process,
-                Err(CampaignError::Spawn { task_id, message }) => {
-                    let row = self.runs.start(&StartRun {
-                        invocation_id: self.invocation_id.clone(),
-                        decision_id: stored.id,
-                        task_id: task_id.clone(),
-                        repo: selected.repo.clone(),
-                        number: selected.number,
-                        started_at_secs: now,
-                    })?;
+                Err(CampaignError::Spawn { message, .. }) => {
                     self.runs
                         .finish(row.id, RunRowStatus::Failed, now, 0.0, &message)?;
                     counters.failed += 1;
                     events.push(LoopEvent::WorkerFinished {
                         run_id: row.id,
-                        task_id,
+                        task_id: selected.task_id.clone(),
                         completed: false,
                     });
                     self.pace_no_spawn(events, self.elapsed());
@@ -1090,14 +1096,6 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 // condition — surface it.
                 Err(error) => return Err(error),
             };
-            let row = self.runs.start(&StartRun {
-                invocation_id: self.invocation_id.clone(),
-                decision_id: stored.id,
-                task_id: selected.task_id.clone(),
-                repo: selected.repo.clone(),
-                number: selected.number,
-                started_at_secs: now,
-            })?;
             self.slots.push(Slot {
                 run_id: row.id,
                 task_id: selected.task_id.clone(),
@@ -1199,6 +1197,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     Some(StopIntent::Drain(reason)) => (
                         RunRowStatus::AbortedShutdown,
                         drain_detail(reason).to_string(),
+                        false,
+                    ),
+                    // A drain whose summary stop reason was never declared
+                    // (a fatal-exit sweep): unattributed, by construction.
+                    Some(StopIntent::Drained) => (
+                        RunRowStatus::AbortedShutdown,
+                        "unattributed-drain-abort".to_string(),
                         false,
                     ),
                     None => (
