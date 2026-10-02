@@ -303,12 +303,8 @@ impl McpGateway {
             blocked_graph: input.blocked_graph,
             skipped: input.skipped,
         };
-        let result = run_decision_record_shared(
-            &input,
-            &chain,
-            self.context.decision_store.as_ref(),
-            self.context.board_audit_store.as_ref(),
-        );
+        let result =
+            run_decision_record_shared(&input, &chain, self.context.decision_store.as_ref());
         self.structured(result)
     }
 
@@ -439,6 +435,7 @@ struct DecisionRecordRequest {
     /// Resolved model for the role.
     model: String,
     /// Precedence path that produced the routing resolution (§9.19.2).
+    #[serde(default)]
     precedence_path: String,
     /// Documented fallback reason, when routing fell back.
     #[serde(default)]
@@ -481,53 +478,26 @@ pub(crate) fn run_decision_record_shared(
     shared_store: Option<
         &std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>,
     >,
-    shared_audit: Option<
-        &std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>,
-    >,
 ) -> Result<orchestraitor_campaign::StoredCampaignDecision, McpGatewayError> {
-    // §9.25.1 recording mirrors `board.query` (issue #458 F3): with a shared
-    // audit store the ToolRequest event is appended DIRECTLY into that
-    // store under ONE lock section held across the whole invocation, so it
-    // CONTINUES the shared hash chain (seq = len+1, prev_hash = last shared
-    // hash), survives the invocation, and concurrent invocations serialize
-    // without loss (N2) — no snapshot/replay window exists. With no shared
-    // store the recording is PER-INVOCATION-VOLATILE — written and
-    // validated into an invocation-local store, then dropped (same
-    // documented posture as `board.query`). Durable persistence lands with
-    // the daemon event-store wiring (§9.17). All sections here are
-    // synchronous; no guard ever crosses an await point.
-    let mut local_audit = orchestraitor_events::InMemoryAuditStore::default();
-    let mut shared_guard =
-        match shared_audit {
-            Some(shared) => Some(shared.lock().map_err(|_| {
-                McpGatewayError::DecisionRecord(String::from("audit store poisoned"))
-            })?),
-            None => None,
-        };
-    let audit_target: &mut (dyn orchestraitor_events::AuditStore + Send) =
-        match shared_guard.as_mut() {
-            Some(guard) => &mut **guard,
-            None => &mut local_audit,
-        };
-
-    // With a session-scoped decision store the append lands in THAT store
-    // (row ids strictly increase across the session's invocations); with
-    // none, the invocation opens its own in-memory store. Durable
-    // persistence stays owned by `orc campaign run --once` until the daemon
-    // decision-tool wiring (§9.17) lands. The store mutex serializes
+    // With a session-scoped store the append lands in THAT store (row ids
+    // strictly increase across the session's invocations); with none, the
+    // invocation opens its own in-memory store (per-invocation row space).
+    // Durable persistence stays owned by `orc campaign run --once` until the
+    // daemon decision-tool wiring (§9.17) lands. The store mutex serializes
     // concurrent appends; the audit event is written after the record, so a
     // crash between them leaves a record without its §9.25.1 event (visible,
     // never silent).
-    if let Some(shared_store) = shared_store {
+    let mut audit = orchestraitor_events::InMemoryAuditStore::default();
+    if let Some(shared_store) = &shared_store {
         let mut store = shared_store.lock().map_err(|_| {
             McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
         })?;
-        return record_decision(input, chain, &mut store, audit_target)
+        return record_decision(input, chain, &mut store, &mut audit)
             .map_err(|error| decision_record_error(&error));
     }
     let mut store = orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
         .map_err(decision_store_error)?;
-    record_decision(input, chain, &mut store, audit_target)
+    record_decision(input, chain, &mut store, &mut audit)
         .map_err(|error| decision_record_error(&error))
 }
 
@@ -637,16 +607,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-
-    /// A fixed delegation chain for the decision.record tests: static
-    /// client-asserted labels, one correlation id per call site.
-    fn chain_for_test() -> DelegationChain {
-        DelegationChain {
-            correlation_id: OperationId::from_string(String::from("op_decision_record_test")),
-            parent_op_id: None,
-            principals: vec![String::from("user:test")],
-        }
-    }
 
     /// The `#[tool_router]`/`#[tool_handler]` macros expand for the
     /// gateway and the router-disable path keeps `ServerHandler` intact.
@@ -813,9 +773,9 @@ mod tests {
             parent_op_id: None,
             principals: vec![String::from("user:test")],
         };
-        let first = run_decision_record_shared(&input, &chain, Some(&shared), None)
+        let first = run_decision_record_shared(&input, &chain, Some(&shared))
             .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        let second = run_decision_record_shared(&input, &chain, Some(&shared), None)
+        let second = run_decision_record_shared(&input, &chain, Some(&shared))
             .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
         assert!(
             second.id > first.id,
@@ -835,248 +795,6 @@ mod tests {
             listed[0].decision, first.decision,
             "the original row is untouched after the second append"
         );
-        Ok(())
-    }
-
-    /// §9.25.1 with a SHARED audit store (issue #476 review F1): a
-    /// pre-existing seed event survives, the decision invocation's
-    /// `ToolRequest` event CONTINUES the shared hash chain (seq = seed+1,
-    /// `prev_hash` = seed's hash), and the whole merged chain validates —
-    /// the invocation event is not dropped with a per-call store.
-    #[test]
-    fn decision_record_extends_shared_audit_chain() -> McpGatewayResult<()> {
-        use orchestraitor_events::{
-            AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
-        };
-        let _temp = tempfile::tempdir()?;
-        let decision_store = std::sync::Arc::new(std::sync::Mutex::new(
-            orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
-                .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?,
-        ));
-        let shared_audit = std::sync::Arc::new(std::sync::Mutex::new(
-            orchestraitor_events::InMemoryAuditStore::default(),
-        ));
-
-        // Seed: one pre-existing non-decision.record event.
-        let seed = EventEnvelope::try_new(EventEnvelopeInput {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            monotonic_seq: 1,
-            wall_clock_ts: String::from("2026-07-30T00:00:00Z"),
-            correlation_id: OperationId::from_string(String::from("op_seed")),
-            parent_op_id: None,
-            category: EventCategory::SessionLifecycle,
-            payload: serde_json::json!({"state": "seeded"}),
-            prev_hash: None,
-        })
-        .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        shared_audit
-            .lock()
-            .map_err(|_| McpGatewayError::DecisionRecord(String::from("seed lock poisoned")))?
-            .append(seed)
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-
-        let input = crate::decision_record::DecisionRecordInput {
-            kind: crate::decision_record::DecisionRecordKind::NoOp,
-            no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
-            selected: None,
-            role: String::from("implement"),
-            provider: String::from("neuralwatt"),
-            model: String::from("glm-5.2"),
-            precedence_path: String::from("bootstrap-default"),
-            fallback_reason: None,
-            worker_args: Vec::new(),
-            rationale: String::from("shared-audit probe"),
-            alternatives: Vec::new(),
-            blocked_graph: Vec::new(),
-            skipped: Vec::new(),
-        };
-        let chain = DelegationChain {
-            correlation_id: OperationId::new(),
-            parent_op_id: None,
-            principals: vec![String::from("user:test")],
-        };
-        run_decision_record_shared(&input, &chain, Some(&decision_store), Some(&shared_audit))
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-
-        let records = shared_audit
-            .lock()
-            .map_err(|_| McpGatewayError::DecisionRecord(String::from("audit lock poisoned")))?
-            .records()
-            .to_vec();
-        assert_eq!(
-            records.len(),
-            2,
-            "seed + one ToolRequest per invocation; the seed survives"
-        );
-        assert_eq!(records[0].envelope.payload["state"], "seeded");
-        assert_eq!(
-            records[1].envelope.payload["tool"],
-            crate::decision_record::TOOL_NAME,
-            "the invocation event persisted into the shared store"
-        );
-        orchestraitor_events::validate_hash_chain(&records)
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        Ok(())
-    }
-
-    /// Review F2 (PR #476 gen-2): two concurrent invocations against ONE
-    /// shared audit store — the lock is held across each invocation's whole
-    /// event append, so both `ToolRequest` events survive with distinct
-    /// sequence numbers, the seed is intact, and the merged chain validates
-    /// (no snapshot/replay lost-update window).
-    #[test]
-    fn decision_record_concurrent_shared_audit_appends_serialize() -> McpGatewayResult<()> {
-        use crate::decision_record::{DecisionRecordKind, DecisionRecordNoOpReason};
-        use orchestraitor_events::{
-            AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
-        };
-        use std::sync::Arc;
-
-        let shared_audit = Arc::new(std::sync::Mutex::new(
-            orchestraitor_events::InMemoryAuditStore::default(),
-        ));
-
-        // Seed: one pre-existing non-decision.record event.
-        let seed = EventEnvelope::try_new(EventEnvelopeInput {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            monotonic_seq: 1,
-            wall_clock_ts: String::from("2026-07-30T00:00:00Z"),
-            correlation_id: orchestraitor_model::OperationId::from_string(String::from("op_seed")),
-            parent_op_id: None,
-            category: EventCategory::SessionLifecycle,
-            payload: serde_json::json!({"state": "seeded"}),
-            prev_hash: None,
-        })
-        .unwrap();
-        shared_audit
-            .lock()
-            .map_err(|_| String::from("seed lock poisoned"))
-            .and_then(|mut store| {
-                store
-                    .append(seed)
-                    .map_err(|error| format!("seed append failed: {error}"))
-            })
-            .unwrap();
-
-        let make_input = || crate::decision_record::DecisionRecordInput {
-            kind: DecisionRecordKind::NoOp,
-            no_op_reason: Some(DecisionRecordNoOpReason::EmptyQueue),
-            selected: None,
-            role: String::from("implement"),
-            provider: String::from("neuralwatt"),
-            model: String::from("glm-5.2"),
-            precedence_path: String::from("bootstrap-default"),
-            fallback_reason: None,
-            worker_args: Vec::new(),
-            rationale: String::from("concurrent shared-audit probe"),
-            alternatives: Vec::new(),
-            blocked_graph: Vec::new(),
-            skipped: Vec::new(),
-        };
-        // Real OS-thread stress (review round 2): `tokio::join!` over
-        // synchronous bodies does NOT overlap them — the first call runs to
-        // completion before the second is polled, so a snapshot/write-back
-        // implementation could pass spuriously. N threads × M invocations
-        // against one shared audit store, joined at thread boundaries,
-        // genuinely interleave; under the old lock scope the lost update
-        // would surface as a broken hash chain or a missing event.
-        let (threads, invocations_per_thread) = (8usize, 6usize);
-        let mut handles = Vec::new();
-        for _ in 0..threads {
-            let shared_audit = shared_audit.clone();
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..invocations_per_thread {
-                    let input = make_input();
-                    run_decision_record_shared(
-                        &input,
-                        &chain_for_test(),
-                        None,
-                        Some(&shared_audit),
-                    )
-                    .expect("concurrent invocation succeeds");
-                }
-            }));
-        }
-        for handle in handles {
-            handle.join().expect("stress thread completes");
-        }
-
-        let records = shared_audit
-            .lock()
-            .map_err(|_| String::from("final lock poisoned"))
-            .map(|store| store.records().to_vec())
-            .unwrap();
-        assert_eq!(
-            records.len(),
-            1 + threads * invocations_per_thread,
-            "seed + one ToolRequest per invocation, nothing lost"
-        );
-        assert_eq!(records[0].envelope.payload["state"], "seeded");
-        assert_eq!(
-            records[1].envelope.payload["tool"],
-            crate::decision_record::TOOL_NAME
-        );
-        assert_eq!(
-            records[2].envelope.payload["tool"],
-            crate::decision_record::TOOL_NAME
-        );
-        let sequences: Vec<_> = records
-            .iter()
-            .map(|record| record.envelope.monotonic_seq)
-            .collect();
-        let mut sorted = sequences.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            sequences, sorted,
-            "hash chain continues in sequence order: no lost update"
-        );
-        orchestraitor_events::validate_hash_chain(&records)
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        Ok(())
-    }
-
-    /// Review F2 counterpart (PR #476 gen-2): shared-audit WITHOUT a
-    /// decision store — the event still lands in the shared audit store and
-    /// the merged chain validates, even though the decision record itself
-    /// is per-invocation-volatile on this path.
-    #[test]
-    fn decision_record_records_event_without_decision_store() -> McpGatewayResult<()> {
-        let shared_audit = std::sync::Arc::new(std::sync::Mutex::new(
-            orchestraitor_events::InMemoryAuditStore::default(),
-        ));
-        let input = crate::decision_record::DecisionRecordInput {
-            kind: crate::decision_record::DecisionRecordKind::NoOp,
-            no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
-            selected: None,
-            role: String::from("implement"),
-            provider: String::from("neuralwatt"),
-            model: String::from("glm-5.2"),
-            precedence_path: String::from("bootstrap-default"),
-            fallback_reason: None,
-            worker_args: Vec::new(),
-            rationale: String::from("audit-only probe"),
-            alternatives: Vec::new(),
-            blocked_graph: Vec::new(),
-            skipped: Vec::new(),
-        };
-        run_decision_record_shared(&input, &chain_for_test(), None, Some(&shared_audit))
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        let records = shared_audit
-            .lock()
-            .map_err(|_| McpGatewayError::DecisionRecord(String::from("audit lock poisoned")))?
-            .records()
-            .to_vec();
-        assert_eq!(
-            records.len(),
-            1,
-            "the invocation event persists without a shared decision store"
-        );
-        assert_eq!(
-            records[0].envelope.payload["tool"],
-            crate::decision_record::TOOL_NAME
-        );
-        orchestraitor_events::validate_hash_chain(&records)
-            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
         Ok(())
     }
 
