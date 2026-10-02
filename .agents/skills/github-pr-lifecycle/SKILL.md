@@ -57,6 +57,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   implementer's session). Implementers may not approve their own
                   security-sensitive changes (spec `50-contracts-data.md` §21.1).
                   This skill does NOT perform the review itself; it tracks generations.
+                  Every generation uses the canonical prompt + report shape in
+                  references/review-message-template.md (parameters, fixed report
+                  sections, tone rules).
 
 4. FINDINGS       Fetch review threads with `review-threads` (GraphQL; `gh pr view
                   --json reviewThreads` DOES NOT EXIST — see gh-capabilities.md).
@@ -92,10 +95,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                     - convergence achieved against current HEAD
                     - documentation updated
                     - PR checklist items checked based on EVIDENCE
-                  `gh pr merge --squash --delete-branch --match-head-commit <sha>`
-                  (executed as the App service identity via
-                  `orc github gh-env --` when `github_app` config is present;
-                  see Safety conditions).
+                  `gh pr merge --squash --delete-branch --match-head-commit <sha>`.
                   Never use --admin to bypass a red gate (spec `50-contracts-data.md` §21.10, AGENTS.md).
 
 9. RECONCILE      After merge: close the linked issue (or confirm the PR's "Closes #N"
@@ -107,7 +107,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 - **PR identifier**: number, URL, branch, or JSON from stdin (for piping).
 - **Project config**: `.agents/project/github-project.local.toml` for review-loop limits, required reviewer domains, merge strategy. If absent, scripts exit `2`.
-- **`gh` auth**: requires GraphQL access (default `gh auth` scope is sufficient for read; mutations on review threads use the same scope). Agent-driven operations authenticate as the GitHub App service identity via `orc github gh-env --` (see Safety conditions), not a personal account.
+- **`gh` auth**: requires GraphQL access (default `gh auth` scope is sufficient for read; mutations on review threads use the same scope). Agent-driven operations authenticate as the GitHub App service identity (see Safety conditions), not a personal account.
 
 ## Outputs
 
@@ -134,7 +134,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.
-- **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity; commits are authored with the bot identity and DCO sign-off. For Orchestraitor that is the `arbsec-agent` App (org-owned, installation-scoped; planning runbook `.omo/drafts/github-app-setup.md`). Mechanically: mutating `gh` calls in these scripts route through `orc_lib_gh_service` (in `_lib.sh`), which wraps `gh` in `orc github gh-env --` when the `github_app` config resolves — the minted installation token is injected into the child's `GH_TOKEN` and never printed, logged, or persisted. When the config is absent AND enforcement is `recommended` (the default), the wrapper falls back to ambient `gh` auth behind an explicit loud `WARNING: service-identity fallback` line on stderr — the labelled fallback only, never an equal option. The wrapper refuses with exit 2 (typed config error, no personal auth) in three cases: enforcement is `required` (config key `github_app.enforcement` or `ORC_GITHUB_APP_ENFORCEMENT=required`), the layered config fails validation, or the `orc config get github_app.enforcement` read itself fails. Caller identity for assignee-ownership checks resolves via `orc_lib_resolve_my_login` (in `_lib.sh`), scoped strictly to the selected route: when `orc` is present (service route) the principal is the App bot login from `orc github commit-author` — if that fails, the result is EMPTY, never the personal login (a personal login on the service route would be a principal mismatch in the ownership checks); `gh api user` is used only when `orc` is absent (ambient route). An empty resolution is a typed failure, never a wildcard match — the calling scripts exit with the config error code when identity cannot be resolved.
+- **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity; commits are authored with the bot identity and DCO sign-off. For Orchestraitor that is the `arbsec-agent` App (org-owned, installation-scoped; planning runbook `.omo/drafts/github-app-setup.md`). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option.
 
 ## How this skill relates to project policy
 
