@@ -6,7 +6,7 @@ use std::sync::Arc;
 use miette::{IntoDiagnostic, Result, miette};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth, SkipWarning};
 
-use crate::cli::{BoardCommand, BoardMoveArgs, BoardReadyArgs, ConfigPaths};
+use crate::cli::{BoardCommand, BoardGuardedMoveArgs, BoardMoveArgs, BoardReadyArgs, ConfigPaths};
 
 /// Runs an `orc board` subcommand.
 ///
@@ -20,6 +20,9 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: BoardCommand, writer: &mut W)
     // event recording testable end to end today.
     if let BoardCommand::Query(args) = command {
         return query(&args, writer);
+    }
+    if let BoardCommand::GuardedMove(args) = command {
+        return guarded_move(&args, writer);
     }
     let (config, _path) = BoardProjectConfig::load(&paths.project_dir).into_diagnostic()?;
     let token_uri = config
@@ -43,14 +46,16 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: BoardCommand, writer: &mut W)
     match command {
         BoardCommand::Ready(args) => ready(&runtime, &client, &config, args, writer),
         BoardCommand::Move(args) => move_item(&runtime, &client, &config, &args, writer),
-        // Typed early return above keeps this arm exhaustive only.
-        BoardCommand::Query(_) => Ok(()),
+        // Typed early returns above keep this arm exhaustive only.
+        BoardCommand::Query(_) | BoardCommand::GuardedMove(_) => Ok(()),
     }
 }
 
 /// Builds the shared `board.query` fixture board (same shape as the crate
 /// tests): a small typed board with a blocked chain, a cycle branch, and
-/// filterable items.
+/// filterable items — plus the `board.move` guard-fixture items (issue
+/// #333): a Ready task, a blocked pair, and a triage-gated bug.
+#[allow(clippy::too_many_lines)] // declarative fixture data, not logic
 fn fixture_board() -> orchestraitor_board_contract::InMemoryBoardProvider {
     use orchestraitor_board_contract::{BoardFieldKind, BoardFieldValue, BoardItemType};
     orchestraitor_board_contract::InMemoryBoardProvider::new(|setup| {
@@ -137,6 +142,42 @@ fn fixture_board() -> orchestraitor_board_contract::InMemoryBoardProvider {
                         option: "MVP".into(),
                     },
                 )],
+            )
+            // board.move guard-fixture items (issue #333): the happy-path
+            // Ready task, the blocked pair, and the triage-gated bug.
+            .status("Triage")
+            .item(
+                "ready-task",
+                BoardItemType::Task,
+                "Ready task",
+                "body",
+                "Ready",
+                &[],
+            )
+            .item(
+                "blocked-task",
+                BoardItemType::Task,
+                "Blocked task",
+                "body",
+                "Blocked",
+                &[],
+            )
+            .item(
+                "blocker-1",
+                BoardItemType::Task,
+                "Blocker one",
+                "body",
+                "In Progress",
+                &[],
+            )
+            .edge("blocked-task", "blocker-1")
+            .item(
+                "triaged-bug",
+                BoardItemType::Bug,
+                "Triaged bug",
+                "body",
+                "Triage",
+                &[],
             )
             .item(
                 "done-task",
@@ -370,4 +411,156 @@ fn report_warnings(warnings: &[SkipWarning]) -> Result<()> {
         .into_diagnostic()?;
     }
     Ok(())
+}
+
+/// Runs `orc board guarded-move`: the `board.move` coordinator decision
+/// tool (spec `10-orchestrator.md` §9.39, issue #333) against the
+/// deterministic fixture board — a guarded status transition:
+/// workflow-policy validated, lease-checked, reconcile-visible. Refusals
+/// are typed outcomes (exit-path output, not a crash); the board stays
+/// unchanged.
+///
+/// # Errors
+/// Returns a diagnostic only for process-level failures (runtime spawn,
+/// serialization); guard refusals are rendered output.
+fn guarded_move<W: Write>(args: &BoardGuardedMoveArgs, writer: &mut W) -> Result<()> {
+    use orchestraitor_events::InMemoryAuditStore;
+    use orchestraitor_mcp::board_move::{
+        BoardMoveDelegationChain, BoardMoveOutcome, BoardMoveRequest, InMemoryLeaseRegistry,
+        board_move,
+    };
+    use orchestraitor_model::OperationId;
+
+    let request = BoardMoveRequest {
+        item: args.item.clone(),
+        status: args.status.clone(),
+        session: args.session.clone(),
+        ..BoardMoveRequest::default()
+    };
+    let chain = BoardMoveDelegationChain {
+        correlation_id: OperationId::new(),
+        parent_op_id: None,
+        principals: vec![
+            String::from("user:cli"),
+            format!("session:{}", args.session),
+        ],
+    };
+    // §9.25.1 recording: one-shot CLI invocation — the event is written,
+    // hash-chain-validated, and summarized here; the in-memory store lives
+    // only for this process (per-invocation-volatile), mirroring
+    // `orc board query`.
+    let mut registry = InMemoryLeaseRegistry::new();
+    let mut store = InMemoryAuditStore::default();
+    let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
+    let result = runtime
+        .block_on(board_move(
+            &fixture_board(),
+            &mut registry,
+            &request,
+            &chain,
+            &mut store,
+        ))
+        .map_err(|error| miette!("{error}"))?;
+    if args.json {
+        serde_json::to_writer_pretty(&mut *writer, &result).into_diagnostic()?;
+        writeln!(writer).into_diagnostic()?;
+        return Ok(());
+    }
+    match result.outcome {
+        BoardMoveOutcome::Applied {
+            applied,
+            lease_bookkeeping_failure,
+        } => {
+            writeln!(
+                writer,
+                "moved {} from \"{}\" to \"{}\"{}",
+                applied.item,
+                applied.from_status,
+                applied.to_status,
+                if applied.lease_acquired {
+                    " (lease acquired)"
+                } else {
+                    ""
+                }
+            )
+            .into_diagnostic()?;
+            if let Some(failure) = lease_bookkeeping_failure {
+                writeln!(
+                    writer,
+                    "WARNING (lease bookkeeping failure: {}): the board change landed, \
+                     but the lease state must be reconciled",
+                    failure.failure
+                )
+                .into_diagnostic()?;
+            }
+        }
+        BoardMoveOutcome::Refused { refusal } => {
+            write_refusal(writer, &refusal)?;
+        }
+        BoardMoveOutcome::Indeterminate {
+            item,
+            requested_status,
+            failure,
+        } => {
+            writeln!(
+                writer,
+                "INDETERMINATE ({failure}): the write of {item} to \"{requested_status}\" \
+                 may have landed but its outcome could not be verified — re-read the board \
+                 state before retrying"
+            )
+            .into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+/// Renders one typed refusal: the machine reason plus its human meaning.
+/// The board is unchanged after any refusal.
+fn write_refusal<W: Write>(
+    writer: &mut W,
+    refusal: &orchestraitor_mcp::board_move::BoardMoveRefusal,
+) -> Result<()> {
+    use orchestraitor_mcp::board_move::BoardMoveRefusal;
+    writeln!(
+        writer,
+        "REFUSED ({}): {}",
+        serde_json::to_value(refusal)
+            .ok()
+            .and_then(|value| value
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(String::from))
+            .unwrap_or_else(|| String::from("unknown")),
+        match refusal {
+            BoardMoveRefusal::PolicyInvalid {
+                from_class,
+                to_class,
+                blocking,
+            } => {
+                let blockers = blocking.as_ref().map_or_else(String::new, |ids| {
+                    format!("; unresolved blockers: {}", ids.join(", "))
+                });
+                format!("the workflow policy does not allow {from_class} -> {to_class}{blockers}")
+            }
+            BoardMoveRefusal::LeaseConflict { holder } => {
+                format!("another session holds the lease: {holder}")
+            }
+            BoardMoveRefusal::MissingSession => {
+                "the invoking session must identify itself".to_string()
+            }
+            BoardMoveRefusal::LeaseExpired => {
+                "your session's lease on this item has expired; re-acquire first".to_string()
+            }
+            BoardMoveRefusal::UnknownStatus => {
+                "the target status does not exist on the board".to_string()
+            }
+            BoardMoveRefusal::UnknownItem => "the item id is not on the board".to_string(),
+            BoardMoveRefusal::ProviderRejected =>
+                "the board provider refused or failed the write".to_string(),
+            BoardMoveRefusal::OutOfScope => {
+                "field and edge writes are outside this tool's scope".to_string()
+            }
+        }
+    )
+    .into_diagnostic()
 }
