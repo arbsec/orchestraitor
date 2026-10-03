@@ -14,17 +14,17 @@ orc loop [--json] [--max-cycles N]
 
 ## Guard set
 
-Every guard is owner-adjustable at the board (issue #310 set), pinned once in
+Every guard is fixed in this slice — the issue #310 set pinned in
 `WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop (the
-loop hands its validated instance to the worker starter) — the two enforcement layers
-can never drift apart:
+loop hands its validated instance to the worker starter). No board field, config
+key, or flag adjusts them — the two enforcement layers can never drift apart:
 
 | Guard | Default | Enforced by |
 | --- | --- | --- |
 | attempts | 3 per worker run | worker loop (typed failure on exhaustion) |
 | re-plans | 2 between attempts | worker loop |
 | worker timeout | 45m | worker deadline + supervisor kill (beats or not) |
-| concurrency | 2 | loop (cap on supervised slots) |
+| concurrency | 2 | loop (cap on supervised slots; each worker slot gets its own `git worktree` under `<config-dir>/loop-worktrees/` keyed by task id — concurrent workers never share the project directory) |
 | stall | 10m | worker-internal check + supervisor beat-staleness kill |
 | backoff | 10s·2^n capped at 5m | loop pass pacing (same schedule the worker uses for provider retries) |
 | spend | $10/day soft cap | worker records exceedance; loop seals the intake (inert by default — the per-token spend estimate is `0.0` until the cost-ledger lane wires provider pricing in, so no accrual crosses the cap) |

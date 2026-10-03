@@ -167,10 +167,24 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   supervisor-side stall kill (beat staleness over the 10m window — catches runs wedged
   inside hung transport calls), worker-timeout kill at 45m, pass pacing at 10s·2^n
   capped 5m, $10/day spend soft cap (seals the intake and drains in-flight work — never
-  aborts), and a 4h whole-run budget. SIGTERM/SIGINT drain gracefully inside the 5s
+  aborts; inert by default — the per-token spend estimate is `0.0` until the
+  cost-ledger lane wires provider pricing in, so no spend accrues and the cap is never
+  reached — matching [docs/cli/orc-loop.md](docs/cli/orc-loop.md)), and a 4h whole-run
+  budget. SIGTERM/SIGINT drain gracefully inside the 5s
   daemon budget and record stragglers; a second signal short-circuits the grace. A
   second concurrent invocation is rejected (`loop-already-running`, advisory flock).
-  One worker run per task per invocation — failed or killed tasks are never silently
+  A task that cannot be started (missing task fixture, unsupported provider,
+  transport build failure) is a per-task outcome, not a run-killer: the task is
+  recorded as a terminal `failed` run row, the pass is paced out, and the loop keeps
+  supervising in-flight work — the failed task is excluded for the rest of the
+  invocation. A fatal durable-state failure aborts and records in-flight workers
+  before the run returns, so no row is stranded `running`. The 4h run budget bounds
+  the board poll too — the budget cannot expire while the loop sits inside a board
+  request, and nothing is planned or spawned after expiry; transient poll failures
+  back off and retry (counted in the summary, never fatal). Each concurrent worker
+  slot gets its own git worktree under `<config-dir>/loop-worktrees/` keyed by task
+  id — concurrent workers never share or write the project directory. One worker run
+  per task per invocation — failed or killed tasks are never silently
   retried; retry is a fresh board-driven selection in a later invocation. Run state is
   recorded at `<config-dir>/loop.db` for guard accounting and run outcomes. Documented
   in [docs/cli/orc-loop.md](docs/cli/orc-loop.md) and the README.
@@ -277,34 +291,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
-- `orc loop` writes the run-state row BEFORE spawning the worker: a durable row-write
-  failure on the spawn path now fails the run with the in-flight worker aborted —
-  previously the spawned worker task detached and ran to its 45-minute timeout with no
-  run row, invisible to every sweep (#434).
-- `orc loop` run rows aborted by the fatal-exit sweep (a durable-state failure ended the
-  run) now carry the detail `unattributed-drain-abort` instead of a fabricated
-  `run-budget-abort`: no budget stop was declared, so the audit row no longer claims a
-  cause that did not hold. The unattributed abort is a distinct typed intent, and the
-  fabricated terminal reason is unrepresentable by construction (#434).
-- `orc loop` creates the configuration directory on first run instead of dying on a
-  bare `No such file or directory` when `<config-dir>/loop.lock`'s parent does not
-  exist yet (#434).
-- `orc loop` no longer treats a worker spawn failure (missing task fixture,
-  unsupported provider, transport build failure) as a run-killer: the task is
-  recorded as a terminal `failed` run row, the pass is paced out, and the loop keeps
-  supervising in-flight work — the failed task is excluded for the rest of the
-  invocation (#434). A fatal durable-state failure now aborts and records in-flight
-  workers before the run returns, so no row is stranded `running`.
-- `orc loop` bounds process shutdown by the five-second daemon budget after the run
-  completes, so a blocking worker operation cannot hold process exit past it (#434).
-- `orc loop` now bounds board polling by the remaining run budget: the budget could
-  previously expire while the loop sat inside a board request (up to the board client's
-  60s timeout), leaving in-flight work unsupervised and letting the pass plan or start
-  work on an already-spent budget. The pass now races the poll against the remaining
-  budget and re-checks it after the poll — expiry enters the normal
-  `run-budget-exhausted` drain, and nothing is planned or spawned after expiry (#434).
-  Transient poll failures keep their existing backoff-and-retry semantics (counted in
-  the summary, journaled as `poll-failed`, next pass paced out — never fatal).
 - `orc github commit-author` authenticates `GET /app` with a freshly minted
   App JWT instead of an installation token: `GET /app` is an App-level
   endpoint that GitHub answers with 401 for installation tokens, so the
