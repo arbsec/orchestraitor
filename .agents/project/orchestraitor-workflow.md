@@ -45,6 +45,12 @@ the one-claim guard:
   a merged or abandoned lane releases its claim (`release-issue`, then `reconcile` for board
   state) before another lane claims that issue.
 
+## Replay base policy
+
+Verified-commit replays on this repo target `main` (the default branch): the
+PR's base ref, per the generic mechanism in
+`.agents/skills/github-pr-lifecycle/references/verified-commit-path.md`.
+
 ## GitHub service identity
 
 All agent-driven GitHub operations — board writes, issue lifecycle, PRs, reviews — run as

@@ -239,7 +239,12 @@ per-item disposition:
     or evidence that covers it.
   - already-held: verified against current code and rejected as a
     non-issue; cite the evidence.
-  - wontfix: valid but not acted on; state the reason.
+  - wontfix: valid but not acted on; state the reason. Every verified-valid
+    wontfix item MUST also appear as a canonical finding in the `## Findings`
+    section (with `status: deferred` and the severity rules of
+    [review-findings.md](review-findings.md) applied — a CRITICAL/HIGH/MEDIUM
+    finding is never wontfix-only). The cross-check section alone does not
+    enter the `NOTEWORTHY FINDINGS` count or the `VERDICT` computation.
 ```
 
 Each disposition MUST carry its evidence or reason inline. Unverified bot

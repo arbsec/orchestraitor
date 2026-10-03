@@ -21,11 +21,20 @@ into GitHub-signed commits:
 
 1. Mint a JWT (RS256, `iss` = App client id, ≤10 min TTL) from the keyring PEM
    (`secret-tool lookup service orchestraitor`), exchange it for an installation token.
-2. Walk the branch's commits oldest→newest above the merge-base with `origin/main`.
+2. Derive the replay base from the PR itself — the PR's base ref and its base
+   OID (GraphQL `pullRequest.baseRefName` / `baseRefOid`), not a hardcoded
+   branch name. Walk the branch's commits oldest→newest above that base OID.
+   Concrete default-branch restrictions are project policy
+   (`.agents/project/orchestraitor-workflow.md`), not part of this mechanism.
 3. Replay each commit via GraphQL `createCommitOnBranch` on a **temp branch**
    `replay/signed-<branch>`, checking `expectedHeadOid` against the live remote before
    every mutation.
-4. Force-swing the real branch ref to the temp head **once**, then delete the temp branch.
+4. Force-swing the real branch ref to the temp head **once**, as a
+   compare-and-swap: the ref update MUST carry the latest observed branch OID
+   as its expected value (GraphQL `updateRef` with `expectedHeadOid`, fetched
+   immediately before the mutation) and the swing MUST abort on mismatch — a
+   concurrent commit in the window MUST NOT be overwritten. Delete the temp
+   branch only after the swing succeeds.
 
 **Pitfall:** never reset a PR branch through an ancestor-of-main state mid-replay —
 GitHub auto-closes the PR. Replay on the temp branch; swing the ref a single time.

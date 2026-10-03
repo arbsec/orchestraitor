@@ -25,7 +25,7 @@ Every finding MUST include:
   "proposed_remediation": "Replace with proper error propagation using thiserror",
   "generation": 2,
   "thread_id": "PRRT_kw...",
-  "status": "open|fixed|resolved-with-reasoning|deferred",
+  "status": "open|fixed|resolved-with-reasoning|deferred|stale|duplicate-ref: <earlier-id>",
   "cwe": "CWE-284",
   "evidence_command": "cargo clippy --all-targets -- -D warnings"
 }
