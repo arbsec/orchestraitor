@@ -107,14 +107,6 @@ untrusted value, and bounded — provenance is never fabricated (same posture
 as `board.query`). The record content itself stays in the decision store; the
 audit event carries only the summary.
 
-**Audit persistence:** identical posture to `board.query` in this slice. When
-the connection carries a shared audit store, the invocation event CONTINUES
-that store's hash chain (seed events and other invocations' events survive;
-the merged chain validates end to end). When none is configured, the event is
-written and hash-chain-validated but the store is per-invocation-volatile —
-dropped with the invocation. Durable persistence lands with the daemon
-event-store wiring (§9.17).
-
 ## Persistence note
 
 In this slice the MCP tool runs against the campaign §9.35 store IN MEMORY:

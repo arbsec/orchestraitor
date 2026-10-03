@@ -178,6 +178,7 @@ pub struct DecisionRecordInput {
     /// Resolved model for the role.
     pub model: String,
     /// Precedence path that produced the routing resolution (§9.19.2).
+    #[serde(default)]
     pub precedence_path: String,
     /// Documented fallback reason, when routing fell back.
     #[serde(default)]
