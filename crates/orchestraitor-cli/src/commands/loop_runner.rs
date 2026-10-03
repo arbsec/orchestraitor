@@ -151,36 +151,49 @@ impl DirectLoopStarter {
     /// they never fail the run, but they are never silent either.
     fn prune_worktrees(config_dir: &Path, project_dir: &Path) {
         let base = config_dir.join("loop-worktrees");
+        // Clear stale registrations FIRST (a removed directory, an
+        // interrupted remove): without this, `worktree remove` on a
+        // dangling path fails and the directory survives.
+        let _ignore = Self::git(project_dir).args(["worktree", "prune"]).output();
         let Ok(entries) = std::fs::read_dir(&base) else {
             return; // no worktree base yet — nothing to prune
         };
         for entry in entries.filter_map(Result::ok) {
             // `git worktree remove --force` clears the project repo's
             // worktree registration; a bare directory removal would leave a
-            // stale one behind. The branch itself is deleted separately —
-            // `worktree remove` never touches it, and a leftover branch
-            // would break the next `worktree add -B` for the same task.
+            // stale one behind. The branch is deleted ONLY after a
+            // successful removal — a failed removal leaves the branch
+            // checked out, and git refuses to delete a checked-out branch.
             let task_id = entry.file_name().to_string_lossy().into_owned();
             let output = Self::git(project_dir)
                 .args(["worktree", "remove", "--force"])
                 .arg(entry.path())
                 .output();
             match output {
-                Ok(output) if output.status.success() => {}
+                Ok(output) if output.status.success() => {
+                    let branch = format!("orc-loop/{task_id}");
+                    match Self::git(project_dir)
+                        .args(["branch", "-D", &branch])
+                        .output()
+                    {
+                        Ok(o) if o.status.success() => {}
+                        Ok(o) => {
+                            Self::report_prune_failure(
+                                &task_id,
+                                &String::from_utf8_lossy(&o.stderr),
+                            );
+                        }
+                        Err(error) => {
+                            Self::report_prune_failure(&task_id, &error.to_string());
+                        }
+                    }
+                }
                 Ok(output) => {
                     Self::report_prune_failure(&task_id, &String::from_utf8_lossy(&output.stderr));
                 }
                 Err(error) => Self::report_prune_failure(&task_id, &error.to_string()),
             }
-            let branch = format!("orc-loop/{task_id}");
-            let _ignore = Self::git(project_dir)
-                .args(["branch", "-D", &branch])
-                .output();
         }
-        // Clear stale registrations whose directories vanished (e.g. a
-        // crash mid-remove): without this, `worktree add -B` refuses the
-        // path as "already registered".
-        let _ignore = Self::git(project_dir).args(["worktree", "prune"]).output();
     }
 
     /// Reports a worktree-prune failure to stderr (best-effort — the same
