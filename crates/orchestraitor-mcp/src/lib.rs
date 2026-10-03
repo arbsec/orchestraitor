@@ -15,8 +15,15 @@ mod patch;
 mod project;
 mod workflow;
 
+pub mod board_move;
 pub mod board_query;
 pub mod decision_record;
+
+pub use board_move::{
+    BoardMoveApplied, BoardMoveDelegationChain, BoardMoveError, BoardMoveOutcome, BoardMoveRefusal,
+    BoardMoveRequest, BoardMoveResult, ClaimOutcome, InMemoryLeaseRegistry, ItemLease,
+    LeaseBookkeepingFailure, LeaseRegistry, StatusClass, board_move,
+};
 
 pub use board_query::{
     BlockedCycle, BlockedGraph, BoardQueryField, BoardQueryFieldValue, BoardQueryFilter,

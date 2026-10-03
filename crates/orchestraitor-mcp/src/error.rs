@@ -84,6 +84,12 @@ pub enum McpGatewayError {
     /// persist+replay guarantee (spec §9.35).
     #[error("decision.record is not configured with a session-scoped decision store")]
     DecisionRecordUnconfigured,
+    /// The `board.move` decision tool failed (lease registry or event
+    /// store). Message text is a static, log-safe label — never board
+    /// content (spec `40-arbitraitor-integration.md` §9.23.4). Guard
+    /// REFUSALS are not errors: they are structured outcomes.
+    #[error("board.move failed: {0}")]
+    BoardMove(String),
 }
 
 impl From<std::io::Error> for McpGatewayError {

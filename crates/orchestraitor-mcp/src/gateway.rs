@@ -10,6 +10,10 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::board_move::{
+    BoardMoveDelegationChain, BoardMoveError, BoardMoveRequest, BoardMoveResult, board_move,
+    build_invocation_event as build_move_invocation_event, execute_move,
+};
 use crate::board_query::{
     BoardQueryMode, BoardQueryResultKind, DelegationChain, board_query, build_invocation_event,
     execute_query, invocation_summary,
@@ -54,6 +58,13 @@ pub struct GatewayContext {
     /// append it would drop.
     pub decision_store:
         Option<std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>>,
+    /// Shared lease registry for the `board.move` decision tool
+    /// (§9.24.2 leases; §9.43 — runtime state is local-only, never synced
+    /// to the board). `None` disables the tool the same way a missing
+    /// board provider does: the route is dropped from `tools/list` and
+    /// calls are rejected.
+    pub board_lease_registry:
+        Option<std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>>,
 }
 
 /// rmcp server exposing Orchestraitor built-in tools for one project scope.
@@ -74,6 +85,8 @@ pub struct McpGateway {
 impl McpGateway {
     /// The `board.query` tool name, used by the router-disable path.
     const BOARD_QUERY_NAME: &'static str = "board.query";
+    /// The `board.move` tool name, used by the router-disable path.
+    const BOARD_MOVE_NAME: &'static str = "board.move";
 
     /// The `decision.record` tool name, used by the router-disable path.
     const DECISION_RECORD_NAME: &'static str = "decision.record";
@@ -83,8 +96,13 @@ impl McpGateway {
     pub fn new(context: GatewayContext) -> Self {
         let fs = FileSystemTools::new(context.scope.clone());
         let mut tool_router = Self::static_tool_router();
-        if context.board.is_none() {
+        if context.board.is_none() || context.board_lease_registry.is_none() {
+            // Both board decision tools need the provider; `board.move`
+            // additionally needs the lease registry. Either missing
+            // disables BOTH routes: the guard surface never runs against
+            // a partial configuration (fail closed).
             tool_router.disable_route(Self::BOARD_QUERY_NAME);
+            tool_router.disable_route(Self::BOARD_MOVE_NAME);
         }
         if context.decision_store.is_none() {
             tool_router.disable_route(Self::DECISION_RECORD_NAME);
@@ -354,6 +372,39 @@ impl McpGateway {
             }))),
         }
     }
+
+    /// Apply a guarded board transition through the configured
+    /// [`BoardProvider`](orchestraitor_board_contract::BoardProvider):
+    /// workflow-policy validated, lease-checked, reconcile-visible (spec
+    /// `10-orchestrator.md` §9.39, §9.40, §9.43; issue #333) — never a raw
+    /// provider write. Refusals are typed structured data with the board
+    /// unchanged. When no board provider AND lease registry are configured
+    /// in the context, the route is disabled entirely — this arm is
+    /// defense in depth.
+    #[tool(
+        name = "board.move",
+        description = "Guarded board transition: move one item to a status class after workflow-policy validation and lease check; refusals are typed, board stays unchanged"
+    )]
+    async fn board_move(
+        &self,
+        Parameters(input): Parameters<BoardMoveRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(provider) = self.context.board.clone() else {
+            return Ok(CallToolResult::structured_error(serde_json::json!({
+                "error": "board.move is not configured for this project scope",
+                "code": "board_move_unconfigured"
+            })));
+        };
+        let Some(registry) = self.context.board_lease_registry.clone() else {
+            return Ok(CallToolResult::structured_error(serde_json::json!({
+                "error": "board.move is not configured for this project scope",
+                "code": "board_move_unconfigured"
+            })));
+        };
+        let shared = self.context.board_audit_store.clone();
+        let result = run_board_move_shared(provider.as_ref(), registry, input, shared).await;
+        self.structured(result)
+    }
 }
 
 #[tool_handler(router = self.tool_router, name = "orchestraitor-mcp", version = "0.0.0")]
@@ -574,6 +625,136 @@ pub(crate) async fn run_board_query_shared(
         .map_err(|error| McpGatewayError::BoardQuery(error.to_string()))
 }
 
+/// Drives one guarded board move against a provider, recording into the
+/// context's audit store when one is shared, otherwise a fresh in-memory
+/// store (mirrors [`run_board_query_shared`], issue #458 F3).
+///
+/// The caller's §9.25.1 delegation-chain labels ride ON the request
+/// (`delegation_chain`, client-asserted data — PR #475 review thread 7)
+/// and are recorded verbatim with the same `claimed:` prefix and
+/// truncation bounds as `board.query`.
+///
+/// The move runs FIRST (no locks held), then the outcome — applied,
+/// refused, OR indeterminate; every terminal outcome is a decision and
+/// records — appends under ONE lock section. The lock is held only across
+/// the synchronous section; a poisoned lock fails the invocation closed.
+/// An append failure on a shared store maps to the typed indeterminate
+/// error: the board mutation (when applied) already landed and the audit
+/// gap must be visible (PR #475 review thread 1).
+pub(crate) async fn run_board_move_shared(
+    provider: &dyn orchestraitor_board_contract::BoardProvider,
+    registry: std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>,
+    request: BoardMoveRequest,
+    shared_store: Option<
+        std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>,
+    >,
+) -> Result<BoardMoveResult, McpGatewayError> {
+    let correlation_id = OperationId::new();
+    let chain = BoardMoveDelegationChain {
+        correlation_id,
+        parent_op_id: None,
+        principals: request.delegation_chain.clone(),
+    };
+    if let Some(shared) = shared_store {
+        let mut guarded = GuardedRegistry(std::sync::Arc::clone(&registry));
+        let (outcome, summary) = execute_move(provider, &mut guarded, &request)
+            .await
+            .map_err(|error| McpGatewayError::BoardMove(error.to_string()))?;
+        {
+            let mut store = shared
+                .lock()
+                .map_err(|_| McpGatewayError::BoardMove(String::from("audit store poisoned")))?;
+            let seq_base = store.records().len();
+            let prev_base = store.records().last().map(|record| record.hash.clone());
+            let event =
+                build_move_invocation_event(&request, &chain, &summary, seq_base, prev_base)
+                    .map_err(|_| {
+                        McpGatewayError::BoardMove(String::from(
+                            "invocation event construction failed",
+                        ))
+                    })?;
+            store.append(event).map_err(|_| {
+                // The append failed AFTER the move's terminal outcome: the
+                // message must match the outcome class (PR #478 review).
+                // Refused: the board is provably unchanged — only the
+                // record is missing. Applied/indeterminate: the board
+                // mutation may have landed, so the audit gap means the
+                // board state must be reconciled through a fresh read
+                // (PR #475 review thread 1). Either way the error return
+                // keeps the §9.39 fail-closed posture: the invocation is
+                // never reported as an unrecorded success.
+                let message = match &outcome {
+                    crate::board_move::BoardMoveOutcome::Refused { .. } => {
+                        "invocation event append rejected after a refused move; \
+                         the board is unchanged but the invocation was not recorded"
+                    }
+                    crate::board_move::BoardMoveOutcome::Applied { .. }
+                    | crate::board_move::BoardMoveOutcome::Indeterminate { .. } => {
+                        "invocation event append rejected: board state for this \
+                         move must be reconciled through a fresh read"
+                    }
+                };
+                McpGatewayError::BoardMove(String::from(message))
+            })?;
+        }
+        return Ok(BoardMoveResult {
+            correlation_id: chain.correlation_id.to_string(),
+            outcome,
+        });
+    }
+    let mut store = orchestraitor_events::InMemoryAuditStore::default();
+    let mut guarded = GuardedRegistry(registry);
+    board_move(provider, &mut guarded, &request, &chain, &mut store)
+        .await
+        .map_err(|error| McpGatewayError::BoardMove(error.to_string()))
+}
+
+/// Adapter that locks the shared registry long enough for one synchronous
+/// registry call — `LeaseRegistry` methods are sync and short (no await
+/// inside), so a per-call lock section never crosses an await point. The
+/// shared registry serializes concurrent invocations at `try_claim`, so
+/// the TOCTOU fix holds across gateway requests (PR #475 review thread 2).
+struct GuardedRegistry(std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>);
+
+impl crate::board_move::LeaseRegistry for GuardedRegistry {
+    fn try_claim(
+        &mut self,
+        item: &orchestraitor_board_contract::BoardItemId,
+        session: &str,
+        expires_at_unix_secs: u64,
+    ) -> Result<crate::board_move::ClaimOutcome, BoardMoveError> {
+        let mut leases = self
+            .0
+            .lock()
+            .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
+        leases.try_claim(item, session, expires_at_unix_secs)
+    }
+
+    fn held_by(
+        &self,
+        item: &orchestraitor_board_contract::BoardItemId,
+        session: &str,
+    ) -> Result<Option<crate::board_move::ItemLease>, BoardMoveError> {
+        let leases = self
+            .0
+            .lock()
+            .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
+        leases.held_by(item, session)
+    }
+
+    fn release(
+        &mut self,
+        item: &orchestraitor_board_contract::BoardItemId,
+        session: &str,
+    ) -> Result<(), BoardMoveError> {
+        let mut leases = self
+            .0
+            .lock()
+            .map_err(|_| BoardMoveError::EventStore("lease registry poisoned"))?;
+        leases.release(item, session)
+    }
+}
+
 /// Maps a typed gateway error onto the structured error payload the MCP
 /// client sees: a human-readable message plus a stable machine `code`
 /// (never board content, never internal details).
@@ -593,6 +774,7 @@ fn error_payload(error: &McpGatewayError) -> serde_json::Value {
             McpGatewayError::BoardQuery(_) => "board_query_failed",
             McpGatewayError::DecisionRecord(_) => "decision_record_failed",
             McpGatewayError::DecisionRecordUnconfigured => "decision_record_unconfigured",
+            McpGatewayError::BoardMove(_) => "board_move_failed",
         }
     })
 }
@@ -630,6 +812,7 @@ mod tests {
             board: None,
             board_audit_store: None,
             decision_store: None,
+            board_lease_registry: None,
         });
         let _ = gateway;
         Ok(())
@@ -650,6 +833,7 @@ mod tests {
             board: None,
             board_audit_store: None,
             decision_store: None,
+            board_lease_registry: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -669,6 +853,36 @@ mod tests {
             unconfigured.tool_router.is_disabled("board.query"),
             "the route is disabled, not removed"
         );
+        // board.move disables alongside board.query: the guard surface
+        // never runs against a partial configuration (fail closed).
+        assert!(
+            !unconfigured.tool_router.has_route("board.move"),
+            "board.move must be uncallsable when unconfigured"
+        );
+        assert!(unconfigured.tool_router.is_disabled("board.move"));
+        Ok(())
+    }
+
+    /// A provider WITHOUT a lease registry also disables both board tools:
+    /// `board.move` needs both, and a partial guard configuration fails
+    /// closed rather than running unlease-checked.
+    #[test]
+    fn board_tools_disable_when_lease_registry_is_missing() -> McpGatewayResult<()> {
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let partial = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: Some(std::sync::Arc::new(
+                orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
+            )),
+            board_audit_store: None,
+            board_lease_registry: None,
+        });
+        assert!(!partial.tool_router.has_route("board.move"));
+        assert!(partial.tool_router.is_disabled("board.move"));
+        assert!(!partial.tool_router.has_route("board.query"));
         Ok(())
     }
 
@@ -686,7 +900,10 @@ mod tests {
                 orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
             )),
             board_audit_store: None,
-            decision_store: None,
+    decision_store: None,
+    board_lease_registry: Some(std::sync::Arc::new(std::sync::Mutex::new(
+        crate::board_move::InMemoryLeaseRegistry::new(),
+    ))),
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -699,6 +916,13 @@ mod tests {
             "board.query must be listed when a provider is configured: {listed:?}"
         );
         assert!(configured.tool_router.has_route("board.query"));
+        // With provider + lease registry both configured, board.move is
+        // listed and callable too.
+        assert!(
+            listed.iter().any(|name| name == "board.move"),
+            "board.move must be listed when fully configured: {listed:?}"
+        );
+        assert!(configured.tool_router.has_route("board.move"));
         Ok(())
     }
 

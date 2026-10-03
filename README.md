@@ -118,6 +118,10 @@ The loop's first concrete surfaces ship today:
   replayable §9.35 decision record into the campaign store, with typed write validation and
   fail-closed secret refusal; documented in
   [`docs/cli/orc-decision-record.md`](docs/cli/orc-decision-record.md).
+- [`orc board guarded-move`](docs/cli/orc-board.md) — the `board.move` coordinator decision
+  tool (#333): guarded status-class transitions — workflow-policy validated, lease-checked,
+  reconcile-visible; refusals are typed and leave the board unchanged. Fixture board in this
+  slice (#318 split).
 - The `orchestraitor-board-contract` crate — the `BoardProvider` contract with a
   write-through, board-wins read cache (spec §9.43).
 
@@ -157,8 +161,9 @@ The cron-shaped `orc loop` runner lands with #434.
 - [`orc init`](docs/cli/orc-init.md) — deterministic local project detection that writes a
   proposed `.orchestraitor/orchestraitor.toml`; `--dry-run` writes nothing.
 - [`orc board`](docs/cli/orc-board.md) — ready-queue read, verified Status write, and the
-  read-only `board.query` decision tool (typed filter search + transitive blocked-graph
-  walk, §9.39/§9.40) against the shared GitHub Projects v2 board
+  board coordinator decision tools (`board.query` typed filter search + transitive
+  blocked-graph walk; `board.move` guarded transitions with typed refusals,
+  §9.39/§9.40) against the shared GitHub Projects v2 board
   (spec `10-orchestrator.md` §9.43, §9.40).
 - [`orc worker`](docs/cli/orc-worker.md) — headless one-shot bootstrap worker: runs one
   leaf task through the bounded mini-agent loop with exactly four tools (file read,
@@ -194,11 +199,13 @@ orc github mint-token
 orc routing resolve --role <id> [--json]
 orc campaign run --once [--json]
 orc board query [--blocked-by <item-id> | [--item-type <type>] [--status <name>] [--field <name>=<option>]...] [--json]
+orc board guarded-move <item-id> --status "<Status option name>" --session <session-label> [--json]
 orc loop --max-cycles N [--json]
 ```
 
 The last line lands with #434; `orc board query` shipped with #458 (fixture board;
-`--blocked-by` selects blocked-graph mode, the filter flags select filter mode).
+`--blocked-by` selects blocked-graph mode, the filter flags select filter mode) and
+`orc board guarded-move` with #333 (fixture board; guarded `board.move`).
 
 `orc config explain` reports the resolved value, source layer, source file, inherited state,
 and profile contribution placeholder. `orc config validate` rejects ambiguous same-layer
