@@ -303,8 +303,12 @@ impl McpGateway {
             blocked_graph: input.blocked_graph,
             skipped: input.skipped,
         };
-        let result =
-            run_decision_record_shared(&input, &chain, self.context.decision_store.as_ref());
+        let result = run_decision_record_shared(
+            &input,
+            &chain,
+            self.context.decision_store.as_ref(),
+            self.context.board_audit_store.as_ref(),
+        );
         self.structured(result)
     }
 
@@ -435,7 +439,6 @@ struct DecisionRecordRequest {
     /// Resolved model for the role.
     model: String,
     /// Precedence path that produced the routing resolution (§9.19.2).
-    #[serde(default)]
     precedence_path: String,
     /// Documented fallback reason, when routing fell back.
     #[serde(default)]
@@ -478,27 +481,87 @@ pub(crate) fn run_decision_record_shared(
     shared_store: Option<
         &std::sync::Arc<std::sync::Mutex<orchestraitor_campaign::CampaignDecisionStore>>,
     >,
+    shared_audit: Option<
+        &std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>,
+    >,
 ) -> Result<orchestraitor_campaign::StoredCampaignDecision, McpGatewayError> {
-    // With a session-scoped store the append lands in THAT store (row ids
-    // strictly increase across the session's invocations); with none, the
-    // invocation opens its own in-memory store (per-invocation row space).
-    // Durable persistence stays owned by `orc campaign run --once` until the
-    // daemon decision-tool wiring (§9.17) lands. The store mutex serializes
+    // §9.25.1 recording mirrors `board.query` (issue #458 F3): with a shared
+    // audit store the ToolRequest event CONTINUES that store's hash chain
+    // (seq = len+1, prev_hash = last shared hash) and survives the
+    // invocation; with none the recording is PER-INVOCATION-VOLATILE —
+    // written and validated, then dropped with the store (same documented
+    // posture as `board.query`). Durable persistence lands with the daemon
+    // event-store wiring (§9.17).
+    let mut audit = orchestraitor_events::InMemoryAuditStore::default();
+    let audit_target: &mut (dyn orchestraitor_events::AuditStore + Send) = match shared_audit {
+        Some(shared_audit) => {
+            let guard = shared_audit.lock().map_err(|_| {
+                McpGatewayError::DecisionRecord(String::from("audit store poisoned"))
+            })?;
+            // Seed the invocation-local view from the shared chain so the
+            // event CONTINUES it (seq = len+1, prev_hash = last shared
+            // hash), then append back under the same lock — the shared
+            // store is never overwritten, only extended (N2).
+            let previous = guard
+                .records()
+                .iter()
+                .map(|record| record.envelope.clone())
+                .collect::<Vec<_>>();
+            for envelope in previous {
+                audit.append(envelope).map_err(|_| {
+                    McpGatewayError::DecisionRecord(String::from("audit store replay rejected"))
+                })?;
+            }
+            &mut audit
+        }
+        None => &mut audit,
+    };
+
+    // With a session-scoped decision store the append lands in THAT store
+    // (row ids strictly increase across the session's invocations); with
+    // none, the invocation opens its own in-memory store. Durable
+    // persistence stays owned by `orc campaign run --once` until the daemon
+    // decision-tool wiring (§9.17) lands. The store mutex serializes
     // concurrent appends; the audit event is written after the record, so a
     // crash between them leaves a record without its §9.25.1 event (visible,
     // never silent).
-    let mut audit = orchestraitor_events::InMemoryAuditStore::default();
-    if let Some(shared_store) = &shared_store {
+    if let Some(shared_store) = shared_store {
         let mut store = shared_store.lock().map_err(|_| {
             McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
         })?;
-        return record_decision(input, chain, &mut store, &mut audit)
-            .map_err(|error| decision_record_error(&error));
+        let stored = record_decision(input, chain, &mut store, audit_target)
+            .map_err(|error| decision_record_error(&error))?;
+        if let Some(shared_audit) = shared_audit {
+            write_back_audit(shared_audit, &audit)?;
+        }
+        return Ok(stored);
     }
     let mut store = orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
         .map_err(decision_store_error)?;
-    record_decision(input, chain, &mut store, &mut audit)
+    record_decision(input, chain, &mut store, audit_target)
         .map_err(|error| decision_record_error(&error))
+}
+
+/// Appends the invocation-local audit events back into the shared store
+/// under its lock. The lock section is synchronous; no guard crosses an
+/// await point (there are none on this path).
+fn write_back_audit(
+    shared_audit: &std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>,
+    audit: &orchestraitor_events::InMemoryAuditStore,
+) -> Result<(), McpGatewayError> {
+    let mut store = shared_audit
+        .lock()
+        .map_err(|_| McpGatewayError::DecisionRecord(String::from("audit store poisoned")))?;
+    let shared_len = store.records().len();
+    for (offset, record) in audit.records().iter().enumerate() {
+        if offset < shared_len {
+            continue; // already present in the shared store (seeded)
+        }
+        store.append(record.envelope.clone()).map_err(|_| {
+            McpGatewayError::DecisionRecord(String::from("audit event append rejected"))
+        })?;
+    }
+    Ok(())
 }
 
 /// Maps a campaign store failure onto the typed gateway error. The message
@@ -773,9 +836,9 @@ mod tests {
             parent_op_id: None,
             principals: vec![String::from("user:test")],
         };
-        let first = run_decision_record_shared(&input, &chain, Some(&shared))
+        let first = run_decision_record_shared(&input, &chain, Some(&shared), None)
             .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
-        let second = run_decision_record_shared(&input, &chain, Some(&shared))
+        let second = run_decision_record_shared(&input, &chain, Some(&shared), None)
             .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
         assert!(
             second.id > first.id,
@@ -795,6 +858,87 @@ mod tests {
             listed[0].decision, first.decision,
             "the original row is untouched after the second append"
         );
+        Ok(())
+    }
+
+    /// §9.25.1 with a SHARED audit store (issue #476 review F1): a
+    /// pre-existing seed event survives, the decision invocation's
+    /// `ToolRequest` event CONTINUES the shared hash chain (seq = seed+1,
+    /// `prev_hash` = seed's hash), and the whole merged chain validates —
+    /// the invocation event is not dropped with a per-call store.
+    #[test]
+    fn decision_record_extends_shared_audit_chain() -> McpGatewayResult<()> {
+        use orchestraitor_events::{
+            AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
+        };
+        let _temp = tempfile::tempdir()?;
+        let decision_store = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_campaign::CampaignDecisionStore::open_in_memory()
+                .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?,
+        ));
+        let shared_audit = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::InMemoryAuditStore::default(),
+        ));
+
+        // Seed: one pre-existing non-decision.record event.
+        let seed = EventEnvelope::try_new(EventEnvelopeInput {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            monotonic_seq: 1,
+            wall_clock_ts: String::from("2026-07-30T00:00:00Z"),
+            correlation_id: OperationId::from_string(String::from("op_seed")),
+            parent_op_id: None,
+            category: EventCategory::SessionLifecycle,
+            payload: serde_json::json!({"state": "seeded"}),
+            prev_hash: None,
+        })
+        .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+        shared_audit
+            .lock()
+            .map_err(|_| McpGatewayError::DecisionRecord(String::from("seed lock poisoned")))?
+            .append(seed)
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+
+        let input = crate::decision_record::DecisionRecordInput {
+            kind: crate::decision_record::DecisionRecordKind::NoOp,
+            no_op_reason: Some(crate::decision_record::DecisionRecordNoOpReason::EmptyQueue),
+            selected: None,
+            role: String::from("implement"),
+            provider: String::from("neuralwatt"),
+            model: String::from("glm-5.2"),
+            precedence_path: String::from("bootstrap-default"),
+            fallback_reason: None,
+            worker_args: Vec::new(),
+            rationale: String::from("shared-audit probe"),
+            alternatives: Vec::new(),
+            blocked_graph: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let chain = DelegationChain {
+            correlation_id: OperationId::new(),
+            parent_op_id: None,
+            principals: vec![String::from("user:test")],
+        };
+        run_decision_record_shared(&input, &chain, Some(&decision_store), Some(&shared_audit))
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+
+        let records = shared_audit
+            .lock()
+            .map_err(|_| McpGatewayError::DecisionRecord(String::from("audit lock poisoned")))?
+            .records()
+            .to_vec();
+        assert_eq!(
+            records.len(),
+            2,
+            "seed + one ToolRequest per invocation; the seed survives"
+        );
+        assert_eq!(records[0].envelope.payload["state"], "seeded");
+        assert_eq!(
+            records[1].envelope.payload["tool"],
+            crate::decision_record::TOOL_NAME,
+            "the invocation event persisted into the shared store"
+        );
+        orchestraitor_events::validate_hash_chain(&records)
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
         Ok(())
     }
 
