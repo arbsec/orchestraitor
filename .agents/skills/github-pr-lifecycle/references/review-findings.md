@@ -25,7 +25,7 @@ Every finding MUST include:
   "proposed_remediation": "Replace with proper error propagation using thiserror",
   "generation": 2,
   "thread_id": "PRRT_kw...",
-  "status": "open|fixed|resolved-with-reasoning|deferred|stale|duplicate-ref: <earlier-id>",
+  "status": "open|fixed|resolved-with-reasoning|deferred",
   "cwe": "CWE-284",
   "evidence_command": "cargo clippy --all-targets -- -D warnings"
 }
@@ -58,6 +58,13 @@ The skill does NOT rely on GitHub's review-thread state alone for tracking — t
 2. **Finding deduplication state** — local to the skill session, keyed by `(path, line, rule)`.
 
 When the implementer marks a thread "resolved" but the reviewer has not confirmed the fix in a subsequent generation, the finding stays `status: open` in the skill's tracking until confirmed.
+
+## Governance precondition
+
+This file is part of the review procedure itself. Convergence on a change to
+this skill (`.agents/**` governance) additionally requires maintainer review
+per project policy (`.agents/project/orchestraitor-workflow.md`, required
+reviewer domains) — finding resolution above does not replace that precondition.
 
 ## What "resolved" means
 
