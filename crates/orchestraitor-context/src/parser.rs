@@ -56,7 +56,7 @@ fn symbol_from_match(
     let mut name = None;
     let mut range = None;
     let mut kind = None;
-    for capture in query_match.captures {
+    for capture in query_match.captures() {
         let capture_name = query.capture_names().get(capture.index as usize)?;
         if *capture_name == "name" {
             name = capture.node.utf8_text(bytes).ok().map(str::to_owned);

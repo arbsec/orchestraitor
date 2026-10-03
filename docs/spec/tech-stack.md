@@ -34,7 +34,7 @@
 | Receipt canonicalization | serde_json_canonicalizer 0.3.2 (RFC 8785 JCS) | MIT | crates.io |
 | CLI | clap 4.6.4 + clap_derive | MIT OR Apache-2.0 | crates.io |
 | Git (controller-owned) | gix 0.85.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
-| Tree-sitter baseline indexer | tree-sitter 0.26.11 + per-language grammar crates (all MIT) | MIT | crates.io |
+| Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
 | MCP server + client | rmcp 2.2.0 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
 | Agent Client Protocol | agent-client-protocol 1.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
 | ACP ↔ MCP bridge | agent-client-protocol-rmcp 1.3.0 | Apache-2.0 | crates.io |
@@ -393,7 +393,7 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 
 ### 9.1 Tree-sitter baseline indexer
 
-- `tree-sitter` 0.26.11 + per-language grammars (all MIT). Initial grammar set: `tree-sitter-rust` 0.24.2, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-bash`. Additional grammars feature-gated.
+- `tree-sitter` 0.27.0 + per-language grammars (all MIT). Initial grammar set: `tree-sitter-rust` 0.24.2, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-bash`. Additional grammars feature-gated.
 - Untrusted or third-party grammars MUST be loaded via the `wasm` feature + `wasmtime` runtime, NOT compiled into the daemon.
 
 ### 9.2 LSP
