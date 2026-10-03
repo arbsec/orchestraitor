@@ -43,7 +43,7 @@ review generation N (fresh context, current HEAD)
 ## Limits are safety valves, not convergence
 
 Reaching `max_review_loops` (default 3), a cost budget, or an elapsed-time limit produces a **`blocked`** or **`needs-human`** state (spec `10-orchestrator.md` §9.24, §9.33.4). It NEVER counts as successful convergence. The implementer:
-1. Adds a human reviewer (`gh pr edit <num> --add-reviewer <human>`)
+1. Adds a human reviewer (`pr-mutate edit <num> --add-reviewer <human>`)
 2. Posts a comment summarizing remaining findings and what was tried
 3. Moves to the next task in the queue
 

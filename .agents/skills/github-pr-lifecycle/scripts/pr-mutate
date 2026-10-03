@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# pr-mutate: edit / ready / close a PR through the service-identity wrapper.
+# Wraps `gh pr edit` / `gh pr ready` / `gh pr close` via orc_lib_gh_service so
+# the write attributes to the arbsec-agent GitHub App service identity, never
+# a personal account (AGENTS.md critical rules;
+# .agents/project/orchestraitor-workflow.md "GitHub service identity").
+# `gh pr edit|ready|close` are PR writes exactly like `pr create`/`comment`:
+# direct invocation risks personal attribution — the defect this skill
+# exists to prevent.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... | ready <pr> | close <pr> [reason flags]."
+  exit "$ORC_OK"
+fi
+
+REST=("${ORC_LIB_EXTRA_ARGS[@]:-}")
+ACTION="${REST[0]:-}"
+if [ -z "$ACTION" ]; then
+  echo "error: subcommand required (edit | ready | close)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+case "$ACTION" in
+  edit|ready|close) ;;
+  *) echo "error: unknown subcommand \`$ACTION\` (edit | ready | close)" >&2; exit "$ORC_ERR_CONFIG" ;;
+esac
+REST=("${REST[@]:1}")
+
+PR="${REST[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: PR number must be numeric, got \`$PR\`" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+REST=("${REST[@]:1}")
+
+# `edit` has no meaningful effect without at least one edit flag; refuse the
+# no-op instead of letting gh error later with an ambiguous message.
+if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ]; then
+  echo "error: edit requires at least one edit flag (e.g. --add-reviewer <login>)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+REPO="$(orc_lib_resolve_repo)"
+ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
+[ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh ${ARGS[*]}" >&2
+  echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
+  exit "$ORC_OK"
+fi
+
+# Mutating call: service route or typed failure — never silent personal auth.
+OUT="$(orc_lib_run_or_dry_run ARGS gh)"
+echo "PR #$PR $ACTION done" >&2
+if [ -n "$OUT" ]; then
+  printf '%s\n' "$OUT"
+fi

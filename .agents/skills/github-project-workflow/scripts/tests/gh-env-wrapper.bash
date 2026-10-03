@@ -116,10 +116,13 @@ if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
 fi
 
 # --- 3. config absent: labelled personal fallback still reaches gh, and the
-#        warning is present (labelled fallback, never silent).
+#        warning is present (labelled fallback, never silent). The sandbox
+#        TOML has NO pin: the checked-in orchestraitor.toml pins `required`,
+#        and this case asserts the unpinned default, not that repo state.
 : > "$ORC_LOG"; : > "$GH_LOG"
 rm -f "$WORK/orc" # no orc on PATH at all
-OUT="$(run_service issue close 9 2>&1)" || true
+printf '[github_app]\n' > "$WORK/no-pin.toml"
+OUT="$(ORC_REPO_TOML="$WORK/no-pin.toml" run_service issue close 9 2>&1)" || true
 grep -q 'WARNING: service-identity fallback' <<<"$OUT" || fail "missing fallback warning"
 grep -qx 'gh:issue close 9' "$GH_LOG" || fail "fallback argv wrong: $(cat "$GH_LOG")"
 grep -qx 'rc:0' "$GH_LOG" || fail "fallback must not fail the call"
@@ -176,10 +179,13 @@ if grep -q '^gh:' "$GH_LOG"; then
 fi
 
 # --- 7. config absent, enforcement unset: the get-probe is inconclusive and
-#        the labelled fallback still applies (default = recommended).
+#        the labelled fallback still applies (default = recommended). The
+#        sandbox TOML has NO pin (see case 3): the checked-in
+#        orchestraitor.toml pins `required`, which this case does not test.
 : > "$ORC_LOG"; : > "$GH_LOG"
 rm -f "$WORK/orc" # no orc on PATH at all
-OUT="$(run_service issue close 16 2>&1)" || true
+printf '[github_app]\n' > "$WORK/no-pin-7.toml"
+OUT="$(ORC_REPO_TOML="$WORK/no-pin-7.toml" run_service issue close 16 2>&1)" || true
 grep -q 'WARNING: service-identity fallback' <<<"$OUT" || fail "unset enforcement must keep the labelled fallback"
 grep -qx 'rc:0' "$GH_LOG" || fail "unset-enforcement fallback must not fail the call"
 
@@ -417,3 +423,370 @@ if [ -s "$GH_LOG" ]; then
 fi
 
 echo "PASS gh-env service wrapper routing (login resolution)"
+
+# --- pr-create / pr-comment / pr-review-post routing (service-identity
+#     coverage for PR creation, comments, and review posts — the paths that
+#     produced the personal-attribution PRs #475/#476).
+PRCREATE="$HERE/../../../github-pr-lifecycle/scripts/pr-create"
+PRCOMMENT="$HERE/../../../github-pr-lifecycle/scripts/pr-comment"
+PRREVIEW="$HERE/../../../github-pr-lifecycle/scripts/pr-review-post"
+
+run_script() {
+  # Run a skill script in a subshell with stub orc/gh on PATH and the
+  # enforcement mode declared via $ORC_GITHUB_APP_ENFORCEMENT (empty =
+  # unset). Args are passed through to the script.
+  local script="$1" enforcement="${2:-}"; shift 2
+  (
+    set -euo pipefail
+    export PATH="$WORK:$PATH"
+    export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh"
+    export GH_LOG="$GH_LOG" ORC_LOG="$ORC_LOG"
+    # TOML-pin sandbox for the orc-less fallback cases: an inherited
+    # ORC_REPO_TOML wins over the (pinned) checked-in orchestraitor.toml.
+    if [ -n "${ORC_REPO_TOML:-}" ]; then export ORC_REPO_TOML; fi
+    if [ -n "$enforcement" ]; then export ORC_GITHUB_APP_ENFORCEMENT="$enforcement"; else unset ORC_GITHUB_APP_ENFORCEMENT; fi
+    set +e
+    "$script" "$@"
+    "$WORK/rcnote" "$?"
+  )
+}
+
+# Stub orc: `config validate` passes (the layered config resolves), every
+# other invocation is recorded. `config get github_app.enforcement` reports
+# the mode the case sets via $STUB_ENFORCEMENT (unset key when empty).
+STUB_ENFORCEMENT=""
+new_orc_stub() {
+  STUB_ENFORCEMENT="${1:-}"
+  cat > "$WORK/orc" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = config ] && [ "\${2:-}" = validate ]; then exit 0; fi
+if [ "\${1:-}" = config ] && [ "\${2:-}" = get ] && [ "\${3:-}" = github_app.enforcement ]; then
+  if [ -n "$STUB_ENFORCEMENT" ]; then printf '%s\n' "$STUB_ENFORCEMENT"; fi
+  exit 0
+fi
+printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
+exit 0
+EOF
+  chmod +x "$WORK/orc"
+}
+
+# --- 12. enforcement=required + complete config: pr-create routes through
+#         `orc github gh-env --` (service path); the stub gh is never invoked
+#         directly, so no personal-auth write can happen.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
+  || fail "pr-create must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create ran gh directly (personal auth) on the service path: $(cat "$GH_LOG")"
+fi
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-create service path must not fail the call: $(cat "$GH_LOG")"
+
+# --- 13. missing config + enforcement=required: pr-create FAILS CLOSED
+#         (typed config error, exit 2) and gh is NEVER invoked — the
+#         forbidden effect (a personal-attribution PR) does not occur.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${2:-}" = get ]; then exit 1; fi   # no github_app.* key resolves
+exit 1
+EOF
+chmod +x "$WORK/orc"
+OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-create missing-config+required must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-create missing-config+required must exit 2: $(cat "$GH_LOG")"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create reached gh or orc gh-env despite required + missing config: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 14. same fail-closed shape for pr-comment and pr-review-post (required
+#         mode, config absent): typed refusal, gh never reached.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRCOMMENT" required 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-comment required+missing-config must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-comment required+missing-config must exit 2"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-comment ran gh on the fallback path in required mode"; fi
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --approve --body "ok" 2>&1)" || true
+# --approve is refused outright (bot self-approval policy, case 14b below);
+# the fail-closed shape for this verdict is the typed approval refusal.
+grep -q 'approvals require an independent authorized reviewer' <<<"$OUT" || fail "pr-review-post --approve must print the typed approval refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-review-post --approve must exit 2"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh on the fallback path in required mode"; fi
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --request-changes --body "issue" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-review-post required+missing-config must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-review-post required+missing-config must exit 2"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh on the fallback path in required mode"; fi
+
+# --- 15. required + complete config: pr-comment and pr-review-post route
+#         through gh-env; the stub gh is never invoked directly, and the
+#         gh-env child argv carries the intended gh subcommand.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRCOMMENT" required 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr comment 42 --repo arbsec/orchestraitor --body hi' "$ORC_LOG" \
+  || fail "pr-comment must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-comment ran gh directly on the service path"; fi
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --comment --body "finding" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment --body finding' "$ORC_LOG" \
+  || fail "pr-review-post must take the service path: orc=[$(cat "$ORC_LOG")]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh directly on the service path"; fi
+
+# --- 16. config present but enforcement UNSET (the live deployment state
+#         until this change pins it): the scripts still route through the
+#         service path (config resolves) — coverage does not depend on the
+#         pin; the pin only closes the fallback when config is missing.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub ""
+OUT="$(run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
+  || fail "pr-create with resolved config must take the service path regardless of the pin: orc=[$(cat "$ORC_LOG")]"
+
+# --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRCREATE" required --dry-run -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -q '\[dry-run\] gh pr create' <<<"$OUT" || fail "pr-create --dry-run must preview the gh command: $OUT"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-create --dry-run must not reach orc gh-env or gh: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 18. TOML pin survives a missing orc binary: `github_app.enforcement =
+#         "required"` in the repo orchestraitor.toml (the checked-in pin this
+#         PR adds) must fail the wrapper closed (exit 2, gh never invoked)
+#         even when orc is UNAVAILABLE — the enforcement decision must never
+#         depend on tool availability. Simulated with ORC_REPO_TOML pointing
+#         at a pinned TOML (the same awk fallback _lib.sh resolves to
+#         "$(git rev-parse --show-toplevel)/orchestraitor.toml").
+: > "$ORC_LOG"; : > "$GH_LOG"
+rm -f "$WORK/orc" # no orc on PATH at all (case 16 left a stub behind)
+printf '[github_app]\nenforcement = "required"\n' > "$WORK/pinned.toml"
+OUT="$(ORC_REPO_TOML="$WORK/pinned.toml" run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "TOML-pinned required + missing orc must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "TOML-pinned required + missing orc must exit 2: $(cat "$GH_LOG")"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "TOML-pinned required + missing orc reached gh or orc gh-env: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 19. same fail-closed shape with an INCOMPLETE github_app block in the
+#         TOML: the pin decides (fail closed), not the missing keys.
+: > "$ORC_LOG"; : > "$GH_LOG"
+rm -f "$WORK/orc" # no orc on PATH at all
+printf '[github_app]\nclient_id = "Iv23..."\nenforcement = "required"\n' > "$WORK/pinned-partial.toml"
+OUT="$(ORC_REPO_TOML="$WORK/pinned-partial.toml" run_script "$PRCOMMENT" "" 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "TOML-pinned required (partial block) + missing orc must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "TOML-pinned required (partial block) + missing orc must exit 2"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "TOML-pinned required (partial block) reached gh or orc gh-env: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+echo "PASS pr-create / pr-comment / pr-review-post service-identity routing"
+
+# --- Argument validation & flag passthrough (CodeRabbit PR #477 findings) ---
+# These cases assert ARG PARSING behavior: a trailing flag with no value must
+# produce the typed argument error (exit 2), never a bash nounset crash, and
+# --body-file must reach gh as a flag (gh reads the file), never as --body.
+
+# --- 20. trailing flag with no value: typed error, exit 2, no crash.
+arg_err_case() {
+  # $1 = script, rest = args. Prints the captured output; caller greps it.
+  local script="$1"; shift
+  (
+    set -euo pipefail
+    export PATH="$WORK:$PATH"
+    export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh"
+    export GH_LOG="$GH_LOG" ORC_LOG="$ORC_LOG"
+    unset ORC_GITHUB_APP_ENFORCEMENT
+    set +e
+    "$script" "$@"
+    "$WORK/rcnote" "$?"
+  ) 2>&1
+}
+for bad_args in \
+  "--title" \
+  "--body"; do
+  : > "$ORC_LOG"; : > "$GH_LOG"
+  OUT="$(arg_err_case "$PRCREATE" -R arbsec/orchestraitor "$bad_args")" || true
+  grep -q "error: $bad_args requires a" <<<"$OUT" || fail "pr-create trailing $bad_args must print the typed argument error: $OUT"
+  grep -q 'rc:2' "$GH_LOG" || fail "pr-create trailing $bad_args must exit 2 (config), got: $(cat "$GH_LOG")"
+  if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
+    fail "pr-create trailing $bad_args crashed with a bash nounset error: $OUT"
+  fi
+done
+for spec in \
+  "PRCOMMENT|--body" \
+  "PRCOMMENT|--body-file" \
+  "PRREVIEW|--body" \
+  "PRREVIEW|--body-file"; do
+  script_var="${spec%%|*}"; flag="${spec##*|}"
+  script="${!script_var}"
+  : > "$ORC_LOG"; : > "$GH_LOG"
+  OUT="$(arg_err_case "$script" 42 -R arbsec/orchestraitor "$flag")" || true
+  grep -q "error: $flag requires a" <<<"$OUT" || fail "${script_var} trailing $flag must print the typed argument error: $OUT"
+  grep -q 'rc:2' "$GH_LOG" || fail "${script_var} trailing $flag must exit 2 (config), got: $(cat "$GH_LOG")"
+  if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
+    fail "${script_var} trailing $flag crashed with a bash nounset error: $OUT"
+  fi
+done
+
+echo "PASS trailing-flag argument validation (typed exit 2)"
+
+# --- 21. --body-file survives to gh as a file flag (space AND = forms).
+#         pr-review-post with --comment: the file path must NEVER appear as
+#         the value of --body (that would post the path as the review text).
+#         Cases 18-20 removed the orc stub from $WORK: restore the
+#         service-path stub (complete config) so these cases exercise the
+#         FLAG PARSING, not the enforcement gate.
+new_orc_stub required
+bodyfile_case() {
+  local script="$1"; shift
+  (
+    set -euo pipefail
+    export PATH="$WORK:$PATH"
+    export ORC_BIN="$WORK/orc" GH_BIN="$WORK/gh"
+    export GH_LOG="$GH_LOG" ORC_LOG="$ORC_LOG"
+    unset ORC_GITHUB_APP_ENFORCEMENT
+    set +e
+    "$script" "$@"
+    "$WORK/rcnote" "$?"
+  ) 2>&1
+}
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --comment --body-file "$WORK/review.md")" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment --body-file /.*/review.md' "$ORC_LOG" \
+  || fail "pr-review-post --body-file <path> must reach gh-env as a flag: orc=[$(cat "$ORC_LOG")]"
+if grep -q -- '--body /.*/review.md' "$ORC_LOG"; then
+  fail "pr-review-post mangled --body-file into --body (posts the path as text): $(cat "$ORC_LOG")"
+fi
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-review-post --body-file service path must not fail: $(cat "$GH_LOG")"
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --comment --body-file="$WORK/review.md")" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment --body-file /.*/review.md' "$ORC_LOG" \
+  || fail "pr-review-post --body-file=<path> must reach gh-env as a flag: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-review-post --body-file= service path must not fail: $(cat "$GH_LOG")"
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRCOMMENT" 42 -R arbsec/orchestraitor --body-file "$WORK/comment.md")" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr comment 42 --repo arbsec/orchestraitor --body-file /.*/comment.md' "$ORC_LOG" \
+  || fail "pr-comment --body-file <path> must reach gh-env as a flag: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-comment --body-file service path must not fail: $(cat "$GH_LOG")"
+
+echo "PASS --body-file passthrough (space and = forms)"
+
+# --- 22. bot self-approval refused: --approve never reaches gh, in ANY
+#         enforcement mode — approvals require an independent reviewer.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --approve --body "lgtm")" || true
+grep -q 'approvals require an independent authorized reviewer' <<<"$OUT" || fail "pr-review-post --approve must print the typed refusal: $OUT"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-review-post --approve must be refused before any gh invocation: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+grep -q 'rc:2' "$GH_LOG" || fail "pr-review-post --approve must exit 2 (config): $(cat "$GH_LOG")"
+# request-changes and comment remain supported (no regression).
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --request-changes --body "issues found")" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --request-changes --body issues found' "$ORC_LOG" \
+  || fail "pr-review-post --request-changes must still be supported: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-review-post --request-changes must not fail: $(cat "$GH_LOG")"
+
+# --- 23. --request-changes still requires a body (text OR file); --comment
+#         may be empty (gh posts a bodyless comment review).
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --request-changes)" || true
+grep -q 'is required with --request-changes' <<<"$OUT" || fail "pr-review-post --request-changes without a body must print the typed error: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-review-post --request-changes without a body must exit 2"
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(bodyfile_case "$PRREVIEW" 42 -R arbsec/orchestraitor --comment)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment' "$ORC_LOG" \
+  || fail "pr-review-post --comment with no body must still post: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-review-post bodyless --comment must not fail: $(cat "$GH_LOG")"
+
+echo "PASS bot self-approval refusal + verdict body requirements"
+
+
+# --- pr-mutate service-identity routing (gh-capabilities review finding: the
+#     documented `gh pr edit|ready|close` writes must go through the wrapper
+#     like pr-create/pr-comment, never ambient personal auth) ---
+PRMUTATE="$HERE/../../../github-pr-lifecycle/scripts/pr-mutate"
+
+# --- 24. service path: pr-mutate edit routes through gh-env with the
+#         intended gh subcommand; the stub gh is never invoked directly.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRMUTATE" required edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' "$ORC_LOG" \
+  || fail "pr-mutate edit must take the service path: orc=[$(cat "$ORC_LOG")] out=[$OUT]"
+if grep -q '^gh:' "$GH_LOG"; then fail "pr-mutate edit ran gh directly (personal auth)"; fi
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate edit service path must not fail: $(cat "$GH_LOG")"
+
+# --- 25. ready and close route the same way.
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRMUTATE" required ready 42 -R arbsec/orchestraitor 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr ready 42 --repo arbsec/orchestraitor' "$ORC_LOG" \
+  || fail "pr-mutate ready must take the service path: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate ready must not fail: $(cat "$GH_LOG")"
+
+: > "$ORC_LOG"; : > "$GH_LOG"
+OUT="$(run_script "$PRMUTATE" required close 42 -R arbsec/orchestraitor --comment "closing" 2>&1)" || true
+grep -qx 'orc:github gh-env -- /.*/gh pr close 42 --repo arbsec/orchestraitor --comment closing' "$ORC_LOG" \
+  || fail "pr-mutate close must pass extra flags through: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate close must not fail: $(cat "$GH_LOG")"
+
+# --- 26. missing config + enforcement=required: pr-mutate FAILS CLOSED
+#         (typed refusal, exit 2); gh is never reached — the forbidden
+#         effect (a personal-attribution PR write) does not occur.
+: > "$ORC_LOG"; : > "$GH_LOG"
+cat > "$WORK/orc" <<'ORCEOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${2:-}" = get ]; then exit 1; fi   # no github_app.* key resolves
+exit 1
+ORCEOF
+chmod +x "$WORK/orc"
+OUT="$(run_script "$PRMUTATE" required ready 42 -R arbsec/orchestraitor 2>&1)" || true
+grep -q 'enforcement is .required.' <<<"$OUT" || fail "pr-mutate missing-config+required must print the typed refusal: $OUT"
+grep -q 'rc:2' "$GH_LOG" || fail "pr-mutate missing-config+required must exit 2: $(cat "$GH_LOG")"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-mutate reached gh or orc gh-env despite required + missing config: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 27. dry-run: previews the gh command, writes nothing.
+: > "$ORC_LOG"; : > "$GH_LOG"
+new_orc_stub required
+OUT="$(run_script "$PRMUTATE" required --dry-run edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
+grep -q '\[dry-run\] gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' <<<"$OUT" \
+  || fail "pr-mutate --dry-run must preview the gh command: $OUT"
+if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
+  fail "pr-mutate --dry-run must not reach orc gh-env or gh: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+fi
+
+# --- 28. argument validation: unknown subcommand, missing PR number,
+#         non-numeric PR, and edit-without-flags are typed errors (exit 2),
+#         never a bash nounset crash, and never a gh invocation.
+for bad_case in \
+  "ready" \
+  "ready abc" \
+  "edit 42" \
+  "mutate 42"; do
+  : > "$ORC_LOG"; : > "$GH_LOG"
+  # shellcheck disable=SC2086
+  OUT="$(arg_err_case "$PRMUTATE" -R arbsec/orchestraitor $bad_case)" || true
+  grep -q 'error:' <<<"$OUT" || fail "pr-mutate $bad_case must print a typed error: $OUT"
+  grep -q 'rc:2' "$GH_LOG" || fail "pr-mutate $bad_case must exit 2: $(cat "$GH_LOG")"
+  if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
+    fail "pr-mutate $bad_case crashed with a bash nounset error: $OUT"
+  fi
+  if grep -q 'orc:github gh-env' "$ORC_LOG"; then
+    fail "pr-mutate $bad_case must be refused BEFORE any gh-env invocation: $(cat "$ORC_LOG")"
+  fi
+done
+
+echo "PASS pr-mutate service-identity routing + argument validation"

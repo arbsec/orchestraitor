@@ -71,6 +71,7 @@
 <!-- The pr-lifecycle skill reads the orc:* markers below. Checkboxes are verified facts. -->
 
 - [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied
+- [ ] <!-- orc:service-identity --> All GitHub writes (PR creation, comments, review posts, merges, commits) attributed to arbsec-agent — no personal-account (@mekwall) writes (owner mandate; .agents/project/orchestraitor-workflow.md "GitHub service identity")
 - [ ] <!-- orc:tests --> Tests are added or updated
 - [ ] <!-- orc:security --> Security impact is reviewed
 - [ ] <!-- orc:docs --> Human-facing documentation is updated, or not required with justification
