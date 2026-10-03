@@ -5,6 +5,7 @@
 //! not implement sandboxing, policy decisions, approvals, receipts, or workspace
 //! projection primitives.
 
+pub mod bash_child;
 pub mod mediation;
 
 pub use arbitraitor_core as core;
