@@ -924,8 +924,8 @@ mod tests {
     /// event append, so both `ToolRequest` events survive with distinct
     /// sequence numbers, the seed is intact, and the merged chain validates
     /// (no snapshot/replay lost-update window).
-    #[tokio::test]
-    async fn decision_record_concurrent_shared_audit_appends_serialize() {
+    #[test]
+    fn decision_record_concurrent_shared_audit_appends_serialize() -> McpGatewayResult<()> {
         use crate::decision_record::{DecisionRecordKind, DecisionRecordNoOpReason};
         use orchestraitor_events::{
             AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
@@ -973,16 +973,33 @@ mod tests {
             blocked_graph: Vec::new(),
             skipped: Vec::new(),
         };
-        let run = || {
+        // Real OS-thread stress (review round 2): `tokio::join!` over
+        // synchronous bodies does NOT overlap them — the first call runs to
+        // completion before the second is polled, so a snapshot/write-back
+        // implementation could pass spuriously. N threads × M invocations
+        // against one shared audit store, joined at thread boundaries,
+        // genuinely interleave; under the old lock scope the lost update
+        // would surface as a broken hash chain or a missing event.
+        let (threads, invocations_per_thread) = (8usize, 6usize);
+        let mut handles = Vec::new();
+        for _ in 0..threads {
             let shared_audit = shared_audit.clone();
-            let input = make_input();
-            async move {
-                run_decision_record_shared(&input, &chain_for_test(), None, Some(&shared_audit))
-            }
-        };
-        let (first, second) = tokio::join!(run(), run());
-        first.expect("first invocation succeeds");
-        second.expect("second invocation succeeds");
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..invocations_per_thread {
+                    let input = make_input();
+                    run_decision_record_shared(
+                        &input,
+                        &chain_for_test(),
+                        None,
+                        Some(&shared_audit),
+                    )
+                    .expect("concurrent invocation succeeds");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("stress thread completes");
+        }
 
         let records = shared_audit
             .lock()
@@ -991,7 +1008,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             records.len(),
-            3,
+            1 + threads * invocations_per_thread,
             "seed + one ToolRequest per invocation, nothing lost"
         );
         assert_eq!(records[0].envelope.payload["state"], "seeded");
@@ -1014,7 +1031,8 @@ mod tests {
             "hash chain continues in sequence order: no lost update"
         );
         orchestraitor_events::validate_hash_chain(&records)
-            .expect("merged chain validates end to end");
+            .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
+        Ok(())
     }
 
     /// Review F2 counterpart (PR #476 gen-2): shared-audit WITHOUT a
