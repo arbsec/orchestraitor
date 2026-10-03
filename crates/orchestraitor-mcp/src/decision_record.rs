@@ -629,7 +629,10 @@ fn long_token_after(lower: &str, marker: &str) -> bool {
 /// Whether a whitespace-delimited word is an authentication-scheme label
 /// that may precede the credential token in a header value.
 fn is_auth_scheme_word(word: &str) -> bool {
-    matches!(word, "basic" | "bearer" | "token" | "digest" | "negotiate" | "ntlm" | "oauth")
+    matches!(
+        word,
+        "basic" | "bearer" | "token" | "digest" | "negotiate" | "ntlm" | "oauth"
+    )
 }
 
 /// Returns the lengths of maximal runs of ASCII hex characters in `value`.
@@ -726,11 +729,9 @@ fn record_invocation(
     // Chain head only (PR #479 review round 4): the envelope needs the
     // store's current length and the last hash — never the whole history.
     // `AuditStore::head` serves that without cloning the records.
-    let head = audit
-        .head()
-        .map_err(|_| DecisionRecordError::EventStore {
-            reason: "audit query failed",
-        })?;
+    let head = audit.head().map_err(|_| DecisionRecordError::EventStore {
+        reason: "audit query failed",
+    })?;
     let envelope = build_invocation_event(stored, chain, head.seq_base, head.prev_hash)?;
     audit
         .append(envelope)

@@ -305,23 +305,8 @@ impl McpGateway {
             parent_op_id: None,
             principals: input.delegation_chain.clone(),
         };
-        let input = DecisionRecordInput {
-            kind: input.kind,
-            no_op_reason: input.no_op_reason,
-            selected: input.selected,
-            role: input.role,
-            provider: input.provider,
-            model: input.model,
-            precedence_path: input.precedence_path,
-            fallback_reason: input.fallback_reason,
-            worker_args: input.worker_args,
-            rationale: input.rationale,
-            alternatives: input.alternatives,
-            blocked_graph: input.blocked_graph,
-            skipped: input.skipped,
-        };
         let result = run_decision_record_shared(
-            &input,
+            &input.record,
             &chain,
             self.context.decision_store.as_ref(),
             self.context.board_audit_store.as_ref(),
@@ -436,44 +421,16 @@ struct BoardQueryRequest {
     delegation_chain: Vec<String>,
 }
 
-/// `decision.record` request shape: the §9.35 record fields plus the
-/// §9.25.1 delegation-chain labels supplied by the invoking session
-/// (recorded as data on the audit event, never treated as authority).
+/// `decision.record` request shape: the §9.35 record fields (flattened —
+/// the MCP schema is DERIVED from the validated record shape, so the two
+/// cannot drift) plus the §9.25.1 delegation-chain labels supplied by the
+/// invoking session (recorded as data on the audit event, never treated as
+/// authority).
 #[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
 struct DecisionRecordRequest {
-    /// Whether the pass selected a task or was a typed no-op.
-    kind: crate::decision_record::DecisionRecordKind,
-    /// Typed no-op reason; required on `no-op`, refused on `selected`.
-    #[serde(default)]
-    no_op_reason: Option<crate::decision_record::DecisionRecordNoOpReason>,
-    /// The selected task; required on `selected`, refused on `no-op`.
-    #[serde(default)]
-    selected: Option<crate::decision_record::DecisionRecordSelectedTask>,
-    /// Orchestration role the worker runs as (from the role registry).
-    role: String,
-    /// Resolved provider for the role.
-    provider: String,
-    /// Resolved model for the role.
-    model: String,
-    /// Precedence path that produced the routing resolution (§9.19.2).
-    precedence_path: String,
-    /// Documented fallback reason, when routing fell back.
-    #[serde(default)]
-    fallback_reason: Option<String>,
-    /// The concrete worker argv the pass planned.
-    #[serde(default)]
-    worker_args: Vec<String>,
-    /// Why this task, this role, this model. Required, non-empty.
-    rationale: String,
-    /// Alternatives considered, in priority-first order.
-    #[serde(default)]
-    alternatives: Vec<crate::decision_record::DecisionRecordAlternative>,
-    /// Eligible candidates blocked by unresolved dependencies.
-    #[serde(default)]
-    blocked_graph: Vec<crate::decision_record::DecisionRecordAlternative>,
-    /// Board items the read could not safely evaluate.
-    #[serde(default)]
-    skipped: Vec<crate::decision_record::DecisionRecordSkip>,
+    /// The §9.35 record fields, deserialized in place.
+    #[serde(flatten)]
+    record: DecisionRecordInput,
     /// Delegation-chain principal labels, root first. Client-asserted data
     /// only — the tool never mints or verifies identity.
     #[serde(default)]
@@ -537,9 +494,9 @@ pub(crate) fn run_decision_record_shared(
     let Some(shared_store) = shared_store else {
         return Err(McpGatewayError::DecisionRecordUnconfigured);
     };
-    let mut store = shared_store.lock().map_err(|_| {
-        McpGatewayError::DecisionRecord(String::from("decision store poisoned"))
-    })?;
+    let mut store = shared_store
+        .lock()
+        .map_err(|_| McpGatewayError::DecisionRecord(String::from("decision store poisoned")))?;
     record_decision(input, chain, &mut store, audit_target)
         .map_err(|error| decision_record_error(&error))
 }
@@ -1110,7 +1067,6 @@ mod tests {
             .map_err(|error| McpGatewayError::DecisionRecord(error.to_string()))?;
         Ok(())
     }
-
 
     /// N2 (issue #458-gen2): a shared store with a PRE-EXISTING seed event
     /// survives two concurrent invocations — final count = seed + 2, every
