@@ -73,6 +73,17 @@ pub enum McpGatewayError {
     /// content (spec `40-arbitraitor-integration.md` §9.23.4).
     #[error("board.query failed: {0}")]
     BoardQuery(String),
+    /// The `decision.record` decision tool failed (validation refusal,
+    /// store failure, or event-recording failure). Message text is a
+    /// static, log-safe label — never record content (§9.23.4).
+    #[error("decision.record failed: {0}")]
+    DecisionRecord(String),
+    /// `decision.record` was called without a session-scoped decision
+    /// store. The tool never fabricates persistence: appending into a
+    /// per-invocation store and reporting success would violate the
+    /// persist+replay guarantee (spec §9.35).
+    #[error("decision.record is not configured with a session-scoped decision store")]
+    DecisionRecordUnconfigured,
     /// The `board.move` decision tool failed (lease registry or event
     /// store). Message text is a static, log-safe label — never board
     /// content (spec `40-arbitraitor-integration.md` §9.23.4). Guard

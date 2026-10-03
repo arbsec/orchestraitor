@@ -20,6 +20,11 @@ orchestraitor-board-contract = { path = "../orchestraitor-board-contract" }
 # every `board.query` invocation (spec §9.39; issue #332) — the existing
 # event store, not a new mechanism.
 orchestraitor-events = { path = "../orchestraitor-events" }
+# orchestraitor-campaign (MIT OR Apache-2.0): the §9.35 decision-record
+# store and record shape `decision.record` persists into (spec §9.39;
+# issue #334) — the SAME append-only store `orc campaign run --once`
+# writes, never a second record format.
+orchestraitor-campaign = { path = "../orchestraitor-campaign" }
 # orchestraitor-model (MIT OR Apache-2.0): OperationId for delegation-chain
 # correlation ids on recorded events.
 orchestraitor-model = { path = "../orchestraitor-model" }
