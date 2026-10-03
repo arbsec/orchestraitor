@@ -60,11 +60,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   replayed verbatim, never executed. Every successful append records an
   audit event with the delegation chain (`chain_source: client-asserted`,
   `claimed:`-prefixed labels); the audit event carries only a summary,
-  never record content. In this slice the MCP tool runs against the store
-  in memory (a session-scoped store when the connection carries one —
-  append-only row ids observable across the session — otherwise per
-  invocation); invocation events follow the same in-memory posture as
-  `board.query` in this slice. Documented in
+  never record content. In this slice the MCP tool requires a
+  session-scoped in-memory store (append-only row ids observable across
+  the session); without one the gateway disables the tool and calls are
+  refused with `decision_record_unconfigured`. Documented in
   [docs/cli/orc-decision-record.md](docs/cli/orc-decision-record.md).
 - The `board.move` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #333): guarded board status-class transitions —

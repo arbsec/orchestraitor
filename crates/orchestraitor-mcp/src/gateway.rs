@@ -878,6 +878,7 @@ mod tests {
                 orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
             )),
             board_audit_store: None,
+            decision_store: None,
             board_lease_registry: None,
         });
         assert!(!partial.tool_router.has_route("board.move"));
@@ -900,10 +901,10 @@ mod tests {
                 orchestraitor_board_contract::InMemoryBoardProvider::new(|_| {}),
             )),
             board_audit_store: None,
-    decision_store: None,
-    board_lease_registry: Some(std::sync::Arc::new(std::sync::Mutex::new(
-        crate::board_move::InMemoryLeaseRegistry::new(),
-    ))),
+            decision_store: None,
+            board_lease_registry: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::board_move::InMemoryLeaseRegistry::new(),
+            ))),
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -945,6 +946,7 @@ mod tests {
             board: None,
             board_audit_store: None,
             decision_store: None,
+            board_lease_registry: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -973,6 +975,7 @@ mod tests {
             board: None,
             board_audit_store: None,
             decision_store: Some(shared.clone()),
+            board_lease_registry: None,
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -1043,6 +1046,7 @@ mod tests {
             board: None,
             board_audit_store: None,
             decision_store: Some(shared.clone()),
+            board_lease_registry: None,
         });
         let input = DecisionRecordInput {
             kind: DecisionRecordKind::NoOp,
