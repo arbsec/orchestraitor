@@ -73,12 +73,11 @@ pub enum McpGatewayError {
     /// content (spec `40-arbitraitor-integration.md` §9.23.4).
     #[error("board.query failed: {0}")]
     BoardQuery(String),
-    /// The `board.move` decision tool failed (lease registry or event
-    /// store). Message text is a static, log-safe label — never board
-    /// content (spec `40-arbitraitor-integration.md` §9.23.4). Guard
-    /// REFUSALS are not errors: they are structured outcomes.
-    #[error("board.move failed: {0}")]
-    BoardMove(String),
+    /// The `decision.record` decision tool failed (validation refusal,
+    /// store failure, or event-recording failure). Message text is a
+    /// static, log-safe label — never record content (§9.23.4).
+    #[error("decision.record failed: {0}")]
+    DecisionRecord(String),
 }
 
 impl From<std::io::Error> for McpGatewayError {
