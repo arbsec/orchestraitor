@@ -129,14 +129,6 @@ impl InMemoryAuditStore {
     pub fn records(&self) -> &[AuditRecord] {
         &self.records
     }
-
-    /// Returns the record at the store's head — the newest record, if any.
-    /// Lets hash-chain appenders read the sequence base and previous hash
-    /// without cloning the whole store (PR #479 review round 4).
-    #[must_use]
-    pub fn last_record(&self) -> Option<&AuditRecord> {
-        self.records.last()
-    }
 }
 
 impl AuditStore for InMemoryAuditStore {
