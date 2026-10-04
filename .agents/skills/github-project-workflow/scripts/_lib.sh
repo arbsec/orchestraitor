@@ -261,8 +261,19 @@ orc_lib_enforcement_required() {
     else
       # The pin is a checked-in repo file: resolve it against the WORKING TREE
       # (not the git dir — a linked worktree's git dir is under the main
-      # repo's .git/worktrees/ and does not contain the TOML).
-      toml="$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null)/orchestraitor.toml"
+      # repo's .git/worktrees/ and does not contain the TOML). Outside a git
+      # repository the pin is UNREADABLE, not absent — fail closed (a
+      # treeless invocation must not widen into the personal fallback; an
+      # operator can always point ORC_REPO_TOML at the declaration).
+      if ! toml="$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null)"; then
+        ORC_LIB_ENFORCEMENT_PROBE_STATUS=2
+        echo "error: orc is unavailable and the repo working tree (the pinned" >&2
+        echo "       github_app.enforcement in orchestraitor.toml) cannot be resolved;" >&2
+        echo "       refusing to default to the personal-auth fallback — run from a" >&2
+        echo "       checkout or set ORC_GITHUB_APP_ENFORCEMENT / ORC_REPO_TOML." >&2
+        return 2
+      fi
+      toml="$toml/orchestraitor.toml"
     fi
     if [ ! -f "$toml" ]; then
       return 1 # no pinned declaration: wrapper-wide default applies
