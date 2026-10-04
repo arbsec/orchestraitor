@@ -2,3 +2,7 @@
 client_id = "Iv23linxUDbcc53QbFVK"
 installation_id = 165043398
 private_key_uri = "secret://keyring/orchestraitor-app-pem"
+
+# Owner mandate: fail closed for this repo — no personal fallback when the App config is unresolvable (docs/cli/orc-github.md "Enforcement")
+
+enforcement = "required"

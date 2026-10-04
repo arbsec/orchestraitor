@@ -34,7 +34,12 @@ The `pr-checks` script wraps this and classifies each failure (transient vs. rea
 
 Flags: `--approve`, `--comment`, `--request-changes`, `--body`, `--body-file`.
 
-This skill does NOT perform reviews — it tracks them. But `pr-state` uses `reviewDecision` from `gh pr view --json` to report whether the PR has approval, changes requested, or no review yet.
+**Never call `gh pr review` directly** — post reviews through the
+`pr-review-post` script (in `scripts/`), which routes through
+`orc_lib_gh_service` so the review attributes to the App service identity,
+never a personal account. This skill does NOT perform reviews — it tracks
+them. But `pr-state` uses `reviewDecision` from `gh pr view --json` to report
+whether the PR has approval, changes requested, or no review yet.
 
 ## `gh pr merge` (https://cli.github.com/manual/gh_pr_merge)
 
@@ -61,6 +66,17 @@ gh pr list --state open --draft=false \
   --json number,title,updatedAt,reviewDecision
 ```
 
+## `gh pr create` / `gh pr comment` — always via the wrapper scripts
+
+**Never call `gh pr create` or `gh pr comment` directly.** Use the
+`pr-create` and `pr-comment` scripts (in `scripts/`): they route through
+`orc_lib_gh_service` so the write attributes to the App service identity,
+never a personal account, and fail closed (typed config error, exit 2) when
+the service path is unavailable. Direct invocation risks a
+personal-attribution PR or comment — the exact defect this skill exists to
+prevent (owner mandate, 2026-10-02; see
+`.agents/project/orchestraitor-workflow.md` "GitHub service identity").
+
 ## `gh pr edit` (for adding reviewers)
 
 ```text
@@ -73,6 +89,10 @@ gh pr edit <num> --add-reviewer <login>
 gh pr ready <num>     # marks a draft PR as ready for review
 gh pr close <num>     # closes a PR (without merging)
 ```
+
+`pr edit`, `pr ready`, and `pr close` are PR writes too: run them through
+`orc_lib_gh_service` (e.g. from a script that sources `_lib.sh`), never with
+ambient personal auth.
 
 ## `gh pr diff` (for doc-impact classification)
 

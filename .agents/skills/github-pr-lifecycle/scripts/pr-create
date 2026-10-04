@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# pr-create: open a pull request through the service-identity wrapper.
+# Wraps `gh pr create` via orc_lib_gh_service so the PR's author is the
+# arbsec-agent GitHub App service identity, never a personal account
+# (AGENTS.md critical rules; .agents/project/orchestraitor-workflow.md).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --)."
+  exit "$ORC_OK"
+fi
+
+# Extract --title/--body from extra args (body may span several words); the
+# remaining args are passed through to `gh pr create` verbatim (e.g. --draft,
+# --base, --head, --reviewer, --, --body-file).
+TITLE=""
+BODY=""
+REST=()
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --title)   TITLE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --title=*) TITLE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --body)    BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body=*)  BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+  esac
+done
+
+ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
+[ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
+[ -n "$BODY" ] && ARGS+=(--body "$BODY")
+ARGS+=("${REST[@]}")
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh ${ARGS[*]}" >&2
+  echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
+  exit "$ORC_OK"
+fi
+
+# Mutating call: service route or typed failure — never silent personal auth.
+PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
+echo "Created PR: $PR_URL" >&2
+printf '%s\n' "$PR_URL"
