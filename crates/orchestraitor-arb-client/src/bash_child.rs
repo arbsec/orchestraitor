@@ -146,6 +146,11 @@ pub struct BashChild {
     /// The interpreter's pid, recorded at spawn: the kill path signals the
     /// process group even while the blocking `wait` holds the child lock.
     pid: AtomicU32,
+    /// Set by [`BashChild::kill_group`]: [`BashChild::wait`] reports
+    /// `MediationError::Bash { reason: "aborted" }` when set, so a caller
+    /// can distinguish a cancellation from a script that died by a signal
+    /// of its own.
+    killed: AtomicBool,
     /// The built [`ExecutionContext`](arbitraitor_exec::ExecutionContext).
     /// It owns the child's temporary HOME and
     /// working directories — dropping it deletes them under a running
@@ -276,6 +281,7 @@ impl BashChild {
                 child: Mutex::new(Some(child)),
                 reaped: AtomicBool::new(false),
                 pid: AtomicU32::new(child_pid),
+                killed: AtomicBool::new(false),
                 environment: Some(environment),
                 stdin: Mutex::new(Some(stdin)),
             })
@@ -295,6 +301,7 @@ impl BashChild {
     /// a blocked [`BashChild::wait`] observes the child's exit on its next
     /// poll and reaps.
     pub fn kill_group(&self) {
+        self.killed.store(true, Ordering::SeqCst);
         // The interpreter leads its own process group (`process_group(0)`
         // at spawn), so the negative pid reaches every descendant the
         // script forked — a bare kill on the interpreter pid would miss
@@ -331,6 +338,7 @@ impl BashChild {
             stdin: Mutex::new(None),
             reaped: AtomicBool::new(true),
             pid: AtomicU32::new(0),
+            killed: AtomicBool::new(false),
             environment: None,
         }
     }
@@ -407,6 +415,19 @@ impl BashChild {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    // The interpreter exited; its descendants (a background
+                    // `cmd &` inherits the output pipes) keep the PGID and
+                    // still hold the pipes — kill the group BEFORE joining
+                    // the drains, or `handle.join()` would block until an
+                    // unrelated descendant exits (the pinned exec layer's
+                    // own process-group gap; this guard owns the cleanup).
+                    let pid_raw = self.pid.load(Ordering::Relaxed);
+                    if let Some(group) = rustix::process::Pid::from_raw(pid_raw.cast_signed()) {
+                        let _ = rustix::process::kill_process_group(
+                            group,
+                            rustix::process::Signal::KILL,
+                        );
+                    }
                     let _ = self.reaped.compare_exchange(
                         false,
                         true,
@@ -423,6 +444,11 @@ impl BashChild {
                         return Err(MediationError::Bash {
                             reason: "output-exceeded",
                         });
+                    }
+                    // Cancellation is distinct from a script killed by its
+                    // own signal: `kill_group` set the flag.
+                    if self.killed.load(Ordering::SeqCst) {
+                        return Err(MediationError::Bash { reason: "aborted" });
                     }
                     if stdin_result.is_err() && status.code().is_none() {
                         return Err(MediationError::Bash {
@@ -607,7 +633,7 @@ mod tests {
     /// (`bash`) and its background descendants (`sleep`), reached through
     /// the `unshare` wrapper the pinned exec layer spawns. Scans
     /// `/proc/<pid>/stat` and checks full ancestry.
-    fn mediated_tree() -> (usize, usize) {
+    pub(super) fn mediated_tree() -> (usize, usize) {
         let me = std::process::id();
         // One pass: pid → (comm, ppid) for every readable process.
         let mut procs: std::collections::HashMap<u32, (String, u32)> =
@@ -753,6 +779,7 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod kill_tests {
+    use super::tests::mediated_tree;
     use super::*;
     use std::path::Path;
 
@@ -825,9 +852,26 @@ mod kill_tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "the killed wait returned promptly"
         );
-        // A killed interpreter has no exit code (signal death) — the run
-        // resolves, the tree is gone.
-        let _ = run;
+        // The run reports the cancellation, not a script failure.
+        assert!(
+            matches!(&run, Err(MediationError::Bash { reason: "aborted" })),
+            "the killed wait reports the cancellation: {run:?}"
+        );
+        // Forbidden effect (spec §21.4): NO interpreter or descendant
+        // survives the kill — observable absence, not just a returned
+        // wait. Poll briefly for the reap.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (bash, sleep) = mediated_tree();
+            if bash == 0 && sleep == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the process tree survived the kill (bash={bash}, sleep={sleep})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         Ok(())
     }
 
