@@ -44,6 +44,10 @@ enum AttemptOutcome {
 /// unusable worktree root). Classifiable failures — budget exhaustion,
 /// mediation refusal, provider errors — are typed failures inside the
 /// returned [`WorkerRun`], never a retry loop.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the attempt loop's budget branches are the audited surface of this slice; splitting them would scatter the exhaustion semantics the reviewer must see together"
+)]
 pub async fn run_worker(
     task: &WorkerTask,
     worktree: &Path,
@@ -62,6 +66,7 @@ pub async fn run_worker(
         model_calls: 0,
         usage: UsageTotals::default(),
         spend_soft_cap_exceeded: false,
+        progress_beat: 0,
     };
 
     let mut attempts = 0_u32;
@@ -198,6 +203,7 @@ async fn run_attempt(
         }
         turns_this_attempt += 1;
         state.turns += 1;
+        emit_beat(config, state);
         let text = match call_model(transport, config, &messages, state).await {
             Ok(text) => text,
             Err(failure) => return AttemptOutcome::Failed(failure),
@@ -243,6 +249,7 @@ async fn run_attempt(
                 };
             }
             Ok(action) => {
+                emit_beat(config, state);
                 let turn = executor.dispatch(&action).await;
                 let mediation_failure = turn.mediation_failure;
                 messages.push(ModelMessage {
@@ -261,6 +268,22 @@ async fn run_attempt(
 
 fn attempt_failure(class: FailureClass, reason: &'static str) -> AttemptOutcome {
     AttemptOutcome::Failed(TypedFailure { class, reason })
+}
+
+/// Sends one progress beat on the optional supervisor channel.
+///
+/// Two emit sites exist (`run.rs` turn boundary and pre-dispatch) so that
+/// supervisor-side stall detection (issue #314) matches the worker-internal
+/// stall definition exactly: the internal check resets on tool dispatch and
+/// cannot fire while a `call_model` await hangs or a tool call runs long, so
+/// the beats must cover both windows. A send error means every receiver was
+/// dropped — the supervisor stopped watching (shutdown/abort) — and is never
+/// a reason for the worker to stop.
+fn emit_beat(config: &WorkerConfig, state: &mut RunState) {
+    state.progress_beat = state.progress_beat.wrapping_add(1);
+    if let Some(sender) = &config.progress {
+        let _ = sender.send(state.progress_beat);
+    }
 }
 
 /// Canonicalizes the worktree root, failing closed when it cannot be used.

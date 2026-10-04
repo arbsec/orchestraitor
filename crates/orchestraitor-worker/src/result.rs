@@ -22,10 +22,18 @@ pub struct WorkerConfig {
     /// soft-cap check. The one-shot CLI passes `0.0`; the scheduler/cost
     /// lanes supply real values when they wire in.
     pub prior_daily_spend_usd: f64,
+    /// Optional progress-beat channel: a monotonic beat counter is sent at
+    /// every turn boundary and immediately before every tool dispatch. The
+    /// loop runner (`orc loop`, issue #314) watches beat *staleness* to
+    /// detect a worker wedged inside a hung transport call — a case the
+    /// worker-internal stall check cannot see, because it only fires between
+    /// turns. `None` (the default) disables emission entirely; the payload
+    /// is an opaque sequence number, not a turn count.
+    pub progress: Option<tokio::sync::watch::Sender<u64>>,
 }
 
 impl WorkerConfig {
-    /// Creates a config with zero prior daily spend.
+    /// Creates a config with zero prior daily spend and no progress channel.
     #[must_use]
     pub fn new(provider_id: ProviderId, model_id: ModelId, budgets: WorkerBudgets) -> Self {
         Self {
@@ -33,7 +41,15 @@ impl WorkerConfig {
             model_id,
             budgets,
             prior_daily_spend_usd: 0.0,
+            progress: None,
         }
+    }
+
+    /// Attaches a progress-beat channel (see [`WorkerConfig::progress`]).
+    #[must_use]
+    pub fn with_progress(mut self, progress: tokio::sync::watch::Sender<u64>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 }
 
