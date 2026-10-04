@@ -79,20 +79,27 @@ prevent (owner mandate, 2026-10-02; see
 
 ## `gh pr edit` (for adding reviewers)
 
+**Never call `gh pr edit` directly.** Use the `pr-mutate` script (in
+`scripts/`):
+
 ```text
-gh pr edit <num> --add-reviewer <login>
+pr-mutate edit <num> --add-reviewer <login>
 ```
 
 ## `gh pr close` / `gh pr ready` (draft → ready)
 
+**Never call `gh pr ready` or `gh pr close` directly.** Use `pr-mutate`:
+
 ```text
-gh pr ready <num>     # marks a draft PR as ready for review
-gh pr close <num>     # closes a PR (without merging)
+pr-mutate ready <num>     # marks a draft PR as ready for review
+pr-mutate close <num>     # closes a PR (without merging)
 ```
 
-`pr edit`, `pr ready`, and `pr close` are PR writes too: run them through
-`orc_lib_gh_service` (e.g. from a script that sources `_lib.sh`), never with
-ambient personal auth.
+`pr edit`, `pr ready`, and `pr close` are PR writes exactly like
+`pr create`/`pr comment`: they route through `orc_lib_gh_service` via
+`pr-mutate` so the write attributes to the App service identity, never a
+personal account, and fail closed (typed config error, exit 2) when the
+service path is unavailable.
 
 ## `gh pr diff` (for doc-impact classification)
 
