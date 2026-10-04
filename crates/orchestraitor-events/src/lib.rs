@@ -20,5 +20,5 @@ pub use redaction::{PrivacyExportMode, redact_event};
 pub use schema::{
     CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput, SchemaInterpretation,
 };
-pub use store::{AuditRecord, AuditStore, EventQuery, InMemoryAuditStore};
+pub use store::{AuditHead, AuditRecord, AuditStore, EventQuery, InMemoryAuditStore};
 pub use tracing_layer::TracingAuditLayer;

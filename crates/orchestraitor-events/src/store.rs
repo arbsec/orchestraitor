@@ -69,6 +69,27 @@ pub trait AuditStore {
     /// Implementations may return validation or backend errors.
     fn query(&self, query: &EventQuery) -> Result<Vec<AuditRecord>, EventError>;
 
+    /// Reads the store's chain head — the total record count (sequence base)
+    /// and the newest record's hash — WITHOUT cloning the whole history.
+    /// Hash-chain appenders need exactly this; the default implementation
+    /// falls back to an unfiltered [`Self::query`].
+    ///
+    /// # Errors
+    ///
+    /// Implementations may return validation or backend errors.
+    fn head(&self) -> Result<AuditHead, EventError> {
+        let records = self.query(&EventQuery {
+            category: None,
+            since_seq: None,
+            until_seq: None,
+            include_uninterpreted: true,
+        })?;
+        Ok(AuditHead {
+            seq_base: records.len(),
+            prev_hash: records.last().map(|record| record.hash.clone()),
+        })
+    }
+
     /// Exports records as canonical JSON Lines, optionally redacted.
     ///
     /// # Errors
@@ -90,6 +111,18 @@ pub struct InMemoryAuditStore {
     records: Vec<AuditRecord>,
 }
 
+/// The chain head of an audit store: the record count (the next append's
+/// sequence base) and the newest record's hash (`prev_hash` for the next
+/// envelope).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditHead {
+    /// Number of records currently stored — the sequence base for the next
+    /// append.
+    pub seq_base: usize,
+    /// The newest record's hash, when the store is non-empty.
+    pub prev_hash: Option<HashDigest>,
+}
+
 impl InMemoryAuditStore {
     /// Returns all records in append order.
     #[must_use]
@@ -99,6 +132,13 @@ impl InMemoryAuditStore {
 }
 
 impl AuditStore for InMemoryAuditStore {
+    fn head(&self) -> Result<AuditHead, EventError> {
+        Ok(AuditHead {
+            seq_base: self.records.len(),
+            prev_hash: self.records.last().map(|record| record.hash.clone()),
+        })
+    }
+
     fn append(&mut self, envelope: EventEnvelope) -> Result<AuditRecord, EventError> {
         validate_next_envelope(&self.records, &envelope)?;
         let record = AuditRecord::try_from_envelope(envelope)?;

@@ -69,3 +69,7 @@ carries, never credentials or run output.
 
 With `--json` the command prints the persisted decision plus the worker result, when
 one ran.
+
+The same record shape is writable through the `decision.record` coordinator decision
+tool on the MCP gateway (spec §9.39, issue #334) — see
+[orc-decision-record](orc-decision-record.md).

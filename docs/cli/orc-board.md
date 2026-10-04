@@ -35,6 +35,8 @@ orc board ready [--json]
 orc board move <issue-number> --status "<Status option name>"
 orc board query [--blocked-by <item-id>] [--item-type <type>] [--status <name>]
                 [--field <name>=<option>]... [--json]
+orc board guarded-move <item-id> --status "<Status option name>" --session <session-label>
+                       [--json]
 ```
 
 - `orc board ready` lists items on the shared board that are leaf Task/Bug (native issue type
@@ -79,6 +81,52 @@ orc board query [--blocked-by <item-id>] [--item-type <type>] [--status <name>]
   **Event persistence note:** in this slice the invocation event is written and
   hash-chain-validated but the store is per-invocation (CLI: per process) — durable
   persistence lands with the daemon event-store wiring (§9.17).
+- `orc board guarded-move` is the `board.move` coordinator decision tool (spec
+  `10-orchestrator.md` §9.39, issue #333): a GUARDED board transition — never a raw
+  provider write. The tool validates the requested status-class transition against
+  the workflow-policy transition matrix (scheduling forward `Ready -> In Progress`,
+  pause/resume between `In Progress`/`Blocked`, completion `In Progress -> Done`,
+  retirement; everything else — including anything touching `Triage`, the human/PM
+  gate (§9.38), reopening `Done`, and unclassified columns — refuses), enforces the
+  §9.40 unresolved-blocker rule (an item with any unresolved native `blockedBy` edge
+  cannot enter In Progress; a `Done` blocker no longer blocks), and lease-checks
+  against the session lease registry (§9.24.2 — runtime state, local-only per
+  §9.43): another session's live lease refuses with `lease-conflict` naming the
+  holder; the session's own expired lease refuses with `lease-expired`. An applied
+  transition writes through the provider and is verified by read-back —
+  reconcile-visible, board-wins on the next tick (§9.43). Every invocation —
+  applied, refused, OR indeterminate — records to the event store as a `ToolRequest`
+  event with the §9.25.1 delegation chain (`chain_source: client-asserted`,
+  `claimed:`-prefixed labels), same mechanism as `board.query`. Refusals are typed outcomes with static
+  log-safe reason classes (`policy-invalid` with the blocker ids, `lease-conflict`,
+  `lease-expired`, `missing-session`, `unknown-status`, `unknown-item`,
+  `provider-rejected`, `out-of-scope`); the board is unchanged after any refusal.
+  Refusals are completed decisions, not process failures: the CLI renders them and
+  exits 0 in both text and `--json` modes (automation reads the typed `REFUSED`
+  line / the `outcome` field, not the exit status). A write that LANDS but cannot
+  be verified (read-back failure or concurrent drift) is reported as a typed
+  `INDETERMINATE` outcome — the board state is unknown, never reported as an
+  unchanged refusal; re-read the board before retrying. A landed write whose lease
+  bookkeeping fails afterwards reports the applied transition plus a typed
+  lease-bookkeeping warning. Scope is status-class transitions only — request
+  payload fields for field or edge
+  writes are refused `out-of-scope`, never silently narrowed (issue #333
+  non-goals). Item ids, status names, and session labels are untrusted input (§6.1):
+  matched as opaque data — a hostile status name matches nothing and refuses
+  `unknown-status`; its text never executes. **Lease semantics (§9.24.2, §9.40):**
+  the check-and-claim is ONE atomic registry operation (concurrent sessions can
+  never both move an unleased item); `In Progress` AND the held states
+  (`Blocked`, `Approval Required`, `Input Required`) are lease-protected — a pause
+  into a held state KEEPS the session's lease, so another session cannot claim the
+  paused item; the lease releases on completion, retirement, or returning to Ready.
+  The caller's §9.25.1 delegation-chain labels ride the request (`delegation_chain`
+  on the gateway tool; `claimed:`-prefixed, truncated, bounded in the audit record —
+  client-asserted data, never authorization). **Provider note:** in this slice the
+  tool runs against the deterministic in-memory fixture board (the sqlite provider
+  is the #318 follow-up and the live GitHub provider wiring lands separately). The
+  MCP gateway exposes the same tool as `board.move` when a board provider AND lease
+  registry are configured; when either is missing, the gateway's tool router
+  disables BOTH board tool routes (hidden from `tools/list`, calls rejected).
 
 `--json` on `ready` emits a stable JSON array of `{number, title, url, repo, item_id}`. The
 `item_id` is the runtime Projects v2 item node ID for follow-up board operations; it is never

@@ -43,6 +43,63 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   closed at parse time. The default is a documented bootstrap
   deviation (spec `10-orchestrator.md` §9.41): enforcement must be
   `required` at public release.
+- The `decision.record` coordinator decision tool: persists one
+  append-only, replayable decision record (kind, selected task, role,
+  model+provider, worker arguments, rationale, alternatives considered) into
+  the campaign store — the same record shape and store `orc campaign run
+  --once` writes, never a second format. Append-only: no update or delete
+  path exists on the tool; a re-append creates a new row and the original
+  row is never touched. Malformed records (missing required fields — which
+  fail deserialization as MCP `invalid_params` errors before the tool runs,
+  kind/reason inconsistencies, field-bound overflows) are refused with typed
+  reasons, leaving the store and audit log untouched. Records carrying
+  secret-shaped material (`secret://` URIs, `sk-`-prefixed keys, Bearer
+  tokens, GitHub tokens, long hex/base64 runs) are REFUSED fail-closed —
+  never silently redacted (see the tool docs for ownership of payload
+  classification). Instruction-shaped content is inert data: stored and
+  replayed verbatim, never executed. Every successful append records an
+  audit event with the delegation chain (`chain_source: client-asserted`,
+  `claimed:`-prefixed labels); the audit event carries only a summary,
+  never record content. In this slice the MCP tool requires a
+  session-scoped in-memory store (append-only row ids observable across
+  the session); without one the gateway disables the tool and calls are
+  refused with `decision_record_unconfigured`. Documented in
+  [docs/cli/orc-decision-record.md](docs/cli/orc-decision-record.md).
+- The `board.move` coordinator decision tool (spec `10-orchestrator.md`
+  §9.39, §9.40, §9.43; #333): guarded board status-class transitions —
+  never a raw provider write. Transitions validate against the
+  workflow-policy matrix (scheduling forward, pause/resume, completion,
+  retirement; `Triage` is a human/PM gate both ways, reopening `Done` and
+  unclassified columns refuse), enforce the §9.40 unresolved-blocker rule
+  (an item with unresolved `blockedBy` edges cannot enter In Progress), and
+  lease-check against a session lease registry (§9.24.2) whose check-and-claim is
+  ONE atomic operation (concurrent sessions can never both move an unleased item);
+  `In Progress` and the held states (`Blocked`, `Approval Required`, `Input
+  Required`) are lease-protected — pausing keeps the lease. Another session's live
+  lease refuses `lease-conflict` naming the holder; the session's own expired lease
+  refuses `lease-expired`. An applied transition writes through the provider and is
+  verified by read-back — reconcile-visible, board-wins on the next tick (§9.43); a
+  landed write whose outcome cannot be verified (read-back failure or concurrent
+  drift) reports a typed `indeterminate` outcome (board state unknown — re-read
+  before retrying), never a false refusal; a landed write whose lease bookkeeping
+  fails reports applied plus a typed warning. Every invocation — applied, refused,
+  or indeterminate — records to the event store as a `ToolRequest` event with the
+  §9.25.1 delegation chain (`chain_source: client-asserted`, `claimed:`-prefixed
+  labels; the gateway tool accepts `delegation_chain` on the request), same
+  mechanism as `board.query`; an unrecordable invocation fails closed with the
+  event-store gap visible. Refusals
+  are typed outcomes with static log-safe reason classes; the board is
+  unchanged after any refusal, and the CLI renders refusals as decisions
+  (exit 0). Scope is status-class transitions only:
+  requested field or edge writes refuse `out-of-scope`, never silently
+  narrowed. Request values are untrusted input (§6.1) — a hostile status
+  name matches nothing and refuses `unknown-status`. Surfaced as
+  `orc board guarded-move` (against the deterministic in-memory fixture
+  board in this slice — the sqlite provider is the #318 follow-up) and as
+  the `board.move` MCP gateway tool when a board provider AND lease
+  registry are configured; when either is missing, the gateway's tool
+  router disables both board tool routes. Documented in
+  [docs/cli/orc-board.md](docs/cli/orc-board.md).
 - The `board.query` coordinator decision tool (spec `10-orchestrator.md`
   §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
   with two modes — a conjunctive filter search (item type, status, typed
