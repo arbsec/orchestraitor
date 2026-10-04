@@ -157,9 +157,15 @@ impl LoopConfig {
                 "guard-weakening rejected: shutdown budget must be positive".to_string(),
             ));
         }
-        if self.budgets.daily_spend_soft_cap_usd < 0.0 {
+        // `NaN`/∞ fail every comparison with the recorded daily spend, so a
+        // non-finite cap would silently disable the intake seal — fail
+        // closed instead.
+        if !self.budgets.daily_spend_soft_cap_usd.is_finite()
+            || self.budgets.daily_spend_soft_cap_usd < 0.0
+        {
             return Err(CampaignError::Loop(
-                "guard-weakening rejected: daily spend soft cap must be non-negative".to_string(),
+                "guard-weakening rejected: daily spend soft cap must be finite and non-negative"
+                    .to_string(),
             ));
         }
         if self.budgets.run_deadline().is_zero() {
@@ -669,7 +675,6 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                                 &mut counters,
                                 &mut events,
                                 elapsed,
-                                now,
                                 &mut stop,
                                 &mut drain_reason,
                                 &mut drain_deadline,
@@ -907,16 +912,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// the caller must then advance the MAIN receiver's seen version, or the
     /// same send is re-observed by `wait_tick` and misread as a second
     /// signal (collapsing the grace window to one tick).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the stop cells are the run loop's drain state, threaded through so a poll-time signal preempts the pass in place; bundling them into a struct would hide which cell the pass may write"
-    )]
     async fn pass(
         &mut self,
         counters: &mut Counters,
         events: &mut Vec<LoopEvent>,
         elapsed: Duration,
-        now: u64,
         stop: &mut Option<StopReason>,
         drain_reason: &mut Option<StopReason>,
         drain_deadline: &mut Duration,
@@ -984,6 +984,28 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     *drain_deadline = self.elapsed() + self.config.shutdown_budget;
                     return Ok(false);
                 }
+                // Shutdown wins the poll-vs-signal race: tokio's `select!` is
+                // unbiased, so a signal that arrived during the poll can lose
+                // to the snapshot arm even though the documented behavior
+                // seals the intake on the signal. A yield lets the signal
+                // task's send (and the clone's waker registration) land
+                // before the synchronous recheck below — a send that raced
+                // the snapshot arm must still seal the intake before any
+                // work is planned or spawned.
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                if let Some(receiver) = self.shutdown.as_mut()
+                    && matches!(receiver.has_changed(), Ok(true))
+                {
+                    self.shutdown_from_pass(stop, drain_reason, drain_deadline);
+                    return Ok(true);
+                }
+                // Fresh post-poll clock: the poll can block for up to the
+                // board client's timeout, so the pre-poll `elapsed`/`now`
+                // would backdate the worker's heartbeat baseline and the
+                // run row's started-at day. Re-read both before planning.
+                let elapsed = self.elapsed();
+                let now = self.now_secs(elapsed)?;
                 self.plan_and_spawn(counters, events, elapsed, now, snapshot)
                     .await
             }
@@ -1011,9 +1033,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 // receiver too (returning `true` below), so the same send
                 // is never re-observed as a second signal.
                 self.mark_signal_seen();
-                *stop = Some(StopReason::Shutdown);
-                *drain_reason = Some(StopReason::Shutdown);
-                *drain_deadline = self.elapsed() + self.config.shutdown_budget;
+                self.shutdown_from_pass(stop, drain_reason, drain_deadline);
                 Ok(true)
             }
             PassPoll::BudgetExpired => {
@@ -1026,6 +1046,23 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 Ok(false)
             }
         }
+    }
+
+    /// Declares the shutdown from inside a pass: seals the intake, arms the
+    /// grace-window drain, and reports that a send was consumed (the caller
+    /// advances the MAIN receiver so the send is never re-observed).
+    fn shutdown_from_pass(
+        &mut self,
+        stop: &mut Option<StopReason>,
+        drain_reason: &mut Option<StopReason>,
+        drain_deadline: &mut Duration,
+    ) {
+        // Declared before the drain cells: `wait_tick`'s `Begin` branch
+        // refuses to overwrite an existing stop, and the run loop's
+        // drain iterations check `stop.is_some()`.
+        *stop = Some(StopReason::Shutdown);
+        *drain_reason = Some(StopReason::Shutdown);
+        *drain_deadline = self.elapsed() + self.config.shutdown_budget;
     }
 
     /// Plans one campaign pass from a freshly polled snapshot and spawns
