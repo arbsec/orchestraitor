@@ -191,25 +191,17 @@ fn fixture_project(
     .into_diagnostic()?;
     // `orc loop` gives each concurrent worker its own git worktree (#434):
     // the fixture project must be a git work tree with a commit for
-    // `git worktree add` to branch from. The fixture is hermetic: no
-    // inherited `GIT_*` repository-location variables, no host global
-    // config (a `commit.gpgsign=true` would break the commit).
+    // `git worktree add` to branch from.
     for args in [
         vec!["init", "-q", "-b", "main"],
         vec!["config", "user.email", "fixture@example.invalid"],
         vec!["config", "user.name", "fixture"],
-        vec!["config", "commit.gpgsign", "false"],
         vec!["add", "-A"],
         vec!["commit", "-q", "-m", "fixture"],
     ] {
         let status = Command::new("git")
             .args(&args)
             .current_dir(&project_dir)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .into_diagnostic()?;
         assert!(status.success(), "git {args:?} failed");
