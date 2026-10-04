@@ -14,7 +14,7 @@
 //! drain-aborted run can no longer keep executing shell commands after the
 //! loop records its terminal status.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use orchestraitor_arbitraitor_client::ArbitraitorClient;
@@ -91,54 +91,16 @@ impl BashMediator for MediatedBashMediator {
         // `BashChild` above.
         self.worker()?;
         let script = script.to_string();
-        // Cancellation contract (issue #434): Tokio cannot abort a
-        // `spawn_blocking` task once it starts, so the kill capability
-        // lives OUTSIDE the blocking closure. The child handle is shared
-        // as an `Arc`; a drop guard armed in THIS future calls
-        // `kill_group()` if the future is dropped before completion
-        // (the loop runner's `kill_where` abort), and the blocking
-        // `wait` — which polls the child — observes the kill and returns,
-        // letting the detached closure finish and free its resources.
-        let child = Arc::new(
-            tokio::task::spawn_blocking(BashChild::spawn)
-                .await
-                .map_err(|_| MediationError::Bash {
-                    reason: "task-join",
-                })??,
-        );
-        let mut guard = KillOnDrop(child.clone());
-        // The blocking task owns a clone; the guard keeps the kill handle.
-        let waiter =
-            tokio::task::spawn_blocking(move || Arc::clone(&child).wait(script.as_bytes()));
-        let result = waiter.await.map_err(|_| MediationError::Bash {
+        // The blocking closure owns the child guard: an abort of this
+        // future drops the guard, which kills the interpreter's process
+        // group and reaps it — the child never outlives the cancellation.
+        tokio::task::spawn_blocking(move || {
+            let child = BashChild::spawn()?;
+            child.wait(script.as_bytes())
+        })
+        .await
+        .map_err(|_| MediationError::Bash {
             reason: "task-join",
-        })?;
-        // Completed (success or typed failure): the child is reaped and the
-        // drop path must not kill anything.
-        guard.disarm();
-        result
-    }
-}
-
-/// Calls [`BashChild::kill_group`] when dropped, unless disarmed.
-///
-/// Armed across the `await` on the blocking wait: an abort of the
-/// `run_bash` future drops the guard mid-await and kills the process group
-/// from the async side — the capability the blocking closure cannot
-/// provide for itself.
-struct KillOnDrop(Arc<BashChild>);
-
-impl KillOnDrop {
-    /// Marks the run completed: the drop path does nothing.
-    fn disarm(&mut self) {
-        // Swap in a stub whose kill is a no-op: `wait` already reaped the
-        // child, so a group signal would be harmless but pointless.
-        self.0 = Arc::new(BashChild::disarmed());
-    }
-}
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        self.0.kill_group();
+        })?
     }
 }
