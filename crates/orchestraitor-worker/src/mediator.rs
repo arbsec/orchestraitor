@@ -1,15 +1,24 @@
 //! Bash mediation seam: every bash call crosses the Arbitraitor boundary.
 //!
 //! The production implementation ([`MediatedBashMediator`]) wraps
-//! `MediatedWorker::spawn` + `MediatedWorker::run_bash` from
-//! `orchestraitor-arbitraitor-client`'s mediation module (issue #311): the
-//! preflight runs before the first execution surface exists, and the worker
-//! crate implements no security primitive itself (spec §2.2).
+//! `MediatedWorker::spawn` + the cancellation-aware bash pipeline from
+//! `orchestraitor-arbitraitor-client`'s `bash_child` module (issue #311;
+//! cancellation-aware child cleanup added by issue #434): the preflight runs
+//! before the first execution surface exists, and the worker crate
+//! implements no security primitive itself (spec §2.2).
+//!
+//! Cancellation contract (issue #434): `run_bash` executes the mediated
+//! interpreter inside `spawn_blocking` while holding an owned child guard.
+//! Aborting the calling future drops that guard, which kills the
+//! interpreter's process group and reaps it — a stalled, timed-out, or
+//! drain-aborted run can no longer keep executing shell commands after the
+//! loop records its terminal status.
 
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use orchestraitor_arbitraitor_client::ArbitraitorClient;
+use orchestraitor_arbitraitor_client::bash_child::BashChild;
 use orchestraitor_arbitraitor_client::mediation::{MediatedWorker, WORKER_PLATFORM};
 
 pub use orchestraitor_arbitraitor_client::mediation::{MediatedRun, MediationError};
@@ -76,12 +85,22 @@ impl Default for MediatedBashMediator {
 #[async_trait]
 impl BashMediator for MediatedBashMediator {
     async fn run_bash(&self, script: &str) -> Result<MediatedRun, MediationError> {
-        let worker = self.worker()?;
+        // The preflight stays on the `MediatedWorker` path: it must run
+        // before the first execution surface exists (fail closed, spec
+        // §6.7); the bash pipeline itself is the cancellation-aware
+        // `BashChild` above.
+        self.worker()?;
         let script = script.to_string();
-        tokio::task::spawn_blocking(move || worker.run_bash(script.as_bytes()))
-            .await
-            .map_err(|_| MediationError::Bash {
-                reason: "task-join",
-            })?
+        // The blocking closure owns the child guard: an abort of this
+        // future drops the guard, which kills the interpreter's process
+        // group and reaps it — the child never outlives the cancellation.
+        tokio::task::spawn_blocking(move || {
+            let child = BashChild::spawn()?;
+            child.wait(script.as_bytes())
+        })
+        .await
+        .map_err(|_| MediationError::Bash {
+            reason: "task-join",
+        })?
     }
 }
