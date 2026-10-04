@@ -46,6 +46,13 @@ weakened guard is a runaway loop.
 - **Arbitration.** When a kill is declared, the final status derives from what the run
   handle returns: a natural completion always wins; a cancellation resolves to the
   recorded kill intent; a panic is a typed `failed` row.
+- **Spawn failure.** A task that cannot be started (missing fixture, unsupported
+  provider, transport build failure) is a per-task outcome, not a run-killer: the row
+  is recorded terminal `failed` with the spawner's log-safe reason, the pass is paced
+  out, and the loop keeps supervising in-flight work. The failed task is excluded for
+  the rest of the invocation (no silent re-selection). A fatal durable-state failure
+  (store/clock) aborts and records in-flight workers before the run returns — no row
+  is left `running`.
 - **Run budget.** The budget bounds the board poll, not just the checks between passes:
   a poll that would outlast the remaining budget is cut off at expiry (the summary
   records `run-budget-exhausted`), and a snapshot that arrives after the budget is

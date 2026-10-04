@@ -591,7 +591,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     ///
     /// Returns [`CampaignError`] when a durable write fails, the
     /// configuration is invalid, or the clock overflows. Worker failures are
-    /// NOT errors — they are recorded, typed run outcomes.
+    /// NOT errors — they are recorded, typed run outcomes. Before returning
+    /// a fatal error, in-flight slots are aborted and reaped so no row
+    /// stays `running` after the process gives up on the run.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the loop body is the guard state machine (supervise, budget, spend cap, cycle bound, pass, tick wait) read top-to-bottom in arbitration order; extracting arms would scatter the state transitions the spec reviews as one table"
+    )]
     pub async fn run(
         mut self,
         mut shutdown: tokio::sync::watch::Receiver<u64>,
@@ -614,92 +620,146 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         let mut drain_deadline = Duration::MAX;
         let mut signal_source_gone = false;
 
-        // `loop`, not `while stop.is_none()`: setting `stop` must NOT exit
-        // the loop — the drain (grace window, straggler aborts, final
-        // reaps) runs on the following iterations and breaks explicitly
-        // when the slots are empty. A `while` guard would terminate the
-        // loop the moment a budget stop is declared, leaking running rows.
-        loop {
-            let elapsed = self.elapsed();
-            let now = self.now_secs(elapsed)?;
-            self.supervise(&mut counters, &mut events).await?;
+        // The loop body propagates fatal (durable-state) errors; this guard
+        // converts such an exit into the fail-safe terminal: abort every
+        // in-flight slot (intent recorded pre-abort — the arbitration then
+        // records them as aborted), reap what is reapable, and attach the
+        // events to the fatal error's context via the counters above.
+        let run_result: Result<(), CampaignError> = async {
+            // `loop`, not `while stop.is_none()`: setting `stop` must NOT exit
+            // the loop — the drain (grace window, straggler aborts, final
+            // reaps) runs on the following iterations and breaks explicitly
+            // when the slots are empty. A `while` guard would terminate the
+            // loop the moment a budget stop is declared, leaking running rows.
+            loop {
+                let elapsed = self.elapsed();
+                let now = self.now_secs(elapsed)?;
+                self.supervise(&mut counters, &mut events).await?;
 
-            if stop.is_some() {
-                self.drain_step(
-                    drain_reason,
-                    &mut drain_deadline,
-                    &mut counters,
-                    &mut events,
-                )
-                .await?;
-                if self.slots.is_empty() {
-                    break;
-                }
-            } else if elapsed >= self.config.budgets.run_budget {
-                stop = Some(StopReason::RunBudgetExhausted);
-                drain_reason = stop;
-                drain_deadline = elapsed + self.config.shutdown_budget;
-            } else {
-                let daily = self.runs.daily_spend(now)?;
-                if daily >= self.config.budgets.daily_spend_soft_cap_usd {
-                    // Soft: seal the intake, let in-flight runs finish.
-                    stop = Some(StopReason::SpendSoftCap);
-                    drain_reason = stop;
-                    // Unbounded natural drain: no abort deadline. A
-                    // shutdown signal bounds it (see `apply_signal`).
-                    drain_deadline = Duration::MAX;
-                } else if self
-                    .config
-                    .max_cycles
-                    .is_some_and(|max| counters.cycles >= max)
-                {
-                    stop = Some(StopReason::CycleBudget);
+                if stop.is_some() {
+                    self.drain_step(
+                        drain_reason,
+                        &mut drain_deadline,
+                        &mut counters,
+                        &mut events,
+                    )
+                    .await?;
+                    if self.slots.is_empty() {
+                        break;
+                    }
+                } else if elapsed >= self.config.budgets.run_budget {
+                    stop = Some(StopReason::RunBudgetExhausted);
                     drain_reason = stop;
                     drain_deadline = elapsed + self.config.shutdown_budget;
                 } else {
-                    let signal_consumed = self
-                        .pass(
-                            &mut counters,
-                            &mut events,
-                            elapsed,
-                            now,
+                    let daily = self.runs.daily_spend(now)?;
+                    if daily >= self.config.budgets.daily_spend_soft_cap_usd {
+                        // Soft: seal the intake, let in-flight runs finish.
+                        stop = Some(StopReason::SpendSoftCap);
+                        drain_reason = stop;
+                        // Unbounded natural drain: no abort deadline. A
+                        // shutdown signal bounds it (see `apply_signal`).
+                        drain_deadline = Duration::MAX;
+                    } else if self
+                        .config
+                        .max_cycles
+                        .is_some_and(|max| counters.cycles >= max)
+                    {
+                        stop = Some(StopReason::CycleBudget);
+                        drain_reason = stop;
+                        drain_deadline = elapsed + self.config.shutdown_budget;
+                    } else {
+                        let signal_consumed = self
+                            .pass(
+                                &mut counters,
+                                &mut events,
+                                elapsed,
+                                now,
+                                &mut stop,
+                                &mut drain_reason,
+                                &mut drain_deadline,
+                            )
+                            .await?;
+                        if signal_consumed {
+                            // The pass consumed the send through the clone;
+                            // advance the MAIN receiver's seen version too, or
+                            // `wait_tick` re-observes the same send and applies
+                            // the second-signal short-circuit to a first signal
+                            // (grace collapsing to one tick).
+                            shutdown.borrow_and_update();
+                        }
+                    }
+                }
+
+                // -- Wait one tick. The shutdown channel stays armed for the
+                //    whole run: the first signal starts (or preempts) the
+                //    drain, a second short-circuits the remaining grace.
+                if signal_source_gone {
+                    tokio::time::sleep(tick).await;
+                } else {
+                    match self
+                        .wait_tick(
+                            &mut shutdown,
                             &mut stop,
                             &mut drain_reason,
                             &mut drain_deadline,
                         )
-                        .await?;
-                    if signal_consumed {
-                        // The pass consumed the send through the clone;
-                        // advance the MAIN receiver's seen version too, or
-                        // `wait_tick` re-observes the same send and applies
-                        // the second-signal short-circuit to a first signal
-                        // (grace collapsing to one tick).
-                        shutdown.borrow_and_update();
+                        .await
+                    {
+                        TickSignal::None => {}
+                        // Sender dropped: no signals will ever arrive.
+                        TickSignal::SourceGone => signal_source_gone = true,
                     }
                 }
             }
+            Ok(())
+        }
+        .await;
 
-            // -- Wait one tick. The shutdown channel stays armed for the
-            //    whole run: the first signal starts (or preempts) the
-            //    drain, a second short-circuits the remaining grace.
-            if signal_source_gone {
-                tokio::time::sleep(tick).await;
-            } else {
-                match self
-                    .wait_tick(
-                        &mut shutdown,
-                        &mut stop,
-                        &mut drain_reason,
-                        &mut drain_deadline,
-                    )
-                    .await
-                {
-                    TickSignal::None => {}
-                    // Sender dropped: no signals will ever arrive.
-                    TickSignal::SourceGone => signal_source_gone = true,
-                }
+        if run_result.is_err() && !self.slots.is_empty() {
+            // Fatal exit: never strand a `running` row. Abort every
+            // in-flight slot (intent recorded pre-abort — the arbitration
+            // records the recorded intent, conservatively the
+            // run-budget terminal) and reap what is reapable. The sweep is
+            // best-effort: its own clock/store failure cannot make things
+            // more terminal than the fatal error already is, and the
+            // original error is returned either way.
+            self.kill_where(
+                |slot, _| slot.intent.is_none(),
+                StopIntent::Drain(StopReason::RunBudgetExhausted),
+            );
+            // Remove the slots first: awaiting each handle needs the slot
+            // owned, and `self.runs` borrows `self` immutably.
+            let stranded = std::mem::take(&mut self.slots);
+            for slot in stranded {
+                // Wait for the aborted task to observe the cancellation
+                // (the handle is dropped with the slot; awaiting it here
+                // keeps the sweep synchronous with the terminal write).
+                let _ignore = slot.process.run.await;
+                // The fatal may BE the clock: clamp the terminal stamp to
+                // what the store can represent (the sweep is best-effort —
+                // a misdated row is still terminal).
+                let stamp = self
+                    .now_secs(self.elapsed())
+                    .unwrap_or(i64::MAX as u64)
+                    .min(i64::MAX as u64);
+                let _ignore = self.runs.finish(
+                    slot.run_id,
+                    RunRowStatus::AbortedShutdown,
+                    stamp,
+                    0.0,
+                    drain_detail(StopReason::RunBudgetExhausted),
+                );
+                counters.aborted_on_stop += 1;
+                events.push(LoopEvent::WorkerAbortedOnStop {
+                    run_id: slot.run_id,
+                    task_id: slot.task_id.clone(),
+                    shutdown: false,
+                });
             }
         }
+
+        run_result?;
 
         let final_elapsed = self.elapsed();
         Ok(LoopSummary {
@@ -932,12 +992,16 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 // next pass — the loop stays alive and keeps supervising
                 // any in-flight workers. Propagating would end the run
                 // without a drain, leaving running rows and detached
-                // worker tasks behind.
+                // worker tasks behind. The pace anchors at the *current*
+                // elapsed (the poll itself may have consumed up to the
+                // board client's timeout): pre-poll pacing would let a
+                // slow failing poll eat the backoff and re-poll on the
+                // next tick.
                 counters.poll_failures += 1;
                 events.push(LoopEvent::PollFailed {
                     message: error.to_string(),
                 });
-                self.pace_no_spawn(events, elapsed);
+                self.pace_no_spawn(events, self.elapsed());
                 Ok(false)
             }
             PassPoll::Shutdown => {
@@ -989,10 +1053,43 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         });
         if let Some(selected) = selected {
             let spend = self.runs.daily_spend(now)?;
-            let process = self
+            // Spawn failures are per-task outcomes, not run-killers: the
+            // production starter fails on ordinary per-task conditions
+            // (missing fixture, unsupported provider, transport build) —
+            // propagating would strand in-flight workers and re-select the
+            // same dying task next invocation. Record a terminal `failed`
+            // row, pace, and keep supervising. Store/clock errors still
+            // propagate (durable-state failure is fatal).
+            let process = match self
                 .starter
                 .start(&selected.task_id, &self.routing, spend)
-                .await?;
+                .await
+            {
+                Ok(process) => process,
+                Err(CampaignError::Spawn { task_id, message }) => {
+                    let row = self.runs.start(&StartRun {
+                        invocation_id: self.invocation_id.clone(),
+                        decision_id: stored.id,
+                        task_id: task_id.clone(),
+                        repo: selected.repo.clone(),
+                        number: selected.number,
+                        started_at_secs: now,
+                    })?;
+                    self.runs
+                        .finish(row.id, RunRowStatus::Failed, now, 0.0, &message)?;
+                    counters.failed += 1;
+                    events.push(LoopEvent::WorkerFinished {
+                        run_id: row.id,
+                        task_id,
+                        completed: false,
+                    });
+                    self.pace_no_spawn(events, self.elapsed());
+                    return Ok(false);
+                }
+                // Anything else from the starter is not a per-task spawn
+                // condition — surface it.
+                Err(error) => return Err(error),
+            };
             let row = self.runs.start(&StartRun {
                 invocation_id: self.invocation_id.clone(),
                 decision_id: stored.id,

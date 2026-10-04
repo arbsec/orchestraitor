@@ -315,3 +315,44 @@ fn a_second_loop_instance_is_a_typed_rejection() -> miette::Result<()> {
     );
     Ok(())
 }
+
+/// Checks that a fresh checkout (no config dir yet) starts cleanly: the
+/// lock file's parent directory is created, not a bare ENOENT crash.
+#[test]
+fn a_fresh_config_dir_is_created_for_the_lock() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let (project_dir, config_dir, _tasks) = fixture_project(temp.path())?;
+    // The regression condition: the config dir does NOT pre-exist.
+    std::fs::remove_dir_all(&config_dir).into_diagnostic()?;
+    assert!(
+        !config_dir.exists(),
+        "precondition: the config dir must be absent"
+    );
+
+    // No board server needed: the loop exits on the cycle bound before any
+    // useful poll would matter — but only if it gets past the lock.
+    let args = vec![
+        "--config-dir".to_string(),
+        config_dir.display().to_string(),
+        "--project-dir".to_string(),
+        project_dir.display().to_string(),
+        "loop".to_string(),
+        "--max-cycles".to_string(),
+        "1".to_string(),
+    ];
+    let output = run_orc(&args).into_diagnostic()?;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "a missing config dir must not fail the run; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("No such file or directory"),
+        "the failure must not be a bare ENOENT; stderr: {stderr}"
+    );
+    assert!(
+        config_dir.join("loop.lock").exists(),
+        "the lock file exists in the freshly created dir"
+    );
+    Ok(())
+}
