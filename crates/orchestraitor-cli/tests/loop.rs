@@ -189,6 +189,23 @@ fn fixture_project(
         r#"{"id": "board-arbsec_orchestraitor-42", "slug": "board-arbsec_orchestraitor-42", "description": "write the output file"}"#,
     )
     .into_diagnostic()?;
+    // `orc loop` gives each concurrent worker its own git worktree (#434):
+    // the fixture project must be a git work tree with a commit for
+    // `git worktree add` to branch from.
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["config", "user.name", "fixture"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&project_dir)
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success(), "git {args:?} failed");
+    }
     Ok((project_dir, config_dir, tasks_dir))
 }
 
@@ -355,6 +372,121 @@ fn a_fresh_config_dir_is_created_for_the_lock() -> miette::Result<()> {
     assert!(
         config_dir.join("loop.lock").exists(),
         "the lock file exists in the freshly created dir"
+    );
+    Ok(())
+}
+
+/// A board page holding two ready items (issues 42 and 43) — the two-slot
+/// concurrency fixture for the per-task worktree test.
+const TWO_P0_READY_ITEMS: &str = r#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PVTI_H_42","content":{"__typename":"Issue","number":42,"state":"OPEN","title":"P0 eligible task","url":"https://github.com/arbsec/orchestraitor/issues/42","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0}},"fieldValues":{"nodes":[{"field":{"name":"Target"},"name":"MVP"},{"field":{"name":"Status"},"name":"Ready"},{"field":{"name":"Priority"},"name":"P0"}],"totalCount":3}},{"id":"PVTI_H_43","content":{"__typename":"Issue","number":43,"state":"OPEN","title":"P0 eligible task 43","url":"https://github.com/arbsec/orchestraitor/issues/43","repository":{"nameWithOwner":"arbsec/orchestraitor"},"issueType":{"name":"Task"},"labels":{"nodes":[],"totalCount":0}},"fieldValues":{"nodes":[{"field":{"name":"Target"},"name":"MVP"},{"field":{"name":"Status"},"name":"Ready"},{"field":{"name":"Priority"},"name":"P0"}],"totalCount":3}}]}}}}"#;
+
+/// Writes a second task fixture (issue 43) next to the seeded one.
+fn write_second_task_fixture(tasks_dir: &std::path::Path) -> miette::Result<()> {
+    fs::write(
+        tasks_dir.join("board-arbsec_orchestraitor-43.json"),
+        r#"{"id": "board-arbsec_orchestraitor-43", "slug": "board-arbsec_orchestraitor-43", "description": "write the output file 43"}"#,
+    )
+    .into_diagnostic()
+}
+
+/// Checks that concurrent workers do not share the project directory
+/// (#434): with two ready tasks and `max_concurrent_workers = 2`, each
+/// worker gets its own `git worktree` under `<config-dir>/loop-worktrees/`,
+/// keyed by task id — and the worktrees are distinct directories, neither
+/// of them the project directory itself.
+#[test]
+fn concurrent_workers_get_distinct_task_worktrees() -> miette::Result<()> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "items(first",
+            response: RuleResponse::Json(TWO_P0_READY_ITEMS),
+        },
+    ])
+    .into_diagnostic()?;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let (project_dir, config_dir, tasks_dir) = fixture_project(temp.path())?;
+    write_second_task_fixture(&tasks_dir)?;
+
+    // Both workers write the same file name into their (distinct) worktree
+    // and finish: if they shared a directory, the second write would land
+    // in the same file and one worker's finish would observe the other's
+    // content.
+    let endpoint = spawn_simulator(vec![
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"write_file\", \"path\": \"loop-42.txt\", \"content\": \"from-42\"}\n```".to_string(),
+        },
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"finish\", \"summary\": \"wrote 42\", \"success\": true}\n```".to_string(),
+        },
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"write_file\", \"path\": \"loop-43.txt\", \"content\": \"from-43\"}\n```".to_string(),
+        },
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"finish\", \"summary\": \"wrote 43\", \"success\": true}\n```".to_string(),
+        },
+    ])?;
+
+    let args = vec![
+        "--config-dir".to_string(),
+        config_dir.display().to_string(),
+        "--project-dir".to_string(),
+        project_dir.display().to_string(),
+        "--github-graphql-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--board-cache-path".to_string(),
+        temp.path().join("cache").display().to_string(),
+        "loop".to_string(),
+        "--json".to_string(),
+        "--max-cycles".to_string(),
+        "2".to_string(),
+        "--worker-tasks-dir".to_string(),
+        tasks_dir.display().to_string(),
+        "--worker-provider-endpoint".to_string(),
+        endpoint,
+    ];
+    let output = run_orc(&args).into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "the loop exits 0 on a budget stop; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let json: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(json["spawns"], 2, "both ready tasks spawned concurrently");
+
+    // Forbidden effect (#434): the two workers did NOT share the project
+    // directory. Each got its own worktree — the per-task files exist in
+    // their worktrees, and NOTHING was written into the project directory.
+    let worktree_base = config_dir.join("loop-worktrees");
+    assert!(worktree_base.is_dir(), "the worktree base exists");
+    let worktree_42 = worktree_base.join("board-arbsec_orchestraitor-42");
+    let worktree_43 = worktree_base.join("board-arbsec_orchestraitor-43");
+    assert!(worktree_42.is_dir(), "worker 42 has its own worktree");
+    assert!(worktree_43.is_dir(), "worker 43 has its own worktree");
+    assert_eq!(
+        fs::read_to_string(worktree_42.join("loop-42.txt")).into_diagnostic()?,
+        "from-42",
+        "worker 42 wrote into its own worktree"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree_43.join("loop-43.txt")).into_diagnostic()?,
+        "from-43",
+        "worker 43 wrote into its own worktree"
+    );
+    // Neither worker's file appears in the project directory, and the two
+    // worktrees are distinct directories (not the same path).
+    assert!(
+        !project_dir.join("loop-42.txt").exists() && !project_dir.join("loop-43.txt").exists(),
+        "no worker wrote into the shared project directory"
     );
     Ok(())
 }

@@ -14,7 +14,7 @@
 //! the process exits.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -68,12 +68,85 @@ impl BoardPoller for BoardSnapshotPoller {
 /// inside a runtime — no nested runtime is created). The starter receives
 /// the loop's own `WorkerBudgets` instance, so the worker's enforcement is
 /// the loop's enforcement — a single source, structurally no drift.
+///
+/// Each worker slot gets its own `git worktree` keyed by task id under
+/// `<config-dir>/loop-worktrees/` (issue #434): with
+/// `max_concurrent_workers = 2` two workers would otherwise edit the same
+/// directory and overwrite each other's files. A worktree that already
+/// exists for the task (a previous invocation's crash) is reused; worktrees
+/// of tasks this invocation did not run are pruned at startup, so the
+/// directory never grows unboundedly.
 struct DirectLoopStarter {
     project_dir: PathBuf,
     config_dir: PathBuf,
     tasks_dir: Option<PathBuf>,
     provider_endpoint: Option<String>,
     budgets: WorkerBudgets,
+}
+
+impl DirectLoopStarter {
+    /// Prepares (or reuses) the task's worktree and returns its path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Spawn`] when `git worktree add` fails or
+    /// the project directory is not a git work tree.
+    fn prepare_worktree(&self, task_id: &str) -> Result<PathBuf, CampaignError> {
+        let base = self.config_dir.join("loop-worktrees");
+        std::fs::create_dir_all(&base).map_err(|error| CampaignError::Spawn {
+            task_id: task_id.to_string(),
+            message: format!("worktree base dir creation failed: {error}"),
+        })?;
+        // Task ids are repo-scoped slugs (deterministic charset per the
+        // #313 selection contract), so they are safe path components.
+        let worktree = base.join(task_id);
+        if worktree.join(".git").exists() {
+            // A previous invocation's worktree for this task: reuse it.
+            return Ok(worktree);
+        }
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add"])
+            .arg(&worktree)
+            .arg("-b")
+            .arg(format!("orc-loop/{task_id}"))
+            .current_dir(&self.project_dir)
+            .output()
+            .map_err(|error| CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: format!("git worktree add failed to run: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: format!(
+                    "git worktree add failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(worktree)
+    }
+
+    /// Removes every leftover worktree from previous invocations. Called
+    /// once at startup, before any spawn: no worktree is shared across
+    /// invocations (each invocation recreates or reuses only its own), so
+    /// the directory never grows unboundedly across unattended runs.
+    fn prune_worktrees(config_dir: &Path, project_dir: &Path) {
+        let base = config_dir.join("loop-worktrees");
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return; // no worktree base yet — nothing to prune
+        };
+        for entry in entries.filter_map(Result::ok) {
+            // `git worktree remove --force` clears the project repo's
+            // worktree registration; a bare directory removal would leave a
+            // stale one behind.
+            let _ignore = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(entry.path())
+                .current_dir(project_dir)
+                .output();
+        }
+    }
 }
 
 #[async_trait]
@@ -110,7 +183,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
             })?,
         );
         let mediator = Arc::new(MediatedBashMediator::new());
-        let project_dir = self.project_dir.clone();
+        let project_dir = self.prepare_worktree(task_id)?;
         let (beats_tx, beats_rx) = tokio::sync::watch::channel(0_u64);
         let mut config = WorkerConfig::new(
             ProviderId::from_string(routing.provider.clone()),
@@ -327,6 +400,10 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     .map_err(|error| miette!("{error}"))?;
 
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
+    // Prune leftover worktrees from previous invocations before any spawn
+    // (see `prune_worktrees`): the loop runs unattended, so the worktree
+    // base must not grow across invocations.
+    DirectLoopStarter::prune_worktrees(&paths.config_dir, &paths.project_dir);
     let run_result = runtime.block_on(async {
         let (signal_rx, signals) = spawn_signal_task();
         let invocation_id = format!(
