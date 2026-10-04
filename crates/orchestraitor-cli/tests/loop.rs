@@ -329,8 +329,10 @@ fn a_fresh_config_dir_is_created_for_the_lock() -> miette::Result<()> {
         "precondition: the config dir must be absent"
     );
 
-    // No board server needed: the loop exits on the cycle bound before any
-    // useful poll would matter — but only if it gets past the lock.
+    // No board server needed: the loop stops on the cycle bound before any
+    // pass — and therefore before any board poll — but only if it gets past
+    // the lock. (A cycle bound of 0 is checked at the top of the loop body;
+    // a bound of 1 would let one poll reach the real GitHub API.)
     let args = vec![
         "--config-dir".to_string(),
         config_dir.display().to_string(),
@@ -338,7 +340,7 @@ fn a_fresh_config_dir_is_created_for_the_lock() -> miette::Result<()> {
         project_dir.display().to_string(),
         "loop".to_string(),
         "--max-cycles".to_string(),
-        "1".to_string(),
+        "0".to_string(),
     ];
     let output = run_orc(&args).into_diagnostic()?;
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
