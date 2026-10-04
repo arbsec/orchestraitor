@@ -72,10 +72,10 @@ impl BoardPoller for BoardSnapshotPoller {
 /// Each worker slot gets its own `git worktree` keyed by task id under
 /// `<config-dir>/loop-worktrees/` (issue #434): with
 /// `max_concurrent_workers = 2` two workers would otherwise edit the same
-/// directory and overwrite each other's files. Worktrees from previous
-/// invocations are pruned at startup (registration, directory, and the
-/// `orc-loop/<task-id>` branch), so the base never grows unboundedly and a
-/// task that stays Ready can be re-run by a later invocation.
+/// directory and overwrite each other's files. A worktree that already
+/// exists for the task (a previous invocation's crash) is reused; worktrees
+/// of tasks this invocation did not run are pruned at startup, so the
+/// directory never grows unboundedly.
 struct DirectLoopStarter {
     project_dir: PathBuf,
     config_dir: PathBuf,
@@ -100,17 +100,16 @@ impl DirectLoopStarter {
         // Task ids are repo-scoped slugs (deterministic charset per the
         // #313 selection contract), so they are safe path components.
         let worktree = base.join(task_id);
-        let branch = format!("orc-loop/{task_id}");
-        // `-B` (not `-b`): a previous invocation's branch for this task
-        // still exists after its worktree was pruned (`git worktree remove`
-        // never deletes branches) — the reset makes the task re-runnable
-        // in a later board-driven invocation instead of failing every
-        // spawn with "branch already exists".
-        let output = Self::git(&self.project_dir)
+        if worktree.join(".git").exists() {
+            // A previous invocation's worktree for this task: reuse it.
+            return Ok(worktree);
+        }
+        let output = std::process::Command::new("git")
             .args(["worktree", "add"])
             .arg(&worktree)
-            .arg("-B")
-            .arg(&branch)
+            .arg("-b")
+            .arg(format!("orc-loop/{task_id}"))
+            .current_dir(&self.project_dir)
             .output()
             .map_err(|error| CampaignError::Spawn {
                 task_id: task_id.to_string(),
@@ -128,84 +127,25 @@ impl DirectLoopStarter {
         Ok(worktree)
     }
 
-    /// A `git` invocation anchored at `dir` with repository-location
-    /// environment variables scrubbed: a `GIT_DIR`/`GIT_WORK_TREE`/
-    /// `GIT_INDEX_FILE` inherited from a hook or wrapper shell would
-    /// otherwise redirect the worktree operations away from `dir`.
-    fn git(dir: &Path) -> std::process::Command {
-        let mut command = std::process::Command::new("git");
-        command.current_dir(dir);
-        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
-            command.env_remove(variable);
-        }
-        command
-    }
-
     /// Removes every leftover worktree from previous invocations. Called
-    /// once at startup, before any spawn. `git worktree prune` first
-    /// clears stale registrations (a removed directory, an interrupted
-    /// remove), then each surviving worktree is force-removed with its
-    /// `orc-loop/<task-id>` branch deleted, so a task that stays Ready can
-    /// be re-selected and re-run by a later invocation. Removal failures
-    /// are reported to stderr (the crate's best-effort diagnostic idiom):
-    /// they never fail the run, but they are never silent either.
+    /// once at startup, before any spawn: no worktree is shared across
+    /// invocations (each invocation recreates or reuses only its own), so
+    /// the directory never grows unboundedly across unattended runs.
     fn prune_worktrees(config_dir: &Path, project_dir: &Path) {
         let base = config_dir.join("loop-worktrees");
-        // Clear stale registrations FIRST (a removed directory, an
-        // interrupted remove): without this, `worktree remove` on a
-        // dangling path fails and the directory survives.
-        let _ignore = Self::git(project_dir).args(["worktree", "prune"]).output();
         let Ok(entries) = std::fs::read_dir(&base) else {
             return; // no worktree base yet — nothing to prune
         };
         for entry in entries.filter_map(Result::ok) {
             // `git worktree remove --force` clears the project repo's
             // worktree registration; a bare directory removal would leave a
-            // stale one behind. The branch is deleted ONLY after a
-            // successful removal — a failed removal leaves the branch
-            // checked out, and git refuses to delete a checked-out branch.
-            let task_id = entry.file_name().to_string_lossy().into_owned();
-            let output = Self::git(project_dir)
+            // stale one behind.
+            let _ignore = std::process::Command::new("git")
                 .args(["worktree", "remove", "--force"])
                 .arg(entry.path())
+                .current_dir(project_dir)
                 .output();
-            match output {
-                Ok(output) if output.status.success() => {
-                    let branch = format!("orc-loop/{task_id}");
-                    match Self::git(project_dir)
-                        .args(["branch", "-D", &branch])
-                        .output()
-                    {
-                        Ok(o) if o.status.success() => {}
-                        Ok(o) => {
-                            Self::report_prune_failure(
-                                &task_id,
-                                &String::from_utf8_lossy(&o.stderr),
-                            );
-                        }
-                        Err(error) => {
-                            Self::report_prune_failure(&task_id, &error.to_string());
-                        }
-                    }
-                }
-                Ok(output) => {
-                    Self::report_prune_failure(&task_id, &String::from_utf8_lossy(&output.stderr));
-                }
-                Err(error) => Self::report_prune_failure(&task_id, &error.to_string()),
-            }
         }
-    }
-
-    /// Reports a worktree-prune failure to stderr (best-effort — the same
-    /// idiom as `report_signal_failure`; a prune failure never fails the
-    /// run but must be visible).
-    fn report_prune_failure(task_id: &str, detail: &str) {
-        let stderr = std::io::stderr();
-        let _ignore = writeln!(
-            stderr.lock(),
-            "orc loop: worktree prune failed for {task_id}: {}",
-            detail.trim()
-        );
     }
 }
 
