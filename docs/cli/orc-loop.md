@@ -45,7 +45,10 @@ weakened guard is a runaway loop.
   beats or not.
 - **Arbitration.** When a kill is declared, the final status derives from what the run
   handle returns: a natural completion always wins; a cancellation resolves to the
-  recorded kill intent; a panic is a typed `failed` row.
+  recorded kill intent; a panic is a typed `failed` row. A run aborted by the
+  fatal-exit sweep (a durable-state failure ended the run) is recorded
+  `aborted-shutdown` with the detail `unattributed-drain-abort` — no stop reason was
+  declared, so the row never claims a budget cause that did not hold.
 - **Spawn failure.** A task that cannot be started (missing fixture, unsupported
   provider, transport build failure) is a per-task outcome, not a run-killer: the row
   is recorded terminal `failed` with the spawner's log-safe reason, the pass is paced

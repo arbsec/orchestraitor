@@ -25,8 +25,7 @@ use orchestraitor_worker::{
 use crate::cli::{CampaignCommand, CampaignRunArgs, ConfigPaths};
 use crate::commands::config::layers::load_layers;
 
-/// The role the dispatched worker runs as (mirrors `orc worker run`).
-const WORKER_ROLE: &str = "implement";
+use super::WORKER_ROLE;
 
 /// Production spawner: builds the bootstrap transport for the resolved
 /// routing, loads the fixture task, and drives the same bounded loop
@@ -43,14 +42,10 @@ impl WorkerSpawner for DirectSpawner<'_> {
         task_id: &str,
         routing: &RoleRoutingDecision,
     ) -> Result<orchestraitor_worker::WorkerRun, CampaignError> {
-        if routing.provider != "neuralwatt" {
+        if let Err(error) = super::require_bootstrap_provider(&routing.provider) {
             return Err(CampaignError::Spawn {
                 task_id: task_id.to_string(),
-                message: format!(
-                    "bootstrap worker supports only the `neuralwatt` provider (spec §10.3); \
-                     roles.{WORKER_ROLE}.routing.provider resolved to `{}`",
-                    routing.provider
-                ),
+                message: format!("{error:?}"),
             });
         }
         let tasks_dir = self

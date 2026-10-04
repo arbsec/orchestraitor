@@ -34,8 +34,7 @@ use orchestraitor_worker::{
 use crate::cli::{ConfigPaths, LoopArgs};
 use crate::commands::config::layers::load_layers;
 
-/// The role the dispatched workers run as (mirrors `orc campaign`).
-const WORKER_ROLE: &str = "implement";
+use super::{WORKER_ROLE, require_bootstrap_provider};
 
 /// Production poll side: the same reconciled read `orc campaign run` does
 /// (open items + ready queue + blocked candidates + warnings).
@@ -86,14 +85,10 @@ impl LoopWorkerStarter for DirectLoopStarter {
         routing: &RoleRoutingDecision,
         prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError> {
-        if routing.provider != "neuralwatt" {
+        if let Err(error) = require_bootstrap_provider(&routing.provider) {
             return Err(CampaignError::Spawn {
                 task_id: task_id.to_string(),
-                message: format!(
-                    "bootstrap worker supports only the `neuralwatt` provider (spec §10.3); \
-                     roles.{WORKER_ROLE}.routing.provider resolved to `{}`",
-                    routing.provider
-                ),
+                message: format!("{error:?}"),
             });
         }
         let tasks_dir = self
