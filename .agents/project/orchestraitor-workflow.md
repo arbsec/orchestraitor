@@ -47,14 +47,50 @@ the one-claim guard:
 
 ## GitHub service identity
 
-All agent-driven GitHub operations — board writes, issue lifecycle, PRs, reviews — run as
-the Orchestraitor GitHub App service identity (`arbsec-agent`), never a personal account
-(`AGENTS.md` critical rules; runbook `.omo/drafts/github-app-setup.md`). The App is
-registered and installed (issue #307): installation tokens are minted from the App private
-key by `orc github mint-token` / `orchestraitor-core` `GitHubAppAuth` (config block
-`github_app` + `service_identities`; private key via `secret://` URIs, fail-closed, ~1h
-tokens). Personal owner auth remains an explicitly labelled fallback only when the App
-identity is unavailable, never an equal option.
+All agent-driven GitHub operations — board writes, issue lifecycle, PR
+creation/comments, reviews, merges — run as the Orchestraitor GitHub App
+service identity (`arbsec-agent`), never a personal account (`AGENTS.md`
+critical rules; runbook `.omo/drafts/github-app-setup.md`). The App is
+registered and installed (issue #307): installation tokens are minted from the
+App private key by `orc github mint-token` / `orchestraitor-core`
+`GitHubAppAuth` (config block `github_app` + `service_identities`; private key
+via `secret://` URIs, fail-closed, ~1h tokens). There is NO personal-account
+option: if the App identity is unavailable, the operation fails — it is never
+rerouted to a personal account, labelled or otherwise.
+
+**Owner mandate (2026-10-02): NO GitHub writes under the personal account
+(`@mekwall`) — ever, on this repository.** There is no personal fallback for
+this repo, labelled or otherwise:
+
+- Every GitHub write (PR creation, PR comments, review posts, merges, issue
+  and board writes) MUST go through the service wrapper — the skill scripts'
+  `orc_lib_gh_service` route (`orc github gh-env --`) or a direct
+  `orc github` subcommand. The pr-lifecycle scripts `pr-create`, `pr-comment`,
+  and `pr-review-post` wrap `gh pr create`, `gh pr comment`, and
+  `gh pr review` respectively.
+- If the service path fails (missing/partial `github_app` config, minting
+  failure, tool unavailable), the operation FAILS: report the typed error to
+  the orchestrator and stop. NEVER fall back to personal auth, never retry
+  the write outside the wrapper, never invoke `gh` directly for a mutating
+  call.
+- `github_app.enforcement` is pinned to `"required"` in
+  [`orchestraitor.toml`](../../orchestraitor.toml): with the pin in place a
+  missing or unresolvable App config produces a typed config error (exit 2),
+  never the personal fallback. Wrapper-only deployments may additionally pin
+  `ORC_GITHUB_APP_ENFORCEMENT=required` (it wins over the layered config).
+- Workers MUST run from a FRESH checkout at the current `origin/main` (or
+  rebase onto it before any GitHub write). A stale checkout that predates the
+  service-identity wrappers silently bypasses them — verify the wrappers
+  exist (`.agents/skills/*/scripts/_lib.sh` carries `orc_lib_gh_service`)
+  before performing GitHub operations.
+- `orc` MUST be on the worker `PATH` (`ORC_BIN` overrides the binary name in
+  the skill scripts). There is no distributed binary yet: build it from the
+  repo checkout with `cargo build --release -p orchestraitor-cli` and put
+  `target/release/orc` on `PATH` (e.g. `export
+  PATH="$repo/target/release:$PATH"` in the worker environment) or point
+  `ORC_BIN` at it directly. If `orc` is unavailable, mutating GitHub
+  operations fail closed under `required` enforcement — that is the correct
+  outcome; fix the environment, do not route around it.
 
 Assignee fields accept user accounts only, so the bot cannot carry ownership: board Status +
 Orchestraitor run-state do. The ready queue excludes items assigned to humans and keeps
