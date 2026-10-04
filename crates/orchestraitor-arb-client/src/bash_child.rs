@@ -37,7 +37,7 @@
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arbitraitor_exec::{ExecError, ExecutionPolicy, NetworkPolicy};
@@ -49,11 +49,6 @@ use crate::mediation::{MediatedRun, MediationError};
 /// `arbitraitor-exec` default (`ResourceLimits::default().output_size_bytes`
 /// = 10 MiB).
 const OUTPUT_LIMIT: u64 = 10 * 1024 * 1024;
-
-/// The child-exit poll interval in [`BashChild::wait`]: short enough that a
-/// cancellation kill is reaped well inside the daemon budget, long enough
-/// to be cheap.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Drains one pipe in a thread, enforcing the combined output cap; the
 /// producer is killed when the cap is crossed (the pinned exec layer's own
@@ -75,13 +70,8 @@ pub(crate) fn drain_stream(
                     let prev = total.fetch_add(read_bytes, Ordering::Relaxed);
                     buffer.extend_from_slice(&chunk[..read]);
                     if prev + read_bytes > OUTPUT_LIMIT {
-                        // Kill the WHOLE group so inherited-pipe descendants
-                        // die too — a bare interpreter kill would leave a
-                        // descendant holding the pipes and the sibling
-                        // drain thread blocked on EOF. Double-kill is
-                        // harmless; ESRCH is ignored.
-                        let _ =
-                            rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                        // Double-kill is harmless; ESRCH is ignored.
+                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
                         break;
                     }
                 }
@@ -124,33 +114,19 @@ pub(crate) fn exec_reason(error: &ExecError) -> &'static str {
     }
 }
 
-/// A mediated interpreter child in its own process group, with an
-/// externally callable kill.
+/// An owned mediated interpreter child in its own process group.
 ///
-/// The child leads its own POSIX process group; every descendant the script
-/// forks lands in that group. [`BashChild::kill_group`] signals the WHOLE
-/// group (SIGKILL), and [`BashChild::wait`] polls the child so it observes
-/// the kill and reaps promptly. The kill capability is callable from any
-/// thread — including the async caller whose `spawn_blocking` task Tokio
-/// cannot abort mid-flight — and the [`Drop`] impl is the backstop that
-/// kills and reaps a guard discarded without a kill or a completion.
+/// Dropping the guard kills the process group (SIGKILL) and reaps the
+/// child, so a cancelled or failed caller never leaves the interpreter or
+/// its descendants running.
 pub struct BashChild {
-    /// The interpreter child (spawned through the `unshare` wrapper).
-    child: Mutex<Option<Child>>,
+    child: Mutex<Child>,
     /// The child's piped stdin: [`BashChild::wait`] writes the script and
-    /// drops the write end; a kill or an unreaped drop just closes it (EOF).
+    /// drops the write end; an unreaped drop just closes it (EOF).
     stdin: Mutex<Option<std::process::ChildStdin>>,
-    /// Set once the child has been reaped; the drop path must not
-    /// double-kill after a natural completion or an explicit kill.
-    reaped: AtomicBool,
-    /// The interpreter's pid, recorded at spawn: the kill path signals the
-    /// process group even while the blocking `wait` holds the child lock.
-    pid: AtomicU32,
-    /// Set by [`BashChild::kill_group`]: [`BashChild::wait`] reports
-    /// `MediationError::Bash { reason: "aborted" }` when set, so a caller
-    /// can distinguish a cancellation from a script that died by a signal
-    /// of its own.
-    killed: AtomicBool,
+    /// Set once the normal path has reaped the child; the drop path must
+    /// not double-kill after a natural completion.
+    reaped: Mutex<bool>,
     /// The built [`ExecutionContext`](arbitraitor_exec::ExecutionContext).
     /// It owns the child's temporary HOME and
     /// working directories — dropping it deletes them under a running
@@ -255,7 +231,6 @@ impl BashChild {
             let mut child = command
                 .spawn()
                 .map_err(|_source| MediationError::Bash { reason: "spawn" })?;
-            let child_pid = child.id();
             let stdin = child
                 .stdin
                 .take()
@@ -278,115 +253,36 @@ impl BashChild {
             // the pipe). Storing the stdin keeps the write-end lifetime on
             // the guard so a cancellation also closes it.
             Ok(Self {
-                child: Mutex::new(Some(child)),
-                reaped: AtomicBool::new(false),
-                pid: AtomicU32::new(child_pid),
-                killed: AtomicBool::new(false),
+                child: Mutex::new(child),
+                reaped: Mutex::new(false),
                 environment: Some(environment),
                 stdin: Mutex::new(Some(stdin)),
             })
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = script;
             Err(MediationError::UnsupportedPlatform {
                 platform: std::env::consts::OS.to_owned(),
             })
         }
     }
 
-    /// Kills the interpreter's whole process group (SIGKILL) — safe to call
-    /// from any thread, at any point in the child's lifetime. This is the
-    /// cancellation entry point for an async caller whose
-    /// `spawn_blocking` task Tokio cannot abort mid-flight: after the kill,
-    /// a blocked [`BashChild::wait`] observes the child's exit on its next
-    /// poll and reaps.
-    pub fn kill_group(&self) {
-        self.killed.store(true, Ordering::SeqCst);
-        // The interpreter leads its own process group (`process_group(0)`
-        // at spawn), so the negative pid reaches every descendant the
-        // script forked — a bare kill on the interpreter pid would miss
-        // them. Double-kill is harmless (ESRCH ignored); if the group was
-        // already reaped, the signal just fails.
-        let pid = self.pid.load(Ordering::Relaxed);
-        if pid == 0 {
-            return;
-        }
-        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-        // Closing stdin releases the write end: a child blocked reading
-        // stdin observes EOF instead of waiting on a writer that will
-        // never come back.
-        if let Ok(mut guard) = self.stdin.lock() {
-            *guard = None;
-        }
-    }
-
-    /// A no-op child for a completed run: pid 0 kills nothing, there is no
-    /// child to reap, and the drop path releases nothing. Used by the
-    /// mediator's armed guard after `wait` has completed.
-    ///
-    /// # Panics
-    ///
-    /// Never on a POSIX host: spawning `/usr/bin/true` with null stdio
-    /// cannot fail there. On hosts where it would, `run_bash` cannot run
-    /// anyway (the platform check refuses first).
-    #[must_use]
-    pub fn disarmed() -> Self {
-        Self {
-            child: Mutex::new(None),
-            stdin: Mutex::new(None),
-            reaped: AtomicBool::new(true),
-            pid: AtomicU32::new(0),
-            killed: AtomicBool::new(false),
-            environment: None,
-        }
-    }
-
-    /// Writes the script to the child's stdin (write end closed after),
-    /// waits for the interpreter to finish, and collects the capped output.
-    ///
-    /// The wait polls the child so a concurrent [`BashChild::kill_group`]
-    /// (the cancellation path) is observed promptly; after the kill the
-    /// wait returns a `MediationError::Bash { reason: "aborted" }` — the
-    /// blocked blocking task unwinds, so the loop's terminal status is
-    /// recorded with the interpreter gone.
+    /// Writes the script to the child's stdin (write end closed after), waits
+    /// for the interpreter to finish, and collects the capped output.
     ///
     /// The child is reaped here; the guard's drop path then does nothing.
     ///
     /// # Errors
     ///
-    /// - [`MediationError::Bash`] with reason `aborted` when the child was
-    ///   killed by a concurrent `kill_group` (cancellation), `script-io`
-    ///   when piping the script failed with no exit code, `output-exceeded`
-    ///   when the combined output crossed the cap, or `wait` when the child
-    ///   could not be reaped.
+    /// - [`MediationError::Bash`] with reason `script-io` when piping the
+    ///   script failed, `output-exceeded` when the combined output crossed
+    ///   the cap, or `wait` when the child could not be reaped.
     pub fn wait(&self, script: &[u8]) -> Result<MediatedRun, MediationError> {
-        // Drain threads BEFORE the stdin write (the pinned exec layer's
-        // `read_with_limit` ordering): bash runs commands while it reads
-        // stdin, so a long script whose early output fills the pipe would
-        // otherwise deadlock — bash blocked on its stdout write while this
-        // blocking task is still inside `write_all`.
-        let mut guard = self.child.lock().map_err(|_| MediationError::Bash {
-            reason: "child-lock",
-        })?;
-        // `None` = the disarmed stub or an already-reaped child: nothing to
-        // wait for (wait is only called on a live spawn).
-        let Some(mut child) = guard.take() else {
-            return Err(MediationError::Bash {
-                reason: "child-lock",
-            });
-        };
-        let pid = rustix::process::Pid::from_child(&child);
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let total = Arc::new(AtomicU64::new(0));
-        let stdout_handle = stdout.map(|stream| drain_stream(stream, Arc::clone(&total), pid));
-        let stderr_handle = stderr.map(|stream| drain_stream(stream, Arc::clone(&total), pid));
-
         // The script is written to the child's stdin and the write end is
         // closed immediately (the pinned exec layer does the same): the
-        // interpreter observes EOF. A write failure is resolved below from
+        // interpreter observes EOF and any pending read-driven control flow
+        // completes before we wait. A write failure is resolved below from
         // the captured status: a broken pipe after the child already exited
         // is the script's own early exit (its exit code is the result, the
         // pinned exec layer's `resolve_stdin_write_failure` contract); a
@@ -407,94 +303,68 @@ impl BashChild {
                 None => Ok(()),
             }
         };
-
-        // Poll for exit so a concurrent `kill_group` — the cancellation
-        // path from the async caller Tokio cannot deliver into a running
-        // blocking task — is reaped promptly instead of blocking until the
-        // killed interpreter's descendants drain.
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // The interpreter exited; its descendants (a background
-                    // `cmd &` inherits the output pipes) keep the PGID and
-                    // still hold the pipes — kill the group BEFORE joining
-                    // the drains, or `handle.join()` would block until an
-                    // unrelated descendant exits (the pinned exec layer's
-                    // own process-group gap; this guard owns the cleanup).
-                    let pid_raw = self.pid.load(Ordering::Relaxed);
-                    if let Some(group) = rustix::process::Pid::from_raw(pid_raw.cast_signed()) {
-                        let _ = rustix::process::kill_process_group(
-                            group,
-                            rustix::process::Signal::KILL,
-                        );
-                    }
-                    let _ = self.reaped.compare_exchange(
-                        false,
-                        true,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                    let captured_stdout = stdout_handle
-                        .map(|handle| handle.join().unwrap_or_default())
-                        .unwrap_or_default();
-                    let captured_stderr = stderr_handle
-                        .map(|handle| handle.join().unwrap_or_default())
-                        .unwrap_or_default();
-                    if total.load(Ordering::Relaxed) > OUTPUT_LIMIT {
-                        return Err(MediationError::Bash {
-                            reason: "output-exceeded",
-                        });
-                    }
-                    // Cancellation is distinct from a script killed by its
-                    // own signal: `kill_group` set the flag.
-                    if self.killed.load(Ordering::SeqCst) {
-                        return Err(MediationError::Bash { reason: "aborted" });
-                    }
-                    if stdin_result.is_err() && status.code().is_none() {
-                        return Err(MediationError::Bash {
-                            reason: "script-io",
-                        });
-                    }
-                    return Ok(MediatedRun {
-                        exit_code: status.code(),
-                        stdout: captured_stdout,
-                        stderr: captured_stderr,
-                    });
-                }
-                // The child could not be polled — a broker I/O error.
-                Ok(None) => std::thread::sleep(POLL_INTERVAL),
-                Err(_source) => {
-                    return Err(MediationError::Bash { reason: "wait" });
-                }
-            }
+        let mut child = self.child.lock().map_err(|_| MediationError::Bash {
+            reason: "child-lock",
+        })?;
+        let pid = rustix::process::Pid::from_child(&child);
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let total = Arc::new(AtomicU64::new(0));
+        let stdout_handle = stdout.map(|stream| drain_stream(stream, Arc::clone(&total), pid));
+        let stderr_handle = stderr.map(|stream| drain_stream(stream, Arc::clone(&total), pid));
+        let captured_stdout = stdout_handle
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
+        let captured_stderr = stderr_handle
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
+        let status = child
+            .wait()
+            .map_err(|_source| MediationError::Bash { reason: "wait" })?;
+        *self.reaped.lock().map_err(|_| MediationError::Bash {
+            reason: "child-lock",
+        })? = true;
+        if total.load(Ordering::Relaxed) > OUTPUT_LIMIT {
+            return Err(MediationError::Bash {
+                reason: "output-exceeded",
+            });
         }
+        if stdin_result.is_err() && status.code().is_none() {
+            return Err(MediationError::Bash {
+                reason: "script-io",
+            });
+        }
+        Ok(MediatedRun {
+            exit_code: status.code(),
+            stdout: captured_stdout,
+            stderr: captured_stderr,
+        })
     }
 }
 
 impl Drop for BashChild {
     fn drop(&mut self) {
-        // Natural completion (or an explicit kill+reap) already collected
-        // the child — never double-kill.
-        if self.reaped.load(Ordering::SeqCst) {
+        // Natural completion already reaped the child — never double-kill.
+        if matches!(self.reaped.lock(), Ok(guard) if *guard) {
             return;
         }
         // Cancellation or failure: kill the WHOLE process group. The
         // interpreter was spawned with `process_group(0)`, so the negative
         // pid reaches every descendant the script forked, then reap the
         // interpreter itself.
-        let pid = self.pid.load(Ordering::Relaxed);
-        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut child) = guard.take()
-        {
+        if let Ok(child) = self.child.lock() {
+            // Child pids are positive; `from_raw` cannot fail on one.
+            let pid = rustix::process::Pid::from_raw(child.id().cast_signed());
+            if let Some(pid) = pid {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+            let mut child = child;
             let _ = child.kill();
             let _ = child.wait();
         }
         // Drop the ExecutionContext LAST: it owns the child's temporary
         // HOME/working directories, which must outlive the kill+reap above.
-        self.environment.take();
+        drop(self.environment.take());
     }
 }
 
@@ -633,7 +503,7 @@ mod tests {
     /// (`bash`) and its background descendants (`sleep`), reached through
     /// the `unshare` wrapper the pinned exec layer spawns. Scans
     /// `/proc/<pid>/stat` and checks full ancestry.
-    pub(super) fn mediated_tree() -> (usize, usize) {
+    fn mediated_tree() -> (usize, usize) {
         let me = std::process::id();
         // One pass: pid → (comm, ppid) for every readable process.
         let mut procs: std::collections::HashMap<u32, (String, u32)> =
@@ -774,111 +644,5 @@ mod tests {
         assert_eq!(run.stdout, b"orc-434-bootstrap\n");
         assert_eq!(run.exit_code, Some(0));
         Ok(())
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod kill_tests {
-    use super::tests::mediated_tree;
-    use super::*;
-    use std::path::Path;
-
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    fn network_namespace_supported() -> bool {
-        let unshare = Path::new("/usr/bin/unshare");
-        unshare.exists()
-            && Command::new(unshare)
-                .args(["--user", "--map-current-user", "--net", "--"])
-                .arg("/bin/sh")
-                .arg("-c")
-                .arg("true")
-                .status()
-                .is_ok_and(|status| status.success())
-    }
-
-    /// The full mediated stack must complete a benign run (exit 0) — hosts
-    /// where the wrapper dies before the interpreter starts skip the live
-    /// tests rather than fabricate a weaker claim.
-    fn stack_or_skip() -> Option<()> {
-        if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
-            return None;
-        }
-        let child = BashChild::spawn().ok()?;
-        let run = child.wait(b"true\n").ok()?;
-        if run.exit_code == Some(0) {
-            Some(())
-        } else {
-            None
-        }
-    }
-
-    /// The cancellation contract end-to-end: a `kill_group` called from
-    /// another thread while `wait` polls returns the wait promptly and
-    /// leaves no process alive — the shape of the mediator's async-side
-    /// `KillOnDrop` guard (Tokio cannot abort the blocking task, so the
-    /// kill must come from outside it).
-    #[test]
-    fn kill_group_from_another_thread_unblocks_the_wait() -> TestResult {
-        if stack_or_skip().is_none() {
-            return Ok(());
-        }
-        let child = Arc::new(BashChild::spawn()?);
-        let waiter_child = Arc::clone(&child);
-        let script = "sleep 300 &\nwhile true; do sleep 0.1; done\n";
-        let waiter = std::thread::spawn(move || waiter_child.wait(script.as_bytes()));
-
-        // Wait until the interpreter tree is live, then kill from HERE —
-        // the async side in the mediator's shape.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if BashChild::pid_alive_groupwise(child.pid.load(Ordering::Relaxed)) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the mediated interpreter never came up"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        child.kill_group();
-
-        // The blocked wait must return promptly with the kill observed.
-        let started = std::time::Instant::now();
-        let run = waiter
-            .join()
-            .map_err(|panic| format!("wait thread panicked: {panic:?}"))?;
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "the killed wait returned promptly"
-        );
-        // The run reports the cancellation, not a script failure.
-        assert!(
-            matches!(&run, Err(MediationError::Bash { reason: "aborted" })),
-            "the killed wait reports the cancellation: {run:?}"
-        );
-        // Forbidden effect (spec §21.4): NO interpreter or descendant
-        // survives the kill — observable absence, not just a returned
-        // wait. Poll briefly for the reap.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let (bash, sleep) = mediated_tree();
-            if bash == 0 && sleep == 0 {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the process tree survived the kill (bash={bash}, sleep={sleep})"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        Ok(())
-    }
-
-    /// Whether the pid is still present in /proc (liveness probe).
-    impl BashChild {
-        fn pid_alive_groupwise(pid: u32) -> bool {
-            pid != 0 && Path::new(&format!("/proc/{pid}")).exists()
-        }
     }
 }
