@@ -12,9 +12,17 @@ description = "One-shot campaign pass: reads the reconciled board, selects at mo
 workspace = true
 
 [dependencies]
+# async-trait (MIT OR Apache-2.0): object-safe async seams for the loop
+# runner (BoardPoller, LoopWorkerStarter); matches the board and
+# provider-api crates.
+async-trait = "0.1"
 # rusqlite (MIT): append-only SQLite decision-store, mirroring the
 # agent-catalog RoleRoutingDecisionStore pattern (schema_migrations-versioned).
 rusqlite = { workspace = true }
+# tokio (MIT): the loop runner's supervision primitives — watch channels
+# (progress beats), task spawn/abort (the kill primitive), time (tick
+# cadence and virtual-clock tests), and select (shutdown racing).
+tokio = { workspace = true }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-board = { path = "../orchestraitor-board" }
 orchestraitor-worker = { path = "../orchestraitor-worker" }
@@ -24,3 +32,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# tokio/test-util (MIT): `tokio::time::advance` — the virtual-clock control
+# the issue's no-real-sleeps test requirement is built on.
+tokio = { workspace = true, features = ["test-util"] }

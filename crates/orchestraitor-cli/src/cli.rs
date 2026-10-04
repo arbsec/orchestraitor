@@ -104,6 +104,29 @@ pub enum Commands {
     /// Run one campaign pass: select at most one task and record the decision.
     #[command(subcommand)]
     Campaign(CampaignCommand),
+    /// Run the cron-shaped foreground bootstrap loop: poll the board, run
+    /// one campaign pass, supervise the in-flight workers, repeat (issue
+    /// #314; the §9.36 watch daemon deepens this in E8).
+    Loop(LoopArgs),
+}
+
+/// Arguments for `orc loop`.
+#[derive(Debug, Clone, Args)]
+pub struct LoopArgs {
+    /// Emit the end-of-run summary (counts, stop reason, event journal) as
+    /// JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Stop after this many board polls (cycles). A QA/evidence bound;
+    /// without it the loop runs until a budget stop or shutdown signal.
+    #[arg(long)]
+    pub max_cycles: Option<u64>,
+    /// Alternate fixture task directory for tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_TASKS_DIR", hide = true)]
+    pub worker_tasks_dir: Option<PathBuf>,
+    /// Alternate provider base URL for simulator-backed tests.
+    #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
+    pub worker_provider_endpoint: Option<String>,
 }
 
 /// `orc campaign` subcommands.
