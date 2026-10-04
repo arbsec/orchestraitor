@@ -1,0 +1,78 @@
+# `orc loop` — the cron-shaped bootstrap loop runner
+
+The supervision half of the bootstrap self-improvement loop (spec
+[§9.36](../spec/10-orchestrator.md) watch daemon, thin slice; issue #314). `orc loop`
+is a foreground runner: poll the board → run one campaign pass (via
+[orc campaign](orc-campaign.md)'s selection, one decision record) → spawn the worker →
+supervise the in-flight runs → pace the next pass. It is deliberately NOT the always-on
+watch daemon — no adaptive tick, no budget classes beyond the minimal guards, no
+`orc backlog` controls, no restart recovery. Those deepen in E8.
+
+```sh
+orc loop [--json] [--max-cycles N]
+```
+
+## Guard set
+
+Every guard is owner-adjustable at the board (issue #310 set), pinned once in
+`WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop — the
+two enforcement layers can never drift apart:
+
+| Guard | Default | Enforced by |
+| --- | --- | --- |
+| attempts | 3 per worker run | worker loop (typed failure on exhaustion) |
+| re-plans | 2 between attempts | worker loop |
+| worker timeout | 45m | worker deadline + supervisor kill (beats or not) |
+| concurrency | 2 | loop (cap on supervised slots) |
+| stall | 10m | worker-internal check + supervisor beat-staleness kill |
+| backoff | 10s·2^n capped at 5m | loop pass pacing (same schedule the worker uses for provider retries) |
+| spend | $10/day soft cap | worker records exceedance; loop seals the intake |
+| run budget | 4h | loop (aborts in-flight runs, records them) |
+
+A configuration that weakens a guard (zero concurrency, zero stall timeout, zero
+shutdown budget, negative spend cap, zero run deadline) is rejected fail-closed: a
+weakened guard is a runaway loop.
+
+## Supervision semantics
+
+- **Stall kill.** The worker emits progress beats at every turn boundary and before
+  every tool dispatch. If the supervisor observes no beat within the stall timeout, it
+  kills the run and records the task as `stalled` — never a silent retry. The
+  supervisor-side window closes exactly the case the worker-internal check cannot see:
+  a run wedged inside a hung transport call.
+- **Worker timeout.** A run that overstays 45m is killed and recorded `timed-out`,
+  beats or not.
+- **Arbitration.** When a kill is declared, the final status derives from what the run
+  handle returns: a natural completion always wins; a cancellation resolves to the
+  recorded kill intent; a panic is a typed `failed` row.
+- **Graceful stop.** SIGTERM/SIGINT stop the intake immediately, give in-flight runs a
+  five-second window (the tech-stack daemon budget) to finish, then abort stragglers
+  and record them (`aborted-shutdown`). A second signal short-circuits the remaining
+  grace. Stopping leaves board state intact — board-wins on the next run.
+- **Terminal stops.** The spend soft cap and the run budget end the invocation with a
+  typed stop reason (in the summary JSON); empty-queue no-ops are transient — the loop
+  backs off and re-polls.
+
+## Retry and reselection
+
+One worker run per task per loop invocation. A task that failed, stalled, or was
+killed is never silently re-selected during the same invocation; any retry is a fresh
+board-driven selection in a later invocation (if the board still lists the task as
+Ready, the next invocation will pick it up — the typed run rows are the audit trail).
+Cross-invocation suppression is a board/PM decision, not a loop policy.
+
+## State
+
+- Decision records: `<config-dir>/campaign.db` — append-only, shared with
+  [orc campaign](orc-campaign.md).
+- Run state: `<config-dir>/loop.db` — one row per supervised worker run (invocation,
+  decision link, heartbeat, terminal status, recorded spend, detail). Startup
+  reconciliation sweeps `running` rows left by a crashed previous invocation to
+  `aborted-crash` before any guard reads slots, so a crash never permanently consumes
+  concurrency.
+
+## Single instance
+
+An advisory file lock on `<config-dir>/loop.lock` rejects a second concurrent
+invocation with `loop-already-running`. The lock is held by the OS for the process's
+lifetime and released on exit or crash — a stale lock can never wedge the next run.

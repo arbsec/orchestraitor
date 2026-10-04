@@ -164,6 +164,10 @@ The cron-shaped `orc loop` runner lands with #434.
   reconciled board, applies the P0-first epic-focus rule, selects at most one eligible
   task, persists exactly one append-only decision record, and spawns the worker via the
   daemon-less direct path (spec `10-orchestrator.md` §9.35).
+- [`orc loop`](docs/cli/orc-loop.md) — the cron-shaped foreground bootstrap loop: poll
+  the board, run one campaign pass, supervise in-flight workers, repeat — under the
+  minimal guard set (concurrency cap, stall kill, worker timeout, backoff, spend soft
+  cap, run budget; spec `10-orchestrator.md` §9.36 thin slice, issue #314).
 - [Bootstrap Loop Quickstart](book/src/getting-started/loop-quickstart.md) — end-to-end
   owner walkthrough for the cron-shaped `orc loop` bootstrap runner ([#434][]): what to
   configure before the first invocation, what a pass does, how to read `loop.db` and the
