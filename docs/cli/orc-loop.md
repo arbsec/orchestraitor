@@ -46,6 +46,11 @@ weakened guard is a runaway loop.
 - **Arbitration.** When a kill is declared, the final status derives from what the run
   handle returns: a natural completion always wins; a cancellation resolves to the
   recorded kill intent; a panic is a typed `failed` row.
+- **Run budget.** The budget bounds the board poll, not just the checks between passes:
+  a poll that would outlast the remaining budget is cut off at expiry (the summary
+  records `run-budget-exhausted`), and a snapshot that arrives after the budget is
+  spent is never planned or started. In-flight runs are drained/recorded as with any
+  other terminal stop.
 - **Graceful stop.** SIGTERM/SIGINT stop the intake immediately, give in-flight runs a
   five-second window (the tech-stack daemon budget) to finish, then abort stragglers
   and record them (`aborted-shutdown`). A second signal short-circuits the remaining

@@ -366,6 +366,17 @@ enum TickSignal {
     SourceGone,
 }
 
+/// What the pass's poll race observed.
+enum PassPoll {
+    /// The poll returned a snapshot.
+    Snapshot(BoardSnapshot),
+    /// The shutdown signal won the race.
+    Shutdown,
+    /// The remaining run budget won the race (the board client's 60s
+    /// timeout can outlast the budget's last seconds).
+    BudgetExpired,
+}
+
 /// Applies one observed shutdown signal to the drain state.
 ///
 /// `drain_reason` starts equal to the declared stop reason and converges to
@@ -818,12 +829,16 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// pacing gate (slot capacity + backoff) is checked before the cycle is
     /// counted; a gated-off step is a plain supervision tick.
     ///
-    /// The poll races the shutdown channel: `BoardClient` calls can block
-    /// up to its 60s total timeout, far outside the five-second daemon
-    /// budget, so a signal observed mid-poll drops the in-flight request
-    /// future (`poll` takes `&self` and owns no kill-capable state) and
-    /// declares the shutdown right here — the signal is never swallowed,
-    /// and the pass never spawns work on a stale snapshot.
+    /// The poll races the shutdown channel *and* the remaining run budget:
+    /// `BoardClient` calls can block up to its 60s total timeout, far
+    /// outside the five-second daemon budget, so a signal observed mid-poll
+    /// drops the in-flight request future (`poll` takes `&self` and owns no
+    /// kill-capable state) and declares the shutdown right here — the
+    /// signal is never swallowed, and the pass never spawns work on a stale
+    /// snapshot. A budget that expires mid-poll does the same for the run
+    /// budget (typed `RunBudgetExhausted`), and a fresh check after the
+    /// poll completes keeps a budget that expired during the request from
+    /// ever reaching plan or spawn.
     ///
     /// Returns whether the pass consumed a signal (the interrupt arm fired):
     /// the caller must then advance the MAIN receiver's seen version, or the
@@ -852,6 +867,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
 
         // Scoped: the poll future borrows the poller, so the race — and
         // that borrow — must end before the pass mutates runner state.
+        // The remaining run budget: the board client can block up to its
+        // 60s total timeout, so the last seconds of the budget would
+        // otherwise be spent blocked inside the poll — with no supervision
+        // and no chance to enter the budget drain.
+        let budget_left = self.config.budgets.run_budget.checked_sub(self.elapsed());
         let poll_result = {
             let poll = self.poller.poll();
             tokio::pin!(poll);
@@ -860,38 +880,79 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // never wakes.
             let shutdown = self.shutdown.as_mut();
             tokio::select! {
-                result = &mut poll => Some(result),
-                _ = async move {
+                result = &mut poll => PassPoll::Snapshot(result?),
+                () = async move {
                     match shutdown {
-                        Some(receiver) => receiver.changed().await,
+                        // Ok(()) = a signal; Err = the sender was dropped,
+                        // no signal will ever arrive — stay pending.
+                        Some(receiver) => {
+                            if receiver.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
                         None => std::future::pending().await,
                     }
-                } => None,
+                } => PassPoll::Shutdown,
+                // Absent when the budget is already spent: the caller
+                // checked `elapsed < run_budget` this iteration.
+                () = async {
+                    match budget_left {
+                        Some(remaining) => tokio::time::sleep(remaining).await,
+                        None => std::future::pending().await,
+                    }
+                } => PassPoll::BudgetExpired,
             }
         };
-        let mut snapshot = match poll_result {
-            Some(Ok(snapshot)) => snapshot,
-            Some(Err(error)) => {
-                counters.poll_failures += 1;
-                events.push(LoopEvent::PollFailed {
-                    message: error.to_string(),
-                });
-                self.pace_no_spawn(events, elapsed);
-                return Ok(false);
+        match poll_result {
+            PassPoll::Snapshot(snapshot) => {
+                // Fresh post-poll budget check: the poll may complete just
+                // as the budget expires (the race above only bounds the
+                // in-flight wait) — never plan or start work against a
+                // spent budget; enter the same drain as the race arm.
+                if self.elapsed() >= self.config.budgets.run_budget {
+                    *stop = Some(StopReason::RunBudgetExhausted);
+                    *drain_reason = Some(StopReason::RunBudgetExhausted);
+                    *drain_deadline = self.elapsed() + self.config.shutdown_budget;
+                    return Ok(false);
+                }
+                self.plan_and_spawn(counters, events, elapsed, now, snapshot)
+                    .await
             }
-            None => {
+            PassPoll::Shutdown => {
                 // The poll future is dropped mid-request; the signal that
                 // won the race declares the shutdown. The pass-time clone's
                 // version is advanced here; the caller advances the MAIN
-                // receiver too (`true` below), so the same send is never
-                // re-observed as a second signal.
+                // receiver too (returning `true` below), so the same send
+                // is never re-observed as a second signal.
                 self.mark_signal_seen();
                 *stop = Some(StopReason::Shutdown);
                 *drain_reason = Some(StopReason::Shutdown);
                 *drain_deadline = self.elapsed() + self.config.shutdown_budget;
-                return Ok(true);
+                Ok(true)
             }
-        };
+            PassPoll::BudgetExpired => {
+                // The budget expired while the poll was blocked. The pass
+                // consumes nothing — plan nothing, spawn nothing; the
+                // caller's drain (with any in-flight slots) takes over.
+                *stop = Some(StopReason::RunBudgetExhausted);
+                *drain_reason = Some(StopReason::RunBudgetExhausted);
+                *drain_deadline = self.elapsed() + self.config.shutdown_budget;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Plans one campaign pass from a freshly polled snapshot and spawns
+    /// when a task was selected — reached only after `pass` has re-checked
+    /// the budget against the completed poll.
+    async fn plan_and_spawn(
+        &mut self,
+        counters: &mut Counters,
+        events: &mut Vec<LoopEvent>,
+        elapsed: Duration,
+        now: u64,
+        mut snapshot: BoardSnapshot,
+    ) -> Result<bool, CampaignError> {
         let excluded = self.excluded_tasks()?;
         snapshot
             .ready
