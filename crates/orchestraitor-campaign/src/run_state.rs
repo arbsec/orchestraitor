@@ -1,13 +1,18 @@
 //! The loop run-state store: one row per worker run a loop invocation
 //! started, with mutable supervision columns (heartbeat, terminal status).
 //!
-//! This is the durable surface the `orc loop` guards assert against
-//! (issue #314): the concurrency cap reads `active()`, the never-silent-retry
-//! exclusion reads `runs_for_task()`, and the daily spend soft cap reads
-//! `daily_spend()`. A crashed loop leaves `running` rows behind; the next
-//! invocation reconciles them to `aborted-crash` via [`LoopRunStore::reconcile_stale`]
-//! before enforcing any guard (a stale row would otherwise consume a
-//! concurrency slot forever).
+//! The `orc loop` guards read this store against the in-memory supervision
+//! state they enforce (issue #314): the concurrency cap counts supervised
+//! slots in memory (`loop_run.rs`), the never-silent-retry exclusion reads
+//! `runs_for_invocation()` (this invocation's rows are the audit trail a
+//! re-selection would contradict), and the daily spend soft cap reads
+//! `daily_spend()`. The heartbeat columns are the durable liveness record:
+//! every beat the supervisor observes is persisted via
+//! [`LoopRunStore::heartbeat`], so `loop.db` shows how far each run got
+//! even after a crash or kill. A crashed loop leaves `running` rows
+//! behind; the next invocation reconciles them to `aborted-crash` via
+//! [`LoopRunStore::reconcile_stale`] before enforcing any guard (a stale
+//! row would otherwise misrepresent concurrency in the audit surface).
 //!
 //! Rows reference the append-only campaign decision store by plain integer
 //! id (`decision_id`); the two stores live in separate files, so there is no
@@ -316,26 +321,6 @@ impl LoopRunStore {
         decode_row(row).map_err(|source| self.err(source))
     }
 
-    /// Lists rows currently in the `running` status — the concurrency-slot
-    /// holders. Callers must reconcile stale invocations first.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CampaignError::Store`] when the query fails.
-    pub fn active(&self) -> Result<Vec<RunRow>, CampaignError> {
-        self.list_where("status = 'running'")
-    }
-
-    /// Lists every row for a task id (insertion order) — the
-    /// never-silent-retry exclusion surface.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CampaignError::Store`] when the query fails.
-    pub fn runs_for_task(&self, task_id: &str) -> Result<Vec<RunRow>, CampaignError> {
-        self.list_where_task(task_id)
-    }
-
     /// Lists every row of one loop invocation (insertion order) — the
     /// per-invocation exclusion scan.
     ///
@@ -371,9 +356,8 @@ impl LoopRunStore {
 
     /// Sweeps `running` rows that do not belong to `invocation_id` to
     /// `aborted-crash` and returns how many rows were reconciled. Must be
-    /// called at loop start, before any guard reads `active()`: a crashed
-    /// previous invocation's rows would otherwise occupy concurrency slots
-    /// forever.
+    /// called at loop start: a crashed previous invocation's rows would
+    /// otherwise misrepresent concurrency in the audit surface.
     ///
     /// # Errors
     ///
@@ -394,18 +378,6 @@ impl LoopRunStore {
             )
             .map_err(|source| self.err(source))?;
         u64::try_from(changed).map_err(|source| bigint(&self.path_label, source))
-    }
-
-    fn list_where(&self, predicate: &str) -> Result<Vec<RunRow>, CampaignError> {
-        let sql =
-            format!("SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE {predicate} ORDER BY id");
-        self.query_rows(&sql, rusqlite::params![])
-    }
-
-    fn list_where_task(&self, task_id: &str) -> Result<Vec<RunRow>, CampaignError> {
-        let sql =
-            format!("SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE task_id = ?1 ORDER BY id");
-        self.query_rows(&sql, rusqlite::params![task_id])
     }
 
     fn query_rows(
