@@ -31,5 +31,6 @@ pub use decision::{
 };
 pub use error::CampaignError;
 pub use session::{
-    BoardSnapshot, CampaignOutcome, WorkerSpawner, compute_selection, run_once, task_id_for,
+    BoardSnapshot, CampaignOutcome, WorkerSpawner, compute_selection, plan_pass, run_once,
+    task_id_for,
 };
