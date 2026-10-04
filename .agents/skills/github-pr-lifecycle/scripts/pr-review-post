@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# pr-review-post: post a PR review (comment/approve/request-changes) through
+# pr-review-post: post a PR review (comment/request-changes) through
 # the service-identity wrapper. Wraps `gh pr review` via orc_lib_gh_service so
 # the review attributes to the arbsec-agent GitHub App service identity, never
 # a personal account (AGENTS.md critical rules;
 # .agents/project/orchestraitor-workflow.md). This script posts reviews
-# submitted by REVIEWER sessions — it never approves the implementer's own
-# security-sensitive change (spec 50-contracts-data.md §21.1; that policy
-# belongs to the skill's session, not this wrapper).
+# submitted by REVIEWER sessions — it never approves: the wrapper's service
+# identity authors the PRs it reviews, and GitHub forbids self-approval, so
+# `--approve` is refused with a typed error (approvals require an independent
+# authorized reviewer).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -15,20 +16,28 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-review-post" "Post a PR review (gh pr review --comment|--approve|--request-changes) through the service-identity wrapper. Positional: <pr-number> --comment|--approve|--request-changes [--body <text>]."
+  orc_lib_print_help "pr-review-post" "Post a PR review (gh pr review --comment|--request-changes) through the service-identity wrapper. Positional: <pr-number> --comment|--request-changes [--body <text> | --body-file <path>]. --approve is refused: approvals require an independent authorized reviewer."
   exit "$ORC_OK"
 fi
 
-# Extract --body and the review verdict flag; the first remaining positional
-# arg is the PR number, the rest pass through to gh.
+# Extract --body/--body-file and the review verdict flag; the first remaining
+# positional arg is the PR number, the rest pass through to gh. --body-file is
+# preserved AS A FLAG (gh reads the file itself) in both its space and `=`
+# forms — collapsing it into BODY would post the file path as the review text.
 BODY=""
+BODY_FILE=""
 VERDICT=""
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
-    --body)      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --body=*)    BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body-file) BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file=*) BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --approve|--request-changes|--comment) VERDICT="${ORC_LIB_EXTRA_ARGS[0]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)           REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
@@ -43,15 +52,27 @@ if [ -z "$VERDICT" ]; then
   echo "error: one of --comment, --approve, or --request-changes is required" >&2
   exit "$ORC_ERR_CONFIG"
 fi
-# `gh pr review --approve` and `--request-changes` require a body.
-if [ "$VERDICT" != "--comment" ] && [ -z "$BODY" ]; then
-  echo "error: --body <text> is required with $VERDICT" >&2
+# Policy: this wrapper NEVER approves. The App identity that posts these
+# reviews is the same identity that authors the PRs (pr-create attributes to
+# arbsec-agent), and GitHub forbids an author approving their own PR — a
+# bot self-approval would be a fake review signal, so the wrapper refuses
+# the verdict outright instead of discovering it at the GitHub API.
+if [ "$VERDICT" = "--approve" ]; then
+  echo "error: --approve is not supported by this wrapper: approvals require an independent authorized reviewer" >&2
+  echo "       (the wrapper's service identity authors the PRs it reviews; GitHub forbids self-approval)." >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+# `gh pr review --request-changes` requires a body; --comment may be empty
+# (gh posts "No comment provided" — a valid empty review).
+if [ "$VERDICT" = "--request-changes" ] && [ -z "$BODY" ] && [ -z "$BODY_FILE" ]; then
+  echo "error: --body <text> or --body-file <path> is required with $VERDICT" >&2
   exit "$ORC_ERR_CONFIG"
 fi
 
 REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr review "$PR" --repo "$REPO" "$VERDICT")
 [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+[ -n "$BODY_FILE" ] && ARGS+=(--body-file "$BODY_FILE")
 ARGS+=("${REST[@]:1}")
 
 if [ "$OPT_DRY_RUN" = true ]; then

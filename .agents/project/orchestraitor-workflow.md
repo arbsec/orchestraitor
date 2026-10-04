@@ -54,9 +54,9 @@ critical rules; runbook `.omo/drafts/github-app-setup.md`). The App is
 registered and installed (issue #307): installation tokens are minted from the
 App private key by `orc github mint-token` / `orchestraitor-core`
 `GitHubAppAuth` (config block `github_app` + `service_identities`; private key
-via `secret://` URIs, fail-closed, ~1h tokens). Personal owner auth remains an
-explicitly labelled fallback only when the App identity is unavailable, never
-an equal option.
+via `secret://` URIs, fail-closed, ~1h tokens). There is NO personal-account
+option: if the App identity is unavailable, the operation fails — it is never
+rerouted to a personal account, labelled or otherwise.
 
 **Owner mandate (2026-10-02): NO GitHub writes under the personal account
 (`@mekwall`) — ever, on this repository.** There is no personal fallback for
