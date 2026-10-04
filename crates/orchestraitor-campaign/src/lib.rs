@@ -23,6 +23,7 @@
 
 mod decision;
 mod error;
+mod loop_run;
 mod run_state;
 mod session;
 
@@ -31,6 +32,10 @@ pub use decision::{
     SkipRecord, StoredCampaignDecision,
 };
 pub use error::CampaignError;
+pub use loop_run::{
+    BoardPoller, LoopConfig, LoopEvent, LoopRunner, LoopSummary, LoopWorkerStarter, StopReason,
+    WorkerProcess,
+};
 pub use run_state::{LoopRunStore, RunRow, RunRowStatus, StartRun};
 pub use session::{
     BoardSnapshot, CampaignOutcome, WorkerSpawner, compute_selection, plan_pass, run_once,
