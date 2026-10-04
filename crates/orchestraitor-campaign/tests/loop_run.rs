@@ -23,6 +23,7 @@ use orchestraitor_worker::{BudgetEcho, RunStatus, UsageTotals, WorkerBudgets, Wo
 const REPO: &str = "arbsec/orchestraitor";
 const START_UNIX: u64 = 1_000_000;
 
+/// Builds a deterministic worker routing decision for loop fixtures.
 fn routing() -> RoleRoutingDecision {
     RoleRoutingDecision {
         role: "implement".to_string(),
@@ -33,6 +34,7 @@ fn routing() -> RoleRoutingDecision {
     }
 }
 
+/// Builds a ready board item for the fixture repository and issue number.
 fn ready_item(number: u64) -> ReadyItem {
     ReadyItem {
         number,
@@ -43,6 +45,7 @@ fn ready_item(number: u64) -> ReadyItem {
     }
 }
 
+/// Creates a board snapshot with no eligible or blocked work.
 fn empty_snapshot() -> BoardSnapshot {
     BoardSnapshot {
         open: Vec::new(),
@@ -52,6 +55,7 @@ fn empty_snapshot() -> BoardSnapshot {
     }
 }
 
+/// Creates a board snapshot whose ready queue contains the supplied issues.
 fn snapshot_with(numbers: &[u64]) -> BoardSnapshot {
     BoardSnapshot {
         ready: numbers.iter().copied().map(ready_item).collect(),
@@ -59,6 +63,7 @@ fn snapshot_with(numbers: &[u64]) -> BoardSnapshot {
     }
 }
 
+/// Builds a completed worker result with explicit turn and token totals.
 fn fixture_run(task_id: &str, turns: u32, tokens: u64) -> WorkerRun {
     WorkerRun {
         task_id: task_id.to_string(),
@@ -127,10 +132,12 @@ struct FakeStarter {
 }
 
 impl FakeStarter {
+    /// Creates a starter that repeats one worker behavior for every spawn.
     fn new(behavior: Behavior) -> Self {
         Self::with_behaviors(vec![behavior])
     }
 
+    /// Creates a starter that cycles through the supplied worker behaviors.
     fn with_behaviors(behaviors: Vec<Behavior>) -> Self {
         Self {
             behaviors,
@@ -139,6 +146,7 @@ impl FakeStarter {
         }
     }
 
+    /// Returns the task ids and prior spend passed to each worker spawn.
     fn spend_feed(&self) -> Vec<(String, f64)> {
         self.spawns.lock().unwrap().clone()
     }
@@ -146,6 +154,7 @@ impl FakeStarter {
 
 #[async_trait]
 impl LoopWorkerStarter for FakeStarter {
+    /// Records spawn inputs and runs the next scripted behavior with a beat channel.
     async fn start(
         &self,
         task_id: &str,
@@ -205,11 +214,13 @@ struct FakePoller {
 
 #[async_trait]
 impl BoardPoller for FakePoller {
+    /// Returns the same board snapshot on every poll.
     async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
         Ok(self.snapshot.clone())
     }
 }
 
+/// Runs a fixture invocation and returns its summary and stores for assertions.
 async fn run_loop(
     config: LoopConfig,
     snapshot: BoardSnapshot,
@@ -246,6 +257,7 @@ fn never() -> tokio::sync::watch::Receiver<u64> {
     rx
 }
 
+/// Checks that a completed task is recorded once and excluded from later passes.
 #[tokio::test(start_paused = true)]
 async fn happy_path_spawns_completes_and_no_ops_the_next_cycle() {
     let starter = FakeStarter::new(Behavior::Complete {
@@ -284,6 +296,7 @@ async fn happy_path_spawns_completes_and_no_ops_the_next_cycle() {
     assert!(summary.elapsed_secs < 60, "happy path must not pace long");
 }
 
+/// Checks the stall deadline and proves the aborted worker emits no further beats.
 #[tokio::test(start_paused = true)]
 async fn stalled_worker_is_killed_within_one_stall_window() {
     let starter = FakeStarter::new(Behavior::BeatThenPark {
@@ -332,6 +345,7 @@ async fn stalled_worker_is_killed_within_one_stall_window() {
     );
 }
 
+/// Checks that live worker rows never exceed the configured two-slot cap.
 #[tokio::test(start_paused = true)]
 async fn concurrency_cap_never_exceeds_two_slots() {
     let starter = FakeStarter::new(Behavior::SilentHang);
@@ -354,6 +368,7 @@ async fn concurrency_cap_never_exceeds_two_slots() {
     assert!(summary.elapsed_secs < 60, "drain aborts within the budget");
 }
 
+/// Checks that heartbeats cannot extend a worker beyond its total timeout.
 #[tokio::test(start_paused = true)]
 async fn beating_worker_is_timeout_killed_not_stall_killed() {
     let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
@@ -384,6 +399,7 @@ async fn beating_worker_is_timeout_killed_not_stall_killed() {
     );
 }
 
+/// Checks virtual pass times against the exponential backoff and its ceiling.
 #[tokio::test(start_paused = true)]
 async fn backoff_between_no_op_passes_doubles_and_caps() {
     let starter = FakeStarter::new(Behavior::Complete {
@@ -422,6 +438,7 @@ async fn backoff_between_no_op_passes_doubles_and_caps() {
     );
 }
 
+/// Checks that the run budget ends intake and records aborted stragglers.
 #[tokio::test(start_paused = true)]
 async fn run_budget_stops_the_loop_and_records_aborts() {
     let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
@@ -445,6 +462,7 @@ async fn run_budget_stops_the_loop_and_records_aborts() {
     );
 }
 
+/// Checks that recorded spend reaches the cap and prevents another spawn.
 #[tokio::test(start_paused = true)]
 async fn spend_soft_cap_seals_intake_and_drains() {
     // 3M tokens × $2/M = $6 per run; two runs cross the $10 cap.
@@ -480,6 +498,7 @@ async fn spend_soft_cap_seals_intake_and_drains() {
     );
 }
 
+/// Checks that configurations weakening any pinned guard are rejected.
 #[tokio::test(start_paused = true)]
 async fn guardrail_weakening_is_rejected_fail_closed() {
     let zero_concurrency = LoopConfig::new(
@@ -533,6 +552,7 @@ async fn guardrail_weakening_is_rejected_fail_closed() {
     );
 }
 
+/// Checks that shutdown aborts hung workers within the five-second drain budget.
 #[tokio::test(start_paused = true)]
 async fn shutdown_stops_cleanly_within_the_daemon_budget() {
     let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));
@@ -564,6 +584,7 @@ async fn shutdown_stops_cleanly_within_the_daemon_budget() {
     assert_eq!(rows[0].detail, "shutdown-abort");
 }
 
+/// Checks that a worker panic records a failure while subsequent passes continue.
 #[tokio::test(start_paused = true)]
 async fn panicked_worker_is_a_typed_failure_and_the_loop_continues() {
     let starter = FakeStarter::new(Behavior::Panic);
@@ -585,63 +606,10 @@ async fn panicked_worker_is_a_typed_failure_and_the_loop_continues() {
     assert_eq!(summary.cycles, 3);
 }
 
-// Crash reconciliation at the runner level: with the concurrency cap at 1,
-// an unreconciled stale `running` row would consume the only slot and
-// block the respawn — so a successful spawn PROVES the sweep ran.
-#[tokio::test(start_paused = true)]
-async fn stale_running_rows_sweep_and_the_task_reruns() {
-    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
-    let runs = orchestraitor_campaign::LoopRunStore::open_in_memory().unwrap();
-    // A previous invocation died with the task still marked running.
-    runs.start(&orchestraitor_campaign::StartRun {
-        invocation_id: "inv-dead".to_string(),
-        decision_id: 1,
-        task_id: "board-arbsec_orchestraitor-1".to_string(),
-        repo: REPO.to_string(),
-        number: 1,
-        started_at_secs: START_UNIX,
-    })
-    .unwrap();
-
-    let starter = FakeStarter::new(Behavior::Complete {
-        turns: 1,
-        tokens: 0,
-    });
-    let budgets = WorkerBudgets {
-        max_concurrent_workers: 1,
-        ..WorkerBudgets::bootstrap_defaults()
-    };
-    let config = LoopConfig::new(budgets, Duration::from_secs(5), Some(2)).unwrap();
-    let runner = LoopRunner::new(
-        config,
-        FakePoller {
-            snapshot: snapshot_with(&[1]),
-        },
-        starter,
-        &decisions,
-        &runs,
-        routing(),
-        "inv".to_string(),
-        START_UNIX,
-    )
-    .unwrap();
-    let summary = runner.run(never()).await.unwrap();
-
-    assert_eq!(
-        summary.spawns, 1,
-        "the task reruns: the stale row was swept, freeing the single slot"
-    );
-    assert!(summary.events.iter().any(|event| {
-        matches!(
-            event,
-            orchestraitor_campaign::LoopEvent::WorkerSpawned { .. }
-        )
-    }));
-}
-
 // Q5(b) race arbitration: a run that completes INSIDE the stall window is
 // naturally completed — the kill never fires (Ok(run) wins; abort-after-
 // completion would be a no-op anyway, but here no abort is even declared).
+/// Checks that completion before the stall deadline retains its completed status.
 #[tokio::test(start_paused = true)]
 async fn natural_completion_inside_the_stall_window_wins_the_arbitration() {
     let starter = FakeStarter::new(Behavior::CompleteAfter(Duration::from_millis(
@@ -676,6 +644,7 @@ async fn natural_completion_inside_the_stall_window_wins_the_arbitration() {
 // Q5(c) subscribe race: a beat that lands before the supervisor's first
 // tick still counts as liveness — the stall clock runs from the observed
 // beat, never from a silent zero baseline.
+/// Checks that a beat observed at the first tick extends the stall deadline.
 #[tokio::test(start_paused = true)]
 async fn an_early_beat_before_the_first_tick_resets_the_stall_clock() {
     // Beat at 0s (before any tick can observe it fresh), then park. The
@@ -708,6 +677,7 @@ async fn an_early_beat_before_the_first_tick_resets_the_stall_clock() {
 // flight — the intake is sealed and the in-flight run drains NATURALLY
 // (no abort), then the loop exits. The cap crosses at run 1's finish
 // (pre-seeded $5 + run 1's $6); run 2 is the busy slot.
+/// Checks that reaching the spend cap lets a busy worker complete naturally.
 #[tokio::test(start_paused = true)]
 async fn spend_cap_with_a_busy_slot_drains_without_aborting() {
     let decisions = CampaignDecisionStore::open_in_memory().unwrap();
@@ -778,6 +748,7 @@ async fn spend_cap_with_a_busy_slot_drains_without_aborting() {
 // bounds it to the shutdown budget, kills the straggler, records it as a
 // shutdown-abort (the drain reason converged to Shutdown), and keeps the
 // summary's stop reason as the budget cause.
+/// Checks that shutdown bounds a spend-cap drain and preserves completed rows.
 #[tokio::test(start_paused = true)]
 async fn shutdown_preempts_the_spend_cap_drain_within_the_budget() {
     let decisions = CampaignDecisionStore::open_in_memory().unwrap();
@@ -880,6 +851,7 @@ struct HangingPoller;
 
 #[async_trait]
 impl BoardPoller for HangingPoller {
+    /// Models a board request that never completes.
     async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
         std::future::pending().await
     }
@@ -894,6 +866,7 @@ struct FirstPollSnapshot {
 
 #[async_trait]
 impl BoardPoller for FirstPollSnapshot {
+    /// Returns the initial snapshot once, then models a hung board request.
     async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
         if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
             Ok(self.snapshot.clone())
@@ -903,6 +876,7 @@ impl BoardPoller for FirstPollSnapshot {
     }
 }
 
+/// Checks that shutdown cancels a hung board poll within the daemon budget.
 #[tokio::test(start_paused = true)]
 async fn shutdown_interrupts_an_in_flight_board_poll() {
     let decisions = CampaignDecisionStore::open_in_memory().unwrap();
@@ -953,6 +927,7 @@ async fn shutdown_interrupts_an_in_flight_board_poll() {
 // misreads the first signal as a second one and collapses the 5s grace to
 // one tick. Asserts the full grace survives (straggler aborted no earlier
 // than signal + budget) and still lands inside the budget.
+/// Checks that cancelling a board poll still gives active workers their drain grace.
 #[tokio::test(start_paused = true)]
 async fn shutdown_during_a_hung_poll_keeps_the_grace_for_in_flight_work() {
     let decisions = CampaignDecisionStore::open_in_memory().unwrap();
@@ -1013,6 +988,7 @@ async fn shutdown_during_a_hung_poll_keeps_the_grace_for_in_flight_work() {
 // Two signals: the second short-circuits the remaining grace window. The
 // loop must abort at the SECOND signal (2s + 1s), not at the full grace
 // budget (2s + 5s) — the docs and CHANGELOG advertise this short-circuit.
+/// Checks that a second shutdown signal aborts workers before grace expires.
 #[tokio::test(start_paused = true)]
 async fn a_second_signal_short_circuits_the_remaining_grace() {
     let starter = FakeStarter::new(Behavior::BeatEvery(Duration::from_mins(1)));

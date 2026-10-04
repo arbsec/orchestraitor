@@ -72,10 +72,9 @@ Cross-invocation suppression is a board/PM decision, not a loop policy.
   [orc campaign](orc-campaign.md).
 - Run state: `<config-dir>/loop.db` — one row per supervised worker run (invocation,
   decision link, heartbeat — the persisted liveness record updated as the supervisor
-  observes progress beats —, terminal status, recorded spend, detail). Startup
-  reconciliation sweeps `running` rows left by a crashed previous invocation to
-  `aborted-crash` before any guard reads slots, so a crash never permanently consumes
-  concurrency.
+  observes progress beats —, terminal status, recorded spend, detail). Concurrency
+  counts only workers supervised by the current invocation. Historical rows remain
+  unchanged on startup; restart recovery is deferred to the E8 watch daemon.
 
 ## Single instance
 
