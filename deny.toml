@@ -9,15 +9,23 @@ yanked = "deny"
 # bincode is unmaintained (RUSTSEC-2025-0141). Transitive via yara-x, which
 # enters the graph through arbitraitor-analysis at rev ab7af5e; same ignore
 # arbitraitor itself carries at that revision.
-# RUSTSEC-2026-0222/0269/0316 affect the wasmtime 43.0.2 copy pulled in
+# RUSTSEC-2026-0222/0269/0316/0327 affect the wasmtime 43.0.2 copy pulled in
 # transitively by yara-x 1.19.0 (wasmtime requirement ^43.0.2); no patched
 # 43.x exists and it cannot be bumped without upstream yara-x requiring a
 # newer wasmtime. Matches arbitraitor's own deny.toml at the pinned revision.
+# RUSTSEC-2026-0327 additionally cannot be fixed by updating yara-x: even the
+# latest release (1.21.0) requires wasmtime ^45.0.3, below every patched
+# range (>=48.0.4,<49 / >=49.0.2). Its flaw is an unvalidated async-lifted
+# *component-model* callback result count; yara-x uses wasmtime as an
+# internal synchronous engine for modules it compiles itself from YARA rule
+# text and never instantiates untrusted components, so the vulnerable path
+# is unreachable in our use.
 ignore = [
     "RUSTSEC-2025-0141",
     "RUSTSEC-2026-0222",
     { id = "RUSTSEC-2026-0269", reason = "yara-x 1.19.0 requires wasmtime ^43.0.2, resolving the transitive copy to 43.0.2; no patched 43.x exists and yara-x cannot be bumped without an upstream wasmtime requirement change. Matches arbitraitor's ignore at the pinned revision; drop when yara-x requires a patched wasmtime." },
     "RUSTSEC-2026-0316",
+    { id = "RUSTSEC-2026-0327", reason = "Unvalidated async-lifted component-model callback result count (native stack buffer overflow). yara-x 1.19.0 requires wasmtime ^43.0.2 and even the latest yara-x 1.21.0 requires ^45.0.3, below every patched range (>=48.0.4,<49 or >=49.0.2), so no dependency resolution reaches patched wasmtime. The vulnerable path (async component-model callbacks) is unreachable: yara-x embeds wasmtime as a synchronous engine for self-compiled YARA rule modules and never loads untrusted components. Drop when yara-x requires wasmtime >=48.0.4." },
 ]
 
 [licenses]
