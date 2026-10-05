@@ -608,9 +608,21 @@ mod tests {
         let preflight = probe_worker_preflight(&client, "linux");
 
         // Then: the record always carries the Restricted mode and the
-        // Arbitraitor controls matrix verbatim.
+        // Arbitraitor controls matrix verbatim. Since arbitraitor ab7af5e
+        // (#754/#755) the matrix couples `filesystem_isolation` to the
+        // Landlock probe of the RUNNING host, so on a non-Linux test host
+        // the probed control is correctly `Unavailable` — the matrix is
+        // fail-closed, not all-available.
         assert_eq!(preflight.mode, SandboxMode::Restricted);
-        assert!(!preflight.controls.has_unavailable());
+        assert_eq!(
+            preflight.controls.filesystem_isolation,
+            if preflight.controls.landlock_abi_version.is_some() {
+                ControlState::Available
+            } else {
+                ControlState::Unavailable
+            },
+            "filesystem_isolation must track the host Landlock probe verbatim"
+        );
         // And: the verdict tracks the Landlock probe datum (see the #755
         // stopgap in `unavailable_controls`). On hosts that deliver Landlock
         // the verdict is Allowed with no gaps; on hosts that do not, the

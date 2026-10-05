@@ -373,6 +373,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `secret://` URI (env-backed) and never sniffs ambient credentials; a hidden
   `--github-graphql-endpoint` override serves GHES instances.
 
+### Changed
+
+- The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
+  tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
+  migration; the bump pulls in upstream's UTF-16 buffer over-read fix.
+
 ### Fixed
 
 - `orc github commit-author` authenticates `GET /app` with a freshly minted
