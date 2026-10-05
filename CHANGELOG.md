@@ -243,6 +243,35 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   spawn nothing; unevaluable board items (fail-closed reads) are disclosed on every
   record.
   Documented in [docs/cli/orc-campaign.md](docs/cli/orc-campaign.md) and the README.
+- `orc loop [--json] [--max-cycles N]` and the loop runner in `orchestraitor-campaign`:
+  the cron-shaped foreground bootstrap loop (spec `10-orchestrator.md` §9.36 thin slice;
+  #314). Each cycle polls the board, plans one campaign pass (one append-only decision
+  record), spawns the worker on the daemon-less direct path, and supervises in-flight
+  runs under the issue-#310 guard set shared with the worker: concurrency cap 2,
+  supervisor-side stall kill (beat staleness over the 10m window — catches runs wedged
+  inside hung transport calls), worker-timeout kill at 45m, pass pacing at 10s·2^n
+  capped 5m, $10/day spend soft cap (seals the intake and drains in-flight work — never
+  aborts; inert by default — the per-token spend estimate is `0.0` until the
+  cost-ledger lane wires provider pricing in, so no spend accrues and the cap is never
+  reached — matching [docs/cli/orc-loop.md](docs/cli/orc-loop.md)), and a 4h whole-run
+  budget. SIGTERM/SIGINT drain gracefully inside the 5s
+  daemon budget and record stragglers; a second signal short-circuits the grace. A
+  second concurrent invocation is rejected (`loop-already-running`, advisory flock).
+  A task that cannot be started (missing task fixture, unsupported provider,
+  transport build failure) is a per-task outcome, not a run-killer: the task is
+  recorded as a terminal `failed` run row, the pass is paced out, and the loop keeps
+  supervising in-flight work — the failed task is excluded for the rest of the
+  invocation. A fatal durable-state failure aborts and records in-flight workers
+  before the run returns, so no row is stranded `running`. The 4h run budget bounds
+  the board poll too — the budget cannot expire while the loop sits inside a board
+  request, and nothing is planned or spawned after expiry; transient poll failures
+  back off and retry (counted in the summary, never fatal). Each concurrent worker
+  slot gets its own git worktree under `<config-dir>/loop-worktrees/` keyed by task
+  id — concurrent workers never share or write the project directory. One worker run
+  per task per invocation — failed or killed tasks are never silently
+  retried; retry is a fresh board-driven selection in a later invocation. Run state is
+  recorded at `<config-dir>/loop.db` for guard accounting and run outcomes. Documented
+  in [docs/cli/orc-loop.md](docs/cli/orc-loop.md) and the README.
 - `orc worker run --task <id> [--json]` and the `orchestraitor-worker` crate: the headless
   one-shot bootstrap mini-worker (spec `10-orchestrator.md` §9.38, `60-milestones.md` MVP-6;
   #310). The worker resolves a fixture task, routes through the control plane's `implement`

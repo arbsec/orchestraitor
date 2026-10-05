@@ -16,6 +16,9 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# async-trait (MIT OR Apache-2.0): object-safe impls of the campaign loop's
+# BoardPoller/LoopWorkerStarter seams; matches the board/provider crates.
+async-trait = "0.1"
 clap = { workspace = true }
 miette = { workspace = true }
 # orchestraitor-mcp (MIT OR Apache-2.0): the board.query decision tool
@@ -39,6 +42,7 @@ reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }

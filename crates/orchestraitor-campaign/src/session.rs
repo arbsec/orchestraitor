@@ -147,23 +147,33 @@ pub fn compute_selection(ready: &[ReadyItem], open: &[ItemFacts]) -> Vec<ReadyIt
     ordered.into_iter().cloned().collect()
 }
 
-/// Runs exactly one pass: reads the snapshot, selects at most one task,
-/// persists exactly one decision record, and — for a selection — spawns the
-/// worker. No-op passes spawn nothing and still persist their typed record.
+/// Plans exactly one pass without spawning: reads the snapshot, selects at
+/// most one task, and persists exactly one decision record. No-op passes
+/// persist their typed record. The loop runner (issue #314) uses this to
+/// separate selection from background worker supervision; [`run_once`] is
+/// `plan_pass` plus the synchronous spawn.
 ///
 /// # Errors
 ///
-/// Returns [`CampaignError::Store`] when the record cannot be persisted and
-/// [`CampaignError::Spawn`] when the spawner fails to produce a run at all.
-pub fn run_once(
+/// Returns [`CampaignError::Store`] when the record cannot be persisted.
+pub fn plan_pass(
     snapshot: &BoardSnapshot,
     routing: &RoleRoutingDecision,
     store: &CampaignDecisionStore,
-    spawner: &dyn WorkerSpawner,
-) -> Result<CampaignOutcome, CampaignError> {
+) -> Result<StoredCampaignDecision, CampaignError> {
+    let decision = campaign_decision(snapshot, routing);
+    store.record(&decision)
+}
+
+/// Constructs the exactly-one §9.35 decision record for a pass: the
+/// Selected branch for the first eligible item, else the typed no-op
+/// classification. The single construction path shared by [`plan_pass`]
+/// (loop runner) and [`run_once`] (one-shot CLI) — the two consumers can
+/// never drift apart.
+fn campaign_decision(snapshot: &BoardSnapshot, routing: &RoleRoutingDecision) -> CampaignDecision {
     let ordered = compute_selection(&snapshot.ready, &snapshot.open);
     let skipped = skipped_records(snapshot);
-    let decision = if let Some(selected) = ordered.first() {
+    if let Some(selected) = ordered.first() {
         let task_id = task_id_for(&selected.repo, selected.number);
         let alternatives = ordered
             .iter()
@@ -221,9 +231,25 @@ pub fn run_once(
             blocked_graph: blocked_candidate_nodes(snapshot),
             skipped,
         }
-    };
-    let stored = store.record(&decision)?;
-    let worker = match &decision.selected {
+    }
+}
+
+/// Runs exactly one pass: reads the snapshot, selects at most one task,
+/// persists exactly one decision record, and — for a selection — spawns the
+/// worker. No-op passes spawn nothing and still persist their typed record.
+///
+/// # Errors
+///
+/// Returns [`CampaignError::Store`] when the record cannot be persisted and
+/// [`CampaignError::Spawn`] when the spawner fails to produce a run at all.
+pub fn run_once(
+    snapshot: &BoardSnapshot,
+    routing: &RoleRoutingDecision,
+    store: &CampaignDecisionStore,
+    spawner: &dyn WorkerSpawner,
+) -> Result<CampaignOutcome, CampaignError> {
+    let stored = plan_pass(snapshot, routing, store)?;
+    let worker = match &stored.decision.selected {
         Some(selected) => Some(spawner.spawn(&selected.task_id, routing)?),
         None => None,
     };

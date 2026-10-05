@@ -15,6 +15,15 @@ LIB="$HERE/../_lib.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The wrapper scripts land non-executable through GitHub's createCommitOnBranch
+# App-commit path (FileAddition carries no mode), while the invocation sites
+# below exec them directly. Ensure the exec bit before any case runs
+# (best-effort: a read-only checkout cannot grant it).
+for _wrap in pr-create pr-comment pr-review-post pr-mutate; do
+  _p="$HERE/../../../github-pr-lifecycle/scripts/$_wrap"
+  [ -f "$_p" ] && chmod +x "$_p" 2>/dev/null || true
+done
+
 fail() {
   echo "FAIL $1" >&2
   exit 1

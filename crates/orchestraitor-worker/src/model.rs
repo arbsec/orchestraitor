@@ -21,6 +21,9 @@ pub(super) struct RunState {
     pub(super) usage: UsageTotals,
     /// Whether the daily spend soft cap was exceeded.
     pub(super) spend_soft_cap_exceeded: bool,
+    /// Monotonic progress-beat counter sent on the optional supervisor
+    /// channel (issue #314); opaque sequence number, one increment per emit.
+    pub(super) progress_beat: u64,
 }
 
 /// One model call with bounded provider retries (`10s·2^n` capped, issue #310).
