@@ -524,7 +524,14 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // match alone says nothing when a landing already moved the remote past
     // the base (that landing must DELETE the files the remote head has).
     let existing = graphql.branch_ref(&args.owner, &args.repo, remote_branch)?;
-    let diff_base_tree = remote_head_tree(&graphql, existing.as_ref(), &base_tree, remote_branch)?;
+    let diff_base_tree = remote_head_tree(
+        &graphql,
+        existing.as_ref(),
+        &base_tree,
+        remote_branch,
+        &args.owner,
+        &args.repo,
+    )?;
     let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
     if changes.is_empty() {
         writeln!(
@@ -705,6 +712,8 @@ fn remote_head_tree(
     existing: Option<&Value>,
     base_tree: &str,
     remote_branch: &str,
+    owner: &str,
+    repo: &str,
 ) -> Result<String> {
     let Some(ref_payload) = existing else {
         return Ok(base_tree.to_string());
@@ -713,8 +722,12 @@ fn remote_head_tree(
         .pointer("/target/oid")
         .and_then(Value::as_str)
         .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?;
-    if git(&["fetch", "--quiet", "origin", head]).is_err() {
-        git(&["fetch", "--quiet", "origin", remote_branch]).ok();
+    // Fetch directly from the target repository URL — never the ambient
+    // `origin` remote, which may point at a different repository (or not
+    // exist) in this worktree.
+    let repo_url = format!("https://github.com/{owner}/{repo}.git");
+    if git(&["fetch", "--quiet", &repo_url, head]).is_err() {
+        git(&["fetch", "--quiet", &repo_url, remote_branch]).ok();
     }
     git(&["rev-parse", &format!("{head}^{{tree}}")])
 }
@@ -732,6 +745,16 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) ->
         match status.as_str() {
             "A" | "M" => {
                 let spec = format!("{branch}:{}", path.display());
+                // Reject non-regular-file entries: symlinks (120000) and
+                // submodules (160000) cannot be carried by the FileAddition
+                // contents payload — landing would silently materialize them
+                // as regular files or fail opaquely.
+                let object_type = git(&["cat-file", "-t", &spec])?;
+                if object_type != "blob" {
+                    bail!(
+                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob —                          symlinks and submodules are not supported by the GraphQL fileChanges                          payload"
+                    );
+                }
                 let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
                     miette!("failed to read blob `{spec}` for the landing commit: {error}")
                 })?;
