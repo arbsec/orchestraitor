@@ -1998,11 +1998,35 @@ fn spawn_push_branch_server(
     thread::spawn(move || {
         for connection in listener.incoming() {
             let Ok(mut stream) = connection else { break };
-            let mut buffer = vec![0_u8; 262_144].into_boxed_slice();
-            let Ok(read) = stream.read(&mut buffer) else {
-                break;
-            };
-            let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            // Read until the full request is available: headers plus the
+            // declared Content-Length body. A single `read` may return a
+            // partial request, which would truncate the recorded payload.
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 16_384];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buffer);
+                        let Some(headers_end) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let content_length = text[..headers_end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= headers_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&buffer).into_owned();
             let path = text
                 .lines()
                 .next()
@@ -2421,7 +2445,7 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
             r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
     ];
-    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2446,6 +2470,22 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
     assert!(
         flat.contains("beforeOiddoesnotmatchcurrenthead") || flat.contains("updateRefs"),
         "the concurrent-move precondition must surface as a typed error: {stderr}"
+    );
+    // The updateRefs request must carry the exact-head precondition
+    // (beforeOid = the observed remote head) and force=false: neither a
+    // concurrent advance nor a rewind may be overwritten.
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let update_request = bodies
+        .iter()
+        .find(|body| body.contains("updateRefs"))
+        .ok_or_else(|| miette::miette!("no updateRefs request recorded"))?;
+    assert!(
+        update_request.contains(&format!("beforeOid\":\"{main_commit}")),
+        "beforeOid must be the observed remote head: {update_request}"
+    );
+    assert!(
+        update_request.contains("\"force\":false"),
+        "force must be false: {update_request}"
     );
     Ok(())
 }

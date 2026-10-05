@@ -587,9 +587,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     //    after the swing.
     let observed_head = existing
         .as_ref()
-        .and_then(|ref_payload| {
-            ref_payload.pointer("/target/oid").and_then(Value::as_str)
-        })
+        .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
         .map(str::to_string);
     let swing = match observed_head.as_deref() {
         Some(observed) => {
