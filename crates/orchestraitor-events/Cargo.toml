@@ -22,3 +22,13 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# rusqlite (MIT): SQLite-backed §9.17 audit persistence, mirroring the
+# append-only in-memory store with tamper-evident re-validation on read.
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+# rusqlite hooks (MIT): the authorizer callback drives the append/import
+# interleaving test.
+rusqlite = { workspace = true, features = ["hooks"] }
+# tempfile (MIT/Apache-2.0): hermetic file-backed store tests.
+tempfile = { workspace = true }

@@ -37,6 +37,9 @@ pub enum EventError {
         /// Event sequence whose record hash was invalid.
         sequence: u64,
     },
+    /// `SQLite` backend failure during audit persistence.
+    #[error("audit store SQLite backend failed")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 impl From<serde_json::Error> for EventError {

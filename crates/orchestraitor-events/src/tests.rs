@@ -1,6 +1,6 @@
 //! Tests for normalized event records and tamper-evident imports.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use orchestraitor_model::OperationId;
 use serde_json::{Value, json};
@@ -276,6 +276,104 @@ fn tracing_layer_chain_validates_under_concurrent_emission() -> Result<(), Event
     );
 
     validate_hash_chain(&records)?;
+    Ok(())
+}
+
+#[test]
+fn concurrent_import_during_append_never_persists_broken_chain() -> Result<(), EventError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    use crate::SqliteAuditStore;
+
+    let directory = tempfile::tempdir()
+        .map_err(|error| EventError::Json(serde_json::Error::io(std::io::Error::other(error))))?;
+    let path = directory.path().join("audit.db");
+
+    // Seed the database and remember the old head hash.
+    let old_head;
+    {
+        let mut store = SqliteAuditStore::open(&path)?;
+        let first = store.append(event(1, EventCategory::SessionLifecycle, json!({}), None)?)?;
+        old_head = first.hash;
+    }
+
+    // A divergent, independently valid chain that replaces the history.
+    let mut divergent = InMemoryAuditStore::default();
+    divergent.append(event(
+        1,
+        EventCategory::SessionLifecycle,
+        json!({"state":"diverged"}),
+        None,
+    )?)?;
+    let divergent_bytes = divergent.export(PrivacyExportMode::Full)?;
+
+    // Connection A gets an authorizer that, exactly when A prepares its
+    // INSERT (after the head snapshot and chain validation), runs a history
+    // replacement on a second connection — the interleaving CodeRabbit
+    // flagged: B imports between A's head validation and A's insert.
+    let b_ran = std::sync::Arc::new(AtomicBool::new(false));
+    let b_ran_hook = std::sync::Arc::clone(&b_ran);
+    let hook_path = path.clone();
+    let hook = move |context: AuthContext<'_>| {
+        if !matches!(context.action, AuthAction::Insert { .. })
+            || b_ran_hook.swap(true, Ordering::SeqCst)
+        {
+            return Authorization::Allow;
+        }
+        // Run B's import from inside A's append. Short busy timeout: under
+        // the serialized fix, B must lose the race to A's write lock here.
+        let mut store_b = SqliteAuditStore::open(&hook_path).expect("open rival store");
+        store_b
+            .connection()
+            .busy_timeout(std::time::Duration::from_millis(200))
+            .expect("set busy timeout");
+        let import = AuditStore::r#import(&mut store_b, &divergent_bytes);
+        // The forbidden effect only occurs when B's replacement commits while
+        // A is mid-append; either outcome below is acceptable as long as the
+        // persisted chain stays valid (asserted after the append).
+        let _ = import;
+        Authorization::Allow
+    };
+
+    let mut store_a = SqliteAuditStore::open(&path)?;
+    store_a.connection().authorizer(Some(hook))?;
+
+    // A appends a record linked to the pre-import head while the hook injects
+    // B's competing import at A's insert-preparation point.
+    let append_result = store_a.append(event(
+        2,
+        EventCategory::ToolRequest,
+        json!({"tool":"read"}),
+        Some(old_head),
+    )?);
+    assert!(b_ran.load(Ordering::SeqCst), "hook must have fired");
+
+    // FORBIDDEN EFFECT: whatever the race outcome, reopening the store must
+    // load a fully valid chain. Before the serialization fix, B's import won
+    // here and A's record was persisted with prev_hash pointing at the
+    // removed pre-import head — a broken chain that survived reopen.
+    let reopened = SqliteAuditStore::open(&path)?;
+    let records = reopened.query(&EventQuery {
+        include_uninterpreted: true,
+        ..EventQuery::default()
+    })?;
+    match append_result {
+        Ok(_) => assert_eq!(records.len(), 2, "committed append must persist"),
+        Err(_) => assert_eq!(
+            records.len(),
+            1,
+            "failed append must not leave a record behind"
+        ),
+    }
+    if records.len() == 1 {
+        assert_eq!(
+            records[0].hash,
+            divergent.head()?.prev_hash.unwrap(),
+            "persisted history must be exactly the imported chain"
+        );
+    }
     Ok(())
 }
 

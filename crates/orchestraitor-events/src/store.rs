@@ -184,13 +184,14 @@ impl AuditStore for InMemoryAuditStore {
     }
 }
 
-fn validate_next_envelope(
+pub(crate) fn validate_next_envelope(
     records: &[AuditRecord],
     envelope: &EventEnvelope,
 ) -> Result<(), EventError> {
-    let expected_sequence = u64::try_from(records.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
+    let expected_sequence = match records.last() {
+        Some(record) => record.envelope.monotonic_seq.saturating_add(1),
+        None => 1,
+    };
     if envelope.monotonic_seq != expected_sequence {
         return Err(EventError::SequenceGap {
             expected: expected_sequence,

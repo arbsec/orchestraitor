@@ -13,6 +13,25 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
+  durable §9.17 audit persistence. The store performs hash-chain validation
+  that detects inconsistencies between envelope bytes, hashes, and metadata —
+  it does not protect against a database-level rewriter, who can delete or
+  rewrite rows and recompute the unkeyed SHA-256 chain consistently:
+  file-backed (`open`) stores with WAL journaling and in-memory
+  (`open_in_memory`) stores without it. Canonical envelope bytes are the sole
+  record of truth (the `hash`, `category`, `schema_version`, and
+  `monotonic_seq` columns are untrusted index metadata recomputed and
+  cross-checked on every read — tampering with a stored blob or column is
+  quarantined as a typed `RecordHashMismatch`/parity error; malformed
+  `envelope_json` bytes are likewise rejected on read, though the failure
+  surfaces as a JSON decoding error rather than those typed variants), full
+  hash-chain validation over the decoded set on read, and append-time
+  validation identical to the in-memory store (records failing validation are
+  refused and leave the store untouched, so an interrupted append can never
+  persist a broken chain). Serialized append and import under an immediate
+  write transaction so concurrent writers cannot interleave a history
+  replacement and persist a chain broken at the seam.
 - `orc github` service-identity enforcement is now configurable through the
   layered config key `github_app.enforcement` (`recommended` | `required`,
   default `recommended`). In `recommended` mode, when the `github_app` config
