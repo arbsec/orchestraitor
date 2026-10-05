@@ -12,9 +12,11 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 
 **Every new commit invalidates earlier convergence.** A review generation run against commit A says nothing about commit A+1. The next generation re-examines the full diff at the new HEAD.
 
+**Exception: verified-commit ref swing.** A force-swing of the branch ref (replaying the same commits as GitHub-signed commits — see [verified-commit-path.md](verified-commit-path.md)) does **not** invalidate convergence by itself, **if** BOTH hold: (a) the resulting tree is byte-identical to the reviewed head — `git rev-parse <old-oid>^{tree}` and `git rev-parse <new-oid>^{tree}` must return the same tree object ID (tree identity, not `git diff` emptiness: `git diff` can run configured `textconv` filters, which may be one-way and lossy, so different trees can display no diff); AND (b) the comparison base and base-to-head diff are unchanged — the replay base is the PR's recorded base (see [verified-commit-path.md](verified-commit-path.md)): the reviewed-base OID and the current-base OID MUST be recorded explicitly (never inferred from a branch name), and the base-to-head diff is evidenced by a content hash recorded verbatim alongside the old/new head tree IDs — `git diff <reviewed-base> <old-oid> | sha256sum` and `git diff <current-base> <new-oid> | sha256sum` — with both hashes equal (diff content, not `git diff` output emptiness: the same textconv caveats as (a) apply, and a bare `git diff` yields no tree or content ID to compare). The reviewer/orchestrator MUST verify all recorded OIDs, tree IDs, and hashes and record them on the PR; an unverified swing, a changed comparison base, a hash mismatch, or any tree difference invalidates convergence as with any push.
+
 ## What "noteworthy" means
 
-CRITICAL, HIGH, and MEDIUM findings are noteworthy. They MUST be resolved before merge. A finding is "resolved" when:
+CRITICAL, HIGH, and MEDIUM findings are noteworthy. Every review generation reports them in the fixed shape of [review-message-template.md](review-message-template.md), whose `VERDICT` footer reflects this convergence rule. They MUST be resolved before merge. A finding is "resolved" when:
 - the code is fixed AND the reviewer confirms the fix, OR
 - the finding is formally accepted with recorded reasoning in the review thread (e.g. "This is a known limitation; tracking in #N; accepted because X").
 
@@ -64,6 +66,6 @@ The script combines:
 - `pr-checks` — all required + non-optional checks pass at current HEAD;
 - `review-threads` — all actionable threads resolved (`isResolved = true`);
 - `reconcile-checklist` — all `<!-- orc:* -->` markers checked based on evidence;
-- the review-generation state (has a generation run against the current HEAD? did it find new noteworthy findings?).
+- the review-generation state (has a generation run against the current HEAD? did it find new noteworthy findings?) — a PROXY only: the script reads `reviewDecision` and cannot inspect persisted review-generation findings (its own header documents this); a human or the skill's session context must confirm the generation evidence before merging.
 
 The script exits `0` only when all four are true. Exit `5` (`ORC_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.
