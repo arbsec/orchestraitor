@@ -148,12 +148,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (the landing commit is created on top of the observed remote head, and a
   concurrent writer advance makes the fast-forward fail with a typed error
   instead of being overwritten). The temp ref is invocation-unique (uuid
-  name) and deleted on every path. An empty diff (local tree equals the
-  remote head tree) is a no-op. Gates fail closed with typed errors (no `git push`
-  fallback); a failed gate deletes the temp ref and leaves the real branch
-  untouched. An empty diff is a no-op refused before any token is minted.
-  The `github-pr-lifecycle` skill's push steps now route through this
-  subcommand instead of `git push`.
+  name) and deleted on every path. An empty diff (the local tree equals the
+  remote head tree — the head is read before the decision) is a no-op. Gates
+  fail closed with typed errors (no `git push` fallback); a failed gate
+  deletes the temp ref and leaves the real branch untouched. The
+  `github-pr-lifecycle` skill's push steps now route through this subcommand
+  instead of `git push`.
 
 ### Changed
 

@@ -579,18 +579,21 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     )?;
 
     // 5. Move the real branch ref onto the verified commit with an
-    //    expectedHeadOid compare-and-swap (no force): a concurrent move in
-    //    the window aborts the swing instead of overwriting it. A gate or
-    //    mutation failure inside the helper already deleted the temp ref; on
-    //    the success path it is deleted after the swing.
-    let swing = match &existing {
-        Some(ref_payload) => {
-            let ref_id = ref_payload
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| miette!("branch ref response is malformed: missing ref.id"))?
-                .to_string();
-            graphql.fast_forward_ref(&ref_id, &new_head)
+    //    exact-head precondition (updateRefs/RefUpdate.beforeOid = observed
+    //    head, force=false): a concurrent advance OR rewind of the real
+    //    branch in the window fails the precondition — nothing is
+    //    overwritten. A gate or mutation failure inside the landing helper
+    //    already deleted the temp ref; on the success path it is deleted
+    //    after the swing.
+    let observed_head = existing
+        .as_ref()
+        .and_then(|ref_payload| {
+            ref_payload.pointer("/target/oid").and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    let swing = match observed_head.as_deref() {
+        Some(observed) => {
+            graphql.move_ref_with_precondition(&repository_id, remote_branch, observed, &new_head)
         }
         // New branch: the ref never existed on the remote before this run —
         // create the real ref directly at the verified commit.
@@ -1008,20 +1011,38 @@ impl GraphqlSession<'_> {
         graphql_mutation_field(&data, "createCommitOnBranch", "commit").cloned()
     }
 
-    /// Fast-forwards the branch ref onto `oid` (`updateRef` with the
-    /// default `force = false`). The verified landing commit was created ON
-    /// TOP of the observed remote head, so the move is a fast-forward; a
-    /// concurrent writer that advanced the real ref in the window makes the
-    /// fast-forward FAIL with a typed GraphQL error instead of overwriting
-    /// the concurrent commit (GraphQL `UpdateRefInput` has no expected-oid
-    /// field — fast-forward-only IS the compare-and-swap).
-    fn fast_forward_ref(&self, ref_id: &str, oid: &str) -> Result<()> {
+    /// Moves the real branch ref onto `oid` with an exact-head precondition:
+    /// `updateRefs` with `RefUpdate.beforeOid` set to the OBSERVED remote
+    /// head. A concurrent writer that advanced OR rewound the real branch in
+    /// the window makes the precondition fail with a typed GraphQL error —
+    /// neither direction can be overwritten. `force` stays `false`, so a
+    /// non-fast-forward move is also rejected.
+    fn move_ref_with_precondition(
+        &self,
+        repository_id: &str,
+        remote_branch: &str,
+        observed_head_oid: &str,
+        new_oid: &str,
+    ) -> Result<()> {
         let data = self.execute(
-            "updateRef",
-            "mutation($input:UpdateRefInput!){updateRef(input:$input){ref{id}}}",
-            &serde_json::json!({"input": {"refId": ref_id, "oid": oid, "force": false}}),
+            "updateRefs",
+            "mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}",
+            &serde_json::json!({
+                "input": {
+                    "repositoryId": repository_id,
+                    "refUpdates": [{
+                        "name": format!("refs/heads/{remote_branch}"),
+                        "afterOid": new_oid,
+                        "beforeOid": observed_head_oid,
+                        "force": false,
+                    }],
+                }
+            }),
         )?;
-        graphql_mutation_field(&data, "updateRef", "ref").map(|_| ())
+        // The payload carries only clientMutationId; success is the absence
+        // of GraphQL errors (validated in execute).
+        let _ = graphql_mutation_field(&data, "updateRefs", "clientMutationId")?;
+        Ok(())
     }
 
     /// Deletes a ref by node id (deleteRef) — used for the temporary landing

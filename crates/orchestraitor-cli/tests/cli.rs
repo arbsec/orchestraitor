@@ -2102,8 +2102,8 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
             ),
         ),
         (
-            "updateRef".to_string(),
-            r#"{"data":{"updateRef":{"ref":{"id":"REF_node"}}}}"#.to_string(),
+            "updateRefs".to_string(),
+            r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
         temp_probe_rule,
     ];
@@ -2384,9 +2384,9 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
 fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette::Result<()> {
     let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
     // The landing commit verifies, but the real ref moved concurrently: the
-    // fast-forward updateRef FAILS (force=false), the command exits typed,
-    // and the temp branch is deleted — the concurrent commit is NOT
-    // overwritten.
+    // beforeOid precondition FAILS, the command exits typed, and the temp
+    // branch is deleted — the concurrent commit is NOT overwritten (works
+    // for both a concurrent advance and a concurrent rewind).
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),
@@ -2413,8 +2413,8 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
             ),
         ),
         (
-            "updateRef".to_string(),
-            r#"{"data":null,"errors":[{"message":"UpdateRef on refs/heads/feat/github-signed-push failed: branch is not fast-forwardable"}]}"#.to_string(),
+            "updateRefs".to_string(),
+            r#"{"data":null,"errors":[{"message":"UpdateRefs for refs/heads/feat/github-signed-push failed: beforeOid does not match current head (branch was rewound)"}]}"#.to_string(),
         ),
         (
             "deleteRef".to_string(),
@@ -2444,8 +2444,8 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
     let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
     let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        flat.contains("notfast-forwardable") || flat.contains("updateRef"),
-        "the fast-forward conflict must surface as a typed error: {stderr}"
+        flat.contains("beforeOiddoesnotmatchcurrenthead") || flat.contains("updateRefs"),
+        "the concurrent-move precondition must surface as a typed error: {stderr}"
     );
     Ok(())
 }
@@ -2494,8 +2494,8 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
             ),
         ),
         (
-            "updateRef".to_string(),
-            r#"{"data":{"updateRef":{"ref":{"id":"REF_node"}}}}"#.to_string(),
+            "updateRefs".to_string(),
+            r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
         (
             "deleteRef".to_string(),
