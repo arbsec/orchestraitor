@@ -249,25 +249,34 @@ orc github push-branch feat/my-change \
 
 Mechanics:
 
-- Computes the local branch's tree (`git rev-parse <branch>^{tree}`) versus
-  the base branch (`--base`, default `origin/main` then `main`) and builds the
-  GraphQL `fileChanges` payload from the diff (`A`/`M` additions carry base64
-  contents; `D` deletions carry the path). An empty diff is a no-op — nothing
-  is minted and no request is sent.
-- **Existing remote branch:** appends the squashed commit on top of the
-  current remote head with an `expectedHeadOid` compare-and-swap, then
-  force-moves the ref (`updateRef` with `force=true`) onto the landed commit.
-  Landing on top (instead of force-moving first) never regresses the PR head
-  through an ancestor-of-main state (the auto-close pitfall).
-- **New remote branch:** bootstraps the ref at the base commit
-  (`createRef` — `createCommitOnBranch` does NOT auto-create branches) and
-  appends the commit. `--remote-branch` names a remote branch different from
-  the local one.
+- Computes the local branch's tree (`git rev-parse <branch>^{tree}`). The
+  change set is the diff from the REMOTE HEAD's tree when the branch exists on
+  the remote (fetched locally first — an earlier landing may have moved the
+  remote tree past the base), or from the base branch tree (`--base`, default
+  `origin/main` then `main`) for a new branch. `A`/`M` additions carry the
+  branch's committed blob contents (`git cat-file blob` — never the working
+  directory); `D` deletions carry the path. An empty diff is a no-op — the
+  pre-mint stage refuses before any credential is minted or request is sent.
+- **Landing via a temporary branch:** the commit is created on
+  `push-branch/tmp-<tree>` (bootstrapped at the base commit with `createRef`;
+  `createCommitOnBranch` does NOT auto-create branches) so the tree/verification
+  gates run BEFORE the real ref moves — `createCommitOnBranch` advances
+  whatever branch it lands on, so landing directly would move the real branch
+  even when a gate later fails. The temp ref is deleted on every path.
 - **Gates (fail-closed, typed errors, no plain-`git push` fallback):** the
   landed commit's tree MUST equal the local branch tree, and its
   `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
-  refuses the ref move; on an existing branch the remote head is unchanged.
+  deletes the temp ref and leaves the real remote branch untouched.
   Diagnostics never contain the token.
+- **Ref move is fast-forward-only:** the verified landing commit was created
+  ON TOP of the observed remote head, so `updateRef` with the default
+  `force = false` fast-forwards the real branch onto it. GraphQL
+  `UpdateRefInput` has no expected-oid field, so fast-forward-only IS the
+  compare-and-swap: a concurrent writer that advances the real ref in the
+  window makes the update FAIL with a typed error — the concurrent commit is
+  never overwritten. A new remote branch is created directly at the verified
+  commit. The real branch head therefore never regresses through an
+  ancestor-of-main state (the auto-close pitfall).
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 

@@ -140,13 +140,16 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   squashed commit on the remote branch via GraphQL `createCommitOnBranch` —
   the agent push path for repositories with `required_signatures` rulesets,
   where plain `git push` produces unverified commits that are rejected at
-  merge time. Creates new branches (`createRef` bootstrap; the mutation does
-  not auto-create branches) and force-moves existing ones (`updateRef` with
-  `force=true`) after an `expectedHeadOid` compare-and-swap; gates fail
-  closed with typed errors (no `git push` fallback) when the landed commit's
-  tree differs from the local branch tree or its `signature.isValid` is not
-  `true`. An empty diff is a no-op; no token is minted and no request is
-  sent. The `github-pr-lifecycle` skill's push steps now route through this
+  merge time. The commit is created on a temporary branch
+  (`push-branch/tmp-<tree>`, bootstrapped via `createRef` — the mutation does
+  not auto-create branches) so the tree-equality and `signature.isValid`
+  gates run before the real ref moves; the swing is a fast-forward-only
+  `updateRef` (the landing commit is created on top of the observed remote
+  head, and a concurrent writer advance makes the fast-forward fail with a
+  typed error instead of being overwritten). Gates fail closed with typed errors (no `git push`
+  fallback); a failed gate deletes the temp ref and leaves the real branch
+  untouched. An empty diff is a no-op refused before any token is minted.
+  The `github-pr-lifecycle` skill's push steps now route through this
   subcommand instead of `git push`.
 
 ### Changed

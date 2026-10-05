@@ -1900,7 +1900,7 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
 /// changes a file; returns the temp dir (must outlive the test), the repo
 /// path, and the base branch's tree oid. Uses a pinned author identity so
 /// the test never depends on ambient git config.
-fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String)> {
+fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
     use std::process::Command;
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
@@ -1937,9 +1937,29 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
             .into_diagnostic()?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
+    // Register the repo itself as `origin` so the landing path's
+    // `git fetch origin <head-oid>` resolves against a real repository. The
+    // stub rules use this repo's actual main commit oid as the fake remote
+    // head so rev-parse finds the tree locally.
+    run(&["remote", "add", "origin", &repo.display().to_string()])?;
+    run(&["fetch", "--quiet", "origin"])?;
+    let head_output = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(&repo)
+        .output()
+        .into_diagnostic()?;
+    let main_commit = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
     let base_tree = tree_of("main")?;
     let feature_tree = tree_of("feature/signed")?;
-    Ok((temp, repo.display().to_string(), base_tree, feature_tree))
+    Ok((
+        temp,
+        repo.display().to_string(),
+        base_tree,
+        feature_tree,
+        main_commit,
+    ))
 }
 
 /// A mint + GraphQL server for push-branch tests: connection 1 mints the
@@ -2036,11 +2056,26 @@ fn push_branch_cli(
 
 #[test]
 fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let repo_id_rule = (
+        r"name:$repo){id}".to_string(),
+        r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+    );
+    let temp_probe_rule = (
+        "deleteRef".to_string(),
+        r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+    );
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),
-            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        repo_id_rule,
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
         (
             "createCommitOnBranch".to_string(),
@@ -2052,6 +2087,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
             "updateRef".to_string(),
             r#"{"data":{"updateRef":{"ref":{"id":"REF_node"}}}}"#.to_string(),
         ),
+        temp_probe_rule,
     ];
     let (endpoint, auth_rx) = spawn_push_branch_server(rules)?;
 
@@ -2087,15 +2123,15 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         }
     }
     assert_eq!(
-        calls, 3,
-        "ref probe + createCommitOnBranch + updateRef, one token each"
+        calls, 8,
+        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRef CAS + temp-ref probe (stale check) + deleteRef, one minted token each"
     );
     Ok(())
 }
 
 #[test]
 fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
     // The mutation succeeds but reports an UNSIGNED commit (null signature):
     // the ref must NOT be moved and the command must fail with a typed
     // error — no `git push` fallback, no partial success.
@@ -2105,9 +2141,23 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),
-            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
         ("createCommitOnBranch".to_string(), commit_payload),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
     ];
     let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
 
@@ -2140,16 +2190,30 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
 
 #[test]
 fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
     // The mutation reports a DIFFERENT tree than the local branch: the ref
     // must NOT be moved even though the commit claims success.
     let commit_payload = r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"4444444444444444444444444444444444444444","tree":{"oid":"9999999999999999999999999999999999999999"},"signature":{"isValid":true}}}}}"#;
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),
-            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
         ("createCommitOnBranch".to_string(), commit_payload.to_string()),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
     ];
     let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
 
@@ -2182,7 +2246,7 @@ fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
 
 #[test]
 fn github_push_branch_required_enforcement_fails_closed_without_config() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
     // enforcement = required, incomplete github_app block: the command must
     // refuse BEFORE any network call (typed error naming the missing keys).
     fs::write(
@@ -2226,7 +2290,7 @@ fn github_push_branch_required_enforcement_fails_closed_without_config() -> miet
 
 #[test]
 fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
     let (endpoint, auth_rx) = spawn_push_branch_server(Vec::new())?;
     // The local main branch IS the base: nothing to land.
     let output = push_branch_cli(
@@ -2252,6 +2316,147 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
     assert!(
         auth_rx.try_recv().is_err(),
         "an empty diff must not mint a token or touch the network"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    // The landing commit verifies, but the real ref moved concurrently: the
+    // fast-forward updateRef FAILS (force=false), the command exits typed,
+    // and the temp branch is deleted — the concurrent commit is NOT
+    // overwritten.
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRef".to_string(),
+            r#"{"data":null,"errors":[{"message":"UpdateRef on refs/heads/feat/github-signed-push failed: branch is not fast-forwardable"}]}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("notfast-forwardable") || flat.contains("updateRef"),
+        "the fast-forward conflict must surface as a typed error: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Result<()> {
+    use std::process::Command;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // Dirty the working copy of the feature file AND add an untracked file;
+    // neither may leak into the landing payload.
+    fs::write(format!("{repo}/feature.txt"), "DIRTY working-copy edit\n").into_diagnostic()?;
+    fs::write(format!("{repo}/untracked.txt"), "untracked\n").into_diagnostic()?;
+    // The branch's committed tree — the dirty working copy and the
+    // untracked file are NOT part of it.
+    let branch_tree = {
+        let output = Command::new("git")
+            .args(["rev-parse", "feature/signed^{tree}"])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{branch_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRef".to_string(),
+            r#"{"data":{"updateRef":{"ref":{"id":"REF_node"}}}}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
 }

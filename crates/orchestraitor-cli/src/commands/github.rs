@@ -501,28 +501,17 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         require_service_identity(&config, "land an App-signed branch commit")?;
     }
 
-    // 1. Compute the intended tree from the local branch. `rev-parse
-    //    <branch>^{tree}` reads the committed tree object — no index state,
-    //    no textconv filters, exactly the object identity the remote must
-    //    match (the same check `pr-convergence.md` prescribes).
+    // 1. The intended tree: the branch's committed tree object (no index,
+    //    no textconv) — exactly the identity the remote must match
+    //    (`pr-convergence.md`).
     let local_tree = git(&["rev-parse", &format!("{}^{{tree}}", args.branch)])?;
     let base = resolve_base(args.base.as_deref())?;
-    // `git diff-tree -r -z --no-renames --name-status <base-tree> <tree>`
-    // emits NUL-separated `STATUS\0path\0` records (no quoting, no renames);
-    // with `--no-commit-id` against two trees there is no leading commit oid.
+
+    // 2. Empty-diff gate, stage 1 (pre-mint, zero network): if the local
+    //    tree equals the base branch tree, the branch carries nothing to
+    //    land — refuse before any credential is minted or request is sent.
     let base_tree = git(&["rev-parse", &format!("{base}^{{tree}}")])?;
-    let raw = git_raw(&[
-        "diff-tree",
-        "-r",
-        "-z",
-        "--no-renames",
-        "--no-commit-id",
-        "--name-status",
-        &base_tree,
-        &local_tree,
-    ])?;
-    let changes = parse_diff_tree_z(&raw);
-    if changes.is_empty() {
+    if base_tree == local_tree {
         writeln!(
             std::io::stderr(),
             "branch `{}` tree {local_tree} is identical to base `{base}` — nothing to land",
@@ -531,10 +520,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         .into_diagnostic()?;
         return Ok(());
     }
-
-    // 2. Build the fileChanges payload from the worktree files. Additions
-    //    carry base64 contents read from disk; deletions carry the path only.
-    let file_changes = build_file_changes(&changes)?;
 
     // 3. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
@@ -546,71 +531,89 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         bearer: token.token().expose_secret(),
     };
 
-    // Read the remote branch's current head (empty for a new branch).
+    // Read the remote branch's current head (absent for a new branch).
     let existing = graphql.branch_ref(&args.owner, &args.repo, remote_branch)?;
-    let new_head = if let Some(ref_payload) = existing {
-        let head = ref_payload
-            .pointer("/target/oid")
-            .and_then(Value::as_str)
-            .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?
-            .to_string();
-        let ref_id = ref_payload
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| miette!("branch ref response is malformed: missing ref.id"))?
-            .to_string();
-        // Append the squashed commit ON TOP of the current remote head
-        // with an expectedHeadOid compare-and-swap, then force-move the
-        // ref onto the commit whose tree is the local tree. Landing on
-        // top (instead of force-moving first) keeps the PR head from
-        // ever regressing to an ancestor of main — the auto-close
-        // pitfall in verified-commit-path.md — and the expectedHeadOid
-        // gate refuses a concurrent move in the window.
-        let commit = graphql.create_commit_on_branch(
-            &args.owner,
-            &args.repo,
-            remote_branch,
-            &head,
-            &args.message,
-            args.body.as_deref().unwrap_or_default(),
-            &file_changes,
-        )?;
-        verify_landed_commit(&commit, &local_tree, &args.branch)?;
-        let oid = commit_oid(&commit)?.to_string();
-        // Force-move: updateRef with force=true swings the branch onto
-        // the verified commit. The earlier expectedHeadOid CAS plus the
-        // immediate window make a concurrent move extremely unlikely;
-        // the tree and verification gates ran against the landed commit
-        // itself.
-        graphql.update_ref(&ref_id, &oid)?;
-        oid
-    } else {
-        // New branch: bootstrap the ref at the base commit, then append
-        // the commit (createCommitOnBranch does NOT auto-create branches
-        // — verified empirically, gh-aw#22564).
-        let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
-        let created = graphql.create_ref(
-            &repository_id,
-            &format!("refs/heads/{remote_branch}"),
-            &base,
-        )?;
-        let created_head = created
-            .pointer("/target/oid")
-            .and_then(Value::as_str)
-            .ok_or_else(|| miette!("createRef response is malformed: missing target.oid"))?
-            .to_string();
-        let commit = graphql.create_commit_on_branch(
-            &args.owner,
-            &args.repo,
-            remote_branch,
-            &created_head,
-            &args.message,
-            args.body.as_deref().unwrap_or_default(),
-            &file_changes,
-        )?;
-        verify_landed_commit(&commit, &local_tree, &args.branch)?;
-        commit_oid(&commit)?.to_string()
+    // The change set diffs from the remote HEAD tree (an earlier landing may
+    // have moved the remote tree past the base; a file removed locally that
+    // the base never had must still be deleted remotely), not the base tree.
+    // Empty-diff gate, stage 2: the branch may equal the remote head.
+    let diff_base_tree = remote_head_tree(&graphql, existing.as_ref(), &base_tree, remote_branch)?;
+    let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
+    if changes.is_empty() {
+        writeln!(
+            std::io::stderr(),
+            "branch `{}` tree {local_tree} is identical to the remote head tree — nothing to land",
+            args.branch
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+
+    // Build the fileChanges payload. Contents come from the branch's
+    // committed blobs (`git cat-file blob`), never the working directory.
+    let file_changes = build_file_changes(&changes, &args.branch)?;
+
+    // 4. Land via a TEMPORARY branch so the tree/verification gates run
+    //    BEFORE the real ref moves: createCommitOnBranch advances whatever
+    //    branch it lands on, so landing directly would move the real branch
+    //    even when a gate later fails. The temp ref is deleted on every
+    //    path; the real ref then moves fast-forward-only (see below).
+    let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
+    let temp_branch = format!("push-branch/tmp-{local_tree}");
+    // The temp branch MUST start at the remote head when the branch exists:
+    // the change set was computed as diff remote-head-tree -> local-tree and
+    // is applied on top of the temp head, so bootstrapping at the base commit
+    // would DROP the remote head's commits from the landed tree. For a new
+    // branch the remote head does not exist and the base commit is correct.
+    let temp_bootstrap = existing
+        .as_ref()
+        .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
+        .unwrap_or(base.as_str());
+    let (temp_head, temp_ref_id) = bootstrap_temp_branch(
+        &graphql,
+        &args.owner,
+        &args.repo,
+        &repository_id,
+        &temp_branch,
+        temp_bootstrap,
+    )?;
+    let new_head = land_on_temp_branch(
+        &graphql,
+        &repository_id,
+        &temp_branch,
+        &temp_ref_id,
+        &temp_head,
+        args,
+        &file_changes,
+        &local_tree,
+    )?;
+
+    // 5. Move the real branch ref onto the verified commit with an
+    //    expectedHeadOid compare-and-swap (no force): a concurrent move in
+    //    the window aborts the swing instead of overwriting it. A gate or
+    //    mutation failure inside the helper already deleted the temp ref; on
+    //    the success path it is deleted after the swing.
+    let swing = match &existing {
+        Some(ref_payload) => {
+            let ref_id = ref_payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| miette!("branch ref response is malformed: missing ref.id"))?
+                .to_string();
+            graphql.fast_forward_ref(&ref_id, &new_head)
+        }
+        // New branch: the ref never existed on the remote before this run —
+        // create the real ref directly at the verified commit.
+        None => graphql
+            .create_ref(
+                &repository_id,
+                &format!("refs/heads/{remote_branch}"),
+                &new_head,
+            )
+            .map(|_| ()),
     };
+    let _ = graphql.delete_ref(&temp_ref_id);
+    swing?;
 
     writeln!(
         std::io::stderr(),
@@ -618,6 +621,50 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     )
     .into_diagnostic()?;
     Ok(())
+}
+
+/// Creates the landing commit on the temporary branch and runs the
+/// tree/verification gates against it BEFORE the real branch ref moves.
+/// `createCommitOnBranch` advances whatever branch it lands on, so the temp
+/// branch absorbs the mutation: a failed gate (or a failed mutation) leaves
+/// the real remote branch untouched and the temp ref is deleted on every
+/// path. Returns the verified commit's oid.
+#[allow(clippy::too_many_arguments)]
+fn land_on_temp_branch(
+    graphql: &GraphqlSession<'_>,
+    _repository_id: &str,
+    temp_branch: &str,
+    temp_ref_id: &str,
+    temp_head: &str,
+    args: &PushBranchArgs,
+    file_changes: &Value,
+    local_tree: &str,
+) -> Result<String> {
+    let commit = graphql.create_commit_on_branch(
+        &args.owner,
+        &args.repo,
+        temp_branch,
+        temp_head,
+        &args.message,
+        args.body.as_deref().unwrap_or_default(),
+        file_changes,
+    );
+    let commit = match commit {
+        Ok(commit) => commit,
+        // The mutation itself failed (nothing landed): surface the typed
+        // error after cleaning up the temp ref.
+        Err(error) => {
+            let _ = graphql.delete_ref(temp_ref_id);
+            return Err(error);
+        }
+    };
+    // The commit landed on the temp branch; run the gates BEFORE the real
+    // ref moves.
+    if let Err(error) = verify_landed_commit(&commit, local_tree, &args.branch) {
+        let _ = graphql.delete_ref(temp_ref_id);
+        return Err(error);
+    }
+    commit_oid(&commit).map(str::to_string)
 }
 
 /// Resolves the diff base commit: an explicit `--base` ref, else
@@ -637,21 +684,65 @@ fn resolve_base(base: Option<&str>) -> Result<String> {
         })
 }
 
+/// Runs `git diff-tree -r -z --no-renames --name-status` between two trees
+/// and parses the records; `--no-commit-id` against two trees means no
+/// leading oid field.
+fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let raw = git_raw(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--no-commit-id",
+        "--name-status",
+        base_tree,
+        tree,
+    ])?;
+    Ok(parse_diff_tree_z(&raw))
+}
+
+/// Resolves the tree the landing change set is computed against: the remote
+/// head's tree when the branch exists on the remote (an earlier landing may
+/// have moved the remote tree past the base; a file removed locally that the
+/// base never had must still be deleted remotely), or the base branch tree
+/// for a new branch. The remote head commit is fetched first so its tree and
+/// blobs are locally available; a raw-OID fetch falls back to a branch-name
+/// fetch (the head is usually already present locally). A head whose objects
+/// are locally unavailable is a typed error.
+fn remote_head_tree(
+    _graphql: &GraphqlSession<'_>,
+    existing: Option<&Value>,
+    base_tree: &str,
+    remote_branch: &str,
+) -> Result<String> {
+    let Some(ref_payload) = existing else {
+        return Ok(base_tree.to_string());
+    };
+    let head = ref_payload
+        .pointer("/target/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?;
+    if git(&["fetch", "--quiet", "origin", head]).is_err() {
+        git(&["fetch", "--quiet", "origin", remote_branch]).ok();
+    }
+    git(&["rev-parse", &format!("{head}^{{tree}}")])
+}
+
 /// Builds the GraphQL `FileChanges` input from the parsed diff records:
-/// additions/modifications carry base64 file contents read from the worktree,
-/// deletions carry the path. An unreadable file or an unknown diff status is
-/// a typed error — nothing is landed on a partial change set.
-fn build_file_changes(changes: &[(String, std::path::PathBuf)]) -> Result<Value> {
+/// additions/modifications carry base64 contents of the branch's COMMITTED
+/// blobs (`git cat-file blob <branch>:<path>` — never the working directory,
+/// which may carry uncommitted edits or a different checkout), deletions
+/// carry the path. An unreadable blob or an unknown diff status is a typed
+/// error — nothing is landed on a partial change set.
+fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) -> Result<Value> {
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
     for (status, path) in changes {
         match status.as_str() {
             "A" | "M" => {
-                let bytes = std::fs::read(path).map_err(|error| {
-                    miette!(
-                        "failed to read `{}` for the landing commit: {error}",
-                        path.display()
-                    )
+                let spec = format!("{branch}:{}", path.display());
+                let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
+                    miette!("failed to read blob `{spec}` for the landing commit: {error}")
                 })?;
                 additions.push(serde_json::json!({
                     "path": path.display().to_string(),
@@ -669,6 +760,47 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)]) -> Result<Value>
         }
     }
     Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
+}
+
+/// Creates the temporary landing branch at `bootstrap_oid` for
+/// `owner/repo`, after deleting any stale temp ref left by a previous run
+/// with the same tree (landing on top of it would append to the WRONG
+/// commit). Returns `(head oid, ref id)`.
+fn bootstrap_temp_branch(
+    graphql: &GraphqlSession<'_>,
+    owner: &str,
+    repo: &str,
+    repository_id: &str,
+    temp_branch: &str,
+    bootstrap_oid: &str,
+) -> Result<(String, String)> {
+    let existing_temp = graphql.branch_ref(owner, repo, temp_branch)?;
+    if existing_temp.is_some() {
+        // A stale temp ref from a previous run with the same tree: landing
+        // would append on top of the WRONG commit. Delete it and re-bootstrap.
+        let stale_id = existing_temp
+            .as_ref()
+            .and_then(|ref_payload| ref_payload.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .ok_or_else(|| miette!("temp ref response is malformed: missing ref.id"))?;
+        graphql.delete_ref(&stale_id)?;
+    }
+    let created = graphql.create_ref(
+        repository_id,
+        &format!("refs/heads/{temp_branch}"),
+        bootstrap_oid,
+    )?;
+    let head = created
+        .pointer("/target/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("createRef response is malformed: missing target.oid"))?
+        .to_string();
+    let ref_id = created
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("createRef response is malformed: missing ref.id"))?
+        .to_string();
+    Ok((head, ref_id))
 }
 
 /// Verifies a landed commit against the gates: tree equality with the local
@@ -887,14 +1019,33 @@ impl GraphqlSession<'_> {
         graphql_mutation_field(&data, "createCommitOnBranch", "commit").cloned()
     }
 
-    /// Force-moves the branch ref onto `oid` (updateRef with force=true).
-    fn update_ref(&self, ref_id: &str, oid: &str) -> Result<()> {
+    /// Fast-forwards the branch ref onto `oid` (`updateRef` with the
+    /// default `force = false`). The verified landing commit was created ON
+    /// TOP of the observed remote head, so the move is a fast-forward; a
+    /// concurrent writer that advanced the real ref in the window makes the
+    /// fast-forward FAIL with a typed GraphQL error instead of overwriting
+    /// the concurrent commit (GraphQL `UpdateRefInput` has no expected-oid
+    /// field — fast-forward-only IS the compare-and-swap).
+    fn fast_forward_ref(&self, ref_id: &str, oid: &str) -> Result<()> {
         let data = self.execute(
             "updateRef",
             "mutation($input:UpdateRefInput!){updateRef(input:$input){ref{id}}}",
-            &serde_json::json!({"input": {"refId": ref_id, "oid": oid, "force": true}}),
+            &serde_json::json!({"input": {"refId": ref_id, "oid": oid, "force": false}}),
         )?;
         graphql_mutation_field(&data, "updateRef", "ref").map(|_| ())
+    }
+
+    /// Deletes a ref by node id (deleteRef) — used for the temporary landing
+    /// branch on every path (success, gate failure, mutation failure).
+    fn delete_ref(&self, ref_id: &str) -> Result<()> {
+        let data = self.execute(
+            "deleteRef",
+            "mutation($input:DeleteRefInput!){deleteRef(input:$input){clientMutationId}}",
+            &serde_json::json!({"input": {"refId": ref_id}}),
+        )?;
+        graphql_mutation_field(&data, "deleteRef", "clientMutationId")
+            .map(|_| ())
+            .or(Ok(()))
     }
 
     /// Bootstraps a new branch ref at `oid` (createRef; the branch must NOT
