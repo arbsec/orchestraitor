@@ -255,14 +255,19 @@ Mechanics:
   remote tree past the base), or from the base branch tree (`--base`, default
   `origin/main` then `main`) for a new branch. `A`/`M` additions carry the
   branch's committed blob contents (`git cat-file blob` — never the working
-  directory); `D` deletions carry the path. An empty diff is a no-op — the
-  pre-mint stage refuses before any credential is minted or request is sent.
+  directory); `D` deletions carry the path. An empty diff (the local tree
+  equals the remote head tree) is a no-op — the decision needs the remote
+  head, so one minted token and the branch-ref request are spent before the
+  refusal.
 - **Landing via a temporary branch:** the commit is created on
-  `push-branch/tmp-<tree>` (bootstrapped at the base commit with `createRef`;
-  `createCommitOnBranch` does NOT auto-create branches) so the tree/verification
-  gates run BEFORE the real ref moves — `createCommitOnBranch` advances
-  whatever branch it lands on, so landing directly would move the real branch
-  even when a gate later fails. The temp ref is deleted on every path.
+  `push-branch/tmp-<uuid>` — a fresh, invocation-unique name created with
+  `createRef` (`createCommitOnBranch` does NOT auto-create branches),
+  bootstrapped at the observed remote head when the branch exists, or at the
+  base commit for a new branch. This puts the tree/verification gates BEFORE
+  the real ref moves — `createCommitOnBranch` advances whatever branch it
+  lands on, so landing directly would move the real branch even when a gate
+  later fails. The temp ref is deleted on every path, and only the ref id
+  this invocation created is ever touched.
 - **Gates (fail-closed, typed errors, no plain-`git push` fallback):** the
   landed commit's tree MUST equal the local branch tree, and its
   `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate

@@ -142,11 +142,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   where plain `git push` produces unverified commits that are rejected at
   merge time. The commit is created on a temporary branch
   (`push-branch/tmp-<tree>`, bootstrapped via `createRef` — the mutation does
-  not auto-create branches) so the tree-equality and `signature.isValid`
-  gates run before the real ref moves; the swing is a fast-forward-only
-  `updateRef` (the landing commit is created on top of the observed remote
-  head, and a concurrent writer advance makes the fast-forward fail with a
-  typed error instead of being overwritten). Gates fail closed with typed errors (no `git push`
+  not auto-create branches) at the observed remote head (or the base commit
+  for a new branch) so the tree-equality and `signature.isValid` gates run
+  before the real ref moves; the swing is a fast-forward-only `updateRef`
+  (the landing commit is created on top of the observed remote head, and a
+  concurrent writer advance makes the fast-forward fail with a typed error
+  instead of being overwritten). The temp ref is invocation-unique (uuid
+  name) and deleted on every path. An empty diff (local tree equals the
+  remote head tree) is a no-op. Gates fail closed with typed errors (no `git push`
   fallback); a failed gate deletes the temp ref and leaves the real branch
   untouched. An empty diff is a no-op refused before any token is minted.
   The `github-pr-lifecycle` skill's push steps now route through this

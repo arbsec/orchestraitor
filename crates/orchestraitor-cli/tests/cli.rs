@@ -1969,7 +1969,11 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
 /// `<path>\t<auth>`.
 fn spawn_push_branch_server(
     rules: Vec<(String, String)>,
-) -> miette::Result<(String, std::sync::mpsc::Receiver<String>)> {
+) -> miette::Result<(
+    String,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Receiver<String>,
+)> {
     use std::sync::mpsc;
     let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
     let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
@@ -1986,6 +1990,11 @@ fn spawn_push_branch_server(
     let mint_body =
         format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
     let (auth_tx, auth_rx) = mpsc::channel::<String>();
+    let (body_tx, body_rx) = mpsc::channel::<String>();
+    // Rules are CONSUMED in request order (the first rule whose needle matches
+    // is removed) so the nth GraphQL request always sees the nth scripted
+    // response, regardless of shared needles.
+    let rules = std::sync::Mutex::new(rules);
     thread::spawn(move || {
         for connection in listener.incoming() {
             let Ok(mut stream) = connection else { break };
@@ -2007,15 +2016,20 @@ fn spawn_push_branch_server(
                 .map(|(_, value)| value.trim().to_string())
                 .unwrap_or_default();
             let _ = auth_tx.send(format!("{path}\t{auth}"));
+            let _ = body_tx.send(text.clone());
             let (status_line, payload) = if path.contains("/app/installations/") {
                 (String::from("HTTP/1.1 201 Created"), mint_body.clone())
             } else {
                 let default_payload = r#"{"data":null,"errors":[{"message":"unmatched request"}]}"#;
                 let matched = rules
-                    .iter()
-                    .find(|(needle, _)| text.contains(needle))
-                    .map_or(default_payload, |(_, payload)| payload.as_str());
-                (String::from("HTTP/1.1 200 OK"), matched.to_string())
+                    .lock()
+                    .map(|mut pending| {
+                        let position = pending.iter().position(|(needle, _)| text.contains(needle));
+                        position.map(|index| pending.remove(index).1)
+                    })
+                    .unwrap_or_default()
+                    .unwrap_or_else(|| default_payload.to_string());
+                (String::from("HTTP/1.1 200 OK"), matched)
             };
             let response = format!(
                 "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
@@ -2024,7 +2038,7 @@ fn spawn_push_branch_server(
             let _write_result = stream.write_all(response.as_bytes());
         }
     });
-    Ok((endpoint, auth_rx))
+    Ok((endpoint, auth_rx, body_rx))
 }
 
 fn push_branch_cli(
@@ -2074,6 +2088,10 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         ),
         repo_id_rule,
         (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
             "createRef".to_string(),
             r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
@@ -2089,7 +2107,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         ),
         temp_probe_rule,
     ];
-    let (endpoint, auth_rx) = spawn_push_branch_server(rules)?;
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2123,8 +2141,8 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         }
     }
     assert_eq!(
-        calls, 8,
-        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRef CAS + temp-ref probe (stale check) + deleteRef, one minted token each"
+        calls, 7,
+        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRef fast-forward + deleteRef, one minted token each"
     );
     Ok(())
 }
@@ -2150,6 +2168,10 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
             r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
         ),
         (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
             "createRef".to_string(),
             r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
@@ -2159,7 +2181,7 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
             r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
     ];
-    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2206,6 +2228,10 @@ fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
             r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
         ),
         (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
             "createRef".to_string(),
             r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
@@ -2215,7 +2241,7 @@ fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
             r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
     ];
-    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2254,7 +2280,7 @@ fn github_push_branch_required_enforcement_fails_closed_without_config() -> miet
         "[github_app]\nenforcement = \"required\"\n",
     )
     .into_diagnostic()?;
-    let (endpoint, auth_rx) = spawn_push_branch_server(Vec::new())?;
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(Vec::new())?;
 
     let output = push_branch_cli(
         &temp,
@@ -2290,9 +2316,35 @@ fn github_push_branch_required_enforcement_fails_closed_without_config() -> miet
 
 #[test]
 fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
-    let (endpoint, auth_rx) = spawn_push_branch_server(Vec::new())?;
-    // The local main branch IS the base: nothing to land.
+    let (temp, repo, base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // The remote branch head equals the local branch tree (everything
+    // already landed): the diff against the remote head is empty. The
+    // branch-ref probe (the ONLY request) answers with the local tree as the
+    // remote head; the rules list is empty so any FURTHER request fails the
+    // test with an unmatched-request error.
+    let rules = vec![(
+        "ref(qualifiedName".to_string(),
+        r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"HEAD_OID"}}}}}"#
+            .to_string(),
+    )];
+    // The probe's head oid must be a REAL local object the fetch fallback
+    // can resolve: use the local branch's own commit (its tree equals the
+    // remote head tree by construction).
+    let head_commit = {
+        use std::process::Command;
+        let output = Command::new("git")
+            .args(["rev-parse", "main"])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let rules: Vec<(String, String)> = rules
+        .into_iter()
+        .map(|(needle, payload)| (needle, payload.replace("HEAD_OID", &head_commit)))
+        .collect();
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+    // Land `main` whose tree equals the remote head tree: nothing to land.
     let output = push_branch_cli(
         &temp,
         &repo,
@@ -2313,10 +2365,18 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
     assert!(stderr.contains("nothing to land"), "stderr: {stderr}");
-    assert!(
-        auth_rx.try_recv().is_err(),
-        "an empty diff must not mint a token or touch the network"
-    );
+    // Exactly ONE request (the branch-ref probe) reached the network: the
+    // no-op decision is remote-head-aware, so it cannot be made pre-mint.
+    let mut calls = 0;
+    while let Ok(_line) = auth_rx.try_recv() {
+        calls += 1;
+    }
+    // 2 requests: the mint + the branch-ref probe (the no-op decision is
+    // remote-head-aware, so it cannot be made pre-mint — this is the
+    // CodeRabbit-reviewed behavior).
+    assert_eq!(calls, 2, "mint + branch-ref probe only");
+    let _ = base_tree;
+    let _ = main_commit;
     Ok(())
 }
 
@@ -2339,6 +2399,10 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
             r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
         ),
         (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
             "createRef".to_string(),
             r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
@@ -2357,7 +2421,7 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
             r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
     ];
-    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2416,6 +2480,10 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
             r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
         ),
         (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
             "createRef".to_string(),
             r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
         ),
@@ -2434,7 +2502,7 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
             r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
         ),
     ];
-    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2457,6 +2525,34 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The createCommitOnBranch payload must carry the COMMITTED content
+    // (base64 of "signed landing\n") and must NOT contain the dirty working-
+    // copy edit, the untracked file, or its content.
+    let committed_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode("signed landing\n")
+    };
+    let dirty_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode("DIRTY working-copy edit\n")
+    };
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let commit_request = bodies
+        .iter()
+        .find(|body| body.contains("createCommitOnBranch"))
+        .ok_or_else(|| miette::miette!("no createCommitOnBranch request recorded"))?;
+    assert!(
+        commit_request.contains(&committed_b64),
+        "payload must carry the committed blob content"
+    );
+    assert!(
+        !commit_request.contains(&dirty_b64),
+        "payload must NOT carry the dirty working-copy content"
+    );
+    assert!(
+        !commit_request.contains("untracked.txt"),
+        "payload must NOT reference the untracked file"
     );
     Ok(())
 }

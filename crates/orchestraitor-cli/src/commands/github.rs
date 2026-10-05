@@ -507,21 +507,9 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     let local_tree = git(&["rev-parse", &format!("{}^{{tree}}", args.branch)])?;
     let base = resolve_base(args.base.as_deref())?;
 
-    // 2. Empty-diff gate, stage 1 (pre-mint, zero network): if the local
-    //    tree equals the base branch tree, the branch carries nothing to
-    //    land — refuse before any credential is minted or request is sent.
     let base_tree = git(&["rev-parse", &format!("{base}^{{tree}}")])?;
-    if base_tree == local_tree {
-        writeln!(
-            std::io::stderr(),
-            "branch `{}` tree {local_tree} is identical to base `{base}` — nothing to land",
-            args.branch
-        )
-        .into_diagnostic()?;
-        return Ok(());
-    }
 
-    // 3. Mint and drive the remote: one GraphQL endpoint, installation-token
+    // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
     //    Authorization header and never enters a diagnostic.
     let (_, token) = mint_installation_token(paths)?;
@@ -531,12 +519,11 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         bearer: token.token().expose_secret(),
     };
 
-    // Read the remote branch's current head (absent for a new branch).
+    // Read the remote branch's current head (absent for a new branch). The
+    // empty-diff gate runs against the REMOTE head, not the base: a base-tree
+    // match alone says nothing when a landing already moved the remote past
+    // the base (that landing must DELETE the files the remote head has).
     let existing = graphql.branch_ref(&args.owner, &args.repo, remote_branch)?;
-    // The change set diffs from the remote HEAD tree (an earlier landing may
-    // have moved the remote tree past the base; a file removed locally that
-    // the base never had must still be deleted remotely), not the base tree.
-    // Empty-diff gate, stage 2: the branch may equal the remote head.
     let diff_base_tree = remote_head_tree(&graphql, existing.as_ref(), &base_tree, remote_branch)?;
     let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
     if changes.is_empty() {
@@ -559,7 +546,10 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     //    even when a gate later fails. The temp ref is deleted on every
     //    path; the real ref then moves fast-forward-only (see below).
     let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
-    let temp_branch = format!("push-branch/tmp-{local_tree}");
+    // Unique per invocation: two concurrent landings with the same tree but
+    // different remote heads must not delete or collide on each other's
+    // live temp ref.
+    let temp_branch = format!("push-branch/tmp-{}", uuid::Uuid::new_v4());
     // The temp branch MUST start at the remote head when the branch exists:
     // the change set was computed as diff remote-head-tree -> local-tree and
     // is applied on top of the temp head, so bootstrapping at the base commit
@@ -750,7 +740,8 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) ->
                 }));
             }
             "D" => {
-                deletions.push(serde_json::json!(path.display().to_string()));
+                // FileDeletion input shape: {"path": "…"}, not a bare string.
+                deletions.push(serde_json::json!({"path": path.display().to_string()}));
             }
             other => bail!(
                 "unexpected diff-tree status `{other}` for `{}` — refusing to land an ambiguous \
@@ -774,16 +765,14 @@ fn bootstrap_temp_branch(
     temp_branch: &str,
     bootstrap_oid: &str,
 ) -> Result<(String, String)> {
-    let existing_temp = graphql.branch_ref(owner, repo, temp_branch)?;
-    if existing_temp.is_some() {
-        // A stale temp ref from a previous run with the same tree: landing
-        // would append on top of the WRONG commit. Delete it and re-bootstrap.
-        let stale_id = existing_temp
-            .as_ref()
-            .and_then(|ref_payload| ref_payload.get("id").and_then(Value::as_str))
-            .map(str::to_string)
-            .ok_or_else(|| miette!("temp ref response is malformed: missing ref.id"))?;
-        graphql.delete_ref(&stale_id)?;
+    // The ref name is invocation-unique (UUID), so an existing ref here is
+    // an unexpected collision — never delete a ref this invocation did not
+    // create (a concurrent landing may own it).
+    if graphql.branch_ref(owner, repo, temp_branch)?.is_some() {
+        bail!(
+            "temporary branch `{temp_branch}` already exists (unexpected collision) — refusing \
+             to touch it; retry to pick a fresh name"
+        );
     }
     let created = graphql.create_ref(
         repository_id,
@@ -1766,5 +1755,27 @@ mod tests {
     #[test]
     fn base64_engine_encodes_standard_alphabet_with_padding() {
         assert_eq!(BASE64_ENGINE.encode("hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn build_file_changes_shapes_deletions_as_path_objects() {
+        let changes = vec![
+            ("A".to_string(), std::path::PathBuf::from("new.txt")),
+            ("D".to_string(), std::path::PathBuf::from("base.txt")),
+        ];
+        // The branch is irrelevant for deletions and for cat-file on A/M we
+        // use the fixture repo? No — this test only covers the D branch of
+        // the builder plus the payload shape; an A record would need a real
+        // blob, so only D is exercised here.
+        let result = build_file_changes(
+            &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
+            "any-branch",
+        );
+        let payload = result.expect("deletion-only payload must build");
+        assert_eq!(
+            payload,
+            serde_json::json!({"additions": [], "deletions": [{"path": "base.txt"}]})
+        );
+        let _ = changes;
     }
 }
