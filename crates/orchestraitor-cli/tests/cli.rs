@@ -1893,3 +1893,365 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
     });
     Ok(endpoint)
 }
+
+// --- `orc github push-branch`: App-signed landing -----------------------------
+
+/// Builds a local git repo with one base commit and one feature branch that
+/// changes a file; returns the temp dir (must outlive the test), the repo
+/// path, and the base branch's tree oid. Uses a pinned author identity so
+/// the test never depends on ambient git config.
+fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String)> {
+    use std::process::Command;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let run = |args: &[&str]| -> miette::Result<()> {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    };
+    run(&["init", "-q", "-b", "main"])?;
+    // The App config lives at the temp root (the CLI's --project-dir), not
+    // inside the git repo.
+    write_github_app_project_config(&temp)?;
+    fs::write(repo.join("base.txt"), "base\n").into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "base"])?;
+    run(&["checkout", "-qb", "feature/signed"])?;
+    fs::write(repo.join("feature.txt"), "signed landing\n").into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "feature"])?;
+    let tree_of = |spec: &str| -> miette::Result<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", &format!("{spec}^{{tree}}")])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let base_tree = tree_of("main")?;
+    let feature_tree = tree_of("feature/signed")?;
+    Ok((temp, repo.display().to_string(), base_tree, feature_tree))
+}
+
+/// A mint + GraphQL server for push-branch tests: connection 1 mints the
+/// fixture token; later connections are GraphQL requests matched against
+/// `(needle, payload)` rules in order; an unmatched request gets a GraphQL
+/// error envelope. Every request line is forwarded to the channel as
+/// `<path>\t<auth>`.
+fn spawn_push_branch_server(
+    rules: Vec<(String, String)>,
+) -> miette::Result<(String, std::sync::mpsc::Receiver<String>)> {
+    use std::sync::mpsc;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    let expires_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .into_diagnostic()?
+        .as_secs()
+        + 3_300;
+    let expires_at =
+        time::OffsetDateTime::from_unix_timestamp(expires_at_epoch.try_into().into_diagnostic()?)
+            .into_diagnostic()?
+            .format(&time::format_description::well_known::Rfc3339)
+            .into_diagnostic()?;
+    let mint_body =
+        format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
+    let (auth_tx, auth_rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut stream) = connection else { break };
+            let mut buffer = vec![0_u8; 262_144].into_boxed_slice();
+            let Ok(read) = stream.read(&mut buffer) else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let path = text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let auth = text
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_default();
+            let _ = auth_tx.send(format!("{path}\t{auth}"));
+            let (status_line, payload) = if path.contains("/app/installations/") {
+                (String::from("HTTP/1.1 201 Created"), mint_body.clone())
+            } else {
+                let default_payload = r#"{"data":null,"errors":[{"message":"unmatched request"}]}"#;
+                let matched = rules
+                    .iter()
+                    .find(|(needle, _)| text.contains(needle))
+                    .map_or(default_payload, |(_, payload)| payload.as_str());
+                (String::from("HTTP/1.1 200 OK"), matched.to_string())
+            };
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok((endpoint, auth_rx))
+}
+
+fn push_branch_cli(
+    temp: &tempfile::TempDir,
+    repo: &str,
+    endpoint: &str,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            endpoint,
+            "--github-graphql-endpoint",
+            endpoint,
+        ])
+        .args(args)
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .into_diagnostic()
+}
+
+#[test]
+fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree) = spawn_local_repo()?;
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRef".to_string(),
+            r#"{"data":{"updateRef":{"ref":{"id":"REF_node"}}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, auth_rx) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The bearer on the GraphQL calls is the minted installation token, and
+    // the branch-ref probe ran before the mutation (CAS shape).
+    let mut calls = 0;
+    while let Ok(line) = auth_rx.try_recv() {
+        let (_path, auth) = line.split_once('\t').unwrap_or(("", ""));
+        if auth == format!("Bearer {GITHUB_APP_TOKEN_MARKER}") {
+            calls += 1;
+        }
+    }
+    assert_eq!(
+        calls, 3,
+        "ref probe + createCommitOnBranch + updateRef, one token each"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree) = spawn_local_repo()?;
+    // The mutation succeeds but reports an UNSIGNED commit (null signature):
+    // the ref must NOT be moved and the command must fail with a typed
+    // error — no `git push` fallback, no partial success.
+    let commit_payload = format!(
+        r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"3333333333333333333333333333333333333333","tree":{{"oid":"{feature_tree}"}},"signature":null}}}}}}}}"#
+    );
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        ("createCommitOnBranch".to_string(), commit_payload),
+    ];
+    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("NOTverified") && flat.contains("refusingtomove"),
+        "unsigned landing must fail closed with the typed refusal: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    // The mutation reports a DIFFERENT tree than the local branch: the ref
+    // must NOT be moved even though the commit claims success.
+    let commit_payload = r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"4444444444444444444444444444444444444444","tree":{"oid":"9999999999999999999999999999999999999999"},"signature":{"isValid":true}}}}}"#;
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        ("createCommitOnBranch".to_string(), commit_payload.to_string()),
+    ];
+    let (endpoint, _auth_rx) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("treemismatch") && flat.contains("unchanged"),
+        "tree mismatch must fail closed: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_required_enforcement_fails_closed_without_config() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    // enforcement = required, incomplete github_app block: the command must
+    // refuse BEFORE any network call (typed error naming the missing keys).
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\n",
+    )
+    .into_diagnostic()?;
+    let (endpoint, auth_rx) = spawn_push_branch_server(Vec::new())?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("enforcementis`required`") && flat.contains("client_id"),
+        "typed refusal must name the mode and the missing keys: {stderr}"
+    );
+    // Nothing reached the network except nothing at all — no mint, no GraphQL.
+    assert!(
+        auth_rx.try_recv().is_err(),
+        "no request may be sent when the required-enforcement gate refuses"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree) = spawn_local_repo()?;
+    let (endpoint, auth_rx) = spawn_push_branch_server(Vec::new())?;
+    // The local main branch IS the base: nothing to land.
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "main",
+            "--message",
+            "no-op",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stderr.contains("nothing to land"), "stderr: {stderr}");
+    assert!(
+        auth_rx.try_recv().is_err(),
+        "an empty diff must not mint a token or touch the network"
+    );
+    Ok(())
+}

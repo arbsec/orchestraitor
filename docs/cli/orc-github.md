@@ -232,10 +232,49 @@ malformed JWT) exit non-zero with a typed diagnostic that never contains the
 PEM, the JWT, or any token. Any malformation in the `/app` or
 `/users/{slug}[bot]` payload is a typed error; the payload is never echoed.
 
+## `orc github push-branch`
+
+Lands a local branch's tree as ONE App-signed squashed commit on the remote
+branch — the agent push path for repositories with `required_signatures`
+rulesets, where plain `git push` produces unverified commits that are rejected
+at merge time (skill `verified-commit-path.md`; spec `10-orchestrator.md`
+§9.41 service identity):
+
+```sh
+orc github push-branch feat/my-change \
+  --message "feat(widget): add blinking" \
+  --body "Body paragraph." \
+  --owner arbsec --repo orchestraitor
+```
+
+Mechanics:
+
+- Computes the local branch's tree (`git rev-parse <branch>^{tree}`) versus
+  the base branch (`--base`, default `origin/main` then `main`) and builds the
+  GraphQL `fileChanges` payload from the diff (`A`/`M` additions carry base64
+  contents; `D` deletions carry the path). An empty diff is a no-op — nothing
+  is minted and no request is sent.
+- **Existing remote branch:** appends the squashed commit on top of the
+  current remote head with an `expectedHeadOid` compare-and-swap, then
+  force-moves the ref (`updateRef` with `force=true`) onto the landed commit.
+  Landing on top (instead of force-moving first) never regresses the PR head
+  through an ancestor-of-main state (the auto-close pitfall).
+- **New remote branch:** bootstraps the ref at the base commit
+  (`createRef` — `createCommitOnBranch` does NOT auto-create branches) and
+  appends the commit. `--remote-branch` names a remote branch different from
+  the local one.
+- **Gates (fail-closed, typed errors, no plain-`git push` fallback):** the
+  landed commit's tree MUST equal the local branch tree, and its
+  `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
+  refuses the ref move; on an existing branch the remote head is unchanged.
+  Diagnostics never contain the token.
+- In `required` enforcement mode the complete-`github_app` gate applies before
+  any network call.
+
 ## Rollback
 
 Removing the `github_app` configuration (or unsetting any of `client_id`,
-`installation_id`, `private_key_uri`) makes all four subcommands fail closed
+`installation_id`, `private_key_uri`) makes all five subcommands fail closed
 with a typed `github_app.*` configuration error — the commands mint nothing and
 fall back to nothing. Roll back the binary by reverting this change; there is
 no persisted state to clean up.

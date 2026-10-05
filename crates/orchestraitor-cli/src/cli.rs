@@ -179,6 +179,16 @@ pub enum GitHubCommand {
     /// lines, derived from the authenticated App (`GET /app`) — never
     /// hardcoded.
     CommitAuthor,
+    /// Land a local branch's tree as ONE App-signed squashed commit on the
+    /// remote branch.
+    ///
+    /// Computes the branch's tree versus the base branch, creates or
+    /// force-moves the remote branch via the GitHub GraphQL API
+    /// (`createCommitOnBranch` + ref update), and verifies tree equality and
+    /// `verified = true` before reporting success — fail-closed with a typed
+    /// error when the landed commit is not GitHub-signed. Never uses plain
+    /// `git push`.
+    PushBranch(PushBranchArgs),
 }
 
 /// Arguments for `orc github api`.
@@ -207,6 +217,33 @@ pub struct GhEnvArgs {
     /// Child command and arguments, after `--`.
     #[arg(last = true)]
     pub command: Vec<String>,
+}
+
+/// Arguments for `orc github push-branch`.
+#[derive(Debug, Clone, Args)]
+pub struct PushBranchArgs {
+    /// Local branch whose tree is landed (its HEAD tree, not a commit chain).
+    pub branch: String,
+    /// Branch to create or update on the remote. Defaults to the local
+    /// branch name.
+    #[arg(long)]
+    pub remote_branch: Option<String>,
+    /// Base branch the local branch was cut from; its tree is the diff base
+    /// (default: the merge-base with `origin/main`).
+    #[arg(long)]
+    pub base: Option<String>,
+    /// Commit message headline (first line).
+    #[arg(long)]
+    pub message: String,
+    /// Commit message body (optional, after the headline).
+    #[arg(long)]
+    pub body: Option<String>,
+    /// Owner/org of the target repository (e.g. `arbsec`).
+    #[arg(long)]
+    pub owner: String,
+    /// Repository name (e.g. `orchestraitor`).
+    #[arg(long)]
+    pub repo: String,
 }
 
 /// Arguments for `orc init`.

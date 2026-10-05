@@ -136,6 +136,18 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   reflects the loop-first product framing and links to the rendered repo docs
   instead of broken out-of-tree paths. Site goes live on the first push to
   `main` that touches `book/**` or `docs/**`.
+- `orc github push-branch`: lands a local branch's tree as ONE App-signed
+  squashed commit on the remote branch via GraphQL `createCommitOnBranch` —
+  the agent push path for repositories with `required_signatures` rulesets,
+  where plain `git push` produces unverified commits that are rejected at
+  merge time. Creates new branches (`createRef` bootstrap; the mutation does
+  not auto-create branches) and force-moves existing ones (`updateRef` with
+  `force=true`) after an `expectedHeadOid` compare-and-swap; gates fail
+  closed with typed errors (no `git push` fallback) when the landed commit's
+  tree differs from the local branch tree or its `signature.isValid` is not
+  `true`. An empty diff is a no-op; no token is minted and no request is
+  sent. The `github-pr-lifecycle` skill's push steps now route through this
+  subcommand instead of `git push`.
 
 ### Changed
 
