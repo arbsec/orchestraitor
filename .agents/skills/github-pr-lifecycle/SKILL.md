@@ -77,9 +77,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   the same findings pipeline — deduplicated and severity-verified
                   against code before remediation; never applied verbatim.
 
-5. REMEDIATE       Apply fixes in a FRESH context (not the implementer's). Push.
-                  Each new commit INVALIDATES earlier review convergence — the next
-                  review generation targets the CURRENT HEAD, not the prior diff.
+5. REMEDIATE       Apply fixes in a FRESH context (not the implementer's). Land
+                   them with `orc github push-branch` (never plain `git push`).
+                   Each new commit INVALIDATES earlier review convergence — the next
+                   review generation targets the CURRENT HEAD, not the prior diff.
 
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
