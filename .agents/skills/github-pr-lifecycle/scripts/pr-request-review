@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# pr-request-review: request the human reviewer for a `needs-human-review`
+# PR — but ONLY once every automatic check has passed (owner rule: never ask
+# for review while any check is failing; the machine must finish its own
+# verification before consuming human attention).
+#
+# Gate (ALL must hold, else the script exits non-zero with the reasons):
+#   1. The PR carries the `needs-human-review` label.
+#   2. `pr-checks` reports all_passed=true (no failing, pending, or
+#      genuinely-skipped automatic check).
+#   3. The owner is not already a requested reviewer (idempotent).
+#
+# On success: requests `--reviewer <owner-login>` via the service-identity
+# wrapper and prints a JSON receipt.
+#
+# Positional: <pr-number>. Flags: --repo <owner/name>, --reviewer <login>
+# (default: the repository owner from the resolved repo), --dry-run.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-request-review" "Request human review for a needs-human-review PR once ALL automatic checks pass. Positional: <pr-number>. Flags: --repo, --reviewer <login>."
+  exit "$ORC_OK"
+fi
+
+PR="${ORC_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: numeric PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+OWNER="${REPO%%/*}"
+
+# Extract --reviewer override if present in extra args (after the PR).
+REVIEWER=""
+REST=("${ORC_LIB_EXTRA_ARGS[@]:1}")
+index=0
+while [ "$index" -lt "${#REST[@]}" ]; do
+  case "${REST[$index]}" in
+    --reviewer)
+      REVIEWER="${REST[$((index + 1))]:-}"; index=$((index + 2)) ;;
+    --reviewer=*)
+      REVIEWER="${REST[$index]#*=}"; index=$((index + 1)) ;;
+    *) index=$((index + 1)) ;;
+  esac
+done
+REVIEWER="${REVIEWER:-$OWNER}"
+
+REASONS=()
+
+# Gate 1: label present.
+EXISTING="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')" ||
+  { echo "error: cannot read PR #$PR labels" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+if ! printf '%s' "$EXISTING" | tr ',' '\n' | grep -qxF "needs-human-review"; then
+  REASONS+=("label needs-human-review not present")
+fi
+
+# Gate 2: ALL automatic checks pass (no fail, no pending; known-disabled
+# skips excluded inside pr-checks itself).
+CHECKS_JSON="$(mktemp)"
+if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
+  REASONS+=("pr-checks could not classify checks")
+fi
+if [ -s "$CHECKS_JSON" ]; then
+  ALL_PASSED="$(jq -r '.all_passed // false' "$CHECKS_JSON")"
+  ANY_PENDING="$(jq -r '.any_pending // false' "$CHECKS_JSON")"
+  ANY_FAILING="$(jq -r '.any_failing // false' "$CHECKS_JSON")"
+  if [ "$ANY_FAILING" = "true" ]; then
+    FAILING_NAMES="$(jq -r '[.checks[] | select(.classification == "fail") | .name] | join(", ")' "$CHECKS_JSON")"
+    REASONS+=("checks failing: ${FAILING_NAMES:-unknown}")
+  fi
+  if [ "$ANY_PENDING" = "true" ]; then
+    PENDING_NAMES="$(jq -r '[.checks[] | select(.classification == "pending") | .name] | join(", ")' "$CHECKS_JSON")"
+    REASONS+=("checks pending: ${PENDING_NAMES:-unknown}")
+  fi
+  if [ "$ALL_PASSED" != "true" ] && [ "$ANY_FAILING" != "true" ] && [ "$ANY_PENDING" != "true" ]; then
+    REASONS+=("checks not all passed (all_passed=$ALL_PASSED)")
+  fi
+fi
+rm -f "$CHECKS_JSON"
+
+# Gate 3: reviewer not already requested (idempotency check). A failed read
+# must NOT default to "not requested" — that could double-request on a
+# transient error; fail closed instead.
+REQUESTED="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewRequests --jq '[.reviewRequests[].login] | join(",")')" ||
+  { echo "error: cannot read PR #$PR review requests" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+ALREADY_REQUESTED=false
+if printf '%s' "$REQUESTED" | tr ',' '\n' | grep -qxF "$REVIEWER"; then
+  ALREADY_REQUESTED=true
+fi
+
+if [ "${#REASONS[@]}" -gt 0 ]; then
+  echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"$REVIEWER\",\"reasons\":[$(printf '"%s",' "${REASONS[@]}" | sed 's/,$//')]}" >&2
+  exit "$ORC_ERR_BLOCKED"
+fi
+
+if [ "$ALREADY_REQUESTED" = true ]; then
+  echo "{\"pr\":$PR,\"requested\":false,\"already_requested\":true,\"reviewer\":\"$REVIEWER\"}"
+  exit "$ORC_OK"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr edit $PR --repo $REPO --add-reviewer $REVIEWER" >&2
+  exit "$ORC_OK"
+fi
+
+orc_lib_gh_service pr edit "$PR" --repo "$REPO" --add-reviewer "$REVIEWER" >/dev/null
+echo "{\"pr\":$PR,\"requested\":true,\"reviewer\":\"$REVIEWER\"}"

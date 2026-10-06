@@ -41,6 +41,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `orc_lib_gh_service`; never call `gh pr create` directly).
                   The managed checklist (<!-- orc:* --> markers) starts
                   unchecked — checkboxes are verified facts, not intentions.
+                  Then apply attribution labels with `pr-labels <pr>`:
+                  `agent-created` (service-identity author) and
+                  `needs-human-review` (diff touches a §21.1
+                  security-sensitive class by path/content). Labels derive
+                  from launch facts only, applied idempotently.
 
 2. CI             Land commits with `orc github push-branch` (the App-signed
                   landing path — NEVER plain `git push`, which produces
@@ -81,6 +86,20 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                    them with `orc github push-branch` (never plain `git push`).
                    Each new commit INVALIDATES earlier review convergence — the next
                    review generation targets the CURRENT HEAD, not the prior diff.
+                   This loop is AUTOMATIC: every review generation's findings are
+                   remediated without operator involvement (spec §9.24 autonomous
+                   review-fix loop) until convergence or a budget stop.
+
+5b. HUMAN GATE    For PRs carrying `needs-human-review` (§21.1
+                  security-sensitive classes): after checks turn GREEN and
+                  review threads are resolved, request the human reviewer
+                  with `pr-request-review <pr>` — the script refuses
+                  (typed reasons) while ANY automatic check is failing or
+                  pending: never ask for human attention before the machine
+                  finished its own verification. Idempotent; the reviewer is
+                  the repo owner unless `--reviewer` overrides. The PR then
+                  AWAITS the human's approval — the orchestrator MUST NOT
+                  merge it autonomously (workflow policy; AGENTS.md).
 
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
