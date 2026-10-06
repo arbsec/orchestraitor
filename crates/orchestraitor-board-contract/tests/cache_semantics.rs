@@ -626,8 +626,11 @@ async fn failed_provider_write_never_touches_cache() {
         .cached_item(&item)
         .await
         .expect("re-read after failure");
+    // Compare item content, not the whole record: `cached_item` is
+    // refresh-on-read and stamps `last_synced_ms` at read time, so a
+    // millisecond tick between the seed and this re-read is legitimate.
     assert_eq!(
-        after, seeded,
+        after.item, seeded.item,
         "failed write must leave the cached item state untouched"
     );
     let events = cache.drain_events().expect("drain events after failure");
