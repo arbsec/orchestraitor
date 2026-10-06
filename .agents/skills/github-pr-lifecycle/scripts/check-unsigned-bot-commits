@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# pre-push guard: refuse unsigned commits authored by the agent service identity.
+#
+# The AGENTS.md service-identity rule requires agent commits to be created via
+# the App API (GraphQL createCommitOnBranch) so GitHub signs them (web-flow
+# committer, verification.reason=valid). A locally-created commit carrying the
+# bot identity is unsigned by construction ("unknown_key") — pushing it fails
+# the required_signatures ruleset on protected branches and pollutes PR history
+# with unverified commits. This hook blocks that push; the correct path is the
+# replay procedure (verified-commit-path.md) or recreating the commit through
+# the App API.
+#
+# Human-authored commits are exempt: they are signed by the author's own
+# registered key (or the operator accepts unverified human commits on
+# unprotected branches — outside this hook's scope).
+#
+# Input (stdin): "<local-ref> <local-oid> <remote-ref> <remote-oid>" lines.
+set -euo pipefail
+
+BOT_IDENTITIES=(
+  "arbsec-agent[bot]@users.noreply.github.com"
+)
+
+zero="0000000000000000000000000000000000000000"
+
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+  [ "$local_oid" = "$zero" ] && continue        # deletion
+  range="$remote_oid..$local_oid"
+  [ "$remote_oid" = "$zero" ] && range="$local_oid --not --remotes"
+  # shellcheck disable=SC2086 — intentional unwordanged for --not traversal
+  for oid in $(git rev-list $range 2>/dev/null); do
+    author_email="$(git log -1 --format='%ae' "$oid")"
+    for bot in "${BOT_IDENTITIES[@]}"; do
+      if [ "$author_email" = "$bot" ]; then
+        verified="$(git log -1 --format='%G?' "$oid")"
+        if [ "$verified" != "V" ]; then
+          echo >&2 "pre-push: refusing unsigned agent commit"
+          echo >&2 "  commit:  $oid"
+          echo >&2 "  author:  $author_email"
+          echo >&2 "  verify:  $(git log -1 --format='%G?' "$oid") (V=valid signature required)"
+          echo >&2 ""
+          echo >&2 "Agent commits must be created via the App API (createCommitOnBranch)"
+          echo >&2 "so GitHub signs them. See:"
+          echo >&2 "  .agents/skills/github-pr-lifecycle/references/verified-commit-path.md"
+          exit 1
+        fi
+      fi
+    done
+  done
+done
+
+exit 0

@@ -26,3 +26,11 @@ pre-push:
       glob:
         - "*.rs"
         - "**/*.rs"
+    # Verified-commit gate (AGENTS.md service-identity rule; see
+    # .agents/skills/github-pr-lifecycle/references/verified-commit-path.md):
+    # agent commits MUST be created via the App API (createCommitOnBranch) so
+    # GitHub signs them. A locally-created commit carrying the bot identity is
+    # unsigned by construction — block the push instead of replaying after the
+    # fact. Human-authored commits are exempt (their own key signs them).
+    verified-commits:
+      run: .agents/skills/github-pr-lifecycle/scripts/check-unsigned-bot-commits
