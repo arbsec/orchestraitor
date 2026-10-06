@@ -2381,6 +2381,7 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
         .into_iter()
         .map(|(needle, payload)| (needle, payload.replace("HEAD_OID", &head_commit)))
         .collect();
+
     let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
     // Land `main` whose tree equals the remote head tree: nothing to land.
     let output = push_branch_cli(
@@ -2427,14 +2428,14 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
     // for both a concurrent advance and a concurrent rewind).
     let rules = vec![
         (
+            "name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
             "ref(qualifiedName".to_string(),
             format!(
                 r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
             ),
-        ),
-        (
-            r"name:$repo){id}".to_string(),
-            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
         ),
         (
             "ref(qualifiedName".to_string(),
@@ -2613,4 +2614,252 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
         "payload must NOT reference the untracked file"
     );
     Ok(())
+}
+
+#[test]
+
+fn github_push_branch_re_land_signs_an_unsigned_head() -> miette::Result<()> {
+    // Issue #498: a rebased PR branch has a tree identical to the remote
+    // head but an UNSIGNED head chain (plain pushes). `--re-land` lands an
+    // EMPTY App-signed commit through the TEMP-BRANCH flow (gate before the
+    // real ref moves): probe -> head-commit (unsigned) -> repo id -> temp
+    // probe (null) -> createRef -> createCommitOnBranch (empty fileChanges,
+    // signed) -> updateRefs CAS -> post-move read -> deleteRef.
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    let unsigned_head = {
+        use std::process::Command;
+        let output = Command::new("git")
+            .args(["rev-parse", "main"])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let signed_oid = "3333333333333333333333333333333333333333";
+    let local_tree = fixture_main_tree(&repo)?;
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{unsigned_head}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "signature{".to_string(),
+            r#"{"data":{"repository":{"object":{"signature":{"isValid":false}}}}}"#.to_string(),
+        ),
+        (
+            "name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "push-branch/tmp-re-land".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            format!(
+                r#"{{"data":{{"createRef":{{"ref":{{"id":"TEMPREF_node","target":{{"oid":"{unsigned_head}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"{signed_oid}","tree":{{"oid":"{local_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            update_refs_stub("refs/heads/main"),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{signed_oid}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "main",
+            "--re-land",
+            "--message",
+            "re-sign the head chain",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("re-landed") && stderr.contains("head commit now verified"),
+        "stderr: {stderr}"
+    );
+    // The empty fileChanges payload: the createCommitOnBranch request body
+    // carries additions:[] and deletions:[] — nothing else.
+    // Drain the captured request bodies and assert the
+    // createCommitOnBranch payload carries an EMPTY fileChanges set.
+    let mut commit_body = None;
+    while let Ok(body) = bodies.try_recv() {
+        if body.contains("createCommitOnBranch") {
+            commit_body = Some(body);
+        }
+    }
+    let commit_body = commit_body.unwrap_or_default();
+    assert!(
+        commit_body.contains(r#""additions":[]"#) && commit_body.contains(r#""deletions":[]"#),
+        "re-land must carry an EMPTY fileChanges payload, got: {commit_body}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_re_land_is_a_no_op_on_a_verified_head() -> miette::Result<()> {
+    // A verified remote head needs no re-land: the script must stop after
+    // the head-commit query (no createCommitOnBranch — the empty rules list
+    // makes any further request fail the test with an unmatched-request
+    // error) and exit 0.
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let rules = vec![
+        (
+            "name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "signature{".to_string(),
+            r#"{"data":{"repository":{"object":{"signature":{"isValid":true}}}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "main",
+            "--re-land",
+            "--message",
+            "no-op on verified head",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stderr.contains("already verified"), "stderr: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_re_land_fails_closed_on_unsigned_landing() -> miette::Result<()> {
+    // The mutation returned an unverified commit: refuse (typed error). The
+    // remote head advanced (createCommitOnBranch moved the real branch); the
+    // error text carries the documented restore command for the caller.
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let local_tree = fixture_main_tree(&repo)?;
+    let rules = vec![
+        (
+            "name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "signature{".to_string(),
+            r#"{"data":{"repository":{"object":{"signature":{"isValid":false}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"4444444444444444444444444444444444444444","tree":{{"oid":"{local_tree}"}},"signature":{{"isValid":false}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "push-branch/tmp-re-land".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            format!(
+                r#"{{"data":{{"createRef":{{"ref":{{"id":"TEMPREF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "main",
+            "--re-land",
+            "--message",
+            "must refuse",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stderr.contains("NOT verified"), "stderr: {stderr}");
+    Ok(())
+}
+/// The committed tree of the fixture repo's `main` (used to script landing
+/// responses whose tree must match the local tree for the gate to pass).
+fn fixture_main_tree(repo: &str) -> miette::Result<String> {
+    use std::process::Command;
+    let output = Command::new("git")
+        .args(["rev-parse", "main^{tree}"])
+        .current_dir(repo)
+        .output()
+        .into_diagnostic()?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
