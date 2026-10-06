@@ -49,6 +49,9 @@ SENSITIVE_PATHS=(
   "arbitraitor"
   "^\.github/workflows"
   "^\.agents/"
+  "commands/github\.rs"
+  "github_app"
+  "push-branch"
   "sandbox"
   "security"
   "policy"
@@ -65,6 +68,7 @@ SENSITIVE_PATHS=(
   "keyring"
   "signing"
   "signature"
+  "required_signatures"
 )
 
 # §21.1 security-sensitive CONTENT markers: an added line carrying one of

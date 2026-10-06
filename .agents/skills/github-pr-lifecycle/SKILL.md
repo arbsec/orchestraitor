@@ -89,6 +89,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                    This loop is AUTOMATIC: every review generation's findings are
                    remediated without operator involvement (spec §9.24 autonomous
                    review-fix loop) until convergence or a budget stop.
+                   NAMING: each remediation landing carries its OWN
+                   conventional-commit message naming the finding(s) it
+                   addresses — `fix(review): <finding summary> (gen N)`.
+                   NEVER reuse the PR's feature headline for a remediation
+                   landing: identical duplicate commit titles destroy the
+                   history's meaning and make review of the fix impossible.
 
 5b. HUMAN GATE    For PRs carrying `needs-human-review` (§21.1
                   security-sensitive classes): after checks turn GREEN and
