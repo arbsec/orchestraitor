@@ -9,6 +9,7 @@ mod error;
 mod hash;
 mod redaction;
 mod schema;
+mod sqlite;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -20,5 +21,6 @@ pub use redaction::{PrivacyExportMode, redact_event};
 pub use schema::{
     CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput, SchemaInterpretation,
 };
+pub use sqlite::SqliteAuditStore;
 pub use store::{AuditHead, AuditRecord, AuditStore, EventQuery, InMemoryAuditStore};
 pub use tracing_layer::TracingAuditLayer;
