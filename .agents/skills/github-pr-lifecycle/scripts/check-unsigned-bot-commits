@@ -37,13 +37,27 @@ while read -r _local_ref local_oid _remote_ref remote_oid; do
     for bot in "${BOT_IDENTITIES[@]}"; do
       if [ "$author_email" = "$bot" ]; then
         verified="$(git log -1 --format='%G?' "$oid")"
-        # A locally-created bot commit is either unsigned (N) or signed by
-        # a local key that is not the bot identity (G = good signature,
-        # wrong email; B/R = bad/unverifiable). Both are violations. E
-        # (signature present but not locally verifiable — GitHub's
-        # web-flow signature on App-API commits) and V (locally verified)
-        # are the only accepted states.
-        if [ "$verified" != "V" ] && [ "$verified" != "E" ]; then
+        committer_name="$(git log -1 --format='%cn' "$oid")"
+        # Accepted states for a bot-author commit:
+        #  V: locally verified signature.
+        #  E with committer "GitHub" (web-flow): GitHub signed the commit
+        #    server-side at creation (App API path); local git cannot
+        #    verify web-flow signatures without GitHub's key, so E alone
+        #    proves nothing and is ONLY accepted with the web-flow
+        #    committer. Everything else — unsigned (N), a good signature
+        #    from a key that is not the bot identity (G), bad/expired
+        #    (B), expired key (R), or E from any other committer — is a
+        #    violation.
+        if [ "$verified" = "E" ]; then
+          if [ "$committer_name" != "GitHub" ]; then
+            echo >&2 "pre-push: refusing unverified agent commit"
+            echo >&2 "  commit:    $oid"
+            echo >&2 "  author:    $author_email"
+            echo >&2 "  verify:    E (signature not locally verifiable)"
+            echo >&2 "  committer: $committer_name (expected GitHub/web-flow)"
+            exit 1
+          fi
+        elif [ "$verified" != "V" ]; then
           echo >&2 "pre-push: refusing unsigned agent commit"
           echo >&2 "  commit:  $oid"
           echo >&2 "  author:  $author_email"

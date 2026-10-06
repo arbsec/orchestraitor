@@ -57,10 +57,21 @@ pub(super) async fn call_model(
         let started = std::time::Instant::now();
         match transport.stream(request.clone()).await {
             Ok(events) => {
-                let (text, usage) = collect_events(events)?;
-                accumulate_usage(state, config, usage);
-                record_call_cost(config, &request, usage, CallOutcome::Completed, started);
-                return Ok(text);
+                match collect_events(events) {
+                    Ok((text, usage)) => {
+                        accumulate_usage(state, config, usage);
+                        record_call_cost(config, &request, usage, CallOutcome::Completed, started);
+                        return Ok(text);
+                    }
+                    Err(failure) => {
+                        // The transport attempt happened and may have
+                        // produced usage before the stream went invalid:
+                        // record the failed call so the ledger reflects
+                        // the spend (spec §9.26.4).
+                        record_call_cost(config, &request, None, CallOutcome::Failed, started);
+                        return Err(failure);
+                    }
+                }
             }
             Err(ProviderTransportError::RequestFailed { .. }) => {
                 record_call_cost(config, &request, None, CallOutcome::Failed, started);

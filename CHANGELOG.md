@@ -18,9 +18,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   attributed to the board task (agent), the routed orchestration role, and
   the loop invocation + task session. The `--json` end-of-run summary gains
   an `agent_costs` array (per-agent token totals and request counts); text
-  output gains an `agent costs:` section with the same rollups. Ledger-open
-  or query failures degrade to unattributed runs with a stderr warning —
-  cost bookkeeping never blocks delivery.
+  output gains an `agent costs:` section with the same rollups. A ledger-open failure disables attribution for the run (stderr
+  warning; delivery continues). A summary-query failure keeps recorded
+  attribution intact but omits cost rows from the end-of-run summary.
+  Cost bookkeeping never blocks delivery either way.
 - SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
   durable §9.17 audit persistence. The store performs hash-chain validation
   that detects inconsistencies between envelope bytes, hashes, and metadata —
