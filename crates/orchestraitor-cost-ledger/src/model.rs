@@ -197,7 +197,7 @@ impl SubscriptionUtilizationEntry {
 }
 
 /// Rollup totals for a domain-agent id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DomainCostRollup {
     /// Domain-agent identifier for the rollup.
     pub agent_domain_id: AgentId,

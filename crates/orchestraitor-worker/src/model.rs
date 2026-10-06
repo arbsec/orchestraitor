@@ -2,10 +2,12 @@
 //! (backoff per issue #310), event folding, usage accrual, and the daily spend
 //! soft-cap check.
 
+use orchestraitor_cost_ledger::{CostEntry, MonetaryCostBasis};
 use orchestraitor_provider_api::ProviderTransportError;
 use orchestraitor_provider_api::transport::{
     ModelEvent, ModelEventStream, ModelMessage, ModelRequest, ProviderTransport, TokenCount,
 };
+use std::sync::atomic::Ordering;
 use tracing::debug;
 
 use crate::budget::backoff_delay;
@@ -40,11 +42,7 @@ pub(super) async fn call_model(
         provider_id: config.provider_id.clone(),
         model_id: config.model_id.clone(),
         messages: messages.to_vec(),
-        // Bounded per call: an uncapped completion lets a verbose model
-        // (glm-5.x multi-block mode) burn context and wall clock in one
-        // turn. 8k output tokens is ample for one fenced action block plus
-        // reasoning; the guard is a bound, not a target.
-        max_output_tokens: Some(8_192),
+        max_output_tokens: None,
         temperature: None,
         reasoning: None,
         structured_output: None,
@@ -58,6 +56,7 @@ pub(super) async fn call_model(
             Ok(events) => {
                 let (text, usage) = collect_events(events)?;
                 accumulate_usage(state, config, usage);
+                record_call_cost(config, &request, usage);
                 return Ok(text);
             }
             Err(ProviderTransportError::RequestFailed { .. }) => {
@@ -138,5 +137,63 @@ fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<T
     let spent = config.prior_daily_spend_usd + estimated;
     if spent > config.budgets.daily_spend_soft_cap_usd {
         state.spend_soft_cap_exceeded = true;
+    }
+}
+
+/// Records one cost entry for a completed model call (spec §9.19.4 per-call
+/// attribution). Best-effort: a sink write failure is logged and dropped —
+/// cost bookkeeping must never fail a delivery run. Errors carry no request
+/// content (§9.23.4). `usage = None` still records the request (row shows a
+/// provider call with zero reported tokens).
+///
+/// The row key mints a per-call sequence number: `request_id` is the ledger
+/// primary key, so a constant id would silently swallow every entry after
+/// the first.
+fn record_call_cost(config: &WorkerConfig, request: &ModelRequest, usage: Option<TokenCount>) {
+    let (Some(attribution), Some(sink)) = (&config.attribution, &config.cost_sink) else {
+        return;
+    };
+    config.model_call_sequence.fetch_add(1, Ordering::Relaxed);
+    let call_number = config.model_call_sequence.load(Ordering::Relaxed);
+    let (input_tokens, output_tokens, reasoning_tokens, cache_read_tokens) =
+        usage.map_or((0, 0, 0, 0), |u| {
+            (
+                u.input_tokens,
+                u.output_tokens,
+                u.reasoning_tokens,
+                u.cached_tokens,
+            )
+        });
+    let now = chrono::Utc::now();
+    let entry = CostEntry {
+        model: request.model_id.clone(),
+        provider: request.provider_id.clone(),
+        agent_domain_id: attribution.agent_domain_id.clone(),
+        role: attribution.role.clone(),
+        project: attribution.project.clone(),
+        session: attribution.session.clone(),
+        repository: attribution.repository.clone(),
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_write_tokens: 0,
+        request_count: 1,
+        // The transport does not surface a provider request id through the
+        // event stream yet; run-scoped session id + per-call sequence
+        // number gives the row a stable, unique, dedupable key.
+        request_id: format!("{}/call-{call_number}", attribution.session.as_str()),
+        parent_request_id: None,
+        started_at: now,
+        completed_at: now,
+        wall_ms: 0,
+        monetary_cost_measured: None,
+        monetary_cost_estimated: None,
+        monetary_cost_basis: MonetaryCostBasis::UtilizationOnly,
+        subscription_attribution_id: None,
+        routing_decision: "worker-bootstrap".to_owned(),
+    };
+    if let Err(error) = orchestraitor_provider_neuralwatt::CostSink::record(sink.as_ref(), &entry) {
+        debug!(%error, "cost sink write failed; entry dropped");
     }
 }

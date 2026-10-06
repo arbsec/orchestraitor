@@ -182,6 +182,27 @@ impl ApiSpendTable<'_> {
             .optional()
             .map_err(Into::into)
     }
+
+    /// Queries per-agent rollups across all attributed agents, ordered by
+    /// agent id (spec §9.19.4 per-agent cost reporting).
+    ///
+    /// # Errors
+    /// Returns [`LedgerError`] when `SQLite` query or integer conversion fails.
+    pub fn all_agent_rollups(&self) -> LedgerResult<Vec<DomainCostRollup>> {
+        let mut statement = self.conn.prepare(
+            "SELECT agent_domain_id, SUM(input_tokens), SUM(output_tokens), \
+             SUM(reasoning_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), \
+             SUM(request_count), COALESCE(SUM(monetary_cost_measured), 0), \
+             COALESCE(SUM(monetary_cost_estimated), 0) \
+             FROM cost_entries GROUP BY agent_domain_id ORDER BY agent_domain_id",
+        )?;
+        let rows = statement.query_map([], rollup_from_row)?;
+        let mut rollups = Vec::new();
+        for row in rows {
+            rollups.push(row?);
+        }
+        Ok(rollups)
+    }
 }
 
 /// Separate table facade for flat-rate subscription utilization.

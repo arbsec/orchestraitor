@@ -17,6 +17,8 @@ workspace = true
 # sibling provider crates (orchestraitor-provider-api, -neuralwatt).
 async-trait = "0.1"
 orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+chrono = { version = "0.4", features = ["serde"] }
+orchestraitor-cost-ledger = { path = "../orchestraitor-cost-ledger" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 orchestraitor-provider-neuralwatt = { path = "../orchestraitor-provider-neuralwatt" }
