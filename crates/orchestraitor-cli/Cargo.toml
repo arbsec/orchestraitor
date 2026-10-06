@@ -19,6 +19,13 @@ workspace = true
 # async-trait (MIT OR Apache-2.0): object-safe impls of the campaign loop's
 # BoardPoller/LoopWorkerStarter seams; matches the board/provider crates.
 async-trait = "0.1"
+# base64 (MIT OR Apache-2.0): FileAddition.contents encoding for the
+# `orc github push-branch` App-signed landing path (already in the lock via
+# reqwest/hyper-util; no new package).
+base64 = "0.22.1"
+# uuid (MIT OR Apache-2.0): invocation-unique temporary landing branch names
+# for `orc github push-branch` (already in the workspace tree).
+uuid = { workspace = true }
 clap = { workspace = true }
 miette = { workspace = true }
 # orchestraitor-mcp (MIT OR Apache-2.0): the board.query decision tool

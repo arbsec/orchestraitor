@@ -48,8 +48,10 @@ headers), so the token cannot leak through a proxied request.
 
 ## When to use what
 
-- **New agent commits:** create them via the App API (`createCommitOnBranch`) from the
-  start — do not push unsigned commits and replay afterwards.
+- **New agent commits:** land them via `orc github push-branch` (the
+  App-signed landing subcommand — it wraps `createCommitOnBranch` + the ref
+  swing with tree-equality and `verified = true` gates) from the start — do
+  not push unsigned commits and replay afterwards.
 - **Existing unsigned chains:** run the replay script, then verify
   `git rev-parse <old-oid>^{tree}` and `git rev-parse <new-oid>^{tree}` return the
   same tree object ID and record tree identity on the PR (see

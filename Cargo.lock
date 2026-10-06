@@ -4495,6 +4495,7 @@ name = "orchestraitor-cli"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "miette",
  "orchestraitor-agent-catalog",
@@ -4520,6 +4521,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "toml_edit 0.25.15+spec-1.1.0",
  "url",
+ "uuid",
 ]
 
 [[package]]

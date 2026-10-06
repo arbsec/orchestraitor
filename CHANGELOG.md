@@ -155,6 +155,25 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   reflects the loop-first product framing and links to the rendered repo docs
   instead of broken out-of-tree paths. Site goes live on the first push to
   `main` that touches `book/**` or `docs/**`.
+- `orc github push-branch`: lands a local branch's tree as ONE App-signed
+  squashed commit on the remote branch via GraphQL `createCommitOnBranch` —
+  the agent push path for repositories with `required_signatures` rulesets,
+  where plain `git push` produces unverified commits that are rejected at
+  merge time. The commit is created on a temporary branch
+  (`push-branch/tmp-<tree>`, bootstrapped via `createRef` — the mutation does
+  not auto-create branches) at the observed remote head (or the base commit
+  for a new branch) so the tree-equality and `signature.isValid` gates run
+  before the real ref moves; the swing is `updateRefs` with
+  `RefUpdate.beforeOid` set to the observed remote head (exact-head
+  precondition, `force = false`): a concurrent writer advance OR rewind of
+  the branch makes the precondition fail with a typed error instead of being
+  overwritten. The temp ref is invocation-unique (uuid
+  name) and deleted on every path. An empty diff (the local tree equals the
+  remote head tree — the head is read before the decision) is a no-op. Gates
+  fail closed with typed errors (no `git push` fallback); a failed gate
+  deletes the temp ref and leaves the real branch untouched. The
+  `github-pr-lifecycle` skill's push steps now route through this subcommand
+  instead of `git push`.
 
 ### Changed
 

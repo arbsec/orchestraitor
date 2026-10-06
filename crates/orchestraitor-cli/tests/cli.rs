@@ -1893,3 +1893,722 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
     });
     Ok(endpoint)
 }
+
+// --- `orc github push-branch`: App-signed landing -----------------------------
+
+/// Builds a local git repo with one base commit and one feature branch that
+/// changes a file; returns the temp dir (must outlive the test), the repo
+/// path, and the base branch's tree oid. Uses a pinned author identity so
+/// the test never depends on ambient git config.
+fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
+    use std::process::Command;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let run = |args: &[&str]| -> miette::Result<()> {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    };
+    run(&["init", "-q", "-b", "main"])?;
+    // The App config lives at the temp root (the CLI's --project-dir), not
+    // inside the git repo.
+    write_github_app_project_config(&temp)?;
+    fs::write(repo.join("base.txt"), "base\n").into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "base"])?;
+    run(&["checkout", "-qb", "feature/signed"])?;
+    fs::write(repo.join("feature.txt"), "signed landing\n").into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "feature"])?;
+    let tree_of = |spec: &str| -> miette::Result<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", &format!("{spec}^{{tree}}")])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    // Register the repo itself as `origin` so the landing path's
+    // `git fetch origin <head-oid>` resolves against a real repository. The
+    // stub rules use this repo's actual main commit oid as the fake remote
+    // head so rev-parse finds the tree locally.
+    run(&["remote", "add", "origin", &repo.display().to_string()])?;
+    run(&["fetch", "--quiet", "origin"])?;
+    let head_output = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(&repo)
+        .output()
+        .into_diagnostic()?;
+    let main_commit = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let base_tree = tree_of("main")?;
+    let feature_tree = tree_of("feature/signed")?;
+    Ok((
+        temp,
+        repo.display().to_string(),
+        base_tree,
+        feature_tree,
+        main_commit,
+    ))
+}
+
+/// A mint + GraphQL server for push-branch tests: connection 1 mints the
+/// fixture token; later connections are GraphQL requests matched against
+/// `(needle, payload)` rules in order; an unmatched request gets a GraphQL
+/// error envelope. Every request line is forwarded to the channel as
+/// `<path>\t<auth>`.
+fn spawn_push_branch_server(
+    rules: Vec<(String, String)>,
+) -> miette::Result<(
+    String,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Receiver<String>,
+)> {
+    use std::sync::mpsc;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    let expires_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .into_diagnostic()?
+        .as_secs()
+        + 3_300;
+    let expires_at =
+        time::OffsetDateTime::from_unix_timestamp(expires_at_epoch.try_into().into_diagnostic()?)
+            .into_diagnostic()?
+            .format(&time::format_description::well_known::Rfc3339)
+            .into_diagnostic()?;
+    let mint_body =
+        format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#);
+    let (auth_tx, auth_rx) = mpsc::channel::<String>();
+    let (body_tx, body_rx) = mpsc::channel::<String>();
+    // Rules are CONSUMED in request order (the first rule whose needle matches
+    // is removed) so the nth GraphQL request always sees the nth scripted
+    // response, regardless of shared needles.
+    let rules = std::sync::Mutex::new(rules);
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut stream) = connection else { break };
+            // Read until the full request is available: headers plus the
+            // declared Content-Length body. A single `read` may return a
+            // partial request, which would truncate the recorded payload.
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 16_384];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buffer);
+                        let Some(headers_end) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let content_length = text[..headers_end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= headers_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&buffer).into_owned();
+            let path = text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let auth = text
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_default();
+            let _ = auth_tx.send(format!("{path}\t{auth}"));
+            let _ = body_tx.send(text.clone());
+            let (status_line, payload) = if path.contains("/app/installations/") {
+                (String::from("HTTP/1.1 201 Created"), mint_body.clone())
+            } else {
+                let default_payload = r#"{"data":null,"errors":[{"message":"unmatched request"}]}"#;
+                let matched = rules
+                    .lock()
+                    .map(|mut pending| {
+                        let position = pending.iter().position(|(needle, _)| text.contains(needle));
+                        position.map(|index| pending.remove(index).1)
+                    })
+                    .unwrap_or_default()
+                    .unwrap_or_else(|| default_payload.to_string());
+                (String::from("HTTP/1.1 200 OK"), matched)
+            };
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _write_result = stream.write_all(response.as_bytes());
+        }
+    });
+    Ok((endpoint, auth_rx, body_rx))
+}
+
+/// Builds the scripted `updateRefs` success payload confirming the move of
+/// `ref_name` (the response validator checks the ref list by name).
+fn update_refs_stub(ref_name: &str) -> String {
+    format!(
+        r#"{{"data":{{"updateRefs":{{"clientMutationId":"ok","refs":[{{"id":"REF_node","name":"{ref_name}"}}]}}}}}}"#
+    )
+}
+
+fn push_branch_cli(
+    temp: &tempfile::TempDir,
+    repo: &str,
+    endpoint: &str,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            endpoint,
+            "--github-graphql-endpoint",
+            endpoint,
+        ])
+        .args(args)
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .into_diagnostic()
+}
+
+#[test]
+fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let repo_id_rule = (
+        r"name:$repo){id}".to_string(),
+        r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+    );
+    let temp_probe_rule = (
+        "deleteRef".to_string(),
+        r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+    );
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        repo_id_rule,
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            update_refs_stub("refs/heads/feature/signed"),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
+        ),
+        temp_probe_rule,
+    ];
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The bearer on the GraphQL calls is the minted installation token, and
+    // the branch-ref probe ran before the mutation (CAS shape).
+    let mut calls = 0;
+    while let Ok(line) = auth_rx.try_recv() {
+        let (_path, auth) = line.split_once('\t').unwrap_or(("", ""));
+        if auth == format!("Bearer {GITHUB_APP_TOKEN_MARKER}") {
+            calls += 1;
+        }
+    }
+    assert_eq!(
+        calls, 8,
+        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRefs + post-move ref re-read + deleteRef, one minted token each"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    // The mutation succeeds but reports an UNSIGNED commit (null signature):
+    // the ref must NOT be moved and the command must fail with a typed
+    // error — no `git push` fallback, no partial success.
+    let commit_payload = format!(
+        r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"3333333333333333333333333333333333333333","tree":{{"oid":"{feature_tree}"}},"signature":null}}}}}}}}"#
+    );
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        ("createCommitOnBranch".to_string(), commit_payload),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("NOTverified") && flat.contains("refusingtomove"),
+        "unsigned landing must fail closed with the typed refusal: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // The mutation reports a DIFFERENT tree than the local branch: the ref
+    // must NOT be moved even though the commit claims success.
+    let commit_payload = r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"4444444444444444444444444444444444444444","tree":{"oid":"9999999999999999999999999999999999999999"},"signature":{"isValid":true}}}}}"#;
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        ("createCommitOnBranch".to_string(), commit_payload.to_string()),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("treemismatch") && flat.contains("unchanged"),
+        "tree mismatch must fail closed: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_required_enforcement_fails_closed_without_config() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    // enforcement = required, incomplete github_app block: the command must
+    // refuse BEFORE any network call (typed error naming the missing keys).
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nenforcement = \"required\"\n",
+    )
+    .into_diagnostic()?;
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(Vec::new())?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("enforcementis`required`") && flat.contains("client_id"),
+        "typed refusal must name the mode and the missing keys: {stderr}"
+    );
+    // Nothing reached the network except nothing at all — no mint, no GraphQL.
+    assert!(
+        auth_rx.try_recv().is_err(),
+        "no request may be sent when the required-enforcement gate refuses"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
+    let (temp, repo, base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // The remote branch head equals the local branch tree (everything
+    // already landed): the diff against the remote head is empty. The
+    // branch-ref probe (the ONLY request) answers with the local tree as the
+    // remote head; the rules list is empty so any FURTHER request fails the
+    // test with an unmatched-request error.
+    let rules = vec![(
+        "ref(qualifiedName".to_string(),
+        r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"HEAD_OID"}}}}}"#
+            .to_string(),
+    )];
+    // The probe's head oid must be a REAL local object the fetch fallback
+    // can resolve: use the local branch's own commit (its tree equals the
+    // remote head tree by construction).
+    let head_commit = {
+        use std::process::Command;
+        let output = Command::new("git")
+            .args(["rev-parse", "main"])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let rules: Vec<(String, String)> = rules
+        .into_iter()
+        .map(|(needle, payload)| (needle, payload.replace("HEAD_OID", &head_commit)))
+        .collect();
+    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+    // Land `main` whose tree equals the remote head tree: nothing to land.
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "main",
+            "--message",
+            "no-op",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(stderr.contains("nothing to land"), "stderr: {stderr}");
+    // Exactly ONE request (the branch-ref probe) reached the network: the
+    // no-op decision is remote-head-aware, so it cannot be made pre-mint.
+    let mut calls = 0;
+    while let Ok(_line) = auth_rx.try_recv() {
+        calls += 1;
+    }
+    // 2 requests: the mint + the branch-ref probe (the no-op decision is
+    // remote-head-aware, so it cannot be made pre-mint — this is the
+    // CodeRabbit-reviewed behavior).
+    assert_eq!(calls, 2, "mint + branch-ref probe only");
+    let _ = base_tree;
+    let _ = main_commit;
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    // The landing commit verifies, but the real ref moved concurrently: the
+    // beforeOid precondition FAILS, the command exits typed, and the temp
+    // branch is deleted — the concurrent commit is NOT overwritten (works
+    // for both a concurrent advance and a concurrent rewind).
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            r#"{"data":null,"errors":[{"message":"UpdateRefs for refs/heads/feat/github-signed-push failed: beforeOid does not match current head (branch was rewound)"}]}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("beforeOiddoesnotmatchcurrenthead") || flat.contains("updateRefs"),
+        "the concurrent-move precondition must surface as a typed error: {stderr}"
+    );
+    // The updateRefs request must carry the exact-head precondition
+    // (beforeOid = the observed remote head) and force=false: neither a
+    // concurrent advance nor a rewind may be overwritten.
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let update_request = bodies
+        .iter()
+        .find(|body| body.contains("updateRefs"))
+        .ok_or_else(|| miette::miette!("no updateRefs request recorded"))?;
+    assert!(
+        update_request.contains(&format!("beforeOid\":\"{main_commit}")),
+        "beforeOid must be the observed remote head: {update_request}"
+    );
+    assert!(
+        update_request.contains("\"force\":false"),
+        "force must be false: {update_request}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Result<()> {
+    use std::process::Command;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // Dirty the working copy of the feature file AND add an untracked file;
+    // neither may leak into the landing payload.
+    fs::write(format!("{repo}/feature.txt"), "DIRTY working-copy edit\n").into_diagnostic()?;
+    fs::write(format!("{repo}/untracked.txt"), "untracked\n").into_diagnostic()?;
+    // The branch's committed tree — the dirty working copy and the
+    // untracked file are NOT part of it.
+    let branch_tree = {
+        let output = Command::new("git")
+            .args(["rev-parse", "feature/signed^{tree}"])
+            .current_dir(&repo)
+            .output()
+            .into_diagnostic()?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{branch_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            update_refs_stub("refs/heads/feature/signed"),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The createCommitOnBranch payload must carry the COMMITTED content
+    // (base64 of "signed landing\n") and must NOT contain the dirty working-
+    // copy edit, the untracked file, or its content.
+    let committed_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode("signed landing\n")
+    };
+    let dirty_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode("DIRTY working-copy edit\n")
+    };
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let commit_request = bodies
+        .iter()
+        .find(|body| body.contains("createCommitOnBranch"))
+        .ok_or_else(|| miette::miette!("no createCommitOnBranch request recorded"))?;
+    assert!(
+        commit_request.contains(&committed_b64),
+        "payload must carry the committed blob content"
+    );
+    assert!(
+        !commit_request.contains(&dirty_b64),
+        "payload must NOT carry the dirty working-copy content"
+    );
+    assert!(
+        !commit_request.contains("untracked.txt"),
+        "payload must NOT reference the untracked file"
+    );
+    Ok(())
+}

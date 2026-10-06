@@ -232,10 +232,64 @@ malformed JWT) exit non-zero with a typed diagnostic that never contains the
 PEM, the JWT, or any token. Any malformation in the `/app` or
 `/users/{slug}[bot]` payload is a typed error; the payload is never echoed.
 
+## `orc github push-branch`
+
+Lands a local branch's tree as ONE App-signed squashed commit on the remote
+branch — the agent push path for repositories with `required_signatures`
+rulesets, where plain `git push` produces unverified commits that are rejected
+at merge time (skill `verified-commit-path.md`; spec `10-orchestrator.md`
+§9.41 service identity):
+
+```sh
+orc github push-branch feat/my-change \
+  --message "feat(widget): add blinking" \
+  --body "Body paragraph." \
+  --owner arbsec --repo orchestraitor
+```
+
+Mechanics:
+
+- Computes the local branch's tree (`git rev-parse <branch>^{tree}`). The
+  change set is the diff from the REMOTE HEAD's tree when the branch exists on
+  the remote (fetched locally first — an earlier landing may have moved the
+  remote tree past the base), or from the base branch tree (`--base`, default
+  `origin/main` then `main`) for a new branch. `A`/`M` additions carry the
+  branch's committed blob contents (`git cat-file blob` — never the working
+  directory); `D` deletions carry the path. An empty diff (the local tree
+  equals the remote head tree) is a no-op — the decision needs the remote
+  head, so one minted token and the branch-ref request are spent before the
+  refusal.
+- **Landing via a temporary branch:** the commit is created on
+  `push-branch/tmp-<uuid>` — a fresh, invocation-unique name created with
+  `createRef` (`createCommitOnBranch` does NOT auto-create branches),
+  bootstrapped at the observed remote head when the branch exists, or at the
+  base commit for a new branch. This puts the tree/verification gates BEFORE
+  the real ref moves — `createCommitOnBranch` advances whatever branch it
+  lands on, so landing directly would move the real branch even when a gate
+  later fails. The temp ref is deleted on every path, and only the ref id
+  this invocation created is ever touched.
+- **Gates (fail-closed, typed errors, no plain-`git push` fallback):** the
+  landed commit's tree MUST equal the local branch tree, and its
+  `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
+  deletes the temp ref and leaves the real remote branch untouched.
+  Diagnostics never contain the token.
+- **Ref move with an exact-head precondition:** the verified landing commit
+  was created ON TOP of the observed remote head; the real ref is moved with
+  the `updateRefs` mutation carrying `RefUpdate.beforeOid = <observed head>`
+  and `force = false`. `beforeOid` is an exact precondition: a concurrent
+  writer that ADVANCES the branch in the window makes the update
+  non-fast-forward, and one that REWINDS it makes `beforeOid` mismatch —
+  both FAIL with a typed error, and the concurrent commit is never
+  overwritten in either direction. A new remote branch is created directly
+  at the verified commit. The real branch head therefore never regresses
+  through an ancestor-of-main state (the auto-close pitfall).
+- In `required` enforcement mode the complete-`github_app` gate applies before
+  any network call.
+
 ## Rollback
 
 Removing the `github_app` configuration (or unsetting any of `client_id`,
-`installation_id`, `private_key_uri`) makes all four subcommands fail closed
+`installation_id`, `private_key_uri`) makes all five subcommands fail closed
 with a typed `github_app.*` configuration error — the commands mint nothing and
 fall back to nothing. Roll back the binary by reverting this change; there is
 no persisted state to clean up.

@@ -4,6 +4,7 @@ use std::io::Write;
 use std::process::Command;
 use std::time::Duration;
 
+use base64::Engine as _;
 use miette::{IntoDiagnostic, Result, bail, miette};
 use orchestraitor_core::GitHubAppError;
 use orchestraitor_core::github_app::{
@@ -12,7 +13,7 @@ use orchestraitor_core::github_app::{
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
-use crate::cli::{ApiArgs, ConfigPaths, GitHubCommand};
+use crate::cli::{ApiArgs, ConfigPaths, GitHubCommand, PushBranchArgs};
 use crate::commands::config::layers::load_layers;
 use orchestraitor_core::config::{
     GitHubAppConfig, OrchestraitorConfig, ServiceIdentityEnforcement,
@@ -35,6 +36,7 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: GitHubCommand, writer: &mut W
         GitHubCommand::Api(args) => api(paths, &args, writer),
         GitHubCommand::GhEnv(args) => gh_env(paths, &args),
         GitHubCommand::CommitAuthor => commit_author(paths, writer),
+        GitHubCommand::PushBranch(args) => push_branch(paths, &args),
     }
 }
 
@@ -475,6 +477,661 @@ fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
         .map_err(|_| miette!("github user response is malformed: unexpected JSON shape"))?;
     derive_commit_identity(slug, &bot_user)
 }
+
+// --- `orc github push-branch`: App-signed branch landing ---------------------
+
+/// Computes the branch tree, lands it as ONE App-signed squashed commit on
+/// the remote branch via GraphQL `createCommitOnBranch`, force-moves the ref
+/// when the branch already exists, and gates on tree equality and
+/// `verified = true` — fail-closed with typed errors, never touching plain
+/// `git push`.
+///
+/// New-commit policy (skill `verified-commit-path.md`): commits are created
+/// via the App API from the start, never pushed unsigned and replayed. The
+/// local branch keeps its own history; the REMOTE branch receives exactly one
+/// squashed commit whose tree is byte-identical to the local branch tree.
+fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
+    let remote_branch = args.remote_branch.as_ref().unwrap_or(&args.branch);
+
+    // Fail-closed gate: identical to the other mutating subcommands — the
+    // landing path exists for the App service identity, so `required`
+    // enforcement refuses to run it without a complete `github_app` config.
+    let config = resolved_config(paths)?;
+    if enforcement_mode(&config) == ServiceIdentityEnforcement::Required {
+        require_service_identity(&config, "land an App-signed branch commit")?;
+    }
+
+    // 1. The intended tree: the branch's committed tree object (no index,
+    //    no textconv) — exactly the identity the remote must match
+    //    (`pr-convergence.md`).
+    let local_tree = git(&["rev-parse", &format!("{}^{{tree}}", args.branch)])?;
+    let base = resolve_base(args.base.as_deref())?;
+
+    let base_tree = git(&["rev-parse", &format!("{base}^{{tree}}")])?;
+
+    // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
+    //    bearer, every mutation's result validated. The token rides only the
+    //    Authorization header and never enters a diagnostic.
+    let (_, token) = mint_installation_token(paths)?;
+    let transport = ApiTransport::new(paths.github_graphql_endpoint.clone())?;
+    let graphql = GraphqlSession {
+        transport: &transport,
+        bearer: token.token().expose_secret(),
+        owner: args.owner.clone(),
+        repo: args.repo.clone(),
+    };
+
+    // Read the remote branch's current head (absent for a new branch). The
+    // empty-diff gate runs against the REMOTE head, not the base: a base-tree
+    // match alone says nothing when a landing already moved the remote past
+    // the base (that landing must DELETE the files the remote head has).
+    let existing = graphql.branch_ref(&args.owner, &args.repo, remote_branch)?;
+    let diff_base_tree = remote_head_tree(
+        &graphql,
+        existing.as_ref(),
+        &base_tree,
+        remote_branch,
+        &args.owner,
+        &args.repo,
+    )?;
+    let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
+    if changes.is_empty() {
+        writeln!(
+            std::io::stderr(),
+            "branch `{}` tree {local_tree} is identical to the remote head tree — nothing to land",
+            args.branch
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+
+    // Build the fileChanges payload. Contents come from the branch's
+    // committed blobs (`git cat-file blob`), never the working directory.
+    let file_changes = build_file_changes(&changes, &args.branch)?;
+
+    // 4. Land via a TEMPORARY branch so the tree/verification gates run
+    //    BEFORE the real ref moves: createCommitOnBranch advances whatever
+    //    branch it lands on, so landing directly would move the real branch
+    //    even when a gate later fails. The temp ref is deleted on every
+    //    path; the real ref then moves fast-forward-only (see below).
+    let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
+    // Unique per invocation: two concurrent landings with the same tree but
+    // different remote heads must not delete or collide on each other's
+    // live temp ref.
+    let temp_branch = format!("push-branch/tmp-{}", uuid::Uuid::new_v4());
+    // The temp branch MUST start at the remote head when the branch exists:
+    // the change set was computed as diff remote-head-tree -> local-tree and
+    // is applied on top of the temp head, so bootstrapping at the base commit
+    // would DROP the remote head's commits from the landed tree. For a new
+    // branch the remote head does not exist and the base commit is correct.
+    let temp_bootstrap = existing
+        .as_ref()
+        .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
+        .unwrap_or(base.as_str());
+    let (temp_head, temp_ref_id) = bootstrap_temp_branch(
+        &graphql,
+        &args.owner,
+        &args.repo,
+        &repository_id,
+        &temp_branch,
+        temp_bootstrap,
+    )?;
+    let new_head = land_on_temp_branch(
+        &graphql,
+        &repository_id,
+        &temp_branch,
+        &temp_ref_id,
+        &temp_head,
+        args,
+        &file_changes,
+        &local_tree,
+    )?;
+
+    // 5. Move the real branch ref onto the verified commit with an
+    //    exact-head precondition (updateRefs/RefUpdate.beforeOid = observed
+    //    head, force=false): a concurrent advance OR rewind of the real
+    //    branch in the window fails the precondition — nothing is
+    //    overwritten. A gate or mutation failure inside the landing helper
+    //    already deleted the temp ref; on the success path it is deleted
+    //    after the swing.
+    let observed_head = existing
+        .as_ref()
+        .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
+        .map(str::to_string);
+    let swing = match observed_head.as_deref() {
+        Some(observed) => {
+            graphql.move_ref_with_precondition(&repository_id, remote_branch, observed, &new_head)
+        }
+        // New branch: the ref never existed on the remote before this run —
+        // create the real ref directly at the verified commit.
+        None => graphql
+            .create_ref(
+                &repository_id,
+                &format!("refs/heads/{remote_branch}"),
+                &new_head,
+            )
+            .map(|_| ()),
+    };
+    let _ = graphql.delete_ref(&temp_ref_id);
+    swing?;
+
+    writeln!(
+        std::io::stderr(),
+        "landed {remote_branch} at {new_head} (App-signed, tree {local_tree})"
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+/// Creates the landing commit on the temporary branch and runs the
+/// tree/verification gates against it BEFORE the real branch ref moves.
+/// `createCommitOnBranch` advances whatever branch it lands on, so the temp
+/// branch absorbs the mutation: a failed gate (or a failed mutation) leaves
+/// the real remote branch untouched and the temp ref is deleted on every
+/// path. Returns the verified commit's oid.
+#[allow(clippy::too_many_arguments)]
+fn land_on_temp_branch(
+    graphql: &GraphqlSession<'_>,
+    _repository_id: &str,
+    temp_branch: &str,
+    temp_ref_id: &str,
+    temp_head: &str,
+    args: &PushBranchArgs,
+    file_changes: &Value,
+    local_tree: &str,
+) -> Result<String> {
+    let commit = graphql.create_commit_on_branch(
+        &args.owner,
+        &args.repo,
+        temp_branch,
+        temp_head,
+        &args.message,
+        args.body.as_deref().unwrap_or_default(),
+        file_changes,
+    );
+    let commit = match commit {
+        Ok(commit) => commit,
+        // The mutation itself failed (nothing landed): surface the typed
+        // error after cleaning up the temp ref.
+        Err(error) => {
+            let _ = graphql.delete_ref(temp_ref_id);
+            return Err(error);
+        }
+    };
+    // The commit landed on the temp branch; run the gates BEFORE the real
+    // ref moves.
+    if let Err(error) = verify_landed_commit(&commit, local_tree, &args.branch) {
+        let _ = graphql.delete_ref(temp_ref_id);
+        return Err(error);
+    }
+    commit_oid(&commit).map(str::to_string)
+}
+
+/// Resolves the diff base commit: an explicit `--base` ref, else
+/// `origin/main`, else `main`. Typed error when nothing resolves.
+fn resolve_base(base: Option<&str>) -> Result<String> {
+    if let Some(explicit) = base {
+        return git(&["rev-parse", "--verify", explicit]);
+    }
+    let from_origin = git(&["rev-parse", "--verify", "--quiet", "origin/main"]).ok();
+    from_origin
+        .or_else(|| git(&["rev-parse", "--verify", "--quiet", "main"]).ok())
+        .ok_or_else(|| {
+            miette!(
+                "cannot resolve the base branch: no --base given and neither origin/main nor \
+                 main exists — pass --base <ref>"
+            )
+        })
+}
+
+/// Runs `git diff-tree -r -z --no-renames --name-status` between two trees
+/// and parses the records; `--no-commit-id` against two trees means no
+/// leading oid field.
+fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let raw = git_raw(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--no-commit-id",
+        "--name-status",
+        base_tree,
+        tree,
+    ])?;
+    Ok(parse_diff_tree_z(&raw))
+}
+
+/// Resolves the tree the landing change set is computed against: the remote
+/// head's tree when the branch exists on the remote (an earlier landing may
+/// have moved the remote tree past the base; a file removed locally that the
+/// base never had must still be deleted remotely), or the base branch tree
+/// for a new branch. The remote head commit is fetched first so its tree and
+/// blobs are locally available; a raw-OID fetch falls back to a branch-name
+/// fetch (the head is usually already present locally). A head whose objects
+/// are locally unavailable is a typed error.
+fn remote_head_tree(
+    _graphql: &GraphqlSession<'_>,
+    existing: Option<&Value>,
+    base_tree: &str,
+    remote_branch: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<String> {
+    let Some(ref_payload) = existing else {
+        return Ok(base_tree.to_string());
+    };
+    let head = ref_payload
+        .pointer("/target/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?;
+    // Fetch directly from the target repository URL — never the ambient
+    // `origin` remote, which may point at a different repository (or not
+    // exist) in this worktree.
+    let repo_url = format!("https://github.com/{owner}/{repo}.git");
+    if git(&["fetch", "--quiet", &repo_url, head]).is_err() {
+        git(&["fetch", "--quiet", &repo_url, remote_branch]).ok();
+    }
+    git(&["rev-parse", &format!("{head}^{{tree}}")])
+}
+
+/// Builds the GraphQL `FileChanges` input from the parsed diff records:
+/// additions/modifications carry base64 contents of the branch's COMMITTED
+/// blobs (`git cat-file blob <branch>:<path>` — never the working directory,
+/// which may carry uncommitted edits or a different checkout), deletions
+/// carry the path. An unreadable blob or an unknown diff status is a typed
+/// error — nothing is landed on a partial change set.
+fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) -> Result<Value> {
+    let mut additions = Vec::new();
+    let mut deletions = Vec::new();
+    for (status, path) in changes {
+        match status.as_str() {
+            "A" | "M" => {
+                let spec = format!("{branch}:{}", path.display());
+                // Reject non-regular-file entries: symlinks (120000) and
+                // submodules (160000) cannot be carried by the FileAddition
+                // contents payload — landing would silently materialize them
+                // as regular files or fail opaquely.
+                let object_type = git(&["cat-file", "-t", &spec])?;
+                if object_type != "blob" {
+                    bail!(
+                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob —                          symlinks and submodules are not supported by the GraphQL fileChanges                          payload"
+                    );
+                }
+                let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
+                    miette!("failed to read blob `{spec}` for the landing commit: {error}")
+                })?;
+                additions.push(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "contents": BASE64_ENGINE.encode(&bytes),
+                }));
+            }
+            "D" => {
+                // FileDeletion input shape: {"path": "…"}, not a bare string.
+                deletions.push(serde_json::json!({"path": path.display().to_string()}));
+            }
+            other => bail!(
+                "unexpected diff-tree status `{other}` for `{}` — refusing to land an ambiguous \
+                 change set",
+                path.display()
+            ),
+        }
+    }
+    Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
+}
+
+/// Creates the temporary landing branch at `bootstrap_oid` for
+/// `owner/repo`, after deleting any stale temp ref left by a previous run
+/// with the same tree (landing on top of it would append to the WRONG
+/// commit). Returns `(head oid, ref id)`.
+fn bootstrap_temp_branch(
+    graphql: &GraphqlSession<'_>,
+    owner: &str,
+    repo: &str,
+    repository_id: &str,
+    temp_branch: &str,
+    bootstrap_oid: &str,
+) -> Result<(String, String)> {
+    // The ref name is invocation-unique (UUID), so an existing ref here is
+    // an unexpected collision — never delete a ref this invocation did not
+    // create (a concurrent landing may own it).
+    if graphql.branch_ref(owner, repo, temp_branch)?.is_some() {
+        bail!(
+            "temporary branch `{temp_branch}` already exists (unexpected collision) — refusing \
+             to touch it; retry to pick a fresh name"
+        );
+    }
+    let created = graphql.create_ref(
+        repository_id,
+        &format!("refs/heads/{temp_branch}"),
+        bootstrap_oid,
+    )?;
+    let head = created
+        .pointer("/target/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("createRef response is malformed: missing target.oid"))?
+        .to_string();
+    let ref_id = created
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("createRef response is malformed: missing ref.id"))?
+        .to_string();
+    Ok((head, ref_id))
+}
+
+/// Verifies a landed commit against the gates: tree equality with the local
+/// branch tree, and GitHub-web-flow verification (`signature.isValid`). Any
+/// gate failure is a typed error; the caller has NOT yet moved the ref, so a
+/// failed gate on an existing branch leaves the remote head unchanged, and on
+/// a new branch leaves only the base-pinned bootstrap ref (reported in the
+/// error text).
+fn verify_landed_commit(commit: &Value, local_tree: &str, branch: &str) -> Result<()> {
+    let oid = commit_oid(commit)?;
+    let landed_tree = commit
+        .pointer("/tree/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("landing commit response is malformed: missing tree.oid"))?;
+    if landed_tree != local_tree {
+        bail!(
+            "landing commit tree mismatch: remote commit {oid} tree is {landed_tree}, local \
+             branch `{branch}` tree is {local_tree} — refusing to move the ref; the remote \
+             branch is unchanged"
+        );
+    }
+    let verified = commit
+        .get("signature")
+        .and_then(|signature| signature.get("isValid"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !verified {
+        bail!(
+            "landing commit {oid} is NOT verified (signature missing or invalid) — refusing to \
+             move the ref; the remote branch is unchanged; the required_signatures ruleset \
+             would reject this commit at merge time"
+        );
+    }
+    Ok(())
+}
+
+/// Extracts the landed commit oid from a `createCommitOnBranch` payload.
+fn commit_oid(commit: &Value) -> Result<&str> {
+    commit
+        .get("oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("landing commit response is malformed: missing commit.oid"))
+}
+
+/// Runs `git` with the given arguments and returns trimmed stdout; a non-zero
+/// exit is a typed error carrying stderr (never credential material).
+fn git(args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|error| miette!("failed to run `git {}`: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Like [`git`], but returns raw bytes (for NUL-delimited output).
+fn git_raw(args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|error| miette!("failed to run `git {}`: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
+/// Parses `git diff-tree -r -z --no-renames --name-status` output: NUL-
+/// separated `STATUS\0path\0` records. git omits the final NUL after the
+/// last path AND may emit a dangling final `STATUS` with no path when the
+/// record count is odd, so both the `STATUS,path` and dangling-`STATUS`
+/// shapes are handled. Statuses: A (added), M (modified), D (deleted).
+fn parse_diff_tree_z(raw: &[u8]) -> Vec<(String, std::path::PathBuf)> {
+    let mut changes = Vec::new();
+    let mut fields = raw.split(|byte| *byte == 0_u8).peekable();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            continue;
+        }
+        let status = String::from_utf8_lossy(field).to_string();
+        match fields.next() {
+            Some(path) if !path.is_empty() => {
+                changes.push((
+                    status,
+                    std::path::PathBuf::from(String::from_utf8_lossy(path).as_ref()),
+                ));
+            }
+            _ => break, // dangling status with no path: malformed tail, skip
+        }
+    }
+    changes
+}
+
+/// One GraphQL session over the shared [`ApiTransport`]: installation-token
+/// bearer, POST to the configured endpoint, every response validated. The
+/// bearer is held for the session lifetime and never enters a diagnostic.
+struct GraphqlSession<'a> {
+    transport: &'a ApiTransport,
+    bearer: &'a str,
+    /// Target repository coordinates for post-move ref verification.
+    owner: String,
+    repo: String,
+}
+
+impl GraphqlSession<'_> {
+    /// Executes one operation and returns the `data` object; errors are
+    /// typed and carry only status or GraphQL message strings.
+    fn execute(&self, operation: &str, query: &str, variables: &Value) -> Result<Value> {
+        let response = self.transport.request_bearer(
+            "POST",
+            "graphql",
+            self.bearer,
+            Some(serde_json::json!({"query": query, "variables": variables}).to_string()),
+        )?;
+        let (status, body) = response;
+        if !status.is_success() {
+            bail!("github api request returned HTTP {status} ({operation})");
+        }
+        let envelope: Value = serde_json::from_str(&body)
+            .map_err(|_| miette!("github api response is malformed: unexpected JSON shape"))?;
+        let messages: Vec<String> = envelope
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        if !messages.is_empty() {
+            bail!(
+                "github api request failed ({operation}): {}",
+                messages.join("; ")
+            );
+        }
+        envelope
+            .get("data")
+            .cloned()
+            .ok_or_else(|| miette!("github api response is malformed: missing data object"))
+    }
+
+    /// Resolves the repository node id (createRef needs it for new branches).
+    fn repository_id(&self, owner: &str, repo: &str) -> Result<String> {
+        let data = self.execute(
+            "repository query",
+            "query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){id}}",
+            &serde_json::json!({"owner": owner, "repo": repo}),
+        )?;
+        data.get("repository")
+            .and_then(|repository| repository.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                miette!(
+                    "response is missing repository.id — verify the owner/repo arguments \
+                     ({owner}/{repo})"
+                )
+            })
+    }
+
+    /// Reads the remote branch ref; `Ok(None)` when the branch does not
+    /// exist on the remote.
+    fn branch_ref(&self, owner: &str, repo: &str, branch: &str) -> Result<Option<Value>> {
+        let data = self.execute(
+            "branch ref query",
+            "query($owner:String!,$repo:String!,$qualified:String!){repository(owner:$owner,\
+             name:$repo){ref(qualifiedName:$qualified){id target{... on Commit{oid}}}}}",
+            &serde_json::json!({
+                "owner": owner,
+                "repo": repo,
+                "qualified": format!("refs/heads/{branch}"),
+            }),
+        )?;
+        Ok(data
+            .pointer("/repository/ref")
+            .filter(|ref_value| !ref_value.is_null())
+            .cloned())
+    }
+
+    /// Appends one squashed commit to the branch with an expectedHeadOid
+    /// compare-and-swap; returns the `commit` payload.
+    #[allow(clippy::too_many_arguments)]
+    fn create_commit_on_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        expected_head_oid: &str,
+        headline: &str,
+        body: &str,
+        file_changes: &Value,
+    ) -> Result<Value> {
+        let data = self.execute(
+            "createCommitOnBranch",
+            "mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input)\
+             {commit{oid tree{oid} signature{... on GpgSignature{isValid} \
+             ... on SmimeSignature{isValid} ... on SshSignature{isValid}}}}}",
+            &serde_json::json!({
+                "input": {
+                    "branch": {
+                        "repositoryNameWithOwner": format!("{owner}/{repo}"),
+                        "branchName": branch,
+                    },
+                    "expectedHeadOid": expected_head_oid,
+                    "message": {"headline": headline, "body": body},
+                    "fileChanges": file_changes,
+                }
+            }),
+        )?;
+        graphql_mutation_field(&data, "createCommitOnBranch", "commit").cloned()
+    }
+
+    /// Moves the real branch ref onto `oid` with an exact-head precondition:
+    /// `updateRefs` with `RefUpdate.beforeOid` set to the OBSERVED remote
+    /// head. A concurrent writer that advanced OR rewound the real branch in
+    /// the window makes the precondition fail with a typed GraphQL error —
+    /// neither direction can be overwritten. `force` stays `false`, so a
+    /// non-fast-forward move is also rejected.
+    fn move_ref_with_precondition(
+        &self,
+        repository_id: &str,
+        remote_branch: &str,
+        observed_head_oid: &str,
+        new_oid: &str,
+    ) -> Result<()> {
+        let data = self.execute(
+            "updateRefs",
+            "mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}",
+            &serde_json::json!({
+                "input": {
+                    "repositoryId": repository_id,
+                    "refUpdates": [{
+                        "name": format!("refs/heads/{remote_branch}"),
+                        "afterOid": new_oid,
+                        "beforeOid": observed_head_oid,
+                        "force": false,
+                    }],
+                }
+            }),
+        )?;
+        // UpdateRefsPayload carries ONLY the nullable clientMutationId (no
+        // refs list exists on the payload type), so the response cannot
+        // confirm the move by itself. Verify the move OUTCOME instead:
+        // re-read the branch ref and confirm it now points at `new_oid` —
+        // a null payload with an absent clientMutationId must not be
+        // reported as success.
+        graphql_mutation_field(&data, "updateRefs", "clientMutationId")?;
+        let moved_head = self.branch_ref(&self.owner, &self.repo, remote_branch)?;
+        let moved_oid = moved_head
+            .as_ref()
+            .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                miette!(
+                    "post-move ref read failed: the branch disappeared — treating the landing \
+                     as failed"
+                )
+            })?;
+        if !moved_oid.eq_ignore_ascii_case(new_oid) {
+            bail!(
+                "post-move verification failed: the branch points at {moved_oid}, expected \
+                 {new_oid} — treating the landing as failed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Deletes a ref by node id (deleteRef) — used for the temporary landing
+    /// branch on every path (success, gate failure, mutation failure).
+    fn delete_ref(&self, ref_id: &str) -> Result<()> {
+        let data = self.execute(
+            "deleteRef",
+            "mutation($input:DeleteRefInput!){deleteRef(input:$input){clientMutationId}}",
+            &serde_json::json!({"input": {"refId": ref_id}}),
+        )?;
+        graphql_mutation_field(&data, "deleteRef", "clientMutationId")
+            .map(|_| ())
+            .or(Ok(()))
+    }
+
+    /// Bootstraps a new branch ref at `oid` (createRef; the branch must NOT
+    /// already exist — callers check first).
+    fn create_ref(&self, repository_id: &str, name: &str, oid: &str) -> Result<Value> {
+        let data = self.execute(
+            "createRef",
+            "mutation($input:CreateRefInput!){createRef(input:$input){ref{id target{... on \
+             Commit{oid}}}}}",
+            &serde_json::json!({
+                "input": {"repositoryId": repository_id, "name": name, "oid": oid}
+            }),
+        )?;
+        graphql_mutation_field(&data, "createRef", "ref").cloned()
+    }
+}
+
+/// Extracts `<mutation>.<field>` from a GraphQL `data` object, failing typed
+/// when the field is null or absent.
+fn graphql_mutation_field<'a>(data: &'a Value, mutation: &str, field: &str) -> Result<&'a Value> {
+    data.get(mutation)
+        .and_then(|payload| payload.get(field))
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| miette!("github api response is malformed: missing {mutation}.{field}"))
+}
+
+/// Base64 engine for `FileAddition.contents` (the GraphQL `Base64String`
+/// scalar): RFC 4648 standard alphabet with padding.
+const BASE64_ENGINE: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 /// Minimal request transport for the `api` passthrough and `GET /app`.
 ///
@@ -1113,5 +1770,80 @@ mod tests {
     fn which_executable_resolves_system_tools_and_rejects_unknown() {
         assert!(which_executable("sh").is_some());
         assert!(which_executable("definitely-not-a-real-binary-orchestraitor").is_none());
+    }
+
+    // --- push-branch: diff-tree -z parsing ------------------------------------
+
+    #[test]
+    fn parse_diff_tree_z_handles_added_modified_deleted() {
+        let raw = b"M\0base.txt\0D\0old.txt\0A\0new.txt\0";
+        let changes = parse_diff_tree_z(raw);
+        assert_eq!(
+            changes,
+            vec![
+                ("M".to_string(), std::path::PathBuf::from("base.txt")),
+                ("D".to_string(), std::path::PathBuf::from("old.txt")),
+                ("A".to_string(), std::path::PathBuf::from("new.txt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_diff_tree_z_survives_dangling_status_without_path() {
+        // git can emit a trailing status field with no path when the record
+        // count is odd; it must be skipped, not paired with garbage.
+        let raw = b"A\0kept.txt\0M\0";
+        let changes = parse_diff_tree_z(raw);
+        assert_eq!(
+            changes,
+            vec![("A".to_string(), std::path::PathBuf::from("kept.txt"))]
+        );
+    }
+
+    #[test]
+    fn parse_diff_tree_z_preserves_spaces_and_utf8_paths_unquoted() {
+        // The -z format never quotes; the parser must keep the raw bytes.
+        let raw = "A\0dir with space/ünïcode.txt\0".as_bytes();
+        let changes = parse_diff_tree_z(raw);
+        assert_eq!(
+            changes,
+            vec![(
+                "A".to_string(),
+                std::path::PathBuf::from("dir with space/ünïcode.txt")
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_diff_tree_z_empty_output_yields_no_changes() {
+        assert!(parse_diff_tree_z(b"").is_empty());
+        assert!(parse_diff_tree_z(b"\0").is_empty());
+    }
+
+    #[test]
+    fn base64_engine_encodes_standard_alphabet_with_padding() {
+        assert_eq!(BASE64_ENGINE.encode("hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn build_file_changes_shapes_deletions_as_path_objects() {
+        let changes = vec![
+            ("A".to_string(), std::path::PathBuf::from("new.txt")),
+            ("D".to_string(), std::path::PathBuf::from("base.txt")),
+        ];
+        // The branch is irrelevant for deletions and for cat-file on A/M we
+        // use the fixture repo? No — this test only covers the D branch of
+        // the builder plus the payload shape; an A record would need a real
+        // blob, so only D is exercised here.
+        let result = build_file_changes(
+            &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
+            "any-branch",
+        );
+        let payload = result.expect("deletion-only payload must build");
+        assert_eq!(
+            payload,
+            serde_json::json!({"additions": [], "deletions": [{"path": "base.txt"}]})
+        );
+        let _ = changes;
     }
 }
