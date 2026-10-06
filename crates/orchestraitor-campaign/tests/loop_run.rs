@@ -179,7 +179,7 @@ impl LoopWorkerStarter for FakeStarter {
         }
         let (tx, rx) = tokio::sync::watch::channel(0_u64);
         let beats = self.beats_observed.clone();
-        let id = task_id.to_string();
+        let id = task_id.clone();
         let run = tokio::spawn(async move {
             match behavior {
                 Behavior::Complete { turns, tokens } => Ok(fixture_run(&id, turns, tokens)),
