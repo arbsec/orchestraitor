@@ -535,26 +535,39 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         &args.repo,
     )?;
     let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
-    if changes.is_empty() {
+    if changes.is_empty() && !args.re_land {
         writeln!(
             std::io::stderr(),
-            "branch `{}` tree {local_tree} is identical to the remote head tree — nothing to land",
+            "branch `{}` tree {local_tree} is identical to the remote head tree — nothing to \
+             land (pass --re-land to re-sign the head with an empty verified commit)",
             args.branch
         )
         .into_diagnostic()?;
         return Ok(());
+    }
+    if changes.is_empty() {
+        return re_land_unsigned_head(
+            &graphql,
+            existing.as_ref(),
+            remote_branch,
+            &args.owner,
+            &args.repo,
+            args,
+            &local_tree,
+        );
     }
 
     // Build the fileChanges payload. Contents come from the branch's
     // committed blobs (`git cat-file blob`), never the working directory.
     let file_changes = build_file_changes(&changes, &args.branch)?;
 
+    let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
+
     // 4. Land via a TEMPORARY branch so the tree/verification gates run
     //    BEFORE the real ref moves: createCommitOnBranch advances whatever
     //    branch it lands on, so landing directly would move the real branch
     //    even when a gate later fails. The temp ref is deleted on every
     //    path; the real ref then moves fast-forward-only (see below).
-    let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
     // Unique per invocation: two concurrent landings with the same tree but
     // different remote heads must not delete or collide on each other's
     // live temp ref.
@@ -618,6 +631,106 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     writeln!(
         std::io::stderr(),
         "landed {remote_branch} at {new_head} (App-signed, tree {local_tree})"
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+/// Re-lands a rebased PR branch whose tree already matches the remote head
+/// (issue #498): the head chain may carry unsigned commits, so the PR head
+/// moves to a verified commit on top of the current remote head.
+///
+/// Limitation (documented in `--help` and `docs/cli/orc-github.md`): ONE
+/// empty signed commit on the tip verifies the head commit GitHub's
+/// `required_signatures` rule evaluates on push; it does NOT rewrite
+/// unsigned ancestors into verified objects — a range check that inspects
+/// every commit can still block the PR. This tool cannot mint verified
+/// replacements for historical commits (the App API cannot re-sign existing
+/// objects); a range-level repair needs the manual temp-branch replay from
+/// `references/verified-commit-path.md`.
+///
+/// Flow mirrors the ordinary landing: the empty commit lands on a TEMP
+/// branch (gate before the real ref moves), then the real ref CAS-moves.
+#[allow(clippy::too_many_arguments)]
+fn re_land_unsigned_head(
+    graphql: &GraphqlSession<'_>,
+    existing: Option<&Value>,
+    remote_branch: &str,
+    owner: &str,
+    repo: &str,
+    args: &PushBranchArgs,
+    local_tree: &str,
+) -> Result<()> {
+    let Some(ref_payload) = existing else {
+        bail!(
+            "--re-land requires an existing remote branch; `{remote_branch}` does not exist on \
+             the remote"
+        )
+    };
+    let remote_head = ref_payload
+        .pointer("/target/oid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?;
+    let head_commit = graphql.head_commit(owner, repo, remote_head)?;
+    let already_verified = head_commit
+        .pointer("/signature/isValid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if already_verified {
+        writeln!(
+            std::io::stderr(),
+            "remote head {remote_head} of `{remote_branch}` is already verified — --re-land is a \
+             no-op"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    // Resolved ONLY after the verified-head no-op check: the documented
+    // no-op must not fail on a repository-ID read error.
+    let repository_id = graphql.repository_id(owner, repo)?;
+
+    // Temp branch absorbs the mutation so the gate runs BEFORE the real ref
+    // moves (same failure-containment shape as the ordinary landing). The
+    // empty commit's tree equals the remote head tree, which equals
+    // `local_tree` here — the tree gate in `verify_landed_commit` holds.
+    let temp_branch = format!("push-branch/tmp-re-land-{}", uuid::Uuid::new_v4());
+    let (temp_head, temp_ref_id) = bootstrap_temp_branch(
+        graphql,
+        owner,
+        repo,
+        &repository_id,
+        &temp_branch,
+        remote_head,
+    )?;
+    let empty_changes = serde_json::json!({"additions": [], "deletions": []});
+    let new_head = match land_on_temp_branch(
+        graphql,
+        &repository_id,
+        &temp_branch,
+        &temp_ref_id,
+        &temp_head,
+        args,
+        &empty_changes,
+        local_tree,
+    ) {
+        Ok(oid) => oid,
+        Err(error) => {
+            let _ = graphql.delete_ref(&temp_ref_id);
+            return Err(error);
+        }
+    };
+    let _ = graphql.delete_ref(&temp_ref_id);
+    // CAS the real branch onto the verified commit. The empty commit's
+    // parent IS the observed remote head, so `beforeOid` = remote head makes
+    // the move a fast-forward: a concurrent advance or rewind fails the
+    // precondition — nothing is overwritten.
+    graphql.move_ref_with_precondition(&repository_id, remote_branch, remote_head, &new_head)?;
+
+    writeln!(
+        std::io::stderr(),
+        "re-landed {remote_branch} at {new_head} (App-signed empty commit, parent {remote_head}; \
+         head commit now verified — note: unsigned ANCESTORS in the range are not rewritten, \
+         a range-level required_signatures check may still block the merge)"
     )
     .into_diagnostic()?;
     Ok(())
@@ -1035,6 +1148,26 @@ impl GraphqlSession<'_> {
             }),
         )?;
         graphql_mutation_field(&data, "createCommitOnBranch", "commit").cloned()
+    }
+
+    /// Reads one commit's verification signature state (`signature.isValid`
+    /// across the Gpg/Smime/Ssh union). Used by `push-branch --re-land` to
+    /// detect an already-verified remote head (re-land is a no-op there).
+    fn head_commit(&self, owner: &str, repo: &str, oid: &str) -> Result<Value> {
+        let data = self.execute(
+            "head commit query",
+            "query($owner:String!,$repo:String!,$oid:GitObjectID!){repository(owner:$owner,\
+             name:$repo){object(oid:$oid){... on Commit{signature{... on GpgSignature{isValid} \
+             ... on SmimeSignature{isValid} ... on SshSignature{isValid}}}}}}",
+            &serde_json::json!({
+                "owner": owner,
+                "repo": repo,
+                "oid": oid,
+            }),
+        )?;
+        data.pointer("/repository/object")
+            .cloned()
+            .ok_or_else(|| miette!("head commit query response is malformed: missing object"))
     }
 
     /// Moves the real branch ref onto `oid` with an exact-head precondition:

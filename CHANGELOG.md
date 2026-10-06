@@ -177,6 +177,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+  A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
+  remote head: it lands one empty App-signed commit on top of the remote head so
+  the evaluated head chain is fully verified (fixing the unsigned-head case that
+  forced plain pushes after conflict rebases); it is a no-op on an already
+  verified head and fails closed if the landing is not verified.
+
 - **Service-identity enforcement is now pinned to `required` for this
   repository** (owner mandate, 2026-10-02: no GitHub writes under the
   personal account, ever). `github_app.enforcement = "required"` in

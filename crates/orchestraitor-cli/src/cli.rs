@@ -244,6 +244,20 @@ pub struct PushBranchArgs {
     /// Repository name (e.g. `orchestraitor`).
     #[arg(long)]
     pub repo: String,
+    /// Re-land even when the diff against the remote head is EMPTY: land an
+    /// empty App-signed commit whose parent is the remote head. This is the
+    /// signed fix for a rebased PR branch whose local chain is unsigned:
+    /// the tree is already correct, but the PR head commit carries an
+    /// unsigned plain-push signature. LIMITATION: one signed commit on the
+    /// tip verifies the head commit GitHub's `required_signatures` push rule
+    /// evaluates; it does NOT rewrite unsigned ancestors into verified
+    /// objects — a ruleset that range-checks every commit can still block
+    /// the merge (range repair needs the manual replay in
+    /// `references/verified-commit-path.md`). Refuse when the local tree
+    /// does NOT match the remote tree: a re-land with a different tree is
+    /// an ordinary landing, not a re-land.
+    #[arg(long)]
+    pub re_land: bool,
 }
 
 /// Arguments for `orc init`.

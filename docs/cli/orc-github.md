@@ -286,6 +286,28 @@ Mechanics:
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 
+### Re-landing a rebased branch (`--re-land`)
+
+After a conflict resolution rebase, the local branch's tree is usually already
+identical to the remote head (the merge was content-free) but the PR head
+chain carries commits `required_signatures` cannot verify (a plain-push
+history, or any unsigned ancestor). `push-branch --re-land` covers exactly
+this case:
+
+- lands ONE empty App-signed commit whose parent is the current remote head —
+  the PR head moves to a verified commit (the new head commit only; unsigned
+  ancestors are not rewritten — see the limitation below);
+- LIMITATION: this verifies the HEAD commit; it does not rewrite unsigned
+  ancestors into verified objects — a ruleset that range-checks every commit
+  can still block the merge (range repair needs the manual replay in
+  `references/verified-commit-path.md`);
+- is a no-op (exit 0, no mutation) when the remote head is already verified;
+- fails closed (typed error, including the documented `gh api` restore
+  command) if the landed empty commit is not verified.
+
+Without `--re-land`, an identical-tree landing stays the safe no-op it has
+always been.
+
 ## Rollback
 
 Removing the `github_app` configuration (or unsetting any of `client_id`,
