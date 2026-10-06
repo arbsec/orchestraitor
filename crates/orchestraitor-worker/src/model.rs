@@ -42,7 +42,9 @@ pub(super) async fn call_model(
         provider_id: config.provider_id.clone(),
         model_id: config.model_id.clone(),
         messages: messages.to_vec(),
-        max_output_tokens: None,
+        // Bounded per-call output: the cap guards context and
+        // wall-clock burn (see a44af33); cost tracking must not change it.
+        max_output_tokens: Some(8_192),
         temperature: None,
         reasoning: None,
         structured_output: None,
@@ -52,14 +54,16 @@ pub(super) async fn call_model(
     let mut retries = 0_u32;
     loop {
         state.model_calls += 1;
+        let started = std::time::Instant::now();
         match transport.stream(request.clone()).await {
             Ok(events) => {
                 let (text, usage) = collect_events(events)?;
                 accumulate_usage(state, config, usage);
-                record_call_cost(config, &request, usage);
+                record_call_cost(config, &request, usage, CallOutcome::Completed, started);
                 return Ok(text);
             }
             Err(ProviderTransportError::RequestFailed { .. }) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 if retries >= budgets.max_provider_retries {
                     return Err(TypedFailure {
                         class: FailureClass::ProviderError,
@@ -72,12 +76,14 @@ pub(super) async fn call_model(
                 tokio::time::sleep(delay).await;
             }
             Err(ProviderTransportError::InvalidEvent) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-invalid-event",
                 });
             }
             Err(ProviderTransportError::CapabilityUnavailable { .. }) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-capability-unavailable",
@@ -140,6 +146,24 @@ fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<T
     }
 }
 
+/// Whether a model call completed or failed. Failed calls still record a
+/// cost row (spec §9.26.4: usage records are mandatory even on failure) —
+/// undercounting spend for flaky providers defeats the ledger's purpose.
+#[derive(Clone, Copy)]
+enum CallOutcome {
+    Completed,
+    Failed,
+}
+
+impl CallOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "worker-bootstrap",
+            Self::Failed => "worker-bootstrap-failed",
+        }
+    }
+}
+
 /// Records one cost entry for a completed model call (spec §9.19.4 per-call
 /// attribution). Best-effort: a sink write failure is logged and dropped —
 /// cost bookkeeping must never fail a delivery run. Errors carry no request
@@ -149,7 +173,13 @@ fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<T
 /// The row key mints a per-call sequence number: `request_id` is the ledger
 /// primary key, so a constant id would silently swallow every entry after
 /// the first.
-fn record_call_cost(config: &WorkerConfig, request: &ModelRequest, usage: Option<TokenCount>) {
+fn record_call_cost(
+    config: &WorkerConfig,
+    request: &ModelRequest,
+    usage: Option<TokenCount>,
+    outcome: CallOutcome,
+    started: std::time::Instant,
+) {
     let (Some(attribution), Some(sink)) = (&config.attribution, &config.cost_sink) else {
         return;
     };
@@ -185,12 +215,12 @@ fn record_call_cost(config: &WorkerConfig, request: &ModelRequest, usage: Option
         parent_request_id: None,
         started_at: now,
         completed_at: now,
-        wall_ms: 0,
+        wall_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         monetary_cost_measured: None,
         monetary_cost_estimated: None,
         monetary_cost_basis: MonetaryCostBasis::UtilizationOnly,
         subscription_attribution_id: None,
-        routing_decision: "worker-bootstrap".to_owned(),
+        routing_decision: outcome.label().to_owned(),
     };
     if let Err(error) = orchestraitor_provider_neuralwatt::CostSink::record(sink.as_ref(), &entry) {
         debug!(%error, "cost sink write failed; entry dropped");

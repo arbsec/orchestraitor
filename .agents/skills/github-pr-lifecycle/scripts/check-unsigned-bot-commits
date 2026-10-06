@@ -37,11 +37,17 @@ while read -r _local_ref local_oid _remote_ref remote_oid; do
     for bot in "${BOT_IDENTITIES[@]}"; do
       if [ "$author_email" = "$bot" ]; then
         verified="$(git log -1 --format='%G?' "$oid")"
-        if [ "$verified" != "V" ]; then
+        # A locally-created bot commit is either unsigned (N) or signed by
+        # a local key that is not the bot identity (G = good signature,
+        # wrong email; B/R = bad/unverifiable). Both are violations. E
+        # (signature present but not locally verifiable — GitHub's
+        # web-flow signature on App-API commits) and V (locally verified)
+        # are the only accepted states.
+        if [ "$verified" != "V" ] && [ "$verified" != "E" ]; then
           echo >&2 "pre-push: refusing unsigned agent commit"
           echo >&2 "  commit:  $oid"
           echo >&2 "  author:  $author_email"
-          echo >&2 "  verify:  $(git log -1 --format='%G?' "$oid") (V=valid signature required)"
+          echo >&2 "  verify:  $verified (N=unsigned G=wrong-key signature; use the App API)"
           echo >&2 ""
           echo >&2 "Agent commits must be created via the App API (createCommitOnBranch)"
           echo >&2 "so GitHub signs them. See:"

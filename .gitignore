@@ -49,6 +49,10 @@ book/src/adr/
 .orchestraitor/cache/
 .orchestraitor/*.bak.*
 .orchestraitor/routing.db*
+.orchestraitor/cost.db*
+.orchestraitor/campaign.db*
+.orchestraitor/loop.db*
+.orchestraitor/loop-worktrees/
 .orchestraitor/codegraph.json
 .orchestraitor/loop.db*
 .orchestraitor/loop.lock

@@ -613,12 +613,15 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     DirectLoopStarter::prune_worktrees(&paths.config_dir, &paths.project_dir);
     let run_result = runtime.block_on(async {
         let (signal_rx, signals) = spawn_signal_task();
+        // Millis alone can collide across hosts sharing a ledger dir (and
+        // clock regressions collapse to "loop-0"); pid + nanos makes the
+        // id process-unique in practice.
         let invocation_id = format!(
-            "loop-{}",
+            "loop-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or_default()
+                .map_or(0, |duration| duration.as_nanos()),
         );
         let start_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
