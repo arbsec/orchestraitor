@@ -598,10 +598,13 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     // unattributed runs (spend still flows through loop.db's soft-cap
     // path) — bookkeeping must never block delivery.
     let cost_ledger =
-        orchestraitor_cost_ledger::CostLedger::open(&paths.config_dir.join("cost.db"))
-            .map(|ledger| Arc::new(std::sync::Mutex::new(ledger)))
-            .map_err(|error| miette!("cost ledger open failed: {error}"))
-            .ok();
+        match orchestraitor_cost_ledger::CostLedger::open(&paths.config_dir.join("cost.db")) {
+            Ok(ledger) => Some(Arc::new(std::sync::Mutex::new(ledger))),
+            Err(error) => {
+                report_signal_failure(&format!("cost ledger open failed: {error}"));
+                None
+            }
+        };
 
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
     // Prune leftover worktrees from previous invocations before any spawn

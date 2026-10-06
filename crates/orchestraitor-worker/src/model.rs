@@ -153,8 +153,7 @@ fn record_call_cost(config: &WorkerConfig, request: &ModelRequest, usage: Option
     let (Some(attribution), Some(sink)) = (&config.attribution, &config.cost_sink) else {
         return;
     };
-    config.model_call_sequence.fetch_add(1, Ordering::Relaxed);
-    let call_number = config.model_call_sequence.load(Ordering::Relaxed);
+    let call_number = config.model_call_sequence.fetch_add(1, Ordering::Relaxed) + 1;
     let (input_tokens, output_tokens, reasoning_tokens, cache_read_tokens) =
         usage.map_or((0, 0, 0, 0), |u| {
             (

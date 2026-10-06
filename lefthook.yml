@@ -34,3 +34,4 @@ pre-push:
     # fact. Human-authored commits are exempt (their own key signs them).
     verified-commits:
       run: .agents/skills/github-pr-lifecycle/scripts/check-unsigned-bot-commits
+      use_stdin: true

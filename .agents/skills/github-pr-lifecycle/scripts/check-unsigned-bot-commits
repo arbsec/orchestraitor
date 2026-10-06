@@ -18,6 +18,7 @@
 set -euo pipefail
 
 BOT_IDENTITIES=(
+  "334074867+arbsec-agent[bot]@users.noreply.github.com"
   "arbsec-agent[bot]@users.noreply.github.com"
 )
 
@@ -27,8 +28,11 @@ while read -r _local_ref local_oid _remote_ref remote_oid; do
   [ "$local_oid" = "$zero" ] && continue        # deletion
   range="$remote_oid..$local_oid"
   [ "$remote_oid" = "$zero" ] && range="$local_oid --not --remotes"
-  # shellcheck disable=SC2086 — intentional unwordanged for --not traversal
-  for oid in $(git rev-list $range 2>/dev/null); do
+  if ! oids="$(git rev-list $range)"; then
+    echo >&2 "pre-push: cannot enumerate commits for $range"
+    exit 1
+  fi
+  for oid in $oids; do
     author_email="$(git log -1 --format='%ae' "$oid")"
     for bot in "${BOT_IDENTITIES[@]}"; do
       if [ "$author_email" = "$bot" ]; then

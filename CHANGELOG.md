@@ -13,8 +13,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
-- Per-agent cost tracking for loop-run workers (spec `10-orchestrator.md`
-  §9.19.4): `orc loop` now opens a durable cost ledger at
+- Per-agent cost tracking for loop-run workers: `orc loop` now opens a durable cost ledger at
   `.orchestraitor/cost.db` and records one cost entry per worker model call,
   attributed to the board task (agent), the routed orchestration role, and
   the loop invocation + task session. The `--json` end-of-run summary gains
