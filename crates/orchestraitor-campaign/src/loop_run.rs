@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 
-use crate::decision::NoOpReason;
+use crate::decision::{NoOpReason, SelectedTask};
 use crate::error::CampaignError;
 use crate::run_state::{LoopRunStore, RunRowStatus, StartRun};
 use crate::session::{BoardSnapshot, plan_pass, task_id_for};
@@ -84,12 +84,17 @@ pub trait BoardPoller: Send + Sync {
 pub trait LoopWorkerStarter: Send + Sync {
     /// Starts one leaf task end-to-end in the background.
     ///
+    /// Receives the full [`SelectedTask`] (title and URL included) so the
+    /// production starter can materialize the task fixture itself — the
+    /// board, not an operator's hand-written JSON file, is the task
+    /// description's source of truth.
+    ///
     /// # Errors
     ///
     /// Returns [`CampaignError::Spawn`] when no run can be started at all.
     async fn start(
         &self,
-        task_id: &str,
+        selected: &SelectedTask,
         routing: &RoleRoutingDecision,
         prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError>;
@@ -1111,11 +1116,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // row, pace, and keep supervising. Store/clock errors still
             // propagate (durable-state failure is fatal); the row written
             // above is then swept terminal by the fatal-exit guard.
-            let process = match self
-                .starter
-                .start(&selected.task_id, &self.routing, spend)
-                .await
-            {
+            let process = match self.starter.start(selected, &self.routing, spend).await {
                 Ok(process) => process,
                 Err(CampaignError::Spawn { message, .. }) => {
                     self.runs
@@ -1210,11 +1211,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                         true,
                     ),
                     RunStatus::Failed => {
-                        let class = run.failure.as_ref().map_or_else(
+                        let detail = run.failure.as_ref().map_or_else(
                             || "typed-failure".to_string(),
-                            |failure| format!("{:?}", failure.class),
+                            |failure| format!("{:?}:{}", failure.class, failure.reason),
                         );
-                        (RunRowStatus::Failed, class, false)
+                        (RunRowStatus::Failed, detail, false)
                     }
                 },
                 // The worker produced no run at all (fail-closed infra

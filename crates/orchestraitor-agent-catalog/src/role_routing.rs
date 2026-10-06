@@ -26,7 +26,12 @@ use thiserror::Error as ThisError;
 pub const BOOTSTRAP_PROVIDER: &str = "neuralwatt";
 
 /// Bootstrap fallback model id, the single-provider default from spec §10.3.
-pub const BOOTSTRAP_MODEL: &str = "glm-5.2";
+///
+/// `glm-5.2` is deprecated at the Neuralwatt endpoint (absent from
+/// `/v1/models`); the default tracks a currently-served id. The routing
+/// config (`roles.<role>.routing.model`) overrides this per deployment —
+/// bump or pin there rather than relying on the fallback.
+pub const BOOTSTRAP_MODEL: &str = "glm-5.3-flash";
 
 /// Max accepted length of a routing model identifier.
 const MAX_MODEL_ID_LEN: usize = 256;

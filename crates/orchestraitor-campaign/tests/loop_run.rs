@@ -16,7 +16,7 @@ use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_board::ReadyItem;
 use orchestraitor_campaign::{
     BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunStore,
-    LoopRunner, LoopWorkerStarter, StopReason, WorkerProcess,
+    LoopRunner, LoopWorkerStarter, SelectedTask, StopReason, WorkerProcess,
 };
 use orchestraitor_worker::{BudgetEcho, RunStatus, UsageTotals, WorkerBudgets, WorkerRun};
 
@@ -160,25 +160,26 @@ impl LoopWorkerStarter for FakeStarter {
     /// Records spawn inputs and runs the next scripted behavior with a beat channel.
     async fn start(
         &self,
-        task_id: &str,
+        selected: &SelectedTask,
         _routing: &RoleRoutingDecision,
         prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError> {
+        let task_id = selected.task_id.clone();
         self.spawns
             .lock()
             .unwrap()
-            .push((task_id.to_string(), prior_daily_spend_usd));
+            .push((task_id.clone(), prior_daily_spend_usd));
         let spawn_index = self.spawns.lock().unwrap().len() - 1;
         let behavior = self.behaviors[spawn_index % self.behaviors.len()].clone();
         if behavior == Behavior::SpawnFail {
             return Err(CampaignError::Spawn {
-                task_id: task_id.to_string(),
+                task_id,
                 message: "fixture task load failed: no such fixture".to_string(),
             });
         }
         let (tx, rx) = tokio::sync::watch::channel(0_u64);
         let beats = self.beats_observed.clone();
-        let id = task_id.to_string();
+        let id = task_id.clone();
         let run = tokio::spawn(async move {
             match behavior {
                 Behavior::Complete { turns, tokens } => Ok(fixture_run(&id, turns, tokens)),
@@ -260,7 +261,7 @@ impl Drop for LeakGuard {
 impl LoopWorkerStarter for AlwaysStartsStarter {
     async fn start(
         &self,
-        _task_id: &str,
+        _selected: &SelectedTask,
         _routing: &RoleRoutingDecision,
         _prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError> {

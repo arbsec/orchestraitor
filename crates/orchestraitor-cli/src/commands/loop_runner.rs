@@ -23,12 +23,12 @@ use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecision};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth};
 use orchestraitor_campaign::{
     BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunner,
-    LoopWorkerStarter, WorkerProcess,
+    LoopWorkerStarter, SelectedTask, WorkerProcess,
 };
 use orchestraitor_worker::bootstrap::build_bootstrap_transport;
 use orchestraitor_worker::{
-    FixtureTaskSource, MediatedBashMediator, ModelId, PendingDeliverySink, ProviderId, TaskSource,
-    WorkerBudgets, WorkerConfig, run_worker,
+    MediatedBashMediator, ModelId, PendingDeliverySink, ProviderId, WorkerBudgets, WorkerConfig,
+    run_worker,
 };
 
 use crate::cli::{ConfigPaths, LoopArgs};
@@ -212,15 +212,25 @@ impl DirectLoopStarter {
 #[async_trait]
 impl LoopWorkerStarter for DirectLoopStarter {
     /// Starts a bootstrap worker with shared budgets, prior spend, and progress beats.
+    ///
+    /// Materializes the task fixture from the board selection first: the
+    /// loop cannot rely on an operator hand-writing
+    /// `<config-dir>/worker-tasks/<id>.json` for every board item. The
+    /// fixture is (re)written on every spawn from the `SelectedTask` the
+    /// board produced — the board is the description's source of truth, and
+    /// a stale file from an earlier selection can never shadow it. The
+    /// description carries the issue title and URL only: the issue body is
+    /// fetched by the worker itself if the model needs it (URLs are data,
+    /// not pre-fetched content).
     async fn start(
         &self,
-        task_id: &str,
+        selected: &SelectedTask,
         routing: &RoleRoutingDecision,
         prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError> {
         if let Err(error) = require_bootstrap_provider(&routing.provider) {
             return Err(CampaignError::Spawn {
-                task_id: task_id.to_string(),
+                task_id: selected.task_id.clone(),
                 message: format!("{error:?}"),
             });
         }
@@ -228,22 +238,49 @@ impl LoopWorkerStarter for DirectLoopStarter {
             .tasks_dir
             .clone()
             .unwrap_or_else(|| self.config_dir.join("worker-tasks"));
-        let task = FixtureTaskSource::new(tasks_dir)
-            .load(task_id)
-            .map_err(|error| CampaignError::Spawn {
-                task_id: task_id.to_string(),
-                message: format!("fixture task load failed: {error}"),
+        if let Err(error) = std::fs::create_dir_all(&tasks_dir) {
+            return Err(CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!("worker-tasks dir creation failed: {error}"),
+            });
+        }
+        let task = orchestraitor_worker::WorkerTask {
+            id: selected.task_id.clone(),
+            slug: selected.task_id.clone(),
+            description: format!(
+                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
+                 the issue and its referenced spec sections. Work in the checked-out task \
+                 worktree; deliver per the worker contract.",
+                selected.number, selected.repo, selected.title, selected.url,
+            ),
+        };
+        let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
+        let task_bytes =
+            serde_json::to_vec_pretty(&task).map_err(|error| CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!("task fixture serialization failed: {error}"),
             })?;
+        // Write + rename so a crashed write can never leave a half-file
+        // that the id-mismatch check would silently (mis)load.
+        let temp_path = tasks_dir.join(format!(".{}.tmp", selected.task_id));
+        std::fs::write(&temp_path, &task_bytes).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture write failed: {error}"),
+        })?;
+        std::fs::rename(&temp_path, &task_path).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture rename failed: {error}"),
+        })?;
         let transport = Arc::new(
             build_bootstrap_transport(self.provider_endpoint.clone()).map_err(|error| {
                 CampaignError::Spawn {
-                    task_id: task_id.to_string(),
+                    task_id: selected.task_id.clone(),
                     message: format!("transport construction failed: {error}"),
                 }
             })?,
         );
         let mediator = Arc::new(MediatedBashMediator::new());
-        let project_dir = self.prepare_worktree(task_id)?;
+        let project_dir = self.prepare_worktree(&selected.task_id)?;
         let (beats_tx, beats_rx) = tokio::sync::watch::channel(0_u64);
         let mut config = WorkerConfig::new(
             ProviderId::from_string(routing.provider.clone()),
