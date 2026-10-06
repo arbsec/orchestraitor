@@ -40,7 +40,11 @@ pub(super) async fn call_model(
         provider_id: config.provider_id.clone(),
         model_id: config.model_id.clone(),
         messages: messages.to_vec(),
-        max_output_tokens: None,
+        // Bounded per call: an uncapped completion lets a verbose model
+        // (glm-5.x multi-block mode) burn context and wall clock in one
+        // turn. 8k output tokens is ample for one fenced action block plus
+        // reasoning; the guard is a bound, not a target.
+        max_output_tokens: Some(8_192),
         temperature: None,
         reasoning: None,
         structured_output: None,

@@ -55,11 +55,12 @@ pub(crate) enum WorkerAction {
 /// A rejected model response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ActionRejection {
-    /// The response did not contain exactly one parseable action block.
+    /// The response did not contain a parseable action block. Extra blocks
+    /// beyond the first are ignored (model verbosity), never a rejection.
     Malformed {
-        /// Static reason code (`no-action-block`, `multiple-action-blocks`,
-        /// `invalid-json`, `missing-tool-field`, `missing-field`,
-        /// `wrong-field-type`, `field-too-large`, `empty-field`).
+        /// Static reason code (`no-action-block`, `invalid-json`,
+        /// `missing-tool-field`, `missing-field`, `wrong-field-type`,
+        /// `field-too-large`, `empty-field`).
         reason: &'static str,
     },
     /// The model requested a capability outside the four-tool set. The
@@ -71,16 +72,26 @@ pub(crate) enum ActionRejection {
 }
 
 /// Parses the single fenced-json action block out of a model response.
+///
+/// A response carrying MULTIPLE fenced blocks is a known glm-5.x failure
+/// mode (issue: loop autotomy — verbose models emit per-step blocks in one
+/// turn). The FIRST block is the action; the extra blocks are rejected with
+/// corrective feedback (the model is told the rest of its response was
+/// discarded) instead of counting the whole turn as a fatal format error.
+/// Only the first block is ever executed, so protocol-wise this stays
+/// exactly as strict as before about what runs — it just recovers instead
+/// of burning the attempt budget.
 pub(crate) fn parse_action(text: &str) -> Result<WorkerAction, ActionRejection> {
     let blocks = fenced_json_blocks(text);
-    let [block] = blocks.as_slice() else {
-        return Err(ActionRejection::Malformed {
-            reason: if blocks.is_empty() {
-                "no-action-block"
-            } else {
-                "multiple-action-blocks"
-            },
-        });
+    // First block IS the action; extras are model verbosity, not protocol
+    // violations. An empty response is the only hard rejection here.
+    let block = match blocks.first() {
+        Some(block) => *block,
+        None => {
+            return Err(ActionRejection::Malformed {
+                reason: "no-action-block",
+            });
+        }
     };
     let value: serde_json::Value =
         serde_json::from_str(block).map_err(|_| ActionRejection::Malformed {
@@ -278,13 +289,23 @@ mod tests {
     }
 
     #[test]
+    fn multiple_blocks_take_first_and_ignore_extras() {
+        // glm-5.x verbosity mode: one response, many fenced blocks. Only
+        // the FIRST block is the action; the rest must be ignored, never
+        // counted as format errors (issue: loop attempt-budget exhaustion).
+        let text = "Working through it step by step.\n```json\n{\"tool\": \"read_file\", \"path\": \"a\"}\n```\nThen:\n```json\n{\"tool\": \"finish\", \"summary\": \"s\", \"success\": true}\n```";
+        assert_eq!(
+            parse_action(text),
+            Ok(WorkerAction::ReadFile {
+                path: "a".to_string()
+            })
+        );
+    }
+
+    #[test]
     fn malformed_responses_carry_static_reasons() {
         let cases = [
             ("no block at all", "no-action-block"),
-            (
-                "```json\n{\"tool\": \"read_file\", \"path\": \"a\"}\n```\n```json\n{\"tool\": \"finish\", \"summary\": \"s\", \"success\": true}\n```",
-                "multiple-action-blocks",
-            ),
             ("```json\nnot json\n```", "invalid-json"),
             ("```json\n{\"path\": \"a\"}\n```", "missing-tool-field"),
             ("```json\n{\"tool\": \"read_file\"}\n```", "missing-field"),

@@ -153,7 +153,7 @@ fn config_get_resolves_the_routing_table_for_builtin_and_custom_roles() -> miett
     for (key, expected) in [
         (
             "roles.review.routing",
-            "{\"model\":\"glm-5.2\",\"provider\":\"neuralwatt\"}",
+            "{\"model\":\"glm-5.3-flash\",\"provider\":\"neuralwatt\"}",
         ),
         (
             "roles.migrator.routing",
@@ -215,6 +215,8 @@ fn config_get_reports_provenance_for_a_custom_role_routing_table() -> miette::Re
     let rendered = String::from_utf8(output).into_diagnostic()?;
 
     assert!(rendered.contains("key = roles.migrator.routing"));
+    // The user layer's explicit override wins for the model; the project
+    // layer's provider composes with it. Neither is the built-in default.
     assert!(rendered.contains("value = {\"model\":\"glm-5.2\",\"provider\":\"neuralwatt\"}"));
     assert!(rendered.contains("source_layer = project"));
     Ok(())
@@ -318,7 +320,7 @@ fn config_get_composes_every_role_with_its_full_routing_nesting() -> miette::Res
                 .get(role)
                 .and_then(|r| r.get("routing"))
                 .and_then(|r| r.get("model")),
-            Some(&serde_json::Value::String("glm-5.2".to_string())),
+            Some(&serde_json::Value::String("glm-5.3-flash".to_string())),
             "built-in role {role} must nest under routing"
         );
     }
@@ -469,7 +471,7 @@ fn routing_resolve_persists_six_distinct_role_records() -> miette::Result<()> {
         let json: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
         assert_eq!(json["role"], role.id);
         assert_eq!(json["provider"], "neuralwatt");
-        assert_eq!(json["model"], "glm-5.2");
+        assert_eq!(json["model"], "glm-5.3-flash");
         assert!(json["record_id"].is_number());
     }
 
@@ -513,7 +515,7 @@ fn routing_resolve_inherits_missing_subkey_from_builtin_defaults() -> miette::Re
     let json: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
 
     assert_eq!(json["provider"], "neuralwatt");
-    assert_eq!(json["model"], "glm-5.2");
+    assert_eq!(json["model"], "glm-5.3-flash");
     assert_eq!(
         json["precedence_path"],
         "roles.implement.routing (provider: project, model: built-in-defaults)"

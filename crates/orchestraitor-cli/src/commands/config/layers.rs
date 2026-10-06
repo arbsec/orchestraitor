@@ -32,27 +32,27 @@ enforcement = "recommended"
 # `roles.<id>.routing.*`.
 [roles.explore.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 
 [roles.research.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 
 [roles.plan.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 
 [roles.implement.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 
 [roles.review.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 
 [roles.verify.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 "#;
 
 #[derive(Debug, Clone)]
