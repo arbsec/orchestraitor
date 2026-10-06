@@ -517,6 +517,8 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     let graphql = GraphqlSession {
         transport: &transport,
         bearer: token.token().expose_secret(),
+        owner: args.owner.clone(),
+        repo: args.repo.clone(),
     };
 
     // Read the remote branch's current head (absent for a new branch). The
@@ -923,6 +925,9 @@ fn parse_diff_tree_z(raw: &[u8]) -> Vec<(String, std::path::PathBuf)> {
 struct GraphqlSession<'a> {
     transport: &'a ApiTransport,
     bearer: &'a str,
+    /// Target repository coordinates for post-move ref verification.
+    owner: String,
+    repo: String,
 }
 
 impl GraphqlSession<'_> {
@@ -1060,9 +1065,30 @@ impl GraphqlSession<'_> {
                 }
             }),
         )?;
-        // The payload carries only clientMutationId; success is the absence
-        // of GraphQL errors (validated in execute).
-        let _ = graphql_mutation_field(&data, "updateRefs", "clientMutationId")?;
+        // UpdateRefsPayload carries ONLY the nullable clientMutationId (no
+        // refs list exists on the payload type), so the response cannot
+        // confirm the move by itself. Verify the move OUTCOME instead:
+        // re-read the branch ref and confirm it now points at `new_oid` —
+        // a null payload with an absent clientMutationId must not be
+        // reported as success.
+        graphql_mutation_field(&data, "updateRefs", "clientMutationId")?;
+        let moved_head = self.branch_ref(&self.owner, &self.repo, remote_branch)?;
+        let moved_oid = moved_head
+            .as_ref()
+            .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                miette!(
+                    "post-move ref read failed: the branch disappeared — treating the landing \
+                     as failed"
+                )
+            })?;
+        if !moved_oid.eq_ignore_ascii_case(new_oid) {
+            bail!(
+                "post-move verification failed: the branch points at {moved_oid}, expected \
+                 {new_oid} — treating the landing as failed"
+            );
+        }
         Ok(())
     }
 

@@ -273,15 +273,16 @@ Mechanics:
   `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
   deletes the temp ref and leaves the real remote branch untouched.
   Diagnostics never contain the token.
-- **Ref move is fast-forward-only:** the verified landing commit was created
-  ON TOP of the observed remote head, so `updateRef` with the default
-  `force = false` fast-forwards the real branch onto it. GraphQL
-  `UpdateRefInput` has no expected-oid field, so fast-forward-only IS the
-  compare-and-swap: a concurrent writer that advances the real ref in the
-  window makes the update FAIL with a typed error — the concurrent commit is
-  never overwritten. A new remote branch is created directly at the verified
-  commit. The real branch head therefore never regresses through an
-  ancestor-of-main state (the auto-close pitfall).
+- **Ref move with an exact-head precondition:** the verified landing commit
+  was created ON TOP of the observed remote head; the real ref is moved with
+  the `updateRefs` mutation carrying `RefUpdate.beforeOid = <observed head>`
+  and `force = false`. `beforeOid` is an exact precondition: a concurrent
+  writer that ADVANCES the branch in the window makes the update
+  non-fast-forward, and one that REWINDS it makes `beforeOid` mismatch —
+  both FAIL with a typed error, and the concurrent commit is never
+  overwritten in either direction. A new remote branch is created directly
+  at the verified commit. The real branch head therefore never regresses
+  through an ancestor-of-main state (the auto-close pitfall).
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 

@@ -2065,6 +2065,14 @@ fn spawn_push_branch_server(
     Ok((endpoint, auth_rx, body_rx))
 }
 
+/// Builds the scripted `updateRefs` success payload confirming the move of
+/// `ref_name` (the response validator checks the ref list by name).
+fn update_refs_stub(ref_name: &str) -> String {
+    format!(
+        r#"{{"data":{{"updateRefs":{{"clientMutationId":"ok","refs":[{{"id":"REF_node","name":"{ref_name}"}}]}}}}}}"#
+    )
+}
+
 fn push_branch_cli(
     temp: &tempfile::TempDir,
     repo: &str,
@@ -2127,7 +2135,11 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         ),
         (
             "updateRefs".to_string(),
-            r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string(),
+            update_refs_stub("refs/heads/feature/signed"),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
         ),
         temp_probe_rule,
     ];
@@ -2165,8 +2177,8 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         }
     }
     assert_eq!(
-        calls, 7,
-        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRef fast-forward + deleteRef, one minted token each"
+        calls, 8,
+        "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRefs + post-move ref re-read + deleteRef, one minted token each"
     );
     Ok(())
 }
@@ -2535,7 +2547,11 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
         ),
         (
             "updateRefs".to_string(),
-            r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string(),
+            update_refs_stub("refs/heads/feature/signed"),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
         ),
         (
             "deleteRef".to_string(),

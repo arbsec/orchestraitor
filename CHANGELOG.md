@@ -144,10 +144,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (`push-branch/tmp-<tree>`, bootstrapped via `createRef` — the mutation does
   not auto-create branches) at the observed remote head (or the base commit
   for a new branch) so the tree-equality and `signature.isValid` gates run
-  before the real ref moves; the swing is a fast-forward-only `updateRef`
-  (the landing commit is created on top of the observed remote head, and a
-  concurrent writer advance makes the fast-forward fail with a typed error
-  instead of being overwritten). The temp ref is invocation-unique (uuid
+  before the real ref moves; the swing is `updateRefs` with
+  `RefUpdate.beforeOid` set to the observed remote head (exact-head
+  precondition, `force = false`): a concurrent writer advance OR rewind of
+  the branch makes the precondition fail with a typed error instead of being
+  overwritten. The temp ref is invocation-unique (uuid
   name) and deleted on every path. An empty diff (the local tree equals the
   remote head tree — the head is read before the decision) is a no-op. Gates
   fail closed with typed errors (no `git push` fallback); a failed gate
