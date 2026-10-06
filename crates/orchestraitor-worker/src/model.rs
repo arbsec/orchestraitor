@@ -63,12 +63,12 @@ pub(super) async fn call_model(
                         record_call_cost(config, &request, usage, CallOutcome::Completed, started);
                         return Ok(text);
                     }
-                    Err(failure) => {
+                    Err((failure, usage)) => {
                         // The transport attempt happened and may have
                         // produced usage before the stream went invalid:
-                        // record the failed call so the ledger reflects
-                        // the spend (spec §9.26.4).
-                        record_call_cost(config, &request, None, CallOutcome::Failed, started);
+                        // record the failed call with any partial usage so
+                        // the ledger reflects the spend (spec §9.26.4).
+                        record_call_cost(config, &request, usage, CallOutcome::Failed, started);
                         return Err(failure);
                     }
                 }
@@ -107,35 +107,112 @@ pub(super) async fn call_model(
 /// Folds one event stream into response text and usage. A stream without a
 /// `Completed` terminator — or carrying native tool calls the text protocol
 /// never requests — is an invalid stream (fail closed, not a silent trim).
-fn collect_events(events: ModelEventStream) -> Result<(String, Option<TokenCount>), TypedFailure> {
+/// The `Err` payload carries any usage observed before the failure so the
+/// failed call still records its partial spend.
+fn collect_events(
+    events: ModelEventStream,
+) -> Result<(String, Option<TokenCount>), (TypedFailure, Option<TokenCount>)> {
     let mut text = String::new();
     let mut usage = None;
     let mut completed = false;
     for event in events {
-        let event = event.map_err(|_| TypedFailure {
-            class: FailureClass::ProviderError,
-            reason: "provider-invalid-event",
-        })?;
+        let Ok(event) = event else {
+            return Err((
+                TypedFailure {
+                    class: FailureClass::ProviderError,
+                    reason: "provider-invalid-event",
+                },
+                usage,
+            ));
+        };
         match event {
             ModelEvent::Started => {}
             ModelEvent::Completed => completed = true,
             ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
             ModelEvent::Usage { token_count } => usage = Some(token_count),
             ModelEvent::ToolCall { .. } => {
-                return Err(TypedFailure {
-                    class: FailureClass::ProviderError,
-                    reason: "provider-unexpected-tool-call",
-                });
+                return Err((
+                    TypedFailure {
+                        class: FailureClass::ProviderError,
+                        reason: "provider-unexpected-tool-call",
+                    },
+                    usage,
+                ));
             }
         }
     }
     if !completed {
-        return Err(TypedFailure {
-            class: FailureClass::ProviderError,
-            reason: "provider-invalid-event",
-        });
+        return Err((
+            TypedFailure {
+                class: FailureClass::ProviderError,
+                reason: "provider-invalid-event",
+            },
+            usage,
+        ));
     }
     Ok((text, usage))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A stream item error after a Usage event must carry the partial usage
+    /// out of `collect_events` (spec §9.26.4: failed calls still record spend).
+    #[test]
+    fn stream_error_after_usage_carries_partial_usage() {
+        let partial = TokenCount {
+            input_tokens: 11,
+            output_tokens: 7,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let events: ModelEventStream = Box::new(
+            vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::Usage {
+                    token_count: partial,
+                }),
+                Err(ProviderTransportError::InvalidEvent),
+            ]
+            .into_iter(),
+        );
+        let Err((_, usage)) = collect_events(events) else {
+            panic!("stream error must fail collect_events");
+        };
+        assert_eq!(usage, Some(partial));
+    }
+
+    /// A missing `Completed` terminator is an invalid stream, and any usage
+    /// observed before the truncation must still be carried out.
+    #[test]
+    fn missing_completed_terminator_carries_partial_usage() {
+        let partial = TokenCount {
+            input_tokens: 3,
+            output_tokens: 4,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let events: ModelEventStream = Box::new(
+            vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::TextDelta {
+                    text: "partial".to_string(),
+                }),
+                Ok(ModelEvent::Usage {
+                    token_count: partial,
+                }),
+            ]
+            .into_iter(),
+        );
+        let Err((failure, usage)) = collect_events(events) else {
+            panic!("truncated stream must fail collect_events");
+        };
+        assert_eq!(failure.reason, "provider-invalid-event");
+        assert_eq!(usage, Some(partial));
+    }
 }
 
 /// Accumulates usage and evaluates the daily spend soft cap (soft: recorded,
