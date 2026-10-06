@@ -146,7 +146,7 @@ CHANGELOG entry.
 Derive concrete practice from [`docs/spec/tech-stack.md`](docs/spec/tech-stack.md) and the
 Arbitraitor `AGENTS.md`. Consistency with the sibling project is intentional.
 
-- **Edition 2024**, Rust 1.96.0 pinned in `rust-toolchain.toml` (matches Arbitraitor MSRV).
+- **Edition 2024**, Rust 1.98.1 pinned in `rust-toolchain.toml` (matches Arbitraitor MSRV).
 - **Lint policy:** workspaces `#![forbid(unsafe_code)]` in core crates; `#![deny(missing_docs,
   unwrap_used, expect_used, panic, unimplemented, dbg_macro, print_stdout, print_stderr)]`;
 `#![warn(clippy::pedantic, clippy::cargo)]` — matches Arbitraitor.
