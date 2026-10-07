@@ -76,8 +76,10 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
       # gh pr edit accepts comma-separated operands; check EVERY reviewer in
       # the operand, not the operand as a whole.
       IFS=',' read -ra operand_reviewers <<< "${REST[$((index + 1))]:-}"
+      operand_has_login=false
       for reviewer in "${operand_reviewers[@]}"; do
         [ -z "$reviewer" ] && continue
+        operand_has_login=true
         if printf '%s' "$PENDING" | tr ',' '\n' | grep -qxF "$reviewer" ||
            printf '%s' "$APPROVED_BY" | tr ',' '\n' | grep -qxF "$reviewer"; then
           echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"$reviewer\",\"note\":\"edge-triggered: reviewer already pending or approved; post a thread reply that the new head invalidates prior review convergence instead\"}" >&2
@@ -85,6 +87,13 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
         fi
         REVIEWERS_TO_ADD+=("$reviewer")
       done
+      # An operand of only delimiters (",,") parses to zero reviewer names;
+      # gh cli#7721 shows empty reviewer arrays REMOVE existing reviewers.
+      # Reject the operand instead of forwarding it.
+      if [ "$operand_has_login" = false ]; then
+        echo "error: --add-reviewer operand '${REST[$((index + 1))]:-}' contains no reviewer login" >&2
+        exit "$ORC_ERR_CONFIG"
+      fi
     fi
     index=$((index + 1))
   done
