@@ -70,6 +70,13 @@ fi
 HEAD_SHA="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid --jq '.headRefOid')" ||
   { echo "error: cannot read PR #$PR head" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
 
+# Fail fast on --json without jq BEFORE consuming a review run whose requested
+# output cannot be produced.
+if [ "$OPT_JSON" = true ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: --json requires jq, which is not installed" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
 # --- Mergeable gate (shared; identical rule as the GitHub-trigger scripts) ------
 # A local review of a conflicting PR would remediate a diff that cannot land;
 # the typed refusal (exit 5) is the same no-review-while-conflicting rule.
@@ -86,16 +93,18 @@ FINDINGS_RAW="$(coderabbit review --agent)"
 CR_RC=$?
 set -e
 if [ "$CR_RC" -ne 0 ]; then
-  echo "error: coderabbit review --agent failed with exit code $CR_RC (output above, if any)" >&2
+  # CodeRabbit can emit findings before failing; retain them for diagnosis,
+  # clearly marked as partial — never presented as a completed review.
+  if [ -n "$FINDINGS_RAW" ]; then
+    echo "--- partial coderabbit findings (review FAILED, exit $CR_RC) ---" >&2
+    printf '%s\n' "$FINDINGS_RAW" >&2
+  fi
+  echo "error: coderabbit review --agent failed with exit code $CR_RC" >&2
   exit "$ORC_ERR_POLICY"
 fi
 
 # --- Output ----------------------------------------------------------------------
 if [ "$OPT_JSON" = true ]; then
-  command -v jq >/dev/null 2>&1 || {
-    echo "error: --json requires jq, which is not installed" >&2
-    exit "$ORC_ERR_CONFIG"
-  }
   jq -n --arg pr "$PR" --arg head "$HEAD_SHA" --arg findings_raw "$FINDINGS_RAW" \
     '{pr: ($pr | tonumber), head: $head, findings_raw: $findings_raw}'
 else
