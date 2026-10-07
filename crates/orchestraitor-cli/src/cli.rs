@@ -182,12 +182,15 @@ pub enum GitHubCommand {
     /// Land a local branch's tree as ONE App-signed squashed commit on the
     /// remote branch.
     ///
-    /// Computes the branch's tree versus the remote head (or the base
-    /// branch for a new branch), creates or force-moves the remote branch
-    /// via the GitHub GraphQL API (`createCommitOnBranch` + ref update),
-    /// and verifies tree equality and `verified = true` before reporting
-    /// success — fail-closed with a typed error when the landed commit is
-    /// not GitHub-signed. Never uses plain `git push`.
+    /// Computes the branch's tree versus the REMOTE HEAD's tree when the
+    /// branch already exists on the remote (fetched locally first), or
+    /// versus the base branch tree for a NEW remote branch; creates the
+    /// remote branch or fast-forwards it with an exact-head precondition
+    /// (never overwrites a concurrent commit) via the GitHub GraphQL API
+    /// (`createCommitOnBranch` + `updateRefs` with `beforeOid`), and verifies
+    /// tree equality and `verified = true` before reporting success —
+    /// fail-closed with a typed error when the landed commit is not
+    /// GitHub-signed. Never uses plain `git push`.
     PushBranch(PushBranchArgs),
     /// Verify the ambient git commit identity of a checkout against the
     /// App-derived canonical commit identity.
@@ -244,9 +247,10 @@ pub struct PushBranchArgs {
     #[arg(long)]
     pub remote_branch: Option<String>,
     /// Base branch the local branch was cut from; its tree is the diff base
-    /// for a NEW remote branch (default: the repo default branch read from
-    /// the API). The diff base for an EXISTING remote branch is always that
-    /// branch's head tree, so a second landing carries only the delta.
+    /// for a NEW remote branch (default: `origin/main`, then `main` if
+    /// `origin/main` cannot be resolved). The diff base for an EXISTING
+    /// remote branch is always that branch's head tree, so a second landing
+    /// carries only the delta.
     #[arg(long)]
     pub base: Option<String>,
     /// Commit message headline (first line).

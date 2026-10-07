@@ -414,3 +414,137 @@ fn json_lines(records: &[AuditRecord]) -> Result<Vec<u8>, EventError> {
     }
     Ok(output)
 }
+
+#[test]
+fn sqlite_cached_head_hit_fallback_and_invalidation() -> Result<(), EventError> {
+    use crate::SqliteAuditStore;
+
+    let directory = tempfile::tempdir()
+        .map_err(|error| EventError::Json(serde_json::Error::io(std::io::Error::other(error))))?;
+    let path = directory.path().join("audit.db");
+
+    // 1. Two appends in a row: the second links to the first's hash — the
+    //    cache-hit path (verified_head_for_append returns the cached head).
+    let mut store = SqliteAuditStore::open(&path)?;
+    let first = store.append(event(1, EventCategory::SessionLifecycle, json!({}), None)?)?;
+    let second = store.append(event(
+        2,
+        EventCategory::SessionLifecycle,
+        json!({"state":"second"}),
+        Some(first.hash.clone()),
+    )?)?;
+    assert_eq!(second.envelope.prev_hash, Some(first.hash.clone()));
+
+    // 2. A foreign connection edits the file: the next append must detect the
+    //    data_version bump and re-verify from disk instead of trusting the
+    //    stale cached head (the foreign write replaced the history).
+    {
+        let mut rival = SqliteAuditStore::open(&path)?;
+        rival.r#import(&json_lines(&[{
+            let mut divergent = InMemoryAuditStore::default();
+            divergent.append(event(
+                1,
+                EventCategory::SessionLifecycle,
+                json!({"state":"diverged"}),
+                None,
+            )?)?;
+            divergent.export(PrivacyExportMode::Full)?;
+            // Build one-record export: re-run through a fresh store.
+            let mut one = InMemoryAuditStore::default();
+            let record = one.append(event(
+                1,
+                EventCategory::SessionLifecycle,
+                json!({"state":"diverged"}),
+                None,
+            )?)?;
+            let _ = record;
+            let mut one = InMemoryAuditStore::default();
+            one.append(event(
+                1,
+                EventCategory::SessionLifecycle,
+                json!({"state":"diverged"}),
+                None,
+            )?)?;
+            let exported = one.export(PrivacyExportMode::Full)?;
+            serde_json::from_slice::<AuditRecord>(
+                exported.split(|b| *b == b'\n').next().unwrap_or(&[]),
+            )?
+        }])?)?;
+    }
+
+    // 3. The append after the foreign import must FAIL (sequence 3 does not
+    //    follow the diverged chain's head), proving the stale cache was NOT
+    //    trusted and the full re-verification path engaged.
+    let stale_append = store.append(event(
+        3,
+        EventCategory::SessionLifecycle,
+        json!({"state":"after-diverge"}),
+        Some(second.hash.clone()),
+    )?);
+    // validate_next_envelope checks the SEQUENCE before prev_hash: the
+    // imported (diverged) history ends at sequence 1, so appending
+    // sequence 3 fails with SequenceGap { expected: 2 }.
+    assert!(
+        matches!(
+            &stale_append,
+            Err(EventError::SequenceGap {
+                expected: 2,
+                observed: 3,
+            })
+        ),
+        "expected SequenceGap {{ expected: 2, observed: 3 }} (full re-verification must engage \
+         after a foreign history replacement), got: {stale_append:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_cached_head_invalidates_on_foreign_append() -> Result<(), EventError> {
+    use crate::SqliteAuditStore;
+
+    let directory = tempfile::tempdir()
+        .map_err(|error| EventError::Json(serde_json::Error::io(std::io::Error::other(error))))?;
+    let path = directory.path().join("audit.db");
+
+    // Two appends on connection A populate its cached head (seq 2).
+    let mut store = SqliteAuditStore::open(&path)?;
+    let first = store.append(event(1, EventCategory::SessionLifecycle, json!({}), None)?)?;
+    let second = store.append(event(
+        2,
+        EventCategory::SessionLifecycle,
+        json!({"state":"second"}),
+        Some(first.hash.clone()),
+    )?)?;
+
+    // A foreign connection appends seq 3 (a legitimate foreign append, not an
+    // import): the file advances past A's cached head.
+    let mut rival = SqliteAuditStore::open(&path)?;
+    let _third = rival.append(event(
+        3,
+        EventCategory::SessionLifecycle,
+        json!({"state":"foreign"}),
+        Some(second.hash.clone()),
+    )?)?;
+
+    // A's next append must NOT trust the cached head (seq 2): the row at the
+    // cached seq still exists but is no longer MAX, so the full re-verification
+    // path engages and validate_next_envelope expects sequence 4.
+    let stale_append = store.append(event(
+        3,
+        EventCategory::SessionLifecycle,
+        json!({"state":"after-foreign-append"}),
+        Some(second.hash.clone()),
+    )?);
+    assert!(
+        matches!(
+            &stale_append,
+            Err(EventError::SequenceGap {
+                expected: 4,
+                observed: 3,
+            })
+        ),
+        "expected SequenceGap {{ expected: 4, observed: 3 }} (cached head must not be trusted \
+         after a foreign append), got: {stale_append:?}"
+    );
+    Ok(())
+}

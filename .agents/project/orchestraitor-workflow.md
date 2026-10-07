@@ -104,6 +104,26 @@ items assigned to a declared service identity schedulable
 (spec `10-orchestrator.md` §9.41; the declared set is `service_identities` in layered config
 and `[service_identities].slugs` in the project config, default `arbsec-agent`).
 
+## Review-thread discipline
+
+Owner directive (2026-10-07): when commenting on a fixed conversation, the
+agent comments IN that conversation — every remediation answer to an inline
+review comment is posted as a REPLY on that comment's thread
+(`pr-thread-reply`; REST `.../comments/{id}/replies` or GraphQL
+`addPullRequestReviewThreadReply`), never as a standalone main-thread PR
+comment. Main-thread comments are reserved for generation summaries, formal
+resolutions of non-thread findings, and gate verdicts (see
+[`.agents/skills/github-pr-lifecycle/references/review-thread-reply.md`](../skills/github-pr-lifecycle/references/review-thread-reply.md)).
+
+## Commit identity
+
+Commits destined for PR branches MUST be authored as the service principal,
+never an ambient human git identity: fresh clones/worktrees inherit the
+global gitconfig and silently attribute commits to the human owner (audit
+class unauthorized-identity). Before any local `git commit` on a PR branch,
+run `commit-identity check` (or `eval "$(commit-identity env)"`); a human
+identity there is a policy violation (exit 3), not a warning.
+
 ## Security-first review
 
 - **Orchestraitor implements no security primitive** (spec `40-arbitraitor-integration.md` §2.2, §16). A Task that needs new
