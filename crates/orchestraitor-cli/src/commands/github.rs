@@ -650,14 +650,26 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             None => graphql.default_branch(&owner, &repo)?,
         };
         let base_head = match graphql.default_branch_head(&owner, &repo, &base_ref) {
-            Ok(head) => head,
-            Err(_) if args.base.is_some() => {
+            // Remote branch resolved through the API (never a stale local ref).
+            Ok(Some(head)) => head,
+            // ONLY an absent remote branch falls back to a local revision of
+            // an explicit --base (a raw SHA, origin/main, a tag). API
+            // transport/HTTP/GraphQL errors propagate: an API failure must
+            // never be mistaken for "no such branch" and diffed against a
+            // possibly-stale local ref.
+            Ok(None) if args.base.is_some() => {
                 git(&["rev-parse", "--verify", &base_ref]).map_err(|_| {
                     miette!(
                         "cannot resolve the --base revision `{base_ref}`: it is neither a \
                          remote branch of {owner}/{repo} nor a local revision"
                     )
                 })?
+            }
+            Ok(None) => {
+                bail!(
+                    "the default branch of {owner}/{repo} resolved to {base_ref} but no such \
+                     remote branch exists — pass --base <ref> explicitly"
+                )
             }
             Err(error) => return Err(error),
         };
@@ -1587,8 +1599,11 @@ impl GraphqlSession<'_> {
 
     /// Resolves a branch name to its head commit oid via the API (for a base
     /// ref that does not resolve locally after a fetch — fetched refs land
-    /// in `FETCH_HEAD`, not under a local name).
-    fn default_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<String> {
+    /// in `FETCH_HEAD`, not under a local name). `Ok(None)` ONLY when the
+    /// remote branch is absent (`repository.ref` is null); transport, HTTP,
+    /// and GraphQL errors propagate so callers never mistake an API failure
+    /// for "no such branch" and silently fall back to a stale local ref.
+    fn default_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
         let data = self.execute(
             "base head query",
             "query($owner:String!,$repo:String!,$qualified:String!){repository(owner:$owner,\
@@ -1599,9 +1614,13 @@ impl GraphqlSession<'_> {
                 "qualified": format!("refs/heads/{branch}"),
             }),
         )?;
+        let absent = data.pointer("/repository/ref").is_some_and(Value::is_null);
+        if absent {
+            return Ok(None);
+        }
         data.pointer("/repository/ref/target/oid")
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .map(|oid| Some(oid.to_string()))
             .ok_or_else(|| miette!("base ref query response is malformed: missing ref.target.oid"))
     }
 
