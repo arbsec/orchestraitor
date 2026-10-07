@@ -2154,6 +2154,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2228,6 +2229,7 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2288,6 +2290,7 @@ fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2327,6 +2330,7 @@ fn github_push_branch_required_enforcement_fails_closed_without_config() -> miet
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2391,6 +2395,7 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
         &[
             "github",
             "push-branch",
+            "--branch",
             "main",
             "--message",
             "no-op",
@@ -2469,6 +2474,7 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2570,6 +2576,7 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
         &[
             "github",
             "push-branch",
+            "--branch",
             "feature/signed",
             "--message",
             "feat: signed landing",
@@ -2692,6 +2699,7 @@ fn github_push_branch_re_land_signs_an_unsigned_head() -> miette::Result<()> {
         &[
             "github",
             "push-branch",
+            "--branch",
             "main",
             "--re-land",
             "--message",
@@ -2763,6 +2771,7 @@ fn github_push_branch_re_land_is_a_no_op_on_a_verified_head() -> miette::Result<
         &[
             "github",
             "push-branch",
+            "--branch",
             "main",
             "--re-land",
             "--message",
@@ -2836,6 +2845,7 @@ fn github_push_branch_re_land_fails_closed_on_unsigned_landing() -> miette::Resu
         &[
             "github",
             "push-branch",
+            "--branch",
             "main",
             "--re-land",
             "--message",
@@ -2862,4 +2872,369 @@ fn fixture_main_tree(repo: &str) -> miette::Result<String> {
         .output()
         .into_diagnostic()?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// --- `orc github push-branch`: mode warning and dry-run ----------------------
+
+#[test]
+fn github_push_branch_warns_when_adding_a_locally_executable_file() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // createCommitOnBranch FileAddition always lands 100644: adding a file
+    // that is 100755 locally must print a WARNING on stderr before any
+    // mutation, and the landing itself proceeds (the tree gate decides).
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    {
+        use std::process::Command;
+        // Make the feature file executable in the branch's committed tree.
+        let status = Command::new("git")
+            .args(["-C", &repo, "checkout", "--quiet", "feature/signed"])
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success());
+        std::fs::set_permissions(
+            format!("{repo}/feature.txt"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .into_diagnostic()?;
+        let env = |command: &mut Command| {
+            command
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com");
+        };
+        let mut commit = Command::new("git");
+        commit
+            .args(["-C", &repo, "add", "feature.txt"])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com");
+        assert!(commit.status().into_diagnostic()?.success());
+        let mut commit = Command::new("git");
+        env(&mut commit);
+        commit.args(["-C", &repo, "commit", "-qm", "chmod"]);
+        assert!(commit.status().into_diagnostic()?.success());
+    }
+    // mode 100755 on feature.txt: the warning must fire even in dry-run.
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "exec landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+            "--dry-run",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "dry-run must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("WARNING") && stderr.contains("100755") && stderr.contains("100644"),
+        "the 100644 mode limitation must be warned on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("dry-run"),
+        "dry-run must print the landing plan: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_dry_run_prints_plan_without_mutation() -> miette::Result<()> {
+    // --dry-run: the branch probe and (for a new branch) the default-branch
+    // read happen, but NO createRef/createCommitOnBranch/updateRefs — the
+    // empty rules list makes any further request fail the test.
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "preview only",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+            "--dry-run",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("dry-run") && stderr.contains("fileChanges: 1 addition(s)"),
+        "the plan must name the payload shape: {stderr}"
+    );
+    let _ = feature_tree;
+    Ok(())
+}
+
+// --- `orc github verify-identity`: commit-identity gate ----------------------
+
+/// Runs `orc github verify-identity [path]` against a stub App
+/// (`GET /app` + `GET /users/{slug}[bot]` -> the canonical identity).
+fn verify_identity_cli(
+    temp: &tempfile::TempDir,
+    endpoint: &str,
+    cwd: &str,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            endpoint,
+        ])
+        .args(args)
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .into_diagnostic()
+}
+
+/// Builds a throwaway repo with the given ambient identity configured
+/// (repo-local config; the test env never reaches the global gitconfig
+/// because repo config wins — an unset identity needs the env approach).
+fn spawn_identity_repo(
+    name: Option<&str>,
+    email: Option<&str>,
+) -> miette::Result<(tempfile::TempDir, String)> {
+    use std::process::Command;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let run = |args: &[&str]| -> miette::Result<()> {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    };
+    run(&["init", "-q", "-b", "main"])?;
+    if let Some(name) = name {
+        run(&["config", "user.name", name])?;
+    }
+    if let Some(email) = email {
+        run(&["config", "user.email", email])?;
+    }
+    Ok((temp, repo.display().to_string()))
+}
+
+/// A stub server for `GET /app` (App JWT) and
+/// `GET /users/arbsec-agent[bot]` (installation token): the flow
+/// `commit-author` runs (JWT first, then mint, then the bot profile).
+fn spawn_identity_app_server() -> miette::Result<String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).into_diagnostic()?;
+    let endpoint = format!("http://{}", listener.local_addr().into_diagnostic()?);
+    thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut stream) = connection else { break };
+            let mut buffer = [0u8; 8192];
+            let read = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let payload = if request.contains("GET /app ") {
+                r#"{"id":5082653,"slug":"arbsec-agent"}"#.to_string()
+            } else if request.contains("GET /users/arbsec-agent[bot] ") {
+                r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#.to_string()
+            } else {
+                // Mint response for /app/installations/….
+                let expires_at_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    + 3_300;
+                let expires_at = time::OffsetDateTime::from_unix_timestamp(
+                    expires_at_epoch.try_into().unwrap_or(0),
+                )
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "1970-01-02T00:00:00Z".to_string());
+                format!(r#"{{"token":"{GITHUB_APP_TOKEN_MARKER}","expires_at":"{expires_at}"}}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+    Ok(endpoint)
+}
+
+#[test]
+fn github_verify_identity_passes_on_the_bot_identity() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_identity_app_server()?;
+    let (_repo_temp, repo) = spawn_identity_repo(
+        Some("arbsec-agent[bot]"),
+        Some("334074867+arbsec-agent[bot]@users.noreply.github.com"),
+    )?;
+
+    let output = verify_identity_cli(&temp, &endpoint, &repo, &["github", "verify-identity"])?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("identity OK") && stderr.contains("arbsec-agent[bot]"),
+        "stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_verify_identity_fails_typed_on_personal_identity_with_the_exact_fix() -> miette::Result<()>
+{
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_identity_app_server()?;
+    // The incident shape: a fresh worktree inherits the human owner's
+    // global gitconfig (mekwall / marcus.ekwall@gmail.com).
+    let (_repo_temp, repo) = spawn_identity_repo(Some("mekwall"), Some("marcus.ekwall@gmail.com"))?;
+
+    let output = verify_identity_cli(&temp, &endpoint, &repo, &["github", "verify-identity"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("commit identity mismatch") && stderr.contains("mekwall"),
+        "the mismatch must be typed and name the ambient identity: {stderr}"
+    );
+    // miette wraps long lines and prefixes each continuation with the `│`
+    // gutter; strip the gutters, then compare whitespace-collapsed text.
+    let unwrapped: String = stderr
+        .lines()
+        .map(|line| line.trim_start_matches([' ', '│']))
+        .collect::<Vec<_>>()
+        .join("");
+    let flat: String = unwrapped.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("git-cuser.name='arbsec-agent[bot]'-cuser.email='334074867+arbsec-agent[bot]@users.noreply.github.com'commit"),
+        "the error must carry the exact -c fix: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_verify_identity_fails_on_unset_identity() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    let endpoint = spawn_identity_app_server()?;
+    // No user.name/user.email configured at all: git would fall back to an
+    // auto-detected identity — the gate must refuse instead.
+    let (repo_temp, repo) = spawn_identity_repo(None, None)?;
+    // Force a clean environment: unset the ambient global identity for the
+    // child (repo config absent, so `git config` reads the global file).
+    let output = {
+        use std::process::{Command, Stdio};
+        Command::new(env!("CARGO_BIN_EXE_orc"))
+            .args([
+                "--project-dir",
+                &temp.path().display().to_string(),
+                "--config-dir",
+                &temp.path().display().to_string(),
+                "--github-api-endpoint",
+                &endpoint,
+                "github",
+                "verify-identity",
+            ])
+            .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+            .env("HOME", stub_home(&repo_temp)?)
+            .current_dir(&repo)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .into_diagnostic()?
+    };
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("is unset"),
+        "an unset identity must fail typed: {stderr}"
+    );
+    Ok(())
+}
+
+/// A scratch HOME with an empty gitconfig so the child's `git config
+/// user.name/email` reads nothing global.
+fn stub_home(repo_temp: &tempfile::TempDir) -> miette::Result<String> {
+    let home = repo_temp.path().join("home");
+    fs::create_dir_all(&home).into_diagnostic()?;
+    fs::write(home.join(".gitconfig"), "").into_diagnostic()?;
+    Ok(home.display().to_string())
 }

@@ -182,13 +182,24 @@ pub enum GitHubCommand {
     /// Land a local branch's tree as ONE App-signed squashed commit on the
     /// remote branch.
     ///
-    /// Computes the branch's tree versus the base branch, creates or
-    /// force-moves the remote branch via the GitHub GraphQL API
-    /// (`createCommitOnBranch` + ref update), and verifies tree equality and
-    /// `verified = true` before reporting success — fail-closed with a typed
-    /// error when the landed commit is not GitHub-signed. Never uses plain
-    /// `git push`.
+    /// Computes the branch's tree versus the remote head (or the base
+    /// branch for a new branch), creates or force-moves the remote branch
+    /// via the GitHub GraphQL API (`createCommitOnBranch` + ref update),
+    /// and verifies tree equality and `verified = true` before reporting
+    /// success — fail-closed with a typed error when the landed commit is
+    /// not GitHub-signed. Never uses plain `git push`.
     PushBranch(PushBranchArgs),
+    /// Verify the ambient git commit identity of a checkout against the
+    /// App-derived canonical commit identity.
+    ///
+    /// The Rust twin of the `commit-identity` skill script: compares the
+    /// ambient `git config user.name`/`user.email` in the target path with
+    /// the service-identity author (`commit-author` derivation, never
+    /// hardcoded) and exits with a typed error carrying the exact
+    /// `git -c user.name=… -c user.email=…` fix on mismatch — so a fresh
+    /// worktree inheriting a personal global gitconfig cannot stamp
+    /// personal attribution onto agent commits.
+    VerifyIdentity(VerifyIdentityArgs),
 }
 
 /// Arguments for `orc github api`.
@@ -222,28 +233,36 @@ pub struct GhEnvArgs {
 /// Arguments for `orc github push-branch`.
 #[derive(Debug, Clone, Args)]
 pub struct PushBranchArgs {
-    /// Local branch whose tree is landed (its HEAD tree, not a commit chain).
-    pub branch: String,
+    /// Local branch whose tree is landed (its HEAD tree, not a commit chain;
+    /// multiple local commits squash-land as ONE remote commit with this
+    /// tree — the landing is a tree operation, never a history replay).
+    /// Defaults to the current branch of the working directory.
+    #[arg(long)]
+    pub branch: Option<String>,
     /// Branch to create or update on the remote. Defaults to the local
     /// branch name.
     #[arg(long)]
     pub remote_branch: Option<String>,
     /// Base branch the local branch was cut from; its tree is the diff base
-    /// (default: the merge-base with `origin/main`).
+    /// for a NEW remote branch (default: the repo default branch read from
+    /// the API). The diff base for an EXISTING remote branch is always that
+    /// branch's head tree, so a second landing carries only the delta.
     #[arg(long)]
     pub base: Option<String>,
     /// Commit message headline (first line).
     #[arg(long)]
     pub message: String,
-    /// Commit message body (optional, after the headline).
+    /// Read the commit message body from a file (`-` = stdin).
     #[arg(long)]
-    pub body: Option<String>,
-    /// Owner/org of the target repository (e.g. `arbsec`).
+    pub body_file: Option<String>,
+    /// Owner/org of the target repository (e.g. `arbsec`). Defaults to the
+    /// owner resolved from the `origin` remote of the current directory.
     #[arg(long)]
-    pub owner: String,
-    /// Repository name (e.g. `orchestraitor`).
+    pub owner: Option<String>,
+    /// Repository name (e.g. `orchestraitor`). Defaults to the repo name
+    /// resolved from the `origin` remote of the current directory.
     #[arg(long)]
-    pub repo: String,
+    pub repo: Option<String>,
     /// Re-land even when the diff against the remote head is EMPTY: land an
     /// empty App-signed commit whose parent is the remote head. This is the
     /// signed fix for a rebased PR branch whose local chain is unsigned:
@@ -258,6 +277,19 @@ pub struct PushBranchArgs {
     /// an ordinary landing, not a re-land.
     #[arg(long)]
     pub re_land: bool,
+    /// Preview the landing without touching the remote: print the resolved
+    /// owner/repo, branches, diff base, and the file-changes payload shape
+    /// (paths and statuses only — never blob contents), then exit 0.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `orc github verify-identity`.
+#[derive(Debug, Clone, Args)]
+pub struct VerifyIdentityArgs {
+    /// Worktree or repository whose ambient git commit identity is checked
+    /// (default: the current directory).
+    pub path: Option<String>,
 }
 
 /// Arguments for `orc init`.

@@ -13,6 +13,35 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orc github verify-identity [path]`: verifies the ambient git commit
+  identity of a checkout (`git config user.name`/`user.email`) against the
+  App-derived canonical commit identity (`commit-author` derivation, never
+  hardcoded) and exits with a typed error carrying both exact fixes —
+  `git -c user.name=… -c user.email=… commit …` and the equivalent
+  `git config` pair — on mismatch. An unset identity is also a typed error
+  (git would fall back to an auto-detected identity). This is the Rust twin
+  of the `commit-identity` skill script: the shell script stays for agents'
+  pre-commit use; orc now enforces the same gate natively, closing the
+  incident class where a fresh worktree inherited the global personal
+  gitconfig and stamped the human owner's identity onto PR commits.
+- `orc github push-branch` now works out of the box from a worktree: the
+  target repository resolves from the `origin` remote (with `--owner`/`--repo`
+  as typed overrides), the local branch defaults to HEAD, and the commit
+  message body comes from `--body-file` (`-` = stdin). A `--dry-run` flag
+  prints the resolved landing plan (paths and statuses only, never blob
+  contents) without touching the remote. The diff base for a NEW remote
+  branch defaults to the repository's default branch read from the API
+  (previously only `origin/main`/`main` resolved locally); for an EXISTING
+  remote branch the diff base stays that branch's remote head tree. The
+  `updateRefs` false-negative is fixed: when the ref-swing mutation reports a
+  GraphQL error or a missing `clientMutationId` but a re-read proves the
+  branch moved to the new head, the landing is reported as a success with a
+  WARNING on stderr instead of a spurious typed error. Added files that are
+  executable (100755) locally trigger a stderr WARNING that
+  `createCommitOnBranch` `FileAddition` always lands 100644 (the limitation
+  is documented; the tree gate still refuses a mode-mismatched landing).
+  Multiple local commits continue to squash-land as ONE App-signed commit
+  (documented).
 - SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
   durable §9.17 audit persistence. The store performs hash-chain validation
   that detects inconsistencies between envelope bytes, hashes, and metadata —

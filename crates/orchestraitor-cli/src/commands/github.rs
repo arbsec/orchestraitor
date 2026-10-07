@@ -13,7 +13,7 @@ use orchestraitor_core::github_app::{
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
-use crate::cli::{ApiArgs, ConfigPaths, GitHubCommand, PushBranchArgs};
+use crate::cli::{ApiArgs, ConfigPaths, GitHubCommand, PushBranchArgs, VerifyIdentityArgs};
 use crate::commands::config::layers::load_layers;
 use orchestraitor_core::config::{
     GitHubAppConfig, OrchestraitorConfig, ServiceIdentityEnforcement,
@@ -37,6 +37,7 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: GitHubCommand, writer: &mut W
         GitHubCommand::GhEnv(args) => gh_env(paths, &args),
         GitHubCommand::CommitAuthor => commit_author(paths, writer),
         GitHubCommand::PushBranch(args) => push_branch(paths, &args),
+        GitHubCommand::VerifyIdentity(args) => verify_identity(paths, &args),
     }
 }
 
@@ -478,6 +479,74 @@ fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
     derive_commit_identity(slug, &bot_user)
 }
 
+// --- `orc github verify-identity`: commit-identity gate ----------------------
+
+/// Compares the ambient git commit identity (`git config user.name` /
+/// `user.email` as a commit in `path` would resolve them) against the
+/// App-derived canonical commit identity — the Rust twin of the
+/// `commit-identity` skill script. On mismatch the typed error carries the
+/// exact `git -c user.name=… -c user.email=…` fix; secrets are never part of
+/// the identity, so the fix line is safe to print.
+///
+/// The comparison is exact for BOTH fields: a name-only match (or an email
+/// noreply look-alike with a different bot id) is a mismatch — attribution
+/// is either the canonical pair or it is a violation.
+fn verify_identity(paths: &ConfigPaths, args: &VerifyIdentityArgs) -> Result<()> {
+    let (expected_name, expected_email) = commit_author_identity(paths)?;
+    let (ambient_name, ambient_email) = ambient_git_identity(args.path.as_deref())?;
+    if ambient_name == expected_name && ambient_email == expected_email {
+        writeln!(
+            std::io::stderr(),
+            "identity OK: {ambient_name} <{ambient_email}> matches the App commit identity"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    bail!(
+        "commit identity mismatch in {}:\n  ambient:  {} <{}>\n  expected: {} <{}>\n\
+         commits here would NOT be authored as the service-identity bot (a fresh worktree \
+         inherits the global gitconfig). Fix with either:\n  \
+         git -c user.name='{expected_name}' -c user.email='{expected_email}' commit …\n  \
+         git config user.name '{expected_name}' && git config user.email '{expected_email}'",
+        args.path.as_deref().unwrap_or("."),
+        ambient_name,
+        ambient_email,
+        expected_name,
+        expected_email,
+    )
+}
+
+/// Resolves the ambient commit identity for `path` the way `git commit`
+/// would: `git -C <path> config user.name` / `user.email` (repo-local,
+/// worktree, global — git's normal precedence). An unset value is a typed
+/// error naming the key; a failed `git` invocation is a typed error carrying
+/// git's stderr (never credential material).
+fn ambient_git_identity(path: Option<&str>) -> Result<(String, String)> {
+    let read_field = |key: &str| -> Result<String> {
+        let mut command = Command::new("git");
+        if let Some(dir) = path {
+            command.arg("-C").arg(dir);
+        }
+        let output = command
+            .args(["config", "--get", key])
+            .output()
+            .map_err(|error| miette!("failed to run `git config --get {key}`: {error}"))?;
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            bail!(
+                "`git config {key}` is unset for {} (a commit would fail or fall back to an \
+                 unintended identity) — set it to the App commit identity printed by \
+                 `orc github commit-author`",
+                path.unwrap_or(".")
+            );
+        }
+        Ok(value)
+    };
+    let name = read_field("user.name")?;
+    let email = read_field("user.email")?;
+    Ok((name, email))
+}
+
 // --- `orc github push-branch`: App-signed branch landing ---------------------
 
 /// Computes the branch tree, lands it as ONE App-signed squashed commit on
@@ -490,8 +559,37 @@ fn commit_author_identity(paths: &ConfigPaths) -> Result<(String, String)> {
 /// via the App API from the start, never pushed unsigned and replayed. The
 /// local branch keeps its own history; the REMOTE branch receives exactly one
 /// squashed commit whose tree is byte-identical to the local branch tree.
+#[allow(clippy::too_many_lines)]
 fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
-    let remote_branch = args.remote_branch.as_ref().unwrap_or(&args.branch);
+    // Argument defaults resolved from the ambient checkout: owner/repo from
+    // the `origin` remote URL, the local branch from HEAD. An unresolvable
+    // origin only matters when --owner/--repo are not given (typed error
+    // then); an explicit flag always wins. A resolvable origin with a
+    // non-GitHub shape is reported but overridden by explicit flags.
+    let (origin_owner, origin_repo) = origin_owner_repo();
+    let owner = args.owner.clone().or(origin_owner);
+    let repo = args.repo.clone().or(origin_repo);
+    let (owner, repo) = match (owner, repo) {
+        (Some(owner), Some(repo)) => (owner, repo),
+        (owner, repo) => bail!(
+            "cannot resolve the target repository: {}/{}, and the origin remote of the \
+             current directory does not name an owner/repo — pass --owner <owner> --repo <name>",
+            owner.unwrap_or_else(|| "<missing>".to_string()),
+            repo.unwrap_or_else(|| "<missing>".to_string()),
+        ),
+    };
+    let local_branch = match &args.branch {
+        Some(branch) => branch.clone(),
+        None => current_branch()?,
+    };
+    let remote_branch = args
+        .remote_branch
+        .clone()
+        .unwrap_or_else(|| local_branch.clone());
+    let body = match &args.body_file {
+        Some(file) => read_body_file(file)?,
+        None => String::new(),
+    };
 
     // Fail-closed gate: identical to the other mutating subcommands — the
     // landing path exists for the App service identity, so `required`
@@ -504,10 +602,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // 1. The intended tree: the branch's committed tree object (no index,
     //    no textconv) — exactly the identity the remote must match
     //    (`pr-convergence.md`).
-    let local_tree = git(&["rev-parse", &format!("{}^{{tree}}", args.branch)])?;
-    let base = resolve_base(args.base.as_deref())?;
-
-    let base_tree = git(&["rev-parse", &format!("{base}^{{tree}}")])?;
+    let local_tree = git(&["rev-parse", &format!("{local_branch}^{{tree}}")])?;
 
     // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
@@ -517,30 +612,65 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     let graphql = GraphqlSession {
         transport: &transport,
         bearer: token.token().expose_secret(),
-        owner: args.owner.clone(),
-        repo: args.repo.clone(),
+        owner: owner.clone(),
+        repo: repo.clone(),
     };
 
     // Read the remote branch's current head (absent for a new branch). The
     // empty-diff gate runs against the REMOTE head, not the base: a base-tree
     // match alone says nothing when a landing already moved the remote past
     // the base (that landing must DELETE the files the remote head has).
-    let existing = graphql.branch_ref(&args.owner, &args.repo, remote_branch)?;
-    let diff_base_tree = remote_head_tree(
-        &graphql,
-        existing.as_ref(),
-        &base_tree,
-        remote_branch,
-        &args.owner,
-        &args.repo,
-    )?;
+    let existing = graphql.branch_ref(&owner, &repo, &remote_branch)?;
+    let (diff_base_tree, base_commit) = if existing.is_some() {
+        // Existing remote branch: the remote head tree is ALWAYS the diff
+        // base — an earlier landing may have moved the remote tree past the
+        // base, and that landing's files must be deletable here. An explicit
+        // --base is still honored as a fallback source for the head objects
+        // (see `remote_head_tree`).
+        let tree = remote_head_tree(
+            &graphql,
+            existing.as_ref(),
+            args.base.as_deref(),
+            &remote_branch,
+            &owner,
+            &repo,
+        )?;
+        let head = existing
+            .as_ref()
+            .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        (tree, head)
+    } else {
+        // New remote branch: the diff base is --base, else the repository's
+        // default branch. The base HEAD commit is resolved through the API
+        // (a LOCAL `main` ref may be stale — behind origin — which would
+        // compute the wrong change set), then fetched so its tree and blobs
+        // are locally readable.
+        let base_ref = match &args.base {
+            Some(base) => base.clone(),
+            None => graphql.default_branch(&owner, &repo)?,
+        };
+        let base_head = graphql.default_branch_head(&owner, &repo, &base_ref)?;
+        let repo_url = format!("https://github.com/{owner}/{repo}.git");
+        if git(&["fetch", "--quiet", &repo_url, &base_head]).is_err() {
+            // Fall through: the rev-parse below produces the typed error
+            // when the object is truly unavailable.
+        }
+        let tree = git(&["rev-parse", &format!("{base_head}^{{tree}}")]).map_err(|_| {
+            miette!(
+                "cannot read the base {base_ref} head {base_head} tree locally after the fetch \
+                 — run `git fetch {repo_url}` and retry"
+            )
+        })?;
+        (tree, Some(base_head))
+    };
     let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
             std::io::stderr(),
-            "branch `{}` tree {local_tree} is identical to the remote head tree — nothing to \
-             land (pass --re-land to re-sign the head with an empty verified commit)",
-            args.branch
+            "branch `{local_branch}` tree {local_tree} is identical to the remote head tree — \
+             nothing to land (pass --re-land to re-sign the head with an empty verified commit)"
         )
         .into_diagnostic()?;
         return Ok(());
@@ -549,45 +679,77 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         return re_land_unsigned_head(
             &graphql,
             existing.as_ref(),
-            remote_branch,
-            &args.owner,
-            &args.repo,
+            &remote_branch,
+            &owner,
+            &repo,
             args,
+            &body,
             &local_tree,
         );
     }
 
     // Build the fileChanges payload. Contents come from the branch's
     // committed blobs (`git cat-file blob`), never the working directory.
-    let file_changes = build_file_changes(&changes, &args.branch)?;
+    let file_changes = build_file_changes(&changes, &local_branch, &diff_base_tree)?;
 
-    let repository_id = graphql.repository_id(&args.owner, &args.repo)?;
+    // --dry-run: print the resolved landing plan and stop before any
+    // mutation (the branch-ref read and — for a new branch — the
+    // default-branch lookup already happened, but nothing was written).
+    if args.dry_run {
+        writeln!(
+            std::io::stderr(),
+            "dry-run: would land {owner}/{repo} {remote_branch} at tree {local_tree}\n\
+             base tree for the change set: {diff_base_tree}\n\
+             message: {}\n\
+             fileChanges: {} addition(s), {} deletion(s)",
+            args.message,
+            file_changes
+                .get("additions")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            file_changes
+                .get("deletions")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+
+    let repository_id = graphql.repository_id(&owner, &repo)?;
 
     // 4. Land via a TEMPORARY branch so the tree/verification gates run
     //    BEFORE the real ref moves: createCommitOnBranch advances whatever
     //    branch it lands on, so landing directly would move the real branch
     //    even when a gate later fails. The temp ref is deleted on every
     //    path; the real ref then moves fast-forward-only (see below).
-    // Unique per invocation: two concurrent landings with the same tree but
-    // different remote heads must not delete or collide on each other's
-    // live temp ref.
+    //    Unique per invocation: two concurrent landings with the same tree
+    //    but different remote heads must not delete or collide on each
+    //    other's live temp ref.
     let temp_branch = format!("push-branch/tmp-{}", uuid::Uuid::new_v4());
     // The temp branch MUST start at the remote head when the branch exists:
     // the change set was computed as diff remote-head-tree -> local-tree and
     // is applied on top of the temp head, so bootstrapping at the base commit
     // would DROP the remote head's commits from the landed tree. For a new
     // branch the remote head does not exist and the base commit is correct.
-    let temp_bootstrap = existing
+    let temp_bootstrap = match existing
         .as_ref()
         .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
-        .unwrap_or(base.as_str());
+        .or(base_commit.as_deref())
+    {
+        Some(oid) => oid.to_string(),
+        None => bail!(
+            "cannot resolve a bootstrap commit for the new branch: the base head is unknown — \
+             pass --base <ref>"
+        ),
+    };
     let (temp_head, temp_ref_id) = bootstrap_temp_branch(
         &graphql,
-        &args.owner,
-        &args.repo,
+        &owner,
+        &repo,
         &repository_id,
         &temp_branch,
-        temp_bootstrap,
+        &temp_bootstrap,
     )?;
     let new_head = land_on_temp_branch(
         &graphql,
@@ -595,9 +757,11 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         &temp_branch,
         &temp_ref_id,
         &temp_head,
-        args,
+        &args.message,
+        &body,
         &file_changes,
         &local_tree,
+        &local_branch,
     )?;
 
     // 5. Move the real branch ref onto the verified commit with an
@@ -612,9 +776,14 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         .and_then(|ref_payload| ref_payload.pointer("/target/oid").and_then(Value::as_str))
         .map(str::to_string);
     let swing = match observed_head.as_deref() {
-        Some(observed) => {
-            graphql.move_ref_with_precondition(&repository_id, remote_branch, observed, &new_head)
-        }
+        Some(observed) => graphql.move_ref_with_precondition(
+            &owner,
+            &repo,
+            &repository_id,
+            &remote_branch,
+            observed,
+            &new_head,
+        ),
         // New branch: the ref never existed on the remote before this run —
         // create the real ref directly at the verified commit.
         None => graphql
@@ -634,6 +803,77 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     )
     .into_diagnostic()?;
     Ok(())
+}
+
+/// Resolves the `(owner, repo)` pair from the `origin` remote URL of the
+/// current directory (`git@github.com:owner/repo.git` or an https URL).
+/// `None` on either side when the origin is absent or not that shape —
+/// callers decide whether that is fatal (no explicit `--owner`/`--repo`).
+fn origin_owner_repo() -> (Option<String>, Option<String>) {
+    let Ok(url) = git(&["remote", "get-url", "origin"]) else {
+        return (None, None);
+    };
+    match parse_github_owner_repo(&url) {
+        Some((owner, repo)) => (Some(owner), Some(repo)),
+        None => (None, None),
+    }
+}
+
+/// Parses `owner/name` out of a GitHub remote URL (ssh or https on
+/// github.com, with or without `.git`). Returns `None` for anything that is
+/// not that shape (other hosts, local paths).
+fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let tail = if let Some((_, rest)) = trimmed.split_once("://") {
+        let (host, path) = rest.split_once('/')?;
+        // Only github.com (and ssh git@github.com over https-style URLs).
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        Some(path)
+    } else if let Some((host, rest)) = trimmed.split_once(':') {
+        // scp-like ssh form: git@github.com:owner/repo — reject absolute
+        // paths (/owner/repo) and drive letters (C:\...).
+        if host
+            .rsplit('@')
+            .next()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+            && !rest.starts_with('/')
+        {
+            Some(rest)
+        } else {
+            None
+        }
+    } else {
+        None
+    }?;
+    let (owner, repo) = tail.trim_end_matches('/').split_once('/')?;
+    let (owner, repo) = (owner.trim(), repo.trim());
+    (!owner.is_empty() && !repo.is_empty() && !owner.contains(char::is_whitespace))
+        .then(|| (owner.to_string(), repo.to_string()))
+}
+
+/// Resolves the current branch of the working directory (symbolic-ref).
+/// Detached HEAD is a typed error — the landing targets a branch.
+fn current_branch() -> Result<String> {
+    git(&["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
+        miette!(
+            "cannot resolve the current branch (detached HEAD or not a git repository) — \
+             pass --branch <name>"
+        )
+    })
+}
+
+/// Reads the `--body-file` value (`-` = stdin) for the commit message body.
+fn read_body_file(file: &str) -> Result<String> {
+    if file == "-" {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).into_diagnostic()?;
+        Ok(buffer)
+    } else {
+        std::fs::read_to_string(file).into_diagnostic()
+    }
 }
 
 /// Re-lands a rebased PR branch whose tree already matches the remote head
@@ -659,6 +899,7 @@ fn re_land_unsigned_head(
     owner: &str,
     repo: &str,
     args: &PushBranchArgs,
+    body: &str,
     local_tree: &str,
 ) -> Result<()> {
     let Some(ref_payload) = existing else {
@@ -709,9 +950,11 @@ fn re_land_unsigned_head(
         &temp_branch,
         &temp_ref_id,
         &temp_head,
-        args,
+        &args.message,
+        body,
         &empty_changes,
         local_tree,
+        remote_branch,
     ) {
         Ok(oid) => oid,
         Err(error) => {
@@ -724,7 +967,14 @@ fn re_land_unsigned_head(
     // parent IS the observed remote head, so `beforeOid` = remote head makes
     // the move a fast-forward: a concurrent advance or rewind fails the
     // precondition — nothing is overwritten.
-    graphql.move_ref_with_precondition(&repository_id, remote_branch, remote_head, &new_head)?;
+    graphql.move_ref_with_precondition(
+        owner,
+        repo,
+        &repository_id,
+        remote_branch,
+        remote_head,
+        &new_head,
+    )?;
 
     writeln!(
         std::io::stderr(),
@@ -749,17 +999,19 @@ fn land_on_temp_branch(
     temp_branch: &str,
     temp_ref_id: &str,
     temp_head: &str,
-    args: &PushBranchArgs,
+    message: &str,
+    body: &str,
     file_changes: &Value,
     local_tree: &str,
+    branch: &str,
 ) -> Result<String> {
     let commit = graphql.create_commit_on_branch(
-        &args.owner,
-        &args.repo,
+        &graphql.owner,
+        &graphql.repo,
         temp_branch,
         temp_head,
-        &args.message,
-        args.body.as_deref().unwrap_or_default(),
+        message,
+        body,
         file_changes,
     );
     let commit = match commit {
@@ -773,28 +1025,11 @@ fn land_on_temp_branch(
     };
     // The commit landed on the temp branch; run the gates BEFORE the real
     // ref moves.
-    if let Err(error) = verify_landed_commit(&commit, local_tree, &args.branch) {
+    if let Err(error) = verify_landed_commit(&commit, local_tree, branch) {
         let _ = graphql.delete_ref(temp_ref_id);
         return Err(error);
     }
     commit_oid(&commit).map(str::to_string)
-}
-
-/// Resolves the diff base commit: an explicit `--base` ref, else
-/// `origin/main`, else `main`. Typed error when nothing resolves.
-fn resolve_base(base: Option<&str>) -> Result<String> {
-    if let Some(explicit) = base {
-        return git(&["rev-parse", "--verify", explicit]);
-    }
-    let from_origin = git(&["rev-parse", "--verify", "--quiet", "origin/main"]).ok();
-    from_origin
-        .or_else(|| git(&["rev-parse", "--verify", "--quiet", "main"]).ok())
-        .ok_or_else(|| {
-            miette!(
-                "cannot resolve the base branch: no --base given and neither origin/main nor \
-                 main exists — pass --base <ref>"
-            )
-        })
 }
 
 /// Runs `git diff-tree -r -z --no-renames --name-status` between two trees
@@ -820,18 +1055,19 @@ fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::pa
 /// base never had must still be deleted remotely), or the base branch tree
 /// for a new branch. The remote head commit is fetched first so its tree and
 /// blobs are locally available; a raw-OID fetch falls back to a branch-name
-/// fetch (the head is usually already present locally). A head whose objects
-/// are locally unavailable is a typed error.
+/// fetch, then to an explicit `--base` ref (the head commit object may be
+/// locally unknown while the base fetch brings the tree in). A head whose
+/// objects are locally unavailable is a typed error.
 fn remote_head_tree(
     _graphql: &GraphqlSession<'_>,
     existing: Option<&Value>,
-    base_tree: &str,
+    fallback_base: Option<&str>,
     remote_branch: &str,
     owner: &str,
     repo: &str,
 ) -> Result<String> {
     let Some(ref_payload) = existing else {
-        return Ok(base_tree.to_string());
+        return Ok(String::new());
     };
     let head = ref_payload
         .pointer("/target/oid")
@@ -844,7 +1080,25 @@ fn remote_head_tree(
     if git(&["fetch", "--quiet", &repo_url, head]).is_err() {
         git(&["fetch", "--quiet", &repo_url, remote_branch]).ok();
     }
-    git(&["rev-parse", &format!("{head}^{{tree}}")])
+    if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
+        return Ok(tree);
+    }
+    // Last resort: the explicit --base ref (its fetch may carry the head
+    // tree into the local object store even when the head oid is unknown).
+    if let Some(base) = fallback_base
+        && let Ok(tree) = git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{tree}}"),
+        ])
+    {
+        return Ok(tree);
+    }
+    bail!(
+        "cannot read the remote head {head} tree of `{remote_branch}` locally — fetch from \
+         {repo_url} first or pass --base <ref>"
+    )
 }
 
 /// Builds the GraphQL `FileChanges` input from the parsed diff records:
@@ -853,7 +1107,18 @@ fn remote_head_tree(
 /// which may carry uncommitted edits or a different checkout), deletions
 /// carry the path. An unreadable blob or an unknown diff status is a typed
 /// error — nothing is landed on a partial change set.
-fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) -> Result<Value> {
+///
+/// Mode handling: `createCommitOnBranch` `FileAddition` CANNOT set the
+/// executable bit — an ADDED file that is 100755 locally lands as 100644.
+/// That is warned about on stderr (tree gate then catches any mismatch);
+/// for a file that already exists in the diff base with 100755, the
+/// modification keeps GitHub's stored mode and no warning is needed.
+fn build_file_changes(
+    changes: &[(String, std::path::PathBuf)],
+    branch: &str,
+    diff_base_tree: &str,
+) -> Result<Value> {
+    let base_modes = base_tree_modes(diff_base_tree);
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
     for (status, path) in changes {
@@ -867,12 +1132,30 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) ->
                 let object_type = git(&["cat-file", "-t", &spec])?;
                 if object_type != "blob" {
                     bail!(
-                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob —                          symlinks and submodules are not supported by the GraphQL fileChanges                          payload"
+                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
+                         symlinks and submodules are not supported by the GraphQL fileChanges \
+                         payload"
                     );
                 }
                 let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
                     miette!("failed to read blob `{spec}` for the landing commit: {error}")
                 })?;
+                let mode = tree_entry_mode(&local_tree_modes(branch)?, path);
+                let path_key = path.display().to_string();
+                if status == "A"
+                    && mode == "100755"
+                    && base_modes.get(&path_key).map(String::as_str) != Some("100755")
+                {
+                    writeln!(
+                        std::io::stderr(),
+                        "WARNING: `{path_key}` is executable (100755) locally but is being ADDED — \
+                         GitHub's createCommitOnBranch FileAddition always lands 100644, so the \
+                         remote tree will differ from the local tree (the tree gate below will \
+                         refuse the landing). Commit the file as 100644 locally, or land it \
+                         first with the mode already 100644 and chmod locally afterwards.",
+                    )
+                    .into_diagnostic()?;
+                }
                 additions.push(serde_json::json!({
                     "path": path.display().to_string(),
                     "contents": BASE64_ENGINE.encode(&bytes),
@@ -890,6 +1173,57 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) ->
         }
     }
     Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
+}
+
+/// Reads the local tree's entry modes (`git ls-tree -r -z <tree>`): path ->
+/// "100644"|"100755". Unreadable trees are a typed error (callers already
+/// validated the tree exists; only a concurrent object-store change fails).
+fn local_tree_modes(tree: &str) -> Result<std::collections::HashMap<String, String>> {
+    let raw = git_raw(&["ls-tree", "-r", "-z", tree])?;
+    Ok(parse_ls_tree_z(&raw))
+}
+
+/// Reads the diff-base tree's entry modes, for the added-file mode check.
+/// An unreadable base tree is not fatal: the mode check then treats every
+/// added file as new (the conservative warning path).
+fn base_tree_modes(diff_base_tree: &str) -> std::collections::HashMap<String, String> {
+    if diff_base_tree.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    match git_raw(&["ls-tree", "-r", "-z", diff_base_tree]) {
+        Ok(raw) => parse_ls_tree_z(&raw),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// Parses `git ls-tree -r -z` records: `MODE TYPE OID\tpath\0` per entry.
+fn parse_ls_tree_z(raw: &[u8]) -> std::collections::HashMap<String, String> {
+    let mut modes = std::collections::HashMap::new();
+    for record in raw.split(|byte| *byte == 0_u8) {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let (meta, path) = (&record[..tab], &record[tab + 1..]);
+        let meta = String::from_utf8_lossy(meta);
+        let Some(mode) = meta.split(' ').next() else {
+            continue;
+        };
+        modes.insert(String::from_utf8_lossy(path).to_string(), mode.to_string());
+    }
+    modes
+}
+
+/// Looks up one path's mode in an `ls-tree` map ("100644" when absent).
+fn tree_entry_mode(
+    modes: &std::collections::HashMap<String, String>,
+    path: &std::path::Path,
+) -> String {
+    modes
+        .get(&path.display().to_string())
+        .map_or_else(|| "100644".to_string(), Clone::clone)
 }
 
 /// Creates the temporary landing branch at `bootstrap_oid` for
@@ -1150,6 +1484,45 @@ impl GraphqlSession<'_> {
         graphql_mutation_field(&data, "createCommitOnBranch", "commit").cloned()
     }
 
+    /// Reads the repository's default branch name (`defaultBranchRef.name`).
+    fn default_branch(&self, owner: &str, repo: &str) -> Result<String> {
+        let data = self.execute(
+            "default branch query",
+            "query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo)\
+             {defaultBranchRef{name}}}",
+            &serde_json::json!({"owner": owner, "repo": repo}),
+        )?;
+        data.pointer("/repository/defaultBranchRef/name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                miette!(
+                    "response is missing repository.defaultBranchRef.name — verify the \
+                     owner/repo arguments ({owner}/{repo})"
+                )
+            })
+    }
+
+    /// Resolves a branch name to its head commit oid via the API (for a base
+    /// ref that does not resolve locally after a fetch — fetched refs land
+    /// in `FETCH_HEAD`, not under a local name).
+    fn default_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<String> {
+        let data = self.execute(
+            "base head query",
+            "query($owner:String!,$repo:String!,$qualified:String!){repository(owner:$owner,\
+             name:$repo){ref(qualifiedName:$qualified){target{... on Commit{oid}}}}}",
+            &serde_json::json!({
+                "owner": owner,
+                "repo": repo,
+                "qualified": format!("refs/heads/{branch}"),
+            }),
+        )?;
+        data.pointer("/repository/ref/target/oid")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| miette!("base ref query response is malformed: missing ref.target.oid"))
+    }
+
     /// Reads one commit's verification signature state (`signature.isValid`
     /// across the Gpg/Smime/Ssh union). Used by `push-branch --re-land` to
     /// detect an already-verified remote head (re-land is a no-op there).
@@ -1178,12 +1551,14 @@ impl GraphqlSession<'_> {
     /// non-fast-forward move is also rejected.
     fn move_ref_with_precondition(
         &self,
+        owner: &str,
+        repo: &str,
         repository_id: &str,
         remote_branch: &str,
         observed_head_oid: &str,
         new_oid: &str,
     ) -> Result<()> {
-        let data = self.execute(
+        let data = match self.execute(
             "updateRefs",
             "mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}",
             &serde_json::json!({
@@ -1197,15 +1572,69 @@ impl GraphqlSession<'_> {
                     }],
                 }
             }),
-        )?;
+        ) {
+            Ok(data) => data,
+            // FALSE-NEGATIVE GUARD: a GraphQL error envelope here is NOT
+            // proof the ref did not move — GitHub has answered updateRefs
+            // with a spurious "malformed: missing updateRefs.clientMutationId"
+            // AFTER applying the mutation, and `execute` surfaces such
+            // envelopes as typed errors. The mutation actually moving the
+            // ref must never be reported as a failure: re-read the branch
+            // ref through the API; when it provably points at `new_oid`,
+            // the landing succeeded and the error degrades to a warning.
+            Err(error) => {
+                // Best-effort probe: if the re-read itself fails, the
+                // original mutation error stands (never masked).
+                let moved = self
+                    .branch_ref(owner, repo, remote_branch)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|oid| oid.eq_ignore_ascii_case(new_oid));
+                if moved {
+                    writeln!(
+                        std::io::stderr(),
+                        "WARNING: the updateRefs response errored ({error:#}) but the branch \
+                         `{remote_branch}` provably points at {new_oid} — treating the landing \
+                         as successful (the ref moved; the error response was spurious)"
+                    )
+                    .into_diagnostic()?;
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
         // UpdateRefsPayload carries ONLY the nullable clientMutationId (no
         // refs list exists on the payload type), so the response cannot
         // confirm the move by itself. Verify the move OUTCOME instead:
         // re-read the branch ref and confirm it now points at `new_oid` —
         // a null payload with an absent clientMutationId must not be
         // reported as success.
-        graphql_mutation_field(&data, "updateRefs", "clientMutationId")?;
-        let moved_head = self.branch_ref(&self.owner, &self.repo, remote_branch)?;
+        let client_mutation_id = graphql_mutation_field(&data, "updateRefs", "clientMutationId");
+        if client_mutation_id.is_err() {
+            // Same guard on the null-field path: verify the ref position
+            // before believing any malformed-payload claim.
+            let moved = self
+                .branch_ref(owner, repo, remote_branch)?
+                .as_ref()
+                .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
+                .and_then(Value::as_str)
+                .is_some_and(|oid| oid.eq_ignore_ascii_case(new_oid));
+            if moved {
+                writeln!(
+                    std::io::stderr(),
+                    "WARNING: the updateRefs payload is missing clientMutationId but the branch \
+                     `{remote_branch}` provably points at {new_oid} — treating the landing as \
+                     successful (the ref moved)"
+                )
+                .into_diagnostic()?;
+                return Ok(());
+            }
+            client_mutation_id?;
+        }
+        let moved_head = self.branch_ref(owner, repo, remote_branch)?;
         let moved_oid = moved_head
             .as_ref()
             .and_then(|ref_payload| ref_payload.pointer("/target/oid"))
@@ -1971,6 +2400,7 @@ mod tests {
         let result = build_file_changes(
             &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
             "any-branch",
+            "",
         );
         let payload = result.expect("deletion-only payload must build");
         assert_eq!(
@@ -1978,5 +2408,173 @@ mod tests {
             serde_json::json!({"additions": [], "deletions": [{"path": "base.txt"}]})
         );
         let _ = changes;
+    }
+
+    // --- push-branch: FileChanges builder (corruption regression) -----------
+
+    /// Builds a fixture repo whose base and branch trees differ by an added,
+    /// a modified, and a deleted file, so the REAL builder runs against REAL
+    /// git objects (the corruption bug was blob OIDs pasted as contents).
+    fn fixture_repo_with_changes() -> miette::Result<(tempfile::TempDir, String, String)> {
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).into_diagnostic()?;
+        let run = |args: &[&str]| -> miette::Result<()> {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .into_diagnostic()?;
+            assert!(status.success(), "git {args:?} failed");
+            Ok(())
+        };
+        run(&["init", "-q", "-b", "main"])?;
+        std::fs::write(repo.join("mod.txt"), "old\n").into_diagnostic()?;
+        std::fs::write(repo.join("del.txt"), "delete me\n").into_diagnostic()?;
+        run(&["add", "."])?;
+        run(&["commit", "-qm", "base"])?;
+        run(&["checkout", "-qb", "feature"])?;
+        std::fs::write(repo.join("mod.txt"), "new\n").into_diagnostic()?;
+        std::fs::write(repo.join("add.txt"), "added\n").into_diagnostic()?;
+        std::fs::remove_file(repo.join("del.txt")).into_diagnostic()?;
+        run(&["add", "-A"])?;
+        run(&["commit", "-qm", "feature"])?;
+        let tree = |spec: &str| -> miette::Result<String> {
+            let output = Command::new("git")
+                .args(["rev-parse", &format!("{spec}^{{tree}}")])
+                .current_dir(&repo)
+                .output()
+                .into_diagnostic()?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        Ok((temp, tree("main")?, tree("feature")?))
+    }
+
+    /// Serializes tests that chdir into a fixture repo (the `git*` helpers
+    /// run against the process CWD; concurrent chdir corrupts siblings).
+    fn repo_cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn build_file_changes_carries_base64_blob_contents_not_blob_oids() -> miette::Result<()> {
+        // THE corruption regression: FileAddition.contents must be the
+        // base64 of the blob BYTES (`git cat-file blob`), never the blob
+        // OID string pasted as contents. The `git*` helpers run against the
+        // process CWD, so the test chdirs into the fixture repo (single-
+        // threaded via a mutex shared with the other repo-bound tests).
+        let _lock = repo_cwd_lock();
+        let (temp, base_tree, feature_tree) = fixture_repo_with_changes()?;
+        let previous = std::env::current_dir().into_diagnostic()?;
+        std::env::set_current_dir(temp.path().join("repo")).into_diagnostic()?;
+        let result = (|| -> miette::Result<()> {
+            let changes = diff_tree_changes(&base_tree, &feature_tree)?;
+            let payload = build_file_changes(&changes, "feature", &base_tree)?;
+            let additions = payload
+                .get("additions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| miette!("additions must be an array: {payload}"))?;
+            let added = additions
+                .iter()
+                .find(|entry| entry.get("path").and_then(Value::as_str) == Some("add.txt"))
+                .ok_or_else(|| miette!("add.txt must be in the payload: {payload}"))?;
+            let contents = added
+                .get("contents")
+                .and_then(Value::as_str)
+                .ok_or_else(|| miette!("addition is missing contents"))?;
+            assert_eq!(
+                BASE64_ENGINE.decode(contents).into_diagnostic()?,
+                b"added\n",
+                "contents must decode to the blob bytes, not contain an OID"
+            );
+            // A 40-hex blob OID pasted as contents would decode to 40 bytes
+            // of hex; the decoded payload must be the actual content.
+            assert!(!contents.chars().all(|c| c.is_ascii_hexdigit()));
+            // Modified and deleted records keep their shapes.
+            let modified = additions
+                .iter()
+                .find(|entry| entry.get("path").and_then(Value::as_str) == Some("mod.txt"))
+                .ok_or_else(|| miette!("mod.txt must be in the payload: {payload}"))?;
+            assert_eq!(
+                BASE64_ENGINE
+                    .decode(
+                        modified
+                            .get("contents")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                    )
+                    .into_diagnostic()?,
+                b"new\n"
+            );
+            let deletions = payload
+                .get("deletions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| miette!("deletions must be an array: {payload}"))?;
+            assert_eq!(deletions.len(), 1, "one deletion: {payload}");
+            assert_eq!(
+                deletions[0].get("path").and_then(Value::as_str),
+                Some("del.txt")
+            );
+            Ok(())
+        })();
+        std::env::set_current_dir(previous).into_diagnostic()?;
+        result
+    }
+
+    #[test]
+    fn build_file_changes_deletion_only_never_touches_git() -> Result<()> {
+        // Deletions carry only the path — no blob read, no mode read.
+        let payload = build_file_changes(
+            &[("D".to_string(), std::path::PathBuf::from("gone.txt"))],
+            "any-branch",
+            "",
+        )?;
+        assert_eq!(
+            payload,
+            serde_json::json!({"additions": [], "deletions": [{"path": "gone.txt"}]})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ls_tree_z_extracts_modes_for_nested_paths() {
+        // `MODE TYPE OID\tpath\0` records; -z keeps spaces and utf-8 raw.
+        let mut raw: Vec<u8> = b"100755 blob abc\tdir with space/run.sh".to_vec();
+        raw.push(0);
+        raw.extend_from_slice(b"100644 blob def\tplain.txt");
+        raw.push(0);
+        let modes = parse_ls_tree_z(&raw);
+        assert_eq!(
+            modes.get("dir with space/run.sh"),
+            Some(&"100755".to_string())
+        );
+        assert_eq!(modes.get("plain.txt"), Some(&"100644".to_string()));
+        assert!(parse_ls_tree_z(b"").is_empty());
+    }
+
+    #[test]
+    fn parse_github_owner_repo_handles_ssh_and_https_and_rejects_other_shapes() {
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:arbsec/orchestraitor.git"),
+            Some(("arbsec".to_string(), "orchestraitor".to_string()))
+        );
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/arbsec/orchestraitor.git"),
+            Some(("arbsec".to_string(), "orchestraitor".to_string()))
+        );
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/arbsec/orchestraitor"),
+            Some(("arbsec".to_string(), "orchestraitor".to_string()))
+        );
+        // A local filesystem path or an absolute scp-ish path is NOT a repo.
+        assert_eq!(parse_github_owner_repo("/tmp/.tmpabc/repo"), None);
+        assert_eq!(parse_github_owner_repo("https://gitlab.com/o/r"), None);
+        assert_eq!(parse_github_owner_repo(""), None);
     }
 }
