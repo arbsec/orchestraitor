@@ -673,7 +673,15 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     if changes.is_empty() {
         // --dry-run must exit before any mutation — including the re-land
         // path, whose helper can create temp refs and commits on the remote.
+        // The re-land path also requires an existing remote branch: report
+        // that contract here too instead of a plan the real run would refuse.
         if args.dry_run {
+            if existing.is_none() {
+                bail!(
+                    "--re-land requires an existing remote branch; `{remote_branch}` does \
+                     not exist on the remote"
+                );
+            }
             writeln!(
                 std::io::stderr(),
                 "dry-run: would re-land {owner}/{repo} {remote_branch} (empty diff, \
