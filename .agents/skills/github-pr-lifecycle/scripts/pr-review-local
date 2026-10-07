@@ -77,6 +77,21 @@ if [ "$OPT_JSON" = true ] && ! command -v jq >/dev/null 2>&1; then
   exit "$ORC_ERR_CONFIG"
 fi
 
+# The CLI reviews the CURRENT WORKTREE but the findings are reported against
+# the PR head: validate that this checkout IS that head, with no uncommitted
+# tracked changes, so findings can never be attributed to code other than the
+# reported head.
+LOCAL_SHA="$(git rev-parse HEAD)" ||
+  { echo "error: cannot read the local HEAD commit" >&2; exit "$ORC_ERR_CONFIG"; }
+if [ "$LOCAL_SHA" != "$HEAD_SHA" ]; then
+  echo "error: local HEAD $LOCAL_SHA does not match PR #$PR head $HEAD_SHA — checkout the PR head (orc github push-branch re-lands the local tree as the App-signed head)" >&2
+  exit "$ORC_ERR_CONCURRENT"
+fi
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "error: worktree has uncommitted tracked changes — commit them via the verified landing path before reviewing, otherwise findings would not match the reported PR head" >&2
+  exit "$ORC_ERR_CONCURRENT"
+fi
+
 # --- Mergeable gate (shared; identical rule as the GitHub-trigger scripts) ------
 # A local review of a conflicting PR would remediate a diff that cannot land;
 # the typed refusal (exit 5) is the same no-review-while-conflicting rule.
