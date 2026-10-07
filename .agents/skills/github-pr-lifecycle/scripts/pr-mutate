@@ -73,13 +73,18 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     if [ "${REST[$index]}" = "--add-reviewer" ]; then
-      reviewer="${REST[$((index + 1))]:-}"
-      if printf '%s' "$PENDING" | tr ',' '\n' | grep -qxF "$reviewer" ||
-         printf '%s' "$APPROVED_BY" | tr ',' '\n' | grep -qxF "$reviewer"; then
-        echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"$reviewer\",\"note\":\"edge-triggered: reviewer already pending or approved; post a thread reply that the new head invalidates prior review convergence instead\"}" >&2
-        exit "$ORC_ERR_BLOCKED"
-      fi
-      REVIEWERS_TO_ADD+=("$reviewer")
+      # gh pr edit accepts comma-separated operands; check EVERY reviewer in
+      # the operand, not the operand as a whole.
+      IFS=',' read -ra operand_reviewers <<< "${REST[$((index + 1))]:-}"
+      for reviewer in "${operand_reviewers[@]}"; do
+        [ -z "$reviewer" ] && continue
+        if printf '%s' "$PENDING" | tr ',' '\n' | grep -qxF "$reviewer" ||
+           printf '%s' "$APPROVED_BY" | tr ',' '\n' | grep -qxF "$reviewer"; then
+          echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"$reviewer\",\"note\":\"edge-triggered: reviewer already pending or approved; post a thread reply that the new head invalidates prior review convergence instead\"}" >&2
+          exit "$ORC_ERR_BLOCKED"
+        fi
+        REVIEWERS_TO_ADD+=("$reviewer")
+      done
     fi
     index=$((index + 1))
   done
