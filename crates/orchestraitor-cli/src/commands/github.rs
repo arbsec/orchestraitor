@@ -567,17 +567,12 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // then); an explicit flag always wins. A resolvable origin with a
     // non-GitHub shape is reported but overridden by explicit flags.
     let (origin_owner, origin_repo) = origin_owner_repo();
-    let owner = args.owner.clone().or(origin_owner);
-    let repo = args.repo.clone().or(origin_repo);
-    let (owner, repo) = match (owner, repo) {
-        (Some(owner), Some(repo)) => (owner, repo),
-        (owner, repo) => bail!(
-            "cannot resolve the target repository: {}/{}, and the origin remote of the \
-             current directory does not name an owner/repo — pass --owner <owner> --repo <name>",
-            owner.unwrap_or_else(|| "<missing>".to_string()),
-            repo.unwrap_or_else(|| "<missing>".to_string()),
-        ),
-    };
+    let (owner, repo) = resolve_repo_slug(
+        args.owner.as_deref(),
+        args.repo.as_deref(),
+        origin_owner.as_deref(),
+        origin_repo.as_deref(),
+    )?;
     let local_branch = match &args.branch {
         Some(branch) => branch.clone(),
         None => current_branch()?,
@@ -803,6 +798,57 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     )
     .into_diagnostic()?;
     Ok(())
+}
+
+/// Resolves the target `(owner, repo)` slug. `--repo owner/name` is used
+/// as-is; a bare `--repo name` combines with the owner (explicit `--owner`
+/// or the origin-derived one). With no flags both come from origin.
+///
+/// # Errors
+/// Typed error when owner or repo cannot be resolved from flags or origin.
+fn resolve_repo_slug(
+    owner_flag: Option<&str>,
+    repo_flag: Option<&str>,
+    origin_owner: Option<&str>,
+    origin_repo: Option<&str>,
+) -> Result<(String, String)> {
+    let owner_flag = owner_flag.map(str::trim).filter(|owner| !owner.is_empty());
+    // `--repo owner/name` wins verbatim — never re-prepend an owner on top
+    // of the origin-derived one (the double-owner `arbsec/arbsec/x` bug).
+    if let Some((owner, repo)) = repo_flag.map(str::trim).and_then(|r| r.split_once('/')) {
+        let (owner, repo) = (owner.trim(), repo.trim());
+        if owner.is_empty() || repo.is_empty() {
+            bail!(
+                "invalid --repo value `{}`: expected `owner/name` or `name`",
+                repo_flag.unwrap_or("<missing>")
+            );
+        }
+        return Ok((owner.to_string(), repo.to_string()));
+    }
+    let repo = match repo_flag.map(str::trim).filter(|repo| !repo.is_empty()) {
+        Some(repo) => repo.to_string(),
+        None => origin_repo
+            .ok_or_else(|| {
+                miette!(
+                    "cannot resolve the target repository: {}/{}, and the origin remote of \
+                     the current directory does not name an owner/repo — pass --owner \
+                     <owner> --repo <name>",
+                    owner_flag.or(origin_owner).unwrap_or("<missing>"),
+                    repo_flag.unwrap_or("<missing>"),
+                )
+            })?
+            .to_string(),
+    };
+    let owner = owner_flag
+        .or(origin_owner)
+        .ok_or_else(|| {
+            miette!(
+                "cannot resolve the repository owner for --repo {repo}: no --owner flag and \
+                 the origin remote of the current directory does not name an owner/repo"
+            )
+        })?
+        .to_string();
+    Ok((owner, repo))
 }
 
 /// Resolves the `(owner, repo)` pair from the `origin` remote URL of the
@@ -2576,5 +2622,54 @@ mod tests {
         assert_eq!(parse_github_owner_repo("/tmp/.tmpabc/repo"), None);
         assert_eq!(parse_github_owner_repo("https://gitlab.com/o/r"), None);
         assert_eq!(parse_github_owner_repo(""), None);
+    }
+
+    #[test]
+    fn resolve_repo_slug_accepts_owner_slash_name_verbatim_and_bare_name_with_origin_owner() {
+        // Regression: an explicit `--repo owner/name` must be used as-is —
+        // the origin-derived owner is never re-prepended (the
+        // `arbsec/arbsec/orchestraitor` double-owner bug).
+        let slug = |owner: Option<&str>, repo: Option<&str>, oo: Option<&str>, or: Option<&str>| {
+            let (owner, repo) = resolve_repo_slug(owner, repo, oo, or).unwrap();
+            (owner, repo)
+        };
+        assert_eq!(
+            slug(
+                None,
+                Some("arbsec/orchestraitor"),
+                Some("arbsec"),
+                Some("orchestraitor")
+            ),
+            ("arbsec".to_string(), "orchestraitor".to_string())
+        );
+        // Explicit `--owner` + explicit `--repo owner/name`: the slug wins.
+        assert_eq!(
+            slug(
+                Some("other"),
+                Some("arbsec/orchestraitor"),
+                Some("arbsec"),
+                Some("orchestraitor")
+            ),
+            ("arbsec".to_string(), "orchestraitor".to_string())
+        );
+        // Bare `--repo name` combines with the origin-derived owner.
+        assert_eq!(
+            slug(None, Some("orchestraitor"), Some("arbsec"), None),
+            ("arbsec".to_string(), "orchestraitor".to_string())
+        );
+        // Bare `--repo name` with an explicit `--owner`.
+        assert_eq!(
+            slug(Some("other"), Some("orchestraitor"), None, None),
+            ("other".to_string(), "orchestraitor".to_string())
+        );
+        // No flags: both from origin.
+        assert_eq!(
+            slug(None, None, Some("arbsec"), Some("orchestraitor")),
+            ("arbsec".to_string(), "orchestraitor".to_string())
+        );
+        // Bare repo flag with no owner anywhere is a typed error.
+        assert!(resolve_repo_slug(None, Some("orchestraitor"), None, None).is_err());
+        // No flags and no origin is a typed error.
+        assert!(resolve_repo_slug(None, None, None, None).is_err());
     }
 }
