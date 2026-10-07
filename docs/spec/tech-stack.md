@@ -20,7 +20,7 @@
 | Concern | Recommendation | License | Verified |
 |---|---|---|---|
 | Language | Rust 2024 edition | — | — |
-| Bootstrap toolchain | Rust 1.98.1, pinned in `rust-toolchain.toml` | — | matches Arbitraitor MSRV |
+| Bootstrap toolchain | Rust 1.96.0, pinned in `rust-toolchain.toml` | — | matches Arbitraitor MSRV |
 | Workspace resolver | Cargo resolver 3 | — | — |
 | Async runtime | Tokio (current_thread default for the daemon) | MIT | crates.io, 17M dl/wk |
 | TUI framework | Ratatui 0.30.2 + crossterm 0.29 | MIT | crates.io, ratatui-org |
