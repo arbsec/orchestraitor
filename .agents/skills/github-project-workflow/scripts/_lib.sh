@@ -414,22 +414,32 @@ orc_lib_require_mergeable() {
     local probe_status=0
     orc_lib_has_github_app_config || probe_status=$?
     local read_failed=0
-    if [ "$probe_status" -eq 0 ]; then
-      # Service route: the read rides the App installation token via gh-env,
-      # the same route the subsequent mutating call takes.
-      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
-    elif orc_lib_enforcement_required; then
+    if [ "$probe_status" -eq 2 ]; then
+      # Config PRESENT but unresolved (orc available, layered config broken):
+      # fail closed here — the ambient route below would authenticate the
+      # precondition read with personal credentials the enforcement gate
+      # refuses for the mutation.
+      echo "error: github_app configuration is present but could not be resolved;" >&2
+      echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+      exit "$ORC_ERR_CONFIG"
+    elif [ "$probe_status" -eq 1 ] && orc_lib_enforcement_required; then
       # Ambient route is forbidden in required mode: the read must not become
       # the personal-auth call the enforcement gate exists to refuse. Same
-      # typed error, same exit class (2) as the mutating-call refusal.
+      # typed error, same exit class (2) as the mutating-call refusal. (An
+      # invalid enforcement pin already failed closed inside the probe with
+      # its own typed error and exit 2.)
       echo "error: service-identity enforcement is \`required\` (github_app.enforcement);" >&2
       echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
       echo "       resolve the github_app config (client_id, installation_id, private_key_uri)" >&2
       echo "       or set github_app.enforcement = \"recommended\"; see docs/cli/orc-github.md" >&2
       exit "$ORC_ERR_CONFIG"
-    else
+    elif [ "$probe_status" -eq 1 ]; then
       # Config absent, recommended/unset enforcement: labelled ambient read.
       raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
+    else
+      # probe_status 0: service route — the read rides the App installation
+      # token via gh-env, the same route the subsequent mutating call takes.
+      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
     fi
     if [ "$read_failed" -eq 1 ]; then
       # A FAILED read is not the same as an UNKNOWN mergeable state: GitHub

@@ -21,8 +21,11 @@ PR timeline fragments into an untraversable side channel.
 
 ## REST: reply on a review-comment thread (preferred)
 
-The reply endpoint on a review comment. `comment-id` is the REST `id` (=
-`databaseId` from the GraphQL `comments.nodes`):
+The reply endpoint on a review comment. `comment-id` MUST be the thread's
+TOP-LEVEL comment id (the REST `id` = the GraphQL `comments.nodes`
+`databaseId` of the thread root): GitHub rejects this endpoint for a reply
+id. Callers holding only a reply id should use `pr-thread-reply`, which
+resolves the root via the comment's `in_reply_to_id`:
 
 ```sh
 orc github gh-env -- gh api \
