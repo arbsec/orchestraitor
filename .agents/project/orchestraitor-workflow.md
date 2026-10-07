@@ -222,6 +222,60 @@ enforces):
   `blocked` / `needs-human` state — never an automatic merge (spec `10-orchestrator.md`
   §9.24, §9.33.4).
 
+## PR labeling and human attention
+
+PRs carry two attribution labels, applied by the pr-lifecycle skill's
+`pr-labels` script immediately after `pr-create` and re-checked at reconcile
+(labels can drift as the diff changes). They derive **only from observable
+facts** — the PR author and the changed paths/diff content — never from
+titles, model-generated text, or PR descriptions:
+
+| Label | Applied when |
+|---|---|
+| `agent-created` | the PR author is a declared service-identity principal (`app/arbsec-agent` / `arbsec-agent[bot]`, or any configured bot) |
+| `needs-human-review` | the diff touches a spec `50-contracts-data.md` §21.1 security-sensitive class by path **or** added-line content |
+
+Human attention is routed by what the label asks **for**, and never doubled
+up by default:
+
+| Need | Route |
+|---|---|
+| Review sign-off (a `needs-human-review` label) | a **reviewer** — `pr-request-review` once checks are green; `pr-mutate edit --add-reviewer` while checks still run |
+| A decision or ownership handoff | an **assignee** (`pr-mutate edit --add-assignee` or `gh edit --add-assignee`) |
+
+Assignee fields accept user accounts only, so the bot cannot carry ownership —
+board ownership rides project Status (see "GitHub service identity" above).
+Review sign-off is always a reviewer, never an assignee. Never request a
+reviewer AND an assignee for the same need by default: pick the route the
+label asks for.
+
+## Commit hygiene
+
+Every commit on a PR in this repository MUST be:
+
+1. **Authored by a declared service principal** — `arbsec-agent[bot]` or
+   `renovate[bot]`. A commit authored as the human owner (`mekwall`) riding
+   an agent-created PR is identity misuse; a commit whose author email
+   resolves to no GitHub account (`NO_USER`) is unattributable. Committer
+   identity is GitHub's `web-flow` on App-created commits (expected, not a
+   mismatch).
+2. **GitHub-verified** — `commit.verification.verified = true`. Unsigned
+   locally-created commits never verify (attribution metadata is not a
+   signature; the `required_signatures` ruleset blocks them at merge).
+3. **Conventional Commits** — subject matches the repo's type list
+   (`feat`, `fix`, `security`, `docs`, `refactor`, `test`, `ci`, `chore`,
+   `build`, `perf`, `revert`), the same shape `cog verify` enforces locally.
+
+These properties are audited in the PR loop by the pr-lifecycle skill's
+`audit-pr-commits` script (alongside `pr-checks` in step 2): local hooks
+(`cog verify`, `check-unsigned-bot-commits`) never run on App-API commits, so
+the audit is the only post-hoc enforcement. A violation is a real failure:
+recreate the offending commit(s) via the verified-commit path
+([`.agents/skills/github-pr-lifecycle/references/commit-hygiene-remediation.md`](../skills/github-pr-lifecycle/references/commit-hygiene-remediation.md)
+— the remediation map for every failure class) — never reroll, never
+force-push an unsigned chain, never reset a PR branch to an ancestor of
+`main` mid-replay.
+
 ## Forbidden administrative shortcuts
 
 - No merge on red. No admin-merge bypass.

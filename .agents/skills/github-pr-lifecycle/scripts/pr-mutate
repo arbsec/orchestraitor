@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... | ready <pr> | close <pr> [reason flags]."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... | ready <pr> | close <pr> [reason flags]."
   exit "$ORC_OK"
 fi
 
