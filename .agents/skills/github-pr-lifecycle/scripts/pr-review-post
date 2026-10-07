@@ -74,11 +74,6 @@ fi
 
 REPO="$(orc_lib_resolve_repo)"
 
-# Conflict gate (owner directive 2026-10-07): no review of any kind is posted
-# while the PR conflicts with its base — the review would evaluate an
-# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY.
-orc_lib_require_mergeable "$PR" "$REPO"
-
 ARGS=(pr review "$PR" --repo "$REPO" "$VERDICT")
 [ -n "$BODY" ] && ARGS+=(--body "$BODY")
 [ -n "$BODY_FILE" ] && ARGS+=(--body-file "$BODY_FILE")
@@ -89,6 +84,15 @@ if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
   exit "$ORC_OK"
 fi
+
+# Conflict gate (owner directive 2026-10-07): no review of any kind is posted
+# while the PR conflicts with its base — the review would evaluate an
+# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY. Runs AFTER
+# the enforcement decision inside orc_lib_run_or_dry_run's service routing —
+# this precondition read must never become the personal-auth write path the
+# enforcement gate exists to refuse (required + missing config refuses here
+# first, with the typed config error and rc:2, gh never invoked).
+orc_lib_require_mergeable "$PR" "$REPO"
 
 # Mutating call: service route or typed failure — never silent personal auth.
 orc_lib_run_or_dry_run ARGS gh

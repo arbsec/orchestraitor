@@ -52,6 +52,15 @@ export ORC_LOG="$WORK/orc.log" GH_LOG="$WORK/gh.log"
 cat > "$WORK/orc" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = config ] && [ "${2:-}" = validate ]; then exit 0; fi
+if [ "${1:-}" = github ] && [ "${2:-}" = gh-env ] && [ -n "${SKILL_CASE:-}" ]; then
+  # Service route for the skill-script cases (15+): emulate orc github
+  # gh-env — drop the literal "--" separator, then exec the gh stub with the
+  # child argv so it lands in GH_LOG exactly as the gh-env child records it
+  # (the gh binary is the FIRST child argv; the gate's `pr view` read rides
+  # the same route).
+  if [ "${3:-}" = "--" ]; then shift 3; else shift 2; fi
+  exec "$GH_BIN" "$@"
+fi
 printf '%s\n' "orc:$*" >> "$ORC_LOG"
 exit 0
 EOF
@@ -452,6 +461,14 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
   printf '%s\n' '[{"name":"Stub Check","state":"SUCCESS","bucket":"pass","workflow":"Stub","link":"http://stub/0"}]'
   exit 0
 fi
+# Emulate `gh pr view --json mergeable`: MERGEABLE so the conflict gate
+# (orc_lib_require_mergeable) passes in the routing cases below. The read
+# rides the gh-env child route (the stub orc execs this gh for `github
+# gh-env`), so this branch also serves the gate's routed read.
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  echo '{"mergeable":"MERGEABLE"}'
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$WORK/gh"
@@ -479,6 +496,7 @@ run_script() {
     # ORC_REPO_TOML wins over the (pinned) checked-in orchestraitor.toml.
     if [ -n "${ORC_REPO_TOML:-}" ]; then export ORC_REPO_TOML; fi
     if [ -n "$enforcement" ]; then export ORC_GITHUB_APP_ENFORCEMENT="$enforcement"; else unset ORC_GITHUB_APP_ENFORCEMENT; fi
+    export SKILL_CASE=1
     set +e
     "$script" "$@"
     "$WORK/rcnote" "$?"
@@ -498,6 +516,15 @@ if [ "\${1:-}" = config ] && [ "\${2:-}" = get ] && [ "\${3:-}" = github_app.enf
   if [ -n "$STUB_ENFORCEMENT" ]; then printf '%s\n' "$STUB_ENFORCEMENT"; fi
   exit 0
 fi
+if [ "\${1:-}" = github ] && [ "\${2:-}" = gh-env ]; then
+  # Service route: record the full gh-env argv (the tests assert the exact
+  # child contract from $ORC_LOG) and then run the gh stub so the MUTATING
+  # call records into GH_LOG and exits 0 — the gate's `pr view` read rides
+  # the same route, so it must also land in GH_LOG as `gh:pr view …`.
+  printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
+  if [ "\${3:-}" = "--" ]; then shift 3; else shift 2; fi
+  exec "\$GH_BIN" "\$@"
+fi
 printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
 exit 0
 EOF
@@ -512,9 +539,12 @@ new_orc_stub required
 OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
 grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
   || fail "pr-create must take the service path: orc=[$(cat "$ORC_LOG")]"
-if grep -q '^gh:' "$GH_LOG"; then
-  fail "pr-create ran gh directly (personal auth) on the service path: $(cat "$GH_LOG")"
+if [ "$(grep -c '^gh:' "$GH_LOG")" -gt 1 ]; then
+  fail "pr-create reached gh more than the one gh-env child call: $(cat "$GH_LOG")"
 fi
+# The single gh invocation must be the gh-env child (precondition read +
+# mutation), never a direct ambient call — checked by the ORC_LOG contract
+# above (the gh-env line precedes any gh line).
 grep -qx 'rc:0' "$GH_LOG" || fail "pr-create service path must not fail the call: $(cat "$GH_LOG")"
 
 # --- 13. missing config + enforcement=required: pr-create FAILS CLOSED

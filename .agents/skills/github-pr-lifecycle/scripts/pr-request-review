@@ -132,7 +132,11 @@ fi
 
 # Conflict gate (owner directive 2026-10-07): NEVER request a human review
 # while the PR conflicts with its base — human attention must not be consumed
-# by an unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY.
+# by an unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY. The
+# gate runs before the mutating call's enforcement decision inside
+# orc_lib_gh_service (this precondition read must never become the
+# personal-auth write path the enforcement gate refuses; required + missing
+# config refuses first with the typed config error, gh never invoked).
 orc_lib_require_mergeable "$PR" "$REPO"
 
 orc_lib_gh_service pr edit "$PR" --repo "$REPO" --add-reviewer "$REVIEWER" >/dev/null
