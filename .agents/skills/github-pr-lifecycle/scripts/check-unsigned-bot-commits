@@ -21,11 +21,18 @@
 #   work. Every other status — including `G`, `E`, and the web-flow signature
 #   status local git reports — is indeterminate: local git cannot attest that
 #   a signature belongs to GitHub's web-flow key or to the bot identity, and
-#   committer metadata is attacker-controlled. For indeterminate commits the
-#   guard defers to GitHub's own verification oracle (the commits API) and
-#   accepts ONLY `verified == true` with `reason == "valid"`. The API call
-#   failing is treated as unverified (fail closed); a deliberate local-only
-#   push can bypass explicitly with `--no-verify`.
+#   committer metadata is attacker-controlled. Local verification is NOT
+#   GitHub verification: an incident (2026-10-07, PR #486) pushed a bot commit
+#   that was locally verifiable against an SSH key GitHub has never registered,
+#   so the repository reported verification.reason=unknown_key. For
+#   indeterminate commits the guard therefore queries GitHub's own verification
+#   oracle (the commits API, reached through the service-identity gh-env route)
+#   and accepts ONLY `verified == true` with `reason == "valid"`. The API call
+#   failing (gh missing, gh-env resolution failure, network) is treated as
+#   unverified (fail closed); a deliberate local-only push can bypass
+#   explicitly with `--no-verify`. Additionally, a repo with
+#   `commit.gpgsign=true` is refused outright: a locally-gpg-signed
+#   bot-identity commit can never be GitHub-verified.
 #
 # Identity matching: a commit is bot-attributed when the author name+email OR
 # the committer name+email pair matches a BOT_IDENTITIES entry (attribution
@@ -73,6 +80,17 @@ guard_commit() {
   # Indeterminate locally (G/U/X/Y/R/E): only GitHub's own verification
   # decides. Fail closed when the oracle is unreachable or disagrees.
   local oracle
+  if [ "$(git config --type=bool --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
+    echo >&2 "pre-push: refusing agent commit from a repo with commit.gpgsign enabled"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  $verified (locally signed; local signing is not the verified-commit path)"
+    echo >&2 ""
+    echo >&2 "A locally-gpg-signed bot-identity commit can never be GitHub-verified"
+    echo >&2 "(the bot's key is not registered with GitHub). Use"
+    echo >&2 "\`orc github push-branch\` — the App-signed landing path."
+    return 1
+  fi
   if ! oracle="$(gh api "repos/$ORC_REPO/commits/$oid" \
       --jq '.commit.verification.verified == true and .commit.verification.reason == "valid"' 2>/dev/null)"; then
     echo >&2 "pre-push: refusing unverified agent commit (GitHub oracle unreachable)"
