@@ -104,7 +104,9 @@ At end of run the per-agent rollups (token totals and request counts per board t
 are appended to the `--json` summary as `agent_costs`, and printed under an
 `agent costs:` heading in text mode. Rollup query failures drop the report with a
 stderr warning and never fail the run. Measured/estimated monetary columns stay `0.0`
-until the cost-ledger lane wires provider pricing in.
+until the cost-ledger lane wires provider pricing in. The rollups are cumulative across
+all `orc loop` invocations that share this machine's config dir (the query reads every
+row in `<config-dir>/cost.db`), not scoped to the current run.
 
 ## Single instance
 

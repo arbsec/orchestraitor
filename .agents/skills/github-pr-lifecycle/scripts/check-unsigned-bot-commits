@@ -98,7 +98,19 @@ guard_commit() {
 while read -r _local_ref local_oid _remote_ref remote_oid; do
   [ "$local_oid" = "$zero" ] && continue        # deletion
   range="$remote_oid..$local_oid"
-  [ "$remote_oid" = "$zero" ] && range="$local_oid --not --remotes"
+  if [ "$remote_oid" = "$zero" ]; then
+    # New-branch push: excluding ALL remote-tracking refs would let a bot
+    # commit skip the oracle check just by being reachable from any fetched
+    # ref. Exclude only the default branch's remote-tracking refs so the
+    # enumerated range is every commit not on the base history; with no
+    # default-branch ref at all we cannot bound the range — fail closed.
+    bases="$(git for-each-ref --format='%(refname)' refs/remotes/origin/main refs/remotes/origin/master)"
+    if [ -z "$bases" ]; then
+      echo >&2 "pre-push: no refs/remotes/origin/main (or master) to bound the new-branch range; refusing"
+      exit 1
+    fi
+    range="$local_oid --not $(echo "$bases" | tr '\n' ' ')"
+  fi
   if ! oids="$(git rev-list $range)"; then
     echo >&2 "pre-push: cannot enumerate commits for $range"
     exit 1

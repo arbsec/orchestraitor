@@ -33,5 +33,10 @@ pre-push:
     # unsigned by construction — block the push instead of replaying after the
     # fact. Human-authored commits are exempt (their own key signs them).
     verified-commits:
-      run: .agents/skills/github-pr-lifecycle/scripts/check-unsigned-bot-commits
+      # Invoked through `bash` rather than direct-executed: the script was
+      # committed 100644 (createCommitOnBranch forces FileAddition mode
+      # 100644 — see PR #487), so a direct invocation fails with exit 126
+      # (Permission denied) and the gate silently never runs. Running it
+      # under bash makes the gate independent of the committed mode.
+      run: bash .agents/skills/github-pr-lifecycle/scripts/check-unsigned-bot-commits
       use_stdin: true
