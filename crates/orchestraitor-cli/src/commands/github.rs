@@ -356,11 +356,13 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
         match pinned.as_str() {
             "required" => required = true,
             "recommended" => {}
-            other => bail!(
-                "invalid ORC_GITHUB_APP_ENFORCEMENT value `{other}` (expected `recommended` \
-                 or `required`); refusing to delegate under an ambiguous enforcement \
-                 declaration"
-            ),
+            other => {
+                bail!(
+                    "invalid ORC_GITHUB_APP_ENFORCEMENT value `{other}` (expected `recommended` \
+                     or `required`); refusing to delegate under an ambiguous enforcement \
+                     declaration"
+                );
+            }
         }
     }
     let mut bot_identity: Option<(String, String)> = None;
@@ -999,7 +1001,7 @@ fn re_land_unsigned_head(
         bail!(
             "--re-land requires an existing remote branch; `{remote_branch}` does not exist on \
              the remote"
-        )
+        );
     };
     let remote_head = ref_payload
         .pointer("/target/oid")
@@ -1259,11 +1261,13 @@ fn build_file_changes(
                 // FileDeletion input shape: {"path": "…"}, not a bare string.
                 deletions.push(serde_json::json!({"path": path.display().to_string()}));
             }
-            other => bail!(
-                "unexpected diff-tree status `{other}` for `{}` — refusing to land an ambiguous \
-                 change set",
-                path.display()
-            ),
+            other => {
+                bail!(
+                    "unexpected diff-tree status `{other}` for `{}` — refusing to land an ambiguous \
+                     change set",
+                    path.display()
+                );
+            }
         }
     }
     Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
@@ -1892,7 +1896,7 @@ fn validate_api_method(method: &str) -> Result<()> {
         bail!(
             "unsupported method `{method}` (expected one of {})",
             API_METHODS.join(", ")
-        )
+        );
     }
 }
 
@@ -2479,8 +2483,14 @@ mod tests {
 
     #[test]
     fn parse_diff_tree_z_empty_output_yields_no_changes() {
-        assert!(parse_diff_tree_z(b"").is_empty());
-        assert!(parse_diff_tree_z(b"\0").is_empty());
+        assert_eq!(
+            parse_diff_tree_z(b""),
+            [] as [(String, std::path::PathBuf); 0]
+        );
+        assert_eq!(
+            parse_diff_tree_z(b"\0"),
+            [] as [(String, std::path::PathBuf); 0]
+        );
     }
 
     #[test]

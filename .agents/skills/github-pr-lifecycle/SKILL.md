@@ -31,6 +31,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/graphql.md`](references/graphql.md) — the `pullRequest.reviewThreads` connection with `isResolved`/`isOutdated`/`comments`; resolve/unresolve mutations.
   - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `10-orchestrator.md` §9.33).
   - [`references/verified-commit-path.md`](references/verified-commit-path.md) — why unsigned local bot-identity commits never verify, and the App-API replay path for unsigned chains (documented procedure; replay script not yet implemented).
+  - [`references/commit-hygiene-remediation.md`](references/commit-hygiene-remediation.md) — failure-class → detection → remediation map for commit-hygiene violations (identity, verification, message format, mode/permission and ghost-commit anomalies); what `audit-pr-commits` flags and how to fix it.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
 
 ## Core procedure
@@ -46,11 +47,33 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `needs-human-review` (diff touches a §21.1
                   security-sensitive class by path/content). Labels derive
                   from launch facts only, applied idempotently.
+                  Human attention rides the labels:
+                    - `needs-human-review` ⇒ request the required-domain
+                      reviewer — `pr-request-review` once ALL automatic
+                      checks are green; `pr-mutate edit <pr>
+                      --add-reviewer` is the same gated fallback (it
+                      refuses while any check is failing or pending, like
+                      `pr-request-review`). Review SIGN-OFF is always a
+                      reviewer, never an assignee.
+                    - Assignee (`pr-mutate edit <pr> --add-assignee`) only
+                      when a decision or ownership HANDOFF is needed
+                      (assignees accept user accounts only; board ownership
+                      rides Status per workflow policy). Never reviewer +
+                      assignee by default
+                      — route by what the label asks FOR (workflow policy
+                      "PR labeling and human attention").
 
 2. CI             Land commits with `orc github push-branch` (the App-signed
                   landing path — NEVER plain `git push`, which produces
                   unverified commits the `required_signatures` ruleset
                   rejects at merge time); watch checks with `pr-checks`.
+                  Audit commit hygiene with `audit-pr-commits <pr>` alongside
+                  `pr-checks` — every PR commit must be authored by a declared
+                  service principal, GitHub-verified, and Conventional Commits.
+                  Violations are REAL failures: fix the root cause per
+                  `references/commit-hygiene-remediation.md` (recreate the
+                  offending commit(s) via the verified-commit path); never
+                  reroll and never force-push an unsigned chain.
                   Classify each failure:
                     transient (timeout, 429, 5xx, runner OOM)  → bounded retry per spec `10-orchestrator.md` §9.26.2
                     real failure                              → fix root cause; do NOT reroll
@@ -136,8 +159,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   see Safety conditions).
                   Never use --admin to bypass a red gate (spec `50-contracts-data.md` §21.10, AGENTS.md).
 
-9. RECONCILE      After merge: close the linked issue (or confirm the PR's "Closes #N"
-                  did), delete the branch, remove the worktree. Move the issue to
+9. RECONCILE      After merge: re-run `pr-labels <pr>` (labels can drift as the
+                  diff changed during the review loop — the audit is cheap and
+                  idempotent; it never removes labels). Then close the linked
+                  issue (or confirm the PR's "Closes #N" did), delete the
+                  branch, remove the worktree. Move the issue to
                   "Done" on the project (github-project-workflow skill owns that).
 ```
 

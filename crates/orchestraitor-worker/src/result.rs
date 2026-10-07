@@ -2,6 +2,8 @@
 //! and the per-run configuration.
 
 use orchestraitor_model::{ModelId, ProviderId};
+use orchestraitor_provider_neuralwatt::CostSink;
+use orchestraitor_provider_neuralwatt::cost::CostAttribution;
 use serde::Serialize;
 
 use crate::budget::WorkerBudgets;
@@ -9,7 +11,6 @@ use crate::delivery::DeliveryOutcome;
 use crate::tools::ToolReceipt;
 
 /// Configuration for one worker run.
-#[derive(Clone, Debug)]
 pub struct WorkerConfig {
     /// Routed provider id (the control plane routes; the worker never
     /// self-selects — issue #310 non-goals).
@@ -30,6 +31,37 @@ pub struct WorkerConfig {
     /// turns. `None` (the default) disables emission entirely; the payload
     /// is an opaque sequence number, not a turn count.
     pub progress: Option<tokio::sync::watch::Sender<u64>>,
+    /// Cost attribution context for this run: which agent (task), role,
+    /// session (run), project, and repository the model calls belong to.
+    /// `None` (the default) means no per-call cost entries are recorded.
+    pub attribution: Option<CostAttribution>,
+    /// Cost sink receiving one `CostEntry` per completed model call when
+    /// `attribution` is `Some`. `None` (the default) records nothing.
+    pub cost_sink: Option<std::sync::Arc<dyn CostSink>>,
+    /// Monotonic per-run model-call counter backing unique cost-row keys
+    /// (`request_id` is the ledger primary key). Shared mutable state on
+    /// the config because `call_model` takes `&WorkerConfig`.
+    pub(crate) model_call_sequence: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for WorkerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerConfig")
+            .field("provider_id", &self.provider_id)
+            .field("model_id", &self.model_id)
+            .field("budgets", &self.budgets)
+            .field("prior_daily_spend_usd", &self.prior_daily_spend_usd)
+            .field("progress", &self.progress)
+            .field("attribution", &self.attribution)
+            .field("cost_sink", &self.cost_sink.is_some())
+            .field(
+                "model_calls_recorded",
+                &self
+                    .model_call_sequence
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 impl WorkerConfig {
@@ -42,6 +74,9 @@ impl WorkerConfig {
             budgets,
             prior_daily_spend_usd: 0.0,
             progress: None,
+            attribution: None,
+            cost_sink: None,
+            model_call_sequence: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -49,6 +84,20 @@ impl WorkerConfig {
     #[must_use]
     pub fn with_progress(mut self, progress: tokio::sync::watch::Sender<u64>) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// Attaches per-call cost attribution and the sink that receives the
+    /// entries (see [`WorkerConfig::attribution`]). Both are set together:
+    /// attribution without a sink (or the reverse) records nothing.
+    #[must_use]
+    pub fn with_cost_tracking(
+        mut self,
+        attribution: CostAttribution,
+        sink: std::sync::Arc<dyn CostSink>,
+    ) -> Self {
+        self.attribution = Some(attribution);
+        self.cost_sink = Some(sink);
         self
     }
 }

@@ -397,3 +397,94 @@ async fn no_progress_channel_still_completes() {
     drop(sim);
     drop(worktree);
 }
+
+#[tokio::test]
+async fn cost_entries_recorded_per_model_call_with_attribution() {
+    // One write turn + one finish turn: two model calls, two distinct rows.
+    let sim = serve(vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "write_file",
+                "path": "src/cost.txt",
+                "content": "cost probe\n"
+            })),
+        },
+        finish_action(true),
+    ])
+    .await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let bash = FixtureBash {
+        mode: BashMode::Ok,
+        calls: std::sync::Mutex::new(0),
+    };
+    let task = fixture_task("t-cost");
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>> =
+        std::sync::Arc::default();
+    let sink: std::sync::Arc<dyn orchestraitor_provider_neuralwatt::CostSink> =
+        std::sync::Arc::new(SharedLedgerSink {
+            captured: std::sync::Arc::clone(&captured),
+        });
+    let config = WorkerConfig::new(
+        ProviderId::from_string("neuralwatt".to_string()),
+        ModelId::from_string("glm-5.2".to_string()),
+        fast_budgets(),
+    )
+    .with_cost_tracking(
+        orchestraitor_provider_neuralwatt::cost::CostAttribution {
+            agent_domain_id: orchestraitor_model::AgentId::from_string("t-cost".to_string()),
+            role: "implement".to_string(),
+            project: "test".to_string(),
+            session: orchestraitor_model::SessionId::from_string("sess-t-cost".to_string()),
+            repository: orchestraitor_model::RepositoryId::from_string("repo".to_string()),
+        },
+        sink,
+    );
+
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &bash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+
+    // One cost row per model call, each with a unique request_id (the
+    // ledger primary key would silently drop duplicates).
+    assert!(run.usage.input_tokens + run.usage.output_tokens > 0);
+    let entries = captured.lock().unwrap().clone();
+    assert_eq!(entries.len(), 2, "one cost row per model call");
+    assert_eq!(entries[0].agent_domain_id.as_str(), "t-cost");
+    assert_eq!(entries[0].role, "implement");
+    assert_eq!(entries[0].session.as_str(), "sess-t-cost");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e.request_id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "request ids must be unique per call"
+    );
+    let total_in: u64 = entries.iter().map(|e| e.input_tokens).sum();
+    let total_out: u64 = entries.iter().map(|e| e.output_tokens).sum();
+    assert_eq!(total_in, run.usage.input_tokens);
+    assert_eq!(total_out, run.usage.output_tokens);
+    assert!(entries.iter().all(|e| e.request_count == 1));
+}
+
+/// Shared in-memory sink for attribution assertions: records entries and
+/// hands them back through the same Arc the config holds.
+struct SharedLedgerSink {
+    captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>>,
+}
+
+impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
+    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
+        self.captured.lock().unwrap().push(entry.clone());
+        Ok(())
+    }
+}

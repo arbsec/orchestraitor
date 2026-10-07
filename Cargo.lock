@@ -4503,10 +4503,12 @@ dependencies = [
  "orchestraitor-board-contract",
  "orchestraitor-campaign",
  "orchestraitor-core",
+ "orchestraitor-cost-ledger",
  "orchestraitor-events",
  "orchestraitor-mcp",
  "orchestraitor-model",
  "orchestraitor-provider-meta",
+ "orchestraitor-provider-neuralwatt",
  "orchestraitor-testkit",
  "orchestraitor-worker",
  "reqwest",
@@ -4795,7 +4797,9 @@ name = "orchestraitor-worker"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "orchestraitor-arbitraitor-client",
+ "orchestraitor-cost-ledger",
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-provider-neuralwatt",

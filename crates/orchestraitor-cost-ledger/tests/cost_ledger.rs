@@ -335,3 +335,52 @@ fn cost_entry_with_session(
     entry.session = SessionId::from_string(String::from(session));
     entry
 }
+
+/// Regression guard for issue #501: `all_agent_rollups` must group by the
+/// domain-agent id across domains, summing token counters and request counts
+/// per agent — one rollup row per agent, never one per entry.
+#[test]
+fn all_agent_rollups_group_by_agent_across_domains() {
+    let ledger = CostLedger::open_in_memory().unwrap();
+
+    // "backend" spans two entries in different sessions; "frontend" has one.
+    let backend_one = sample_cost_entry(
+        AgentId::from_string(String::from("backend")),
+        "req-backend-1",
+        100,
+        50,
+    );
+    let backend_two = sample_cost_entry(
+        AgentId::from_string(String::from("backend")),
+        "req-backend-2",
+        30,
+        20,
+    );
+    let frontend = sample_cost_entry(
+        AgentId::from_string(String::from("frontend")),
+        "req-frontend-1",
+        7,
+        3,
+    );
+    for entry in [&backend_one, &backend_two, &frontend] {
+        ledger.api_spend().insert_cost_entry(entry).unwrap();
+    }
+
+    let rollups = ledger.api_spend().all_agent_rollups().unwrap();
+
+    assert_eq!(rollups.len(), 2, "one rollup per agent, not per entry");
+    assert_eq!(rollups[0].agent_domain_id.as_str(), "backend");
+    assert_eq!(rollups[0].input_tokens, 130);
+    assert_eq!(rollups[0].output_tokens, 70);
+    assert_eq!(rollups[0].reasoning_tokens, 50);
+    assert_eq!(rollups[0].request_count, 2);
+    assert_eq!(rollups[0].total_tokens(), 175 + 75);
+    assert!(
+        (rollups[0].monetary_cost_measured - 0.5).abs() < f64::EPSILON,
+        "measured cost sums across the agent's entries"
+    );
+    assert_eq!(rollups[1].agent_domain_id.as_str(), "frontend");
+    assert_eq!(rollups[1].input_tokens, 7);
+    assert_eq!(rollups[1].output_tokens, 3);
+    assert_eq!(rollups[1].request_count, 1);
+}

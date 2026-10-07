@@ -168,7 +168,7 @@ fn tampered_envelope_bytes_are_detected_on_read() -> Result<(), EventError> {
         [tampered.as_bytes()],
     )?;
     drop(connection);
-    assert!(!stored_hash.is_empty());
+    assert_ne!(stored_hash, "");
 
     let reopened = SqliteAuditStore::open(&path)?;
     let result = reopened.query(&EventQuery {

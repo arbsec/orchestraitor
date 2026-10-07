@@ -1059,7 +1059,7 @@ mod tests {
             panic!("expected blocked graph");
         };
         assert!(!graph.root_exists);
-        assert!(graph.blocking.is_empty());
+        assert_eq!(graph.blocking, [] as [BoardQueryItem; 0]);
     }
 
     // ------------------------------------------------------------------

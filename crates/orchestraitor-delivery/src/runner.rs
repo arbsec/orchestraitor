@@ -1522,10 +1522,9 @@ mod tests {
             }
         )));
         // A stopped runner makes no further progress.
-        assert!(
-            runner
-                .tick(&BTreeMap::from([completed_outcome("a")]))
-                .is_empty()
+        assert_eq!(
+            runner.tick(&BTreeMap::from([completed_outcome("a")])),
+            [] as [RunnerEvent; 0]
         );
         assert!(runner.completed().is_empty());
         Ok(())
@@ -1651,8 +1650,8 @@ mod tests {
         let mut runner = runner(&dag, &config)?;
 
         let outcomes = BTreeMap::from([completed_outcome("a")]);
-        assert!(runner.run(&outcomes, 0).is_empty());
-        assert!(runner.journal().is_empty());
+        assert_eq!(runner.run(&outcomes, 0), [] as [RunnerEvent; 0]);
+        assert_eq!(runner.journal(), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
 
         // One tick dispatches the attempt; the next consumes the outcome.
@@ -1893,7 +1892,7 @@ mod tests {
         assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a", "b"]);
         // Tick 2: the running set is full — no starts, and the full cap is
         // NOT a stop reason.
-        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
         // Draining the running set releases the next cap-sized batch.
         let events = runner.tick(&BTreeMap::from([
@@ -1936,7 +1935,7 @@ mod tests {
             task: tid("a"),
             delay_ms: 200,
         }));
-        assert!(started_events(&events).is_empty());
+        assert_eq!(started_events(&events), [] as [String; 0]);
         // Pending retry a competes with newly eligible b for the single
         // slot; stable task-ID order decides, and b is never dropped or
         // blocked while it waits.
@@ -1964,7 +1963,7 @@ mod tests {
 
         assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a", "b"]);
         // A full running set yields an empty-but-alive tick.
-        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
         // Consuming one outcome frees exactly one slot.
         let events = runner.tick(&BTreeMap::from([completed_outcome("a")]));
@@ -1972,7 +1971,7 @@ mod tests {
         // c joined the running set: b completing frees a slot with nothing
         // left to start — no starts, no stop.
         let events = runner.tick(&BTreeMap::from([completed_outcome("b")]));
-        assert!(started_events(&events).is_empty());
+        assert_eq!(started_events(&events), [] as [String; 0]);
         assert_eq!(runner.stop_reason(), None);
         let events = runner.tick(&BTreeMap::from([completed_outcome("c")]));
         assert_eq!(
@@ -2037,7 +2036,7 @@ mod tests {
         // neither drop a from the running set nor turn the wait into a
         // block, a stop, or a false event stream.
         for _ in 0..3 {
-            assert!(runner.tick(&no_outcomes()).is_empty());
+            assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
             assert_eq!(runner.stop_reason(), None);
         }
         assert!(runner.blocked().is_empty());
@@ -2118,7 +2117,7 @@ mod tests {
         assert_eq!(runner.stop_reason(), None);
         // Headroom exhausted: the third task waits without a stop, block, or
         // drop.
-        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
         assert!(runner.blocked().is_empty());
         // One slot releases and the freed headroom admits exactly one more
@@ -2135,7 +2134,7 @@ mod tests {
         assert_eq!(runner.stop_reason(), None);
         // Both remaining implementations in flight: headroom is exhausted
         // again and the wait stays eventless and alive.
-        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
         let events = runner.tick(&BTreeMap::from([
             completed_outcome("b"),
@@ -2168,7 +2167,7 @@ mod tests {
 
         assert_eq!(started_events(&runner.tick(&no_outcomes())), ["a"]);
         assert_eq!(runner.stop_reason(), None);
-        assert!(runner.tick(&no_outcomes()).is_empty());
+        assert_eq!(runner.tick(&no_outcomes()), [] as [RunnerEvent; 0]);
         assert_eq!(runner.stop_reason(), None);
         assert!(runner.blocked().is_empty());
         let events = runner.tick(&BTreeMap::from([completed_outcome("a")]));
