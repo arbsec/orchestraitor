@@ -282,6 +282,33 @@ fn loop_completes_a_seeded_task_within_the_cycle_bound() -> miette::Result<()> {
     assert_eq!(json["completed"], 1);
     assert_eq!(json["stalled"], 0);
 
+    // Per-agent cost rollups ride inside the summary as `agent_costs` (spec
+    // §9.19.4): the fixture's single task spawns one worker whose two model
+    // calls each record a CostEntry attributed to the board task id, so one
+    // rollup with summed request_count and token counters must appear.
+    let agent_costs = json["agent_costs"]
+        .as_array()
+        .expect("agent_costs array in the JSON summary");
+    assert_eq!(agent_costs.len(), 1, "one rollup for the single task agent");
+    let rollup = &agent_costs[0];
+    assert_eq!(rollup["agent_domain_id"], "board-arbsec_orchestraitor-42");
+    assert_eq!(
+        rollup["request_count"], 2,
+        "one cost entry per worker model call"
+    );
+    // The simulator's NonStreaming usage maps prompt_tokens=0 and
+    // completion_tokens=<word count>, so tokens must sum across both calls.
+    assert_eq!(rollup["input_tokens"], 0, "simulator sends prompt_tokens=0");
+    let output_tokens = rollup["output_tokens"].as_u64().unwrap_or(0);
+    assert!(
+        output_tokens > 0,
+        "output tokens accumulate from both model calls, got {output_tokens}"
+    );
+    assert_eq!(
+        rollup["monetary_cost_measured"], 0.0,
+        "no provider pricing is wired in this slice"
+    );
+
     // Durable surfaces: one completed run row, two decision records (the
     // spawn pass plus the post-completion no-op pass).
     let runs_db = rusqlite::Connection::open(config_dir.join("loop.db")).into_diagnostic()?;

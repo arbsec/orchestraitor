@@ -2,10 +2,12 @@
 //! (backoff per issue #310), event folding, usage accrual, and the daily spend
 //! soft-cap check.
 
+use orchestraitor_cost_ledger::{CostEntry, MonetaryCostBasis};
 use orchestraitor_provider_api::ProviderTransportError;
 use orchestraitor_provider_api::transport::{
     ModelEvent, ModelEventStream, ModelMessage, ModelRequest, ProviderTransport, TokenCount,
 };
+use std::sync::atomic::Ordering;
 use tracing::debug;
 
 use crate::budget::backoff_delay;
@@ -40,10 +42,8 @@ pub(super) async fn call_model(
         provider_id: config.provider_id.clone(),
         model_id: config.model_id.clone(),
         messages: messages.to_vec(),
-        // Bounded per call: an uncapped completion lets a verbose model
-        // (glm-5.x multi-block mode) burn context and wall clock in one
-        // turn. 8k output tokens is ample for one fenced action block plus
-        // reasoning; the guard is a bound, not a target.
+        // Bounded per-call output: the cap guards context and
+        // wall-clock burn (see a44af33); cost tracking must not change it.
         max_output_tokens: Some(8_192),
         temperature: None,
         reasoning: None,
@@ -54,13 +54,27 @@ pub(super) async fn call_model(
     let mut retries = 0_u32;
     loop {
         state.model_calls += 1;
+        let started = std::time::Instant::now();
         match transport.stream(request.clone()).await {
             Ok(events) => {
-                let (text, usage) = collect_events(events)?;
-                accumulate_usage(state, config, usage);
-                return Ok(text);
+                match collect_events(events) {
+                    Ok((text, usage)) => {
+                        accumulate_usage(state, config, usage);
+                        record_call_cost(config, &request, usage, CallOutcome::Completed, started);
+                        return Ok(text);
+                    }
+                    Err((failure, usage)) => {
+                        // The transport attempt happened and may have
+                        // produced usage before the stream went invalid:
+                        // record the failed call with any partial usage so
+                        // the ledger reflects the spend (spec §9.26.4).
+                        record_call_cost(config, &request, usage, CallOutcome::Failed, started);
+                        return Err(failure);
+                    }
+                }
             }
             Err(ProviderTransportError::RequestFailed { .. }) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 if retries >= budgets.max_provider_retries {
                     return Err(TypedFailure {
                         class: FailureClass::ProviderError,
@@ -73,12 +87,14 @@ pub(super) async fn call_model(
                 tokio::time::sleep(delay).await;
             }
             Err(ProviderTransportError::InvalidEvent) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-invalid-event",
                 });
             }
             Err(ProviderTransportError::CapabilityUnavailable { .. }) => {
+                record_call_cost(config, &request, None, CallOutcome::Failed, started);
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-capability-unavailable",
@@ -91,35 +107,112 @@ pub(super) async fn call_model(
 /// Folds one event stream into response text and usage. A stream without a
 /// `Completed` terminator — or carrying native tool calls the text protocol
 /// never requests — is an invalid stream (fail closed, not a silent trim).
-fn collect_events(events: ModelEventStream) -> Result<(String, Option<TokenCount>), TypedFailure> {
+/// The `Err` payload carries any usage observed before the failure so the
+/// failed call still records its partial spend.
+fn collect_events(
+    events: ModelEventStream,
+) -> Result<(String, Option<TokenCount>), (TypedFailure, Option<TokenCount>)> {
     let mut text = String::new();
     let mut usage = None;
     let mut completed = false;
     for event in events {
-        let event = event.map_err(|_| TypedFailure {
-            class: FailureClass::ProviderError,
-            reason: "provider-invalid-event",
-        })?;
+        let Ok(event) = event else {
+            return Err((
+                TypedFailure {
+                    class: FailureClass::ProviderError,
+                    reason: "provider-invalid-event",
+                },
+                usage,
+            ));
+        };
         match event {
             ModelEvent::Started => {}
             ModelEvent::Completed => completed = true,
             ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
             ModelEvent::Usage { token_count } => usage = Some(token_count),
             ModelEvent::ToolCall { .. } => {
-                return Err(TypedFailure {
-                    class: FailureClass::ProviderError,
-                    reason: "provider-unexpected-tool-call",
-                });
+                return Err((
+                    TypedFailure {
+                        class: FailureClass::ProviderError,
+                        reason: "provider-unexpected-tool-call",
+                    },
+                    usage,
+                ));
             }
         }
     }
     if !completed {
-        return Err(TypedFailure {
-            class: FailureClass::ProviderError,
-            reason: "provider-invalid-event",
-        });
+        return Err((
+            TypedFailure {
+                class: FailureClass::ProviderError,
+                reason: "provider-invalid-event",
+            },
+            usage,
+        ));
     }
     Ok((text, usage))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A stream item error after a Usage event must carry the partial usage
+    /// out of `collect_events` (spec §9.26.4: failed calls still record spend).
+    #[test]
+    fn stream_error_after_usage_carries_partial_usage() {
+        let partial = TokenCount {
+            input_tokens: 11,
+            output_tokens: 7,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let events: ModelEventStream = Box::new(
+            vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::Usage {
+                    token_count: partial,
+                }),
+                Err(ProviderTransportError::InvalidEvent),
+            ]
+            .into_iter(),
+        );
+        let Err((_, usage)) = collect_events(events) else {
+            panic!("stream error must fail collect_events");
+        };
+        assert_eq!(usage, Some(partial));
+    }
+
+    /// A missing `Completed` terminator is an invalid stream, and any usage
+    /// observed before the truncation must still be carried out.
+    #[test]
+    fn missing_completed_terminator_carries_partial_usage() {
+        let partial = TokenCount {
+            input_tokens: 3,
+            output_tokens: 4,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let events: ModelEventStream = Box::new(
+            vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::TextDelta {
+                    text: "partial".to_string(),
+                }),
+                Ok(ModelEvent::Usage {
+                    token_count: partial,
+                }),
+            ]
+            .into_iter(),
+        );
+        let Err((failure, usage)) = collect_events(events) else {
+            panic!("truncated stream must fail collect_events");
+        };
+        assert_eq!(failure.reason, "provider-invalid-event");
+        assert_eq!(usage, Some(partial));
+    }
 }
 
 /// Accumulates usage and evaluates the daily spend soft cap (soft: recorded,
@@ -138,5 +231,86 @@ fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<T
     let spent = config.prior_daily_spend_usd + estimated;
     if spent > config.budgets.daily_spend_soft_cap_usd {
         state.spend_soft_cap_exceeded = true;
+    }
+}
+
+/// Whether a model call completed or failed. Failed calls still record a
+/// cost row (spec §9.26.4: usage records are mandatory even on failure) —
+/// undercounting spend for flaky providers defeats the ledger's purpose.
+#[derive(Clone, Copy)]
+enum CallOutcome {
+    Completed,
+    Failed,
+}
+
+impl CallOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "worker-bootstrap",
+            Self::Failed => "worker-bootstrap-failed",
+        }
+    }
+}
+
+/// Records one cost entry for a completed model call (spec §9.19.4 per-call
+/// attribution). Best-effort: a sink write failure is logged and dropped —
+/// cost bookkeeping must never fail a delivery run. Errors carry no request
+/// content (§9.23.4). `usage = None` still records the request (row shows a
+/// provider call with zero reported tokens).
+///
+/// The row key mints a per-call sequence number: `request_id` is the ledger
+/// primary key, so a constant id would silently swallow every entry after
+/// the first.
+fn record_call_cost(
+    config: &WorkerConfig,
+    request: &ModelRequest,
+    usage: Option<TokenCount>,
+    outcome: CallOutcome,
+    started: std::time::Instant,
+) {
+    let (Some(attribution), Some(sink)) = (&config.attribution, &config.cost_sink) else {
+        return;
+    };
+    let call_number = config.model_call_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+    let (input_tokens, output_tokens, reasoning_tokens, cache_read_tokens) =
+        usage.map_or((0, 0, 0, 0), |u| {
+            (
+                u.input_tokens,
+                u.output_tokens,
+                u.reasoning_tokens,
+                u.cached_tokens,
+            )
+        });
+    let now = chrono::Utc::now();
+    let entry = CostEntry {
+        model: request.model_id.clone(),
+        provider: request.provider_id.clone(),
+        agent_domain_id: attribution.agent_domain_id.clone(),
+        role: attribution.role.clone(),
+        project: attribution.project.clone(),
+        session: attribution.session.clone(),
+        repository: attribution.repository.clone(),
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_write_tokens: 0,
+        request_count: 1,
+        // The transport does not surface a provider request id through the
+        // event stream yet; run-scoped session id + per-call sequence
+        // number gives the row a stable, unique, dedupable key.
+        request_id: format!("{}/call-{call_number}", attribution.session.as_str()),
+        parent_request_id: None,
+        started_at: now,
+        completed_at: now,
+        wall_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        monetary_cost_measured: None,
+        monetary_cost_estimated: None,
+        monetary_cost_basis: MonetaryCostBasis::UtilizationOnly,
+        subscription_attribution_id: None,
+        routing_decision: outcome.label().to_owned(),
+    };
+    if let Err(error) = orchestraitor_provider_neuralwatt::CostSink::record(sink.as_ref(), &entry) {
+        debug!(%error, "cost sink write failed; entry dropped");
     }
 }

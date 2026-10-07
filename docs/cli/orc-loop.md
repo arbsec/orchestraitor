@@ -93,6 +93,20 @@ Cross-invocation suppression is a board/PM decision, not a loop policy.
   observes progress beats —, terminal status, recorded spend, detail). Concurrency
   counts only workers supervised by the current invocation. Historical rows remain
   unchanged on startup; restart recovery is deferred to the E8 watch daemon.
+- Cost ledger: `<config-dir>/cost.db` — one cost entry per worker model call (spec
+  §9.19.4), attributed to the board task (agent), the routed orchestration role, and
+  the loop invocation + task session. A ledger-open failure degrades to unattributed
+  runs with a stderr warning; cost bookkeeping never blocks delivery.
+
+## Cost report
+
+At end of run the per-agent rollups (token totals and request counts per board task)
+are appended to the `--json` summary as `agent_costs`, and printed under an
+`agent costs:` heading in text mode. Rollup query failures drop the report with a
+stderr warning and never fail the run. Measured/estimated monetary columns stay `0.0`
+until the cost-ledger lane wires provider pricing in. The rollups are cumulative across
+all `orc loop` invocations that share this machine's config dir (the query reads every
+row in `<config-dir>/cost.db`), not scoped to the current run.
 
 ## Single instance
 

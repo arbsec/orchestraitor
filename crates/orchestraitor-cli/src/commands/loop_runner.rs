@@ -82,6 +82,14 @@ struct DirectLoopStarter {
     tasks_dir: Option<PathBuf>,
     provider_endpoint: Option<String>,
     budgets: WorkerBudgets,
+    /// Shared process-lifetime cost ledger for per-call attribution
+    /// (spec §9.19.4); `None` when the ledger could not be opened and the
+    /// run degrades to unattributed. `CostLedger` wraps a `rusqlite`
+    /// connection (`!Sync`), so spawns share it behind a mutex.
+    cost_ledger: Option<Arc<std::sync::Mutex<orchestraitor_cost_ledger::CostLedger>>>,
+    /// Loop invocation id, minted once per `orc loop` run; names each
+    /// worker run's cost-attribution session.
+    invocation_id: String,
 }
 
 impl DirectLoopStarter {
@@ -124,6 +132,18 @@ impl DirectLoopStarter {
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
             });
+        }
+        // Seed the worker's codegraph lane (spec `10-orchestrator.md`
+        // §9.38): the fresh checkout has no index snapshot (gitignored
+        // build artifact), so copy the project root's if present. Best
+        // effort — a missing or unreadable snapshot degrades the worker's
+        // `sym:` search to plain content search, never blocks the spawn.
+        let snapshot = self.project_dir.join(".orchestraitor/codegraph.json");
+        if snapshot.is_file() {
+            let target_dir = worktree.join(".orchestraitor");
+            if std::fs::create_dir_all(&target_dir).is_ok() {
+                let _ignore = std::fs::copy(&snapshot, target_dir.join("codegraph.json"));
+            }
         }
         Ok(worktree)
     }
@@ -207,6 +227,78 @@ impl DirectLoopStarter {
             detail.trim()
         );
     }
+
+    /// Materializes the task fixture from the board selection (write +
+    /// rename so a crashed write can never leave a half-file that the
+    /// id-mismatch check would silently (mis)load).
+    fn materialize_task_fixture(
+        tasks_dir: &Path,
+        selected: &SelectedTask,
+    ) -> Result<(), CampaignError> {
+        let task = orchestraitor_worker::WorkerTask {
+            id: selected.task_id.clone(),
+            slug: selected.task_id.clone(),
+            description: format!(
+                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
+                 the issue and its referenced spec sections. Work in the checked-out task \
+                 worktree; deliver per the worker contract.",
+                selected.number, selected.repo, selected.title, selected.url,
+            ),
+        };
+        let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
+        let task_bytes =
+            serde_json::to_vec_pretty(&task).map_err(|error| CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!("task fixture serialization failed: {error}"),
+            })?;
+        let temp_path = tasks_dir.join(format!(".{}.tmp", selected.task_id));
+        std::fs::write(&temp_path, &task_bytes).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture write failed: {error}"),
+        })?;
+        std::fs::rename(&temp_path, &task_path).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture rename failed: {error}"),
+        })?;
+        Ok(())
+    }
+
+    /// Attaches per-call cost tracking when the ledger is available: one
+    /// cost row per model call, attributed to
+    ///   agent = the board task (the domain agent),
+    ///   role  = the routed orchestration role,
+    ///   session = this loop invocation + run id.
+    fn with_cost_tracking(
+        &self,
+        mut config: WorkerConfig,
+        selected: &SelectedTask,
+        routing: &RoleRoutingDecision,
+    ) -> WorkerConfig {
+        let Some(ledger) = &self.cost_ledger else {
+            return config;
+        };
+        let attribution = orchestraitor_provider_neuralwatt::cost::CostAttribution {
+            agent_domain_id: orchestraitor_model::AgentId::from_string(selected.task_id.clone()),
+            role: routing.role.clone(),
+            project: self.project_dir.file_name().map_or_else(
+                || "unknown".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            session: orchestraitor_model::SessionId::from_string(format!(
+                "{}-{}",
+                self.invocation_id, selected.task_id
+            )),
+            repository: orchestraitor_model::RepositoryId::from_string(
+                self.project_dir.display().to_string(),
+            ),
+        };
+        let sink: std::sync::Arc<dyn orchestraitor_provider_neuralwatt::CostSink> =
+            std::sync::Arc::new(MutexLedgerSink {
+                ledger: Arc::clone(ledger),
+            });
+        config = config.with_cost_tracking(attribution, sink);
+        config
+    }
 }
 
 #[async_trait]
@@ -244,6 +336,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 message: format!("worker-tasks dir creation failed: {error}"),
             });
         }
+        Self::materialize_task_fixture(&tasks_dir, selected)?;
         let task = orchestraitor_worker::WorkerTask {
             id: selected.task_id.clone(),
             slug: selected.task_id.clone(),
@@ -254,23 +347,6 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 selected.number, selected.repo, selected.title, selected.url,
             ),
         };
-        let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
-        let task_bytes =
-            serde_json::to_vec_pretty(&task).map_err(|error| CampaignError::Spawn {
-                task_id: selected.task_id.clone(),
-                message: format!("task fixture serialization failed: {error}"),
-            })?;
-        // Write + rename so a crashed write can never leave a half-file
-        // that the id-mismatch check would silently (mis)load.
-        let temp_path = tasks_dir.join(format!(".{}.tmp", selected.task_id));
-        std::fs::write(&temp_path, &task_bytes).map_err(|error| CampaignError::Spawn {
-            task_id: selected.task_id.clone(),
-            message: format!("task fixture write failed: {error}"),
-        })?;
-        std::fs::rename(&temp_path, &task_path).map_err(|error| CampaignError::Spawn {
-            task_id: selected.task_id.clone(),
-            message: format!("task fixture rename failed: {error}"),
-        })?;
         let transport = Arc::new(
             build_bootstrap_transport(self.provider_endpoint.clone()).map_err(|error| {
                 CampaignError::Spawn {
@@ -288,6 +364,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
             self.budgets.clone(),
         );
         config.prior_daily_spend_usd = prior_daily_spend_usd;
+        let config = self.with_cost_tracking(config, selected, routing);
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
             run_worker(
@@ -310,6 +387,25 @@ impl LoopWorkerStarter for DirectLoopStarter {
 /// Holds the advisory instance lock for the duration of the run.
 struct InstanceLock {
     _file: std::fs::File,
+}
+
+/// Bridges a shared `CostLedger` (rusqlite `!Sync`) into the `Send + Sync`
+/// `CostSink` trait by locking per call.
+struct MutexLedgerSink {
+    ledger: Arc<std::sync::Mutex<orchestraitor_cost_ledger::CostLedger>>,
+}
+
+impl orchestraitor_provider_neuralwatt::CostSink for MutexLedgerSink {
+    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ledger
+            .api_spend()
+            .insert_cost_entry(entry)
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// A second concurrent `orc loop` invocation refused the instance lock.
@@ -496,6 +592,20 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     )
     .map_err(|error| miette!("{error}"))?;
 
+    // Per-agent cost tracking (spec §9.19.4): one process-lifetime ledger
+    // at `.orchestraitor/cost.db`; every worker model call records a
+    // CostEntry attributed to its run. A ledger open failure degrades to
+    // unattributed runs (spend still flows through loop.db's soft-cap
+    // path) — bookkeeping must never block delivery.
+    let cost_ledger =
+        match orchestraitor_cost_ledger::CostLedger::open(&paths.config_dir.join("cost.db")) {
+            Ok(ledger) => Some(Arc::new(std::sync::Mutex::new(ledger))),
+            Err(error) => {
+                report_signal_failure(&format!("cost ledger open failed: {error}"));
+                None
+            }
+        };
+
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
     // Prune leftover worktrees from previous invocations before any spawn
     // (see `prune_worktrees`): the loop runs unattended, so the worktree
@@ -503,12 +613,15 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     DirectLoopStarter::prune_worktrees(&paths.config_dir, &paths.project_dir);
     let run_result = runtime.block_on(async {
         let (signal_rx, signals) = spawn_signal_task();
+        // Millis alone can collide across hosts sharing a ledger dir (and
+        // clock regressions collapse to "loop-0"); pid + nanos makes the
+        // id process-unique in practice.
         let invocation_id = format!(
-            "loop-{}",
+            "loop-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or_default()
+                .map_or(0, |duration| duration.as_nanos()),
         );
         let start_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -524,6 +637,8 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             // the worker layer reads these pinned values, so the two
             // enforcement layers cannot drift.
             budgets: loop_config.budgets.clone(),
+            cost_ledger: cost_ledger.clone(),
+            invocation_id: invocation_id.clone(),
         };
         let runner = LoopRunner::new(
             loop_config,
@@ -549,10 +664,77 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     let summary = run_result?;
 
     if args.json {
-        serde_json::to_writer_pretty(&mut *writer, &summary).into_diagnostic()?;
-        writeln!(writer).into_diagnostic()?;
+        write_json_summary(writer, &summary, cost_ledger.as_deref())?;
     } else {
-        render_text(writer, &summary)?;
+        render_text(&mut *writer, &summary)?;
+        render_agent_costs(&mut *writer, cost_ledger.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Queries the per-agent rollups (spec §9.19.4); `None` when tracking is
+/// off. A query failure reports to stderr and yields an empty set — a
+/// reporting failure never fails the run.
+fn agent_cost_rollups(
+    ledger: Option<&std::sync::Mutex<orchestraitor_cost_ledger::CostLedger>>,
+) -> Vec<orchestraitor_cost_ledger::DomainCostRollup> {
+    let Some(ledger) = ledger else {
+        return Vec::new();
+    };
+    match ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .api_spend()
+        .all_agent_rollups()
+    {
+        Ok(rollups) => rollups,
+        Err(error) => {
+            let stderr = std::io::stderr();
+            let _ignore = writeln!(stderr.lock(), "orc loop: agent cost report failed: {error}");
+            Vec::new()
+        }
+    }
+}
+
+/// Writes the JSON end-of-run summary: per-agent cost rollups (spec
+/// §9.19.4) ride INSIDE the one summary document as `agent_costs` so
+/// single-document consumers are unaffected when tracking is off.
+fn write_json_summary(
+    writer: &mut dyn Write,
+    summary: &orchestraitor_campaign::LoopSummary,
+    ledger: Option<&std::sync::Mutex<orchestraitor_cost_ledger::CostLedger>>,
+) -> Result<()> {
+    let mut document = serde_json::to_value(summary).into_diagnostic()?;
+    let rollups = agent_cost_rollups(ledger);
+    if !rollups.is_empty() {
+        document["agent_costs"] = serde_json::to_value(&rollups).into_diagnostic()?;
+    }
+    serde_json::to_writer_pretty(&mut *writer, &document).into_diagnostic()?;
+    writeln!(&mut *writer).into_diagnostic()?;
+    Ok(())
+}
+
+/// Appends the text-mode per-agent cost report (spec §9.19.4).
+fn render_agent_costs(
+    writer: &mut dyn Write,
+    ledger: Option<&std::sync::Mutex<orchestraitor_cost_ledger::CostLedger>>,
+) -> Result<()> {
+    let rollups = agent_cost_rollups(ledger);
+    if rollups.is_empty() {
+        return Ok(());
+    }
+    writeln!(writer, "agent costs:").into_diagnostic()?;
+    for rollup in rollups {
+        writeln!(
+            writer,
+            "  {}  in={} out={} calls={} est=${:.4}",
+            rollup.agent_domain_id.as_str(),
+            rollup.input_tokens,
+            rollup.output_tokens,
+            rollup.request_count,
+            rollup.monetary_cost_estimated
+        )
+        .into_diagnostic()?;
     }
     Ok(())
 }
