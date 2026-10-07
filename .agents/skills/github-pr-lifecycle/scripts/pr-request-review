@@ -130,5 +130,10 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
+# Conflict gate (owner directive 2026-10-07): NEVER request a human review
+# while the PR conflicts with its base — human attention must not be consumed
+# by an unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY.
+orc_lib_require_mergeable "$PR" "$REPO"
+
 orc_lib_gh_service pr edit "$PR" --repo "$REPO" --add-reviewer "$REVIEWER" >/dev/null
 echo "{\"pr\":$PR,\"requested\":true,\"reviewer\":\"$REVIEWER\"}"

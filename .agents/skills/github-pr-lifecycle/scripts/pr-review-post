@@ -73,6 +73,12 @@ if [ "$VERDICT" = "--request-changes" ] && [ -z "$BODY" ] && [ -z "$BODY_FILE" ]
 fi
 
 REPO="$(orc_lib_resolve_repo)"
+
+# Conflict gate (owner directive 2026-10-07): no review of any kind is posted
+# while the PR conflicts with its base — the review would evaluate an
+# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY.
+orc_lib_require_mergeable "$PR" "$REPO"
+
 ARGS=(pr review "$PR" --repo "$REPO" "$VERDICT")
 [ -n "$BODY" ] && ARGS+=(--body "$BODY")
 [ -n "$BODY_FILE" ] && ARGS+=(--body-file "$BODY_FILE")

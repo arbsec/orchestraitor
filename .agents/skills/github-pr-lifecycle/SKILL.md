@@ -135,7 +135,14 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   with `pr-request-review <pr>` — the script refuses
                   (typed reasons) while ANY automatic check is failing or
                   pending: never ask for human attention before the machine
-                  finished its own verification. Idempotent; the reviewer is
+                  finished its own verification. The script ALSO refuses
+                  while the PR conflicts with its base
+                  (mergeable=CONFLICTING / mergeStateStatus=DIRTY): no review
+                  of any kind — a human reviewer request OR an automated
+                  review trigger (`@coderabbitai review` via pr-comment,
+                  any pr-review-post verdict) — may be requested while the
+                  PR is unmergeable; resolve conflicts with base first.
+                  Idempotent; the reviewer is
                   the repo owner unless `--reviewer` overrides. The PR then
                   AWAITS the human's approval — the orchestrator MUST NOT
                   merge it autonomously (workflow policy; AGENTS.md).

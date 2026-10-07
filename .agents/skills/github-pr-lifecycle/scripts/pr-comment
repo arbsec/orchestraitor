@@ -48,6 +48,13 @@ if [ -z "$BODY" ] && [ -z "$BODY_FILE" ]; then
 fi
 
 REPO="$(orc_lib_resolve_repo)"
+
+# Conflict gate (owner directive 2026-10-07): no review trigger of any kind
+# (including an `@coderabbitai review` comment) may be posted while the PR
+# conflicts with its base — the automated review would evaluate an
+# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY.
+orc_lib_require_mergeable "$PR" "$REPO"
+
 ARGS=(pr comment "$PR" --repo "$REPO")
 [ -n "$BODY" ] && ARGS+=(--body "$BODY")
 [ -n "$BODY_FILE" ] && ARGS+=(--body-file "$BODY_FILE")
