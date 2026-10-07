@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use orchestraitor_model::{ContextOrigin, Digest, TrustClass};
 use tempfile::TempDir;
 
-use crate::{BlobRecord, ContextAge, ContextItem, ContextQuery, Indexer, LanguageKind, SymbolKind};
+use crate::{
+    BlobRecord, CallEdge, ContextAge, ContextDiagnostic, ContextItem, ContextQuery, Indexer,
+    LanguageKind, ReferenceRecord, RelatedTest, SymbolKind, SymbolRecord,
+};
 
 #[test]
 fn index_fixture_repo_and_find_symbol_tuple() {
@@ -109,8 +112,8 @@ fn deleted_files_are_evicted_on_reindex() {
     assert!(indexer.index().paths().is_empty());
     assert!(indexer.index().symbols().is_empty());
     assert!(indexer.index().blobs().is_empty());
-    assert!(indexer.index().references().is_empty());
-    assert!(indexer.index().calls().is_empty());
+    assert_eq!(indexer.index().references(), [] as [ReferenceRecord; 0]);
+    assert_eq!(indexer.index().calls(), [] as [CallEdge; 0]);
 }
 
 #[test]
@@ -187,9 +190,9 @@ fn appendix_e_queries_return_bounded_provenance_items() {
     assert!(excerpt.text.contains("pub fn add"));
     assert_eq!(excerpt.provenance.trust_class, TrustClass::Untrusted);
     assert!(matches!(body, Err(crate::ContextError::NotFound { .. })));
-    assert!(related.is_empty());
-    assert!(diagnostics.is_empty());
-    assert!(expanded.items.is_empty());
+    assert_eq!(related, [] as [RelatedTest; 0]);
+    assert_eq!(diagnostics, [] as [ContextDiagnostic; 0]);
+    assert_eq!(expanded.items, [] as [ContextItem; 0]);
     assert_eq!(expanded.anchor, symbol.id.0);
 }
 
@@ -204,11 +207,11 @@ fn expand_context_resolves_by_path_and_digest() {
     let digest: Digest = indexer.index().paths().get(path).cloned().unwrap();
 
     let by_path = query.expand_context(&path.display().to_string());
-    assert!(by_path.items.is_empty());
+    assert_eq!(by_path.items, [] as [ContextItem; 0]);
     assert_eq!(by_path.anchor, path.display().to_string());
 
     let by_digest = query.expand_context(&digest.to_string());
-    assert!(by_digest.items.is_empty());
+    assert_eq!(by_digest.items, [] as [ContextItem; 0]);
     assert_eq!(by_digest.anchor, digest.to_string());
 
     let blob = indexer.index().blob_for_digest(&digest).unwrap();
@@ -277,8 +280,14 @@ fn javascript_symbols_are_extracted_with_expected_kinds() {
 
     // Property accesses and comment content are not definitions and must
     // never be extracted as symbols.
-    assert!(query.find_symbol("prefix", None, None).is_empty());
-    assert!(query.find_symbol("ghostSymbol", None, None).is_empty());
+    assert_eq!(
+        query.find_symbol("prefix", None, None),
+        [] as [SymbolRecord; 0]
+    );
+    assert_eq!(
+        query.find_symbol("ghostSymbol", None, None),
+        [] as [SymbolRecord; 0]
+    );
 }
 
 fn blob_path(blob: &BlobRecord) -> PathBuf {

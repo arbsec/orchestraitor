@@ -206,7 +206,7 @@ mod tests {
 
         let secret = resolver.resolve(&provider_id).await?;
 
-        assert!(!secret.expose_secret().is_empty());
+        assert_ne!(secret.expose_secret(), "");
         Ok(())
     }
 

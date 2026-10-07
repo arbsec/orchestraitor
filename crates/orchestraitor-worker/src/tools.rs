@@ -368,7 +368,7 @@ mod tests {
             Some("path-escape")
         );
         assert!(!outside.exists(), "escaping write must not materialize");
-        assert!(executor.into_records().1.is_empty());
+        assert_eq!(executor.into_records().1, [] as [String; 0]);
     }
 
     #[cfg(unix)]

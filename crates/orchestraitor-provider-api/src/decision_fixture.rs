@@ -228,7 +228,7 @@ mod tests {
                 (0.0..=1.0).contains(&proposal.confidence),
                 "confidence must be calibrated"
             );
-            assert!(!proposal.alternatives.is_empty());
+            assert_ne!(proposal.alternatives, [] as [DecisionAlternative; 0]);
         }
     }
 

@@ -151,7 +151,7 @@ fn future_schema_is_preserved_as_uninterpreted() -> Result<(), EventError> {
         ..EventQuery::default()
     })?;
 
-    assert!(hidden.is_empty());
+    assert_eq!(hidden, [] as [AuditRecord; 0]);
     assert_eq!(visible.len(), 1);
     Ok(())
 }

@@ -618,5 +618,5 @@ fn decision_store_reopens_a_file_with_idempotent_migrations() {
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].role, "verify");
-    assert!(!records[0].created_at.is_empty());
+    assert_ne!(records[0].created_at, "");
 }

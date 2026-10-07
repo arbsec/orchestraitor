@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(state.advance(), None);
         assert_eq!(state.advance(), None);
         assert_eq!(state.current_step(), EscalationStep::HumanEscalation);
-        assert!(state.history().is_empty());
+        assert_eq!(state.history(), [] as [EscalationStep; 0]);
         assert_eq!(state.attempts_at_current_step(), 0);
         Ok(())
     }
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn history_is_an_append_only_ordered_record_of_left_steps() -> TestResult {
         let mut state = EscalationState::new(EscalationPolicy::default())?;
-        assert!(state.history().is_empty());
+        assert_eq!(state.history(), [] as [EscalationStep; 0]);
 
         assert_eq!(state.advance(), Some(EscalationStep::AlternateModel));
         assert_eq!(state.history(), [EscalationStep::SameAgentFreshContext]);
@@ -585,7 +585,7 @@ mod tests {
         }
         assert_eq!(state.attempts_at_current_step(), 10);
         assert_eq!(state.current_step(), EscalationStep::SameAgentFreshContext);
-        assert!(state.history().is_empty());
+        assert_eq!(state.history(), [] as [EscalationStep; 0]);
         assert!(!state.exhausted());
         assert_eq!(
             next_escalation(&state),

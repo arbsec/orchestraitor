@@ -277,7 +277,7 @@ fn expired_credential_fails_without_push_and_preserves_worktree()
             source: CredentialError::Expired { .. }
         })
     ));
-    assert!(fixture.ls_remote("refs/heads/feat/expired")?.is_empty());
+    assert_eq!(fixture.ls_remote("refs/heads/feat/expired")?, "");
     let calls = transport
         .calls
         .lock()

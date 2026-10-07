@@ -34,7 +34,7 @@ async fn cancellation_releases_resources_within_bounded_grace() {
     // Then: resources are released inside grace with no unreleased set.
     assert_eq!(outcome, CancellationOutcome::Released);
     assert!(report.completed_within_grace);
-    assert!(report.cleanup.unreleased.is_empty());
+    assert_eq!(report.cleanup.unreleased, [] as [ResourceId; 0]);
 }
 
 #[tokio::test(flavor = "current_thread")]

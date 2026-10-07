@@ -1143,6 +1143,9 @@ mod tests {
         let line = "spec \u{a7}9.99. and spec.md \u{a7}2.2, but aspect \u{a7}5 and spec \u{a7}N are not refs";
         // Then: only real numeric identifiers parse, dots trimmed.
         assert_eq!(references_in_line(line, "spec"), vec!["9.99", "2.2"]);
-        assert!(references_in_line("prefix tech-stack \u{a7}3.1.", "tech-stack") == vec!["3.1"]);
+        assert_eq!(
+            references_in_line("prefix tech-stack \u{a7}3.1.", "tech-stack"),
+            vec!["3.1"]
+        );
     }
 }
