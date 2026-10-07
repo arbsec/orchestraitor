@@ -85,14 +85,24 @@ if [ -s "$CHECKS_JSON" ]; then
 fi
 rm -f "$CHECKS_JSON"
 
-# Gate 3: reviewer not already requested (idempotency check). A failed read
-# must NOT default to "not requested" — that could double-request on a
-# transient error; fail closed instead.
-REQUESTED="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewRequests --jq '[.reviewRequests[].login] | join(",")')" ||
-  { echo "error: cannot read PR #$PR review requests" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+# Gate 3: edge-trigger guard — never re-request a reviewer who has already
+# approved or is already pending (a re-request forces a SECOND manual approval
+# after every landing; workflow policy: review requests are edge-triggered).
+# A failed read must NOT default to "not requested" — that could double-request
+# on a transient error; fail closed instead.
+REVIEW_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewRequests,reviews --jq '
+  {requests: [.reviewRequests[].login],
+   approved: [.reviews[] | select(.state == "APPROVED") | .author.login] | unique}')" ||
+  { echo "error: cannot read PR #$PR review state" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+REQUESTED="$(jq -r '.requests | join(",")' <<<"$REVIEW_STATE")"
+APPROVED_BY="$(jq -r '.approved | join(",")' <<<"$REVIEW_STATE")"
 ALREADY_REQUESTED=false
 if printf '%s' "$REQUESTED" | tr ',' '\n' | grep -qxF "$REVIEWER"; then
   ALREADY_REQUESTED=true
+fi
+ALREADY_APPROVED=false
+if printf '%s' "$APPROVED_BY" | tr ',' '\n' | grep -qxF "$REVIEWER"; then
+  ALREADY_APPROVED=true
 fi
 
 if [ "${#REASONS[@]}" -gt 0 ]; then
@@ -102,6 +112,16 @@ fi
 
 if [ "$ALREADY_REQUESTED" = true ]; then
   echo "{\"pr\":$PR,\"requested\":false,\"already_requested\":true,\"reviewer\":\"$REVIEWER\"}"
+  exit "$ORC_OK"
+fi
+
+# Edge-trigger: an APPROVED review from this reviewer means the request was
+# already satisfied. Re-requesting would force a second manual approval after
+# every landing (review-request churn); the new head invalidates prior review
+# convergence via the ruleset, not via a fresh request. Post the thread note
+# instead — the caller (SKILL.md 5b) owns that; this script just refuses.
+if [ "$ALREADY_APPROVED" = true ]; then
+  echo "{\"pr\":$PR,\"requested\":false,\"already_approved\":true,\"reviewer\":\"$REVIEWER\",\"note\":\"review requests are edge-triggered; post a thread reply that the new head invalidates prior review convergence instead\"}" >&2
   exit "$ORC_OK"
 fi
 

@@ -160,8 +160,13 @@ WANT_HUMAN_REVIEW=false
 while IFS= read -r path; do
   [ -z "$path" ] && continue
   lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
-  # Governance paths never trigger via path (reviewer-domain routing, not
-  # the label); their ADDED-LINE content is still classified below.
+  # Governance paths never trigger via path prefix (reviewer-domain routing,
+  # not the label); their ADDED-LINE content is still classified below, and a
+  # governance filename whose stem names a §21.1 subject (e.g.
+  # `check-unsigned-bot-commits`, `service-identity-enforcement`) still
+  # classifies: match its filename part against the same §21.1 patterns, so a
+  # governance-path change touching a security-control subject is not hidden
+  # by the routing carve-out.
   governance=false
   for gpattern in "${GOVERNANCE_PATHS[@]}"; do
     if printf '%s' "$lower" | grep -qE "$gpattern"; then
@@ -169,7 +174,28 @@ while IFS= read -r path; do
       break
     fi
   done
-  [ "$governance" = true ] && continue
+  if [ "$governance" = true ]; then
+    stem="${lower##*/}"
+    base="${stem%.*}"
+    # Only a compound stem that NAMES a control counts as content-bearing:
+    # either a governance-subject × control-mechanism pair (e.g.
+    # `check-unsigned-bot-commits`, `service-identity-enforcement`), or a
+    # control-mechanism pair on a governance path (e.g.
+    # `unsigned-bot-commits`, `verified-commit-path`). A single adjective
+    # (`security.yml` — GitHub's own workflow naming) or a process noun
+    # (`remediation`, `review`) does not.
+    control_mechanism="(^|-)(guard|enforcement|audit|verification|verified|unsigned|signing|signature|check|checks|blocking|block|gate)(-|$)"
+    gov_subject="identity|bot|commits?|service|app|secret|credential|token|auth|keyring|sandbox|network|projection|capabilit|permission|unsafe|policy"
+    if printf '%s' "$base" | grep -qE "$control_mechanism" && printf '%s' "$base" | grep -qE "$gov_subject"; then
+      for pattern in "${SENSITIVE_PATHS[@]}"; do
+        if printf '%s' "$base" | grep -q "$pattern"; then
+          WANT_HUMAN_REVIEW=true
+          break 2
+        fi
+      done
+    fi
+    continue
+  fi
   for pattern in "${SENSITIVE_PATHS[@]}"; do
     if printf '%s' "$lower" | grep -q "$pattern"; then
       WANT_HUMAN_REVIEW=true

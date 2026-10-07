@@ -57,9 +57,32 @@ ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 # an `edit --add-reviewer` asks for human attention exactly like
 # `pr-request-review`, so it carries the same gate — ALL automatic checks
 # must pass first (the machine finishes its own verification before
-# consuming human attention). Any other edit/ready/close is unaffected.
+# consuming human attention), and requests are EDGE-TRIGGERED: never
+# re-request a reviewer who is already pending or has already approved (a
+# re-request forces a second manual approval after every landing). Any other
+# edit/ready/close is unaffected.
 if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-reviewer"; then
   REASONS=()
+  REVIEW_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewRequests,reviews --jq '
+    {requests: [.reviewRequests[].login],
+     approved: [.reviews[] | select(.state == "APPROVED") | .author.login] | unique}')" ||
+    { echo "error: cannot read PR #$PR review state" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+  PENDING="$(jq -r '.requests | join(",")' <<<"$REVIEW_STATE")"
+  APPROVED_BY="$(jq -r '.approved | join(",")' <<<"$REVIEW_STATE")"
+  REVIEWERS_TO_ADD=()
+  index=0
+  while [ "$index" -lt "${#REST[@]}" ]; do
+    if [ "${REST[$index]}" = "--add-reviewer" ]; then
+      reviewer="${REST[$((index + 1))]:-}"
+      if printf '%s' "$PENDING" | tr ',' '\n' | grep -qxF "$reviewer" ||
+         printf '%s' "$APPROVED_BY" | tr ',' '\n' | grep -qxF "$reviewer"; then
+        echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"$reviewer\",\"note\":\"edge-triggered: reviewer already pending or approved; post a thread reply that the new head invalidates prior review convergence instead\"}" >&2
+        exit "$ORC_ERR_BLOCKED"
+      fi
+      REVIEWERS_TO_ADD+=("$reviewer")
+    fi
+    index=$((index + 1))
+  done
   CHECKS_JSON="$(mktemp)"
   if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
     REASONS+=("pr-checks could not classify checks")

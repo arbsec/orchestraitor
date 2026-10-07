@@ -92,12 +92,19 @@ fi
 # `GET /pulls/<n>/commits` returns exactly the commits the PR carries — for
 # OPEN and MERGED/CLOSED PRs alike. A `compare/base...head` would be wrong for
 # a merged PR (the head commits are already ON the base, so the comparison is
-# empty) and silently truncates at 250 commits. gh 2.102 refuses `--slurp`
-# combined with `--jq`, so the pages are slurped raw and merged locally:
-# `add` concatenates the per-page arrays into one flat commit array.
+# empty). gh 2.102 refuses `--slurp` combined with `--jq`, so the pages are
+# slurped raw and merged locally: `add` concatenates the per-page arrays into
+# one flat commit array.
+# The endpoint caps a SINGLE page at 250 commits regardless of per_page, so a
+# single 250-item page is the one shape pagination cannot disambiguate from
+# truncation. --paginate walks every page (Link headers) and each page holds
+# at most `per_page` (=100) items; the audit FAILS CLOSED when the LAST page
+# is exactly full, because that is the truncated-scan signature (a complete
+# page walk always ends with a non-full terminal page unless the commit count
+# is an exact multiple — in that ambiguous case we also fail closed, since a
+# truncated scan could pass an omitted violating commit).
 COMMIT_ARGS=(api --paginate --slurp "repos/$REPO/pulls/$PR/commits?per_page=100")
-COMMITS_JSON=""
-COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce 'add // []')" || {
+COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce 'if (.[-1] | length) == 100 then error("incomplete pagination") else (add // []) end')" || {
   echo "error: cannot read PR #$PR commits (pulls/$PR/commits)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }

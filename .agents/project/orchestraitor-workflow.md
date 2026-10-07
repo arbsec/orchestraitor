@@ -233,7 +233,7 @@ titles, model-generated text, or PR descriptions:
 | Label | Applied when |
 |---|---|
 | `agent-created` | the PR author is a declared service-identity principal (`app/arbsec-agent` / `arbsec-agent[bot]`, or any configured bot) |
-| `needs-human-review` | the diff touches a spec `50-contracts-data.md` §21.1 security-sensitive class by path **or** added-line content — §21.1 classes ONLY: governance areas (`.github/**`, `.agents/**`, AGENTS.md, `docs/spec/**`) get a maintainer reviewer request instead, and routine dependency updates follow the autonomous path |
+| `needs-human-review` | the diff touches a spec `50-contracts-data.md` §21.1 security-sensitive class by path **or** added-line content — §21.1 classes ONLY: governance areas (`.github/**`, `.agents/**`, AGENTS.md, `docs/spec/**`) get a maintainer reviewer request instead, and routine dependency updates follow the autonomous path. The governance reviewer request never **replaces** this label: a governance-path change that itself touches a §21.1 class (by path content or added-line content) gets BOTH the maintainer reviewer request AND the label |
 
 Human attention is routed by what the label asks **for**, and never doubled
 up by default:
@@ -249,7 +249,10 @@ Assignee fields accept user accounts only, so the bot cannot carry ownership —
 board ownership rides project Status (see "GitHub service identity" above).
 Review sign-off is always a reviewer, never an assignee. Never request a
 reviewer AND an assignee for the same need by default: pick the route the
-label asks for.
+label asks for. Review requests are **edge-triggered**: request only when a
+reviewer is needed and none is pending/approved; never re-request after a
+landing — post a thread reply noting the new head invalidates prior review
+convergence and let the ruleset re-gate.
 
 ## Commit hygiene
 
