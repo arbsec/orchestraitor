@@ -671,6 +671,19 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         return Ok(());
     }
     if changes.is_empty() {
+        // --dry-run must exit before any mutation — including the re-land
+        // path, whose helper can create temp refs and commits on the remote.
+        if args.dry_run {
+            writeln!(
+                std::io::stderr(),
+                "dry-run: would re-land {owner}/{repo} {remote_branch} (empty diff, \
+                 re-signing the head) at tree {local_tree}\n\
+                 message: {}",
+                args.message,
+            )
+            .into_diagnostic()?;
+            return Ok(());
+        }
         return re_land_unsigned_head(
             &graphql,
             existing.as_ref(),
