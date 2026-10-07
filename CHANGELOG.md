@@ -32,8 +32,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   When configured, `orc routing resolve` consults it for role resolution and
   `orc campaign run` / `orc loop` consult it for campaign task selection
   before the deterministic P0-first selector; any provider error, a proposal
-  outside the eligible set, or an unresolvable Neuralwatt API key engages the
-  documented fallback (a key failure is a typed startup error, not a silent
+  outside the eligible set, or an unresolvable `routing.api_key` credential
+  engages the documented fallback (a key failure is a typed startup error, not a silent
   degrade) and the cause is recorded in the decision record
   (`precedence_path` / `rationale`). The credential never enters an
   error or log line. The trait also gains two typed decision surfaces for

@@ -364,3 +364,62 @@ async fn project_endpoint_reaches_the_wire() {
     assert_eq!(selection.task_id, "board--42");
     assert_eq!(provider.endpoint_host(), "127.0.0.1");
 }
+
+#[tokio::test]
+async fn trailing_slash_base_url_normalizes_before_path_join() {
+    // A configured `routing.base_url` ending in `/` must not build
+    // `<base>//systemone` (a 404 on real servers, silently degrading every
+    // consultation to the heuristic fallback; the path-ignoring mock hides
+    // it). The mock here rejects any path but `POST /v1/systemone`.
+    let server = MockServer::start(CHOICE_BODY, "application/json", false);
+    let provider = make_provider(format!("{}/", server.url()));
+    let selection = provider
+        .propose_task_selection(&["board--42".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(selection.task_id, "board--42");
+}
+
+#[test]
+fn credential_over_cleartext_http_fails_closed() {
+    // A bearer credential is never sent over plain `http` off loopback
+    // (CWE-319): construction fails with the typed cleartext error.
+    let Err(error) = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: "http://mekbook.tail1e276.ts.net:8080/v1".to_string(),
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
+    }) else {
+        panic!("a credential over cleartext http must fail at construction")
+    };
+    assert!(
+        error.to_string().contains("cleartext"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn no_credential_over_cleartext_http_is_accepted() {
+    // The documented self-hosted deployment: a no-auth tailnet endpoint
+    // over plain `http` sends no credential, so it is accepted.
+    let provider = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: "http://mekbook.tail1e276.ts.net:8080/v1".to_string(),
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        api_key: None,
+    })
+    .unwrap();
+    assert_eq!(provider.endpoint_host(), "mekbook.tail1e276.ts.net");
+}
+
+#[test]
+fn credential_over_cleartext_http_to_loopback_is_accepted() {
+    // Loopback is the one plain-`http` case where a credential stays
+    // local: no network observer exists between this process and the
+    // engine.
+    let provider = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: "http://127.0.0.1:8080/v1".to_string(),
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
+    })
+    .unwrap();
+    assert_eq!(provider.endpoint_host(), "127.0.0.1");
+}

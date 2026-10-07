@@ -77,7 +77,12 @@ layer) overrides the built-in default field by field:
   the Neuralwatt cloud `https://api.neuralwatt.com/v1` or a self-hosted
   local Metal-native Clef engine such as
   `http://mekbook.tail1e276.ts.net:8080/v1`. The URL lives in
-  configuration, never in code; there is no protocol-level default.
+  configuration, never in code; there is no protocol-level default. A
+  trailing slash is normalized before the `/systemone` path is appended.
+  Plain-`http` endpoints are accepted for no-auth local/tailnet
+  deployments (nothing secret crosses the wire); startup fails closed
+  with a typed error when a credential is configured against a
+  non-`https` endpoint off loopback.
 - `routing.model` — optional decision model id — any model the endpoint
   serves. Defaults to `clef-flash`. Confirm the exact id against the
   endpoint's model list (`GET /v1/models`) when pointing at a custom
@@ -87,7 +92,9 @@ layer) overrides the built-in default field by field:
   `secret://keyring/neuralwatt`). Absent (or the literal `none`) means the
   endpoint takes no auth (a local/self-hosted deployment) and no
   `Authorization` header is sent. The resolved credential never enters an
-  error or log line. Data classification of the endpoint (spec §9.28) is
+  error or log line, and is never sent over plaintext `http` off loopback
+  (configure an `https` endpoint, or drop the key for a no-auth local
+  deployment). Data classification of the endpoint (spec §9.28) is
   an operator choice through the `data_classification` rules — this key
   makes no assumption about what the endpoint may receive.
 

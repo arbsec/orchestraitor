@@ -59,7 +59,10 @@ pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::fro
 pub struct SystemOneEndpointConfig {
     /// Decision endpoint base URL (for example `https://api.neuralwatt.com/v1`
     /// or a self-hosted engine over tailscale). REQUIRED — there is no
-    /// protocol-level default.
+    /// protocol-level default. Plain-`http` endpoints are accepted for
+    /// no-auth local/tailnet deployments (no credential crosses the wire);
+    /// construction fails closed when a credential is configured against a
+    /// non-`https`, non-loopback endpoint.
     pub base_url: String,
     /// Decision model id the endpoint serves (for example `clef-flash`).
     pub model: String,
@@ -126,7 +129,35 @@ impl SystemOneDecisionProvider {
             .base_url
             .parse::<url::Url>()
             .map_err(|source| SystemOneDecisionProviderError::InvalidBaseUrl { source })?;
+        // Normalize before path joins: a configured trailing slash would
+        // otherwise build `<base>//systemone`, which many servers answer
+        // with 404 — silently degrading every consultation to the heuristic
+        // fallback. Keep the non-default port (tailscale endpoints use one).
+        let base_url = base.as_str().trim_end_matches('/').to_string();
         let endpoint_host = base.host_str().unwrap_or_default().to_string();
+        // Fail closed on cleartext credentials (CWE-319): a configured
+        // bearer token is never sent over plain `http` unless the endpoint
+        // is loopback — the one case where no network observer exists
+        // between this process and the engine. A no-auth tailnet endpoint
+        // (the documented self-hosted deployment) sends no credential and
+        // is unaffected; operator data classification is a separate,
+        // config-level choice (`data_classification` rules).
+        let has_credential = endpoint
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.expose_secret().is_empty());
+        if has_credential && base.scheme() != "https" {
+            let loopback = base.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host == "::1"
+                    || host.parse::<std::net::Ipv4Addr>() == Ok(std::net::Ipv4Addr::LOCALHOST)
+            });
+            if !loopback {
+                return Err(SystemOneDecisionProviderError::CleartextCredential {
+                    scheme: base.scheme().to_string(),
+                });
+            }
+        }
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -136,7 +167,10 @@ impl SystemOneDecisionProvider {
             provider_id: ProviderId::from_string(SYSTEMONE_DECISION_PROVIDER_ID.to_string()),
             endpoint_host,
             http,
-            endpoint,
+            endpoint: SystemOneEndpointConfig {
+                base_url,
+                ..endpoint
+            },
         })
     }
 
@@ -293,6 +327,20 @@ pub enum SystemOneDecisionProviderError {
         /// Underlying URL parse error.
         #[source]
         source: url::ParseError,
+    },
+    /// A bearer credential was configured against a non-`https` endpoint
+    /// that is not loopback — the credential would cross the network
+    /// unencrypted (CWE-319).
+    #[error(
+        "systemone decision endpoint uses `{scheme}` (not `https`) while a \
+         `routing.api_key` credential is configured: the bearer token would \
+         cross the network in cleartext. Point `routing.base_url` at an \
+         `https` endpoint, or set `routing.api_key = \"none\"` for a no-auth \
+         local/tailnet deployment."
+    )]
+    CleartextCredential {
+        /// The URL scheme that would have carried the credential.
+        scheme: String,
     },
     /// The HTTP client could not be built or the request failed.
     #[error("systemone decision HTTP request failed: {source}")]

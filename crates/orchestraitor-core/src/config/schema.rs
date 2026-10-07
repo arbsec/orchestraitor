@@ -59,6 +59,10 @@ pub struct RoutingDecisionProviderConfig {
     /// `routing.provider = "systemone"`: any System One-compatible endpoint
     /// — the Neuralwatt cloud or a self-hosted decision engine alike. The
     /// URL is per-project operator configuration, never hardcoded in code.
+    /// A trailing slash is normalized before the `/systemone` path is
+    /// appended. Plain-`http` endpoints are accepted for no-auth
+    /// local/tailnet deployments; startup fails closed when a credential
+    /// is configured against a non-`https` endpoint off loopback.
     pub base_url: Option<String>,
     /// Optional decision model id override — any model the endpoint
     /// serves. Defaults to `clef-flash`.
@@ -68,7 +72,9 @@ pub struct RoutingDecisionProviderConfig {
     /// `none`. Absent (or `none`) means the endpoint takes no auth (a
     /// local/self-hosted deployment) and no `Authorization` header is
     /// sent; a `secret://` URI resolves through the standard secret chain
-    /// and the resolved value never enters an error or log line.
+    /// and the resolved value never enters an error or log line. A
+    /// credential is never sent over plaintext `http` off loopback:
+    /// non-`https` endpoints must be no-auth (local/tailnet) or `https`.
     pub api_key: Option<String>,
 }
 
