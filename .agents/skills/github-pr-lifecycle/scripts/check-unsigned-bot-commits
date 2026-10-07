@@ -80,7 +80,7 @@ guard_commit() {
   # Indeterminate locally (G/U/X/Y/R/E): only GitHub's own verification
   # decides. Fail closed when the oracle is unreachable or disagrees.
   local oracle
-  if [ "$(git config --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
+  if [ "$(git config --type=bool --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
     echo >&2 "pre-push: refusing agent commit from a repo with commit.gpgsign enabled"
     echo >&2 "  commit:  $oid"
     echo >&2 "  author:  $author_pair"

@@ -118,6 +118,7 @@ case "$SUBCOMMAND" in
     COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git -C "$TARGET_PATH" config user.email 2>/dev/null || true)}"
     MATCH=true
     REASON=""
+    GPGSIGN_REASON=""
     if [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
       MATCH=false
       REASON="no user.name/user.email configured in this checkout (and no GIT_AUTHOR_* env)"
@@ -140,9 +141,9 @@ case "$SUBCOMMAND" in
     # ruleset rejects the commit at merge time. Local signing is therefore a
     # policy violation in its own right, independent of the identity match
     # (audit class: local-signing-not-verified-path).
-    if [ "$(git -C "$TARGET_PATH" config --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
+    if [ "$(git -C "$TARGET_PATH" config --type=bool --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
       MATCH=false
-      GPGSIGN_REASON="commit.gpgsign=true in this checkout — a locally-signed bot commit can never be GitHub-verified (audit class: local-signing-not-verified-path)"
+      GPGSIGN_REASON="commit.gpgsign enabled in this checkout — a locally-signed bot commit can never be GitHub-verified (audit class: local-signing-not-verified-path)"
       REASON="${REASON:+$REASON; }$GPGSIGN_REASON"
     fi
     if [ "$OPT_JSON" = true ]; then
