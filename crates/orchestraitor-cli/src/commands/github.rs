@@ -638,15 +638,29 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         (tree, head)
     } else {
         // New remote branch: the diff base is --base, else the repository's
-        // default branch. The base HEAD commit is resolved through the API
-        // (a LOCAL `main` ref may be stale — behind origin — which would
-        // compute the wrong change set), then fetched so its tree and blobs
-        // are locally readable.
+        // default branch. A branch-name base is resolved through the API (a
+        // LOCAL `main` ref may be stale — behind origin — which would
+        // compute the wrong change set); an explicit revision the API ref
+        // probe cannot resolve (a raw SHA, `origin/main`, a tag) falls back
+        // to a local `git rev-parse` so `--base <sha>` keeps working. The
+        // resolved head commit is fetched so its tree and blobs are locally
+        // readable.
         let base_ref = match &args.base {
             Some(base) => base.clone(),
             None => graphql.default_branch(&owner, &repo)?,
         };
-        let base_head = graphql.default_branch_head(&owner, &repo, &base_ref)?;
+        let base_head = match graphql.default_branch_head(&owner, &repo, &base_ref) {
+            Ok(head) => head,
+            Err(_) if args.base.is_some() => {
+                git(&["rev-parse", "--verify", &base_ref]).map_err(|_| {
+                    miette!(
+                        "cannot resolve the --base revision `{base_ref}`: it is neither a \
+                         remote branch of {owner}/{repo} nor a local revision"
+                    )
+                })?
+            }
+            Err(error) => return Err(error),
+        };
         let repo_url = format!("https://github.com/{owner}/{repo}.git");
         if git(&["fetch", "--quiet", &repo_url, &base_head]).is_err() {
             // Fall through: the rev-parse below produces the typed error
@@ -1122,9 +1136,12 @@ fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::pa
 /// base never had must still be deleted remotely), or the base branch tree
 /// for a new branch. The remote head commit is fetched first so its tree and
 /// blobs are locally available; a raw-OID fetch falls back to a branch-name
-/// fetch, then to an explicit `--base` ref (the head commit object may be
-/// locally unknown while the base fetch brings the tree in). A head whose
-/// objects are locally unavailable is a typed error.
+/// fetch. An explicit `--base` ref is only trusted when its fetch demonstrably
+/// brought the HEAD object itself in (`rev-parse --verify <head>` succeeds) —
+/// the base's own tree is NOT a stand-in for the head tree: the remote head
+/// may hold remote-only paths the base never had, and diffing against the
+/// base would report an empty change set and silently drop them. A head whose
+/// objects are still locally unavailable is a typed error.
 fn remote_head_tree(
     _graphql: &GraphqlSession<'_>,
     existing: Option<&Value>,
@@ -1150,15 +1167,13 @@ fn remote_head_tree(
     if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
         return Ok(tree);
     }
-    // Last resort: the explicit --base ref (its fetch may carry the head
-    // tree into the local object store even when the head oid is unknown).
-    if let Some(base) = fallback_base
-        && let Ok(tree) = git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{base}^{{tree}}"),
-        ])
+    // Last resort: an explicit --base ref, but ONLY when its fetch actually
+    // delivered the HEAD commit object (proving the fetch carried the remote
+    // head's history, and with it the true head tree). Falling back to the
+    // base's own tree would mask remote-only paths as an empty diff.
+    if fallback_base.is_some()
+        && git(&["rev-parse", "--verify", "--quiet", head]).is_ok()
+        && let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")])
     {
         return Ok(tree);
     }

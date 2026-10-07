@@ -21,9 +21,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `git config` pair — on mismatch. An unset identity is also a typed error
   (git would fall back to an auto-detected identity). This is the Rust twin
   of the `commit-identity` skill script: the shell script stays for agents'
-  pre-commit use; orc now enforces the same gate natively, closing the
-  incident class where a fresh worktree inherited the global personal
-  gitconfig and stamped the human owner's identity onto PR commits.
+  pre-commit use; `orc github verify-identity` now provides the same gate
+  natively for the incident class where a fresh worktree inherits the global
+  personal gitconfig and stamps the human owner's identity onto PR commits
+  (run it in CI or pre-commit hooks to enforce the check on those paths).
 - `orc github push-branch` now works out of the box from a worktree: the
   target repository resolves from the `origin` remote (with `--owner`/`--repo`
   as typed overrides; `--repo` accepts either a bare name or the full

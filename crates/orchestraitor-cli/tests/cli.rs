@@ -3238,3 +3238,144 @@ fn stub_home(repo_temp: &tempfile::TempDir) -> miette::Result<String> {
     fs::write(home.join(".gitconfig"), "").into_diagnostic()?;
     Ok(home.display().to_string())
 }
+
+#[test]
+fn github_push_branch_new_branch_accepts_explicit_sha_base() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    // New remote branch with an explicit --base given as a raw SHA: the API
+    // ref probe (refs/heads/<sha>) does NOT match a branch, so the base must
+    // fall back to a local `git rev-parse` instead of failing typed. The
+    // rules key on the QUALIFIED ref name in each request's variables so the
+    // remote probe, the SHA base probe, and the temp-branch probe (whose
+    // query text also contains `ref(qualifiedName`) stay distinct.
+    let rules = vec![
+        (
+            r"refs/heads/feature/signed".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            format!(r"refs/heads/{main_commit}"),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            r#""qualified":"refs/heads/push-branch/tmp-"#.to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            update_refs_stub("refs/heads/feature/signed"),
+        ),
+        (
+            r#""name":"refs/heads/feature/signed""#.to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
+        ),
+        (
+            r#""qualified":"refs/heads/feature/signed""#.to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--base",
+            &main_commit,
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The createCommitOnBranch payload must carry the feature content: the
+    // SHA base resolved locally and the diff base was the main tree.
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let landing = bodies
+        .iter()
+        .find(|body| body.contains("createCommitOnBranch"))
+        .ok_or_else(|| miette::miette!("no createCommitOnBranch request recorded"))?;
+    assert!(
+        landing.contains("feature.txt"),
+        "the landing must add feature.txt relative to the SHA base: {landing}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_unreadable_remote_head_fails_even_with_explicit_base() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    // The remote head oid is an object this repo does NOT have and the fetch
+    // cannot bring it in (the stub serves nothing to fetch from — origin is
+    // the local repo itself, which does not contain the oid). An explicit
+    // --base whose OWN tree differs from the head tree must NOT be used as a
+    // stand-in: the fallback would compute an empty diff and silently drop
+    // remote-only paths. The result is the typed error, not a landing.
+    let unknown_oid = "9999999999999999999999999999999999999999";
+    let rules = vec![(
+        "ref(qualifiedName".to_string(),
+        format!(
+            r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{unknown_oid}"}}}}}}}}}}"#
+        ),
+    )];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--base",
+            "main",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("cannot read the remote head"),
+        "an unreadable remote head must fail typed even with an explicit --base: {stderr}"
+    );
+    Ok(())
+}
