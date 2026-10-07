@@ -38,6 +38,12 @@ EOF
 cat > "$WORK/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "gh:$*" >> "$GH_LOG"
+# The conflict-gate's `pr view --json mergeable` precondition read rides the
+# same gh-env route as the mutating call; answer it so the gate passes on the
+# service path (a stub without JSON loops to the UNKNOWN refusal, exit 5).
+case "$*" in
+  "pr view "*" --json mergeable") printf '{"mergeable":"MERGEABLE"}\n'; exit 0 ;;
+esac
 exit 0
 EOF
 cat > "$WORK/rcnote" <<'EOF'
@@ -465,9 +471,14 @@ fi
 # (orc_lib_require_mergeable) passes in the routing cases below. The read
 # rides the gh-env child route (the stub orc execs this gh for `github
 # gh-env`), so this branch also serves the gate's routed read.
+# pr-mutate's --add-reviewer gate reads the review state via the ambient
+# orc_lib_gh (read-only calls stay ambient) with a --jq filter; answer it
+# so the gate passes (empty requests/reviews: nothing pending or approved).
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
-  echo '{"mergeable":"MERGEABLE"}'
-  exit 0
+  case "$*" in
+    *reviewRequests*) echo '{"requests":[],"approved":[]}'; exit 0 ;;
+    *) echo '{"mergeable":"MERGEABLE"}'; exit 0 ;;
+  esac
 fi
 exit 0
 EOF
@@ -519,10 +530,17 @@ fi
 if [ "\${1:-}" = github ] && [ "\${2:-}" = gh-env ]; then
   # Service route: record the full gh-env argv (the tests assert the exact
   # child contract from $ORC_LOG) and then run the gh stub so the MUTATING
-  # call records into GH_LOG and exits 0 — the gate's `pr view` read rides
-  # the same route, so it must also land in GH_LOG as `gh:pr view …`.
+  # call records into GH_LOG and exits 0 — the gate's pr-view precondition
+  # read rides the same route, so it also lands in GH_LOG as a gh child.
+  # NOTE: no backticks in this comment — this heredoc is UNQUOTED and
+  # backticks would be command-substituted at stub-generation time.
   printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
   if [ "\${3:-}" = "--" ]; then shift 3; else shift 2; fi
+  # Real orc github gh-env consumes the child gh binary path itself and
+  # execs it with the remaining argv; emulate that (the gh binary is the
+  # FIRST child argv after the separator) so the gate's routed pr-view
+  # read reaches the gh stub with its gh subcommand.
+  shift
   exec "\$GH_BIN" "\$@"
 fi
 printf '%s\n' "orc:\$*" >> "\$ORC_LOG"
@@ -595,13 +613,24 @@ new_orc_stub required
 OUT="$(run_script "$PRCOMMENT" required 42 -R arbsec/orchestraitor --body "hi" 2>&1)" || true
 grep -qx 'orc:github gh-env -- /.*/gh pr comment 42 --repo arbsec/orchestraitor --body hi' "$ORC_LOG" \
   || fail "pr-comment must take the service path: orc=[$(cat "$ORC_LOG")]"
-if grep -q '^gh:' "$GH_LOG"; then fail "pr-comment ran gh directly on the service path"; fi
+# The gate's `pr view` precondition read and the mutating comment BOTH ride
+# the gh-env child route, so GH_LOG holds only gh-env-child invocations; a
+# gh: line without a preceding gh-env line would be a direct ambient call.
+GHE_COUNT="$(grep -c 'orc:github gh-env' "$ORC_LOG")"
+GH_COUNT="$(grep -c '^gh:' "$GH_LOG")"
+if [ "$GH_COUNT" -ne "$GHE_COUNT" ]; then
+  fail "pr-comment ran gh directly on the service path (gh:$GH_COUNT vs gh-env:$GHE_COUNT): $(cat "$GH_LOG")"
+fi
 
 : > "$ORC_LOG"; : > "$GH_LOG"
 OUT="$(run_script "$PRREVIEW" required 42 -R arbsec/orchestraitor --comment --body "finding" 2>&1)" || true
 grep -qx 'orc:github gh-env -- /.*/gh pr review 42 --repo arbsec/orchestraitor --comment --body finding' "$ORC_LOG" \
   || fail "pr-review-post must take the service path: orc=[$(cat "$ORC_LOG")]"
-if grep -q '^gh:' "$GH_LOG"; then fail "pr-review-post ran gh directly on the service path"; fi
+GHE_COUNT="$(grep -c 'orc:github gh-env' "$ORC_LOG")"
+GH_COUNT="$(grep -c '^gh:' "$GH_LOG")"
+if [ "$GH_COUNT" -ne "$GHE_COUNT" ]; then
+  fail "pr-review-post ran gh directly on the service path (gh:$GH_COUNT vs gh-env:$GHE_COUNT): $(cat "$GH_LOG")"
+fi
 
 # --- 16. config present but enforcement UNSET (the live deployment state
 #         until this change pins it): the scripts still route through the
@@ -792,8 +821,15 @@ new_orc_stub required
 OUT="$(run_script "$PRMUTATE" required edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
 grep -qx 'orc:github gh-env -- /.*/gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' "$ORC_LOG" \
   || fail "pr-mutate edit must take the service path: orc=[$(cat "$ORC_LOG")] out=[$OUT]"
-if grep -qE '^gh:pr (edit|ready|close|merge|comment|review)' "$GH_LOG"; then
-  fail "pr-mutate edit ran a MUTATING gh call directly (personal auth): $(cat "$GH_LOG")"
+# The gh stub logs BOTH the ambient gate reads (pr view/pr checks) AND the
+# gh-env CHILD execution of the mutating call itself — so a bare `gh:pr edit`
+# line is expected (it is the routed child). What is FORBIDDEN is a direct
+# ambient mutating call: every mutating gh line must have a matching
+# `orc:github gh-env` line in ORC_LOG.
+CHILD_ARGV='gh:pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1'
+BAD="$( { grep -E '^gh:pr (edit|ready|close|merge|comment|review)' "$GH_LOG" || true; } | { grep -vx "$CHILD_ARGV" || true; })"
+if [ -n "$BAD" ]; then
+  fail "pr-mutate edit ran a MUTATING gh call directly (personal auth): $BAD"
 fi
 grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate edit service path must not fail: $(cat "$GH_LOG")"
 

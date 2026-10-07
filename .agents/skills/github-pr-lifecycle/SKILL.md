@@ -150,12 +150,6 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
                   resolved. See pr-convergence.md.
-                  The remediation loop MAY use
-                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local` for
-                  fast per-commit CodeRabbit feedback; the GitHub-side CodeRabbit
-                  review generation clean against the final head REMAINS the
-                  recorded convergence evidence before merge (the local run
-                  accelerates iteration, it does not replace the recorded gate).
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
@@ -226,6 +220,8 @@ creating a worktree in a checkout where hooks were never installed, run
 - **Fresh-context reviews only.** The skill tracks review *generations*; it does not let a reviewer approve their own implementation (spec `50-contracts-data.md` §21.1, `10-orchestrator.md` §9.33.3). Security-sensitive changes require human review before release.
 - **HEAD is authoritative.** Reviews rerun against the current HEAD after each commit. Stale convergence is not convergence.
 - **Verified commits / service-identity push path.** Agent branch pushes MUST land as GitHub-signed commits via `orc github push-branch` (GraphQL `createCommitOnBranch` + `updateRefs` with an exact-head precondition — never overwrites a concurrent commit; tree-equality and `verified = true` gates, fail-closed) — never as plain `git push` and never as locally-created unsigned bot-identity commits (the `required_signatures` ruleset blocks them; locally-attributed commits fail closed). The subcommand lands the local branch's tree as ONE squashed App-signed commit and creates or fast-forwards the remote branch by itself; no manual GraphQL recipe is needed. Before any local `git commit` destined for a PR branch, `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check` must pass — it also fails (exit 3, `local-signing-not-verified-path`) when `commit.gpgsign=true` in the checkout, because a locally-gpg-signed bot commit can never be GitHub-verified. For existing unsigned chains, replay per `references/verified-commit-path.md` (the replay script `scripts/github-app-recreate-branch.sh` is designated but not yet implemented — follow the documented steps). Pitfall: never reset a PR branch to an ancestor of main mid-replay — that auto-closes the PR; replay on a temp branch and swing the ref once.
+||||||| 57f1439
+- **Verified commits / service-identity push path.** Agent branch pushes MUST land as GitHub-signed commits via `orc github push-branch` (GraphQL `createCommitOnBranch` + ref force-move, tree-equality and `verified = true` gates, fail-closed) — never as plain `git push` and never as locally-created unsigned bot-identity commits (the `required_signatures` ruleset blocks them; locally-attributed commits fail closed). The subcommand lands the local branch's tree as ONE squashed App-signed commit and creates or force-moves the remote branch by itself; no manual GraphQL recipe is needed. For existing unsigned chains, replay per `references/verified-commit-path.md` (the replay script `scripts/github-app-recreate-branch.sh` is designated but not yet implemented — follow the documented steps). Pitfall: never reset a PR branch to an ancestor of main mid-replay — that auto-closes the PR; replay on a temp branch and swing the ref once.
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.
