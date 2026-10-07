@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_board::{ItemFacts, ReadyItem, SkipWarning, WarningKind};
 use orchestraitor_campaign::{
-    BoardSnapshot, CampaignDecisionStore, CampaignError, DecisionKind, NoOpReason, WorkerSpawner,
-    compute_selection, run_once, task_id_for,
+    BlockedNode, BoardSnapshot, CampaignDecisionStore, CampaignError, DecisionKind, NoOpReason,
+    WorkerSpawner, compute_selection, run_once, task_id_for,
 };
 use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerRun};
 
@@ -357,9 +357,9 @@ fn empty_board_is_empty_queue_no_op_without_spawn() -> TestResult {
         Some(NoOpReason::EmptyQueue)
     );
     assert!(outcome.worker.is_none());
-    assert!(spawner.recorded().is_empty());
+    assert_eq!(spawner.recorded(), [] as [String; 0]);
     assert_eq!(store.list()?.len(), 1);
-    assert!(outcome.decision.decision.worker_args.is_empty());
+    assert_eq!(outcome.decision.decision.worker_args, [] as [String; 0]);
     Ok(())
 }
 
@@ -384,7 +384,10 @@ fn open_items_without_readiness_or_blockers_are_empty_queue_not_all_blocked() ->
         outcome.decision.decision.no_op_reason,
         Some(NoOpReason::EmptyQueue)
     );
-    assert!(outcome.decision.decision.blocked_graph.is_empty());
+    assert_eq!(
+        outcome.decision.decision.blocked_graph,
+        [] as [BlockedNode; 0]
+    );
     assert!(outcome.worker.is_none());
     Ok(())
 }
@@ -408,7 +411,7 @@ fn blocked_eligible_candidates_are_all_blocked_with_graph() -> TestResult {
     assert_eq!(decision.kind, DecisionKind::NoOp);
     assert_eq!(decision.no_op_reason, Some(NoOpReason::AllBlocked));
     assert!(outcome.worker.is_none());
-    assert!(spawner.recorded().is_empty());
+    assert_eq!(spawner.recorded(), [] as [String; 0]);
     let graph = &decision.blocked_graph;
     assert_eq!(graph.len(), 2);
     assert_eq!(graph[0].number, 5);

@@ -219,7 +219,7 @@ mod tests {
     fn empty_dag_orders_to_nothing() -> TestResult {
         let dag = TaskDag::default();
         assert_eq!(dag.topological_order()?, Vec::<BacklogTaskId>::new());
-        assert!(dag.eligible(&BTreeSet::new()).is_empty());
+        assert_eq!(dag.eligible(&BTreeSet::new()), [] as [BacklogTaskId; 0]);
         assert!(dag.is_empty());
         Ok(())
     }
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(ids(&dag.eligible(&completed)), ["c", "d"]);
         completed.insert(BacklogTaskId::new("c"));
         completed.insert(BacklogTaskId::new("d"));
-        assert!(dag.eligible(&completed).is_empty());
+        assert_eq!(dag.eligible(&completed), [] as [BacklogTaskId; 0]);
         Ok(())
     }
 

@@ -238,7 +238,7 @@ mod tests {
         let events = parser
             .feed(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}")
             .unwrap();
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [ModelEvent; 0]);
         let events = parser.feed(b",\"finish_reason\":null}]}\n\n").unwrap();
         assert_eq!(events.len(), 1);
     }

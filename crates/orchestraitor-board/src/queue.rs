@@ -222,7 +222,7 @@ mod tests {
             epic_with_task_label,
         ];
         let ready = ready_queue(&list, &config());
-        assert!(ready.is_empty());
+        assert_eq!(ready, [] as [ReadyItem; 0]);
     }
 
     #[test]

@@ -177,7 +177,7 @@ max_attempts = 3
 backoff_ms = 250
 "#;
         let report = parse_toml_config(toml)?;
-        assert!(report.unknown_keys.is_empty());
+        assert_eq!(report.unknown_keys, [] as [String; 0]);
         let rendered = toml::to_string(&report.config)
             .map_err(|error| ConfigError::TomlSerialize(Box::new(error)))?;
         let reparsed = toml::from_str::<OrchestraitorConfig>(&rendered)
@@ -206,7 +206,7 @@ installation_id = 165043398
 private_key_uri = "secret://keyring/orchestraitor-app-pem"
 "#;
         let report = parse_toml_config(toml)?;
-        assert!(report.unknown_keys.is_empty());
+        assert_eq!(report.unknown_keys, [] as [String; 0]);
         let github_app = report.config.github_app.as_ref();
         assert_eq!(
             github_app.and_then(|app| app.slug.as_deref()),
@@ -274,7 +274,7 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"
         let report = parse_toml_config(
             "[roles.implement.routing]\nprovider = \"neuralwatt\"\nmodel = \"glm-5.2\"\n",
         )?;
-        assert!(report.unknown_keys.is_empty());
+        assert_eq!(report.unknown_keys, [] as [String; 0]);
         assert!(
             report.keys.contains("roles.implement.routing.provider")
                 && report.keys.contains("roles.implement.routing.model")

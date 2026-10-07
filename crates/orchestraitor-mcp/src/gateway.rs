@@ -407,6 +407,13 @@ impl McpGateway {
     }
 }
 
+// The lint fires on rmcp's macro-generated trait methods, not on code we
+// control here — silencing at the impl boundary is the tightest available
+// scope. `unknown_lints` keeps 1.96 (which predates the lint) compiling; the
+// allow itself must be dropped when rmcp's generated handlers stop being
+// async no-ops (or the lint learns to attribute macro-generated spans).
+#[allow(unknown_lints)]
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router, name = "orchestraitor-mcp", version = "0.0.0")]
 impl ServerHandler for McpGateway {}
 

@@ -16,7 +16,7 @@ use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_board::ReadyItem;
 use orchestraitor_campaign::{
     BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunStore,
-    LoopRunner, LoopWorkerStarter, SelectedTask, StopReason, WorkerProcess,
+    LoopRunner, LoopWorkerStarter, RunRow, SelectedTask, StopReason, WorkerProcess,
 };
 use orchestraitor_worker::{BudgetEcho, RunStatus, UsageTotals, WorkerBudgets, WorkerRun};
 
@@ -1084,7 +1084,7 @@ async fn shutdown_interrupts_an_in_flight_board_poll() {
         summary.elapsed_secs
     );
     assert_eq!(summary.spawns, 0, "no spawn from the interrupted pass");
-    assert!(runs.runs_for_invocation("inv").unwrap().is_empty());
+    assert_eq!(runs.runs_for_invocation("inv").unwrap(), [] as [RunRow; 0]);
 }
 
 // Q5(m2) poll race WITH an in-flight worker: the pass's interrupt arm

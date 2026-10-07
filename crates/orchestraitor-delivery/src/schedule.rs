@@ -274,10 +274,9 @@ mod tests {
             max_per_domain: None,
             review_capacity: 8,
         });
-        assert!(
-            sched
-                .select(&dag, &BTreeSet::new(), &[BacklogTaskId::new("a")], 0)
-                .is_empty()
+        assert_eq!(
+            sched.select(&dag, &BTreeSet::new(), &[BacklogTaskId::new("a")], 0),
+            [] as [BacklogTaskId; 0]
         );
         Ok(())
     }
@@ -286,7 +285,10 @@ mod tests {
     fn full_review_backlog_selects_nothing() -> TestResult {
         let dag = TaskDag::new([task("a", &[], "backend", &[])])?;
         let sched = ParallelScheduler::default();
-        assert!(sched.select(&dag, &BTreeSet::new(), &[], 8).is_empty());
+        assert_eq!(
+            sched.select(&dag, &BTreeSet::new(), &[], 8),
+            [] as [BacklogTaskId; 0]
+        );
         Ok(())
     }
 
@@ -303,10 +305,9 @@ mod tests {
             max_per_domain: None,
             review_capacity: 2,
         });
-        assert!(
-            sched
-                .select(&dag, &BTreeSet::new(), &[BacklogTaskId::new("a")], 1)
-                .is_empty()
+        assert_eq!(
+            sched.select(&dag, &BTreeSet::new(), &[BacklogTaskId::new("a")], 1),
+            [] as [BacklogTaskId; 0]
         );
         Ok(())
     }

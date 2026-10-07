@@ -278,7 +278,7 @@ mod tests {
 
         // Then: every required control is unavailable → fail-closed (spec §6.7).
         assert!(!report.protected_services_allowed);
-        assert!(!report.missing_controls.is_empty());
+        assert_ne!(report.missing_controls, [] as [&str; 0]);
         assert_eq!(report.status_str(), "fail_closed");
         // Every required control must be listed as missing.
         assert_eq!(
@@ -332,7 +332,7 @@ mod tests {
         assert!(report.protected_services_allowed);
         assert!(report.degraded_mode);
         assert_eq!(report.status_str(), "degraded");
-        assert!(report.missing_controls.is_empty());
+        assert_eq!(report.missing_controls, [] as [&str; 0]);
     }
 
     #[test]
