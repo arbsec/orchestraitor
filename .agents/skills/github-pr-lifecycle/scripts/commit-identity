@@ -70,8 +70,10 @@ fi
 BOT_IDENTITIES_RAW="${BOT_IDENTITIES:-}"
 BOT_IDENTITIES=()
 if [ -n "$BOT_IDENTITIES_RAW" ]; then
+  set -f  # keep wildcard characters literal: aliases are names, not patterns
   # shellcheck disable=SC2206  # intentional splitting on commas/whitespace
   BOT_IDENTITIES+=(${BOT_IDENTITIES_RAW//,/ })
+  set +f
 fi
 BOT_IDENTITIES+=("$SVC_NAME")
 
