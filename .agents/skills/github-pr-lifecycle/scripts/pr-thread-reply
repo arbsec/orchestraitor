@@ -121,26 +121,14 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
-# Mutating call: service route or typed failure — never silent personal auth.
-# ORC_GITHUB_APP_ENFORCEMENT=required is pinned (env wins over layered config):
-# even when the github_app config is absent/incomplete, the labelled
-# personal-account fallback is refused — the reply/resolve mutations MUST
-# attribute to the App service identity (owner mandate 2026-10-02).
-REPLY_OUT="$(ORC_GITHUB_APP_ENFORCEMENT=required orc_lib_run_or_dry_run REPLY_ARGS gh)" || {
-  echo "error: failed to post the thread reply on PR #$PR comment $COMMENT_ID" >&2
-  exit "$ORC_ERR_UNRECOVERABLE"
-}
-REPLY_URL="$(printf '%s' "$REPLY_OUT" | jq -r '.html_url // empty' 2>/dev/null)" || REPLY_URL=""
-echo "Replied on PR #$PR comment thread $COMMENT_ID${REPLY_URL:+: $REPLY_URL}" >&2
-
 if [ -n "$RESOLVE_THREAD_ID" ]; then
-  # Thread-identity guard: the resolved thread must CONTAIN the comment that
-  # was replied to (its root or any of its replies). Resolving an unrelated
-  # thread would mark a conversation as addressed that this reply never
-  # answered. Query the SUPPLIED thread by its GraphQL id directly (no
-  # pagination over the PR's thread list) and verify it belongs to this PR
-  # and contains the comment that was replied to; a mismatch is a typed
-  # failure, never a silent resolve.
+  # Thread-identity guard: run BEFORE the reply is posted. Resolving an
+  # unrelated thread would mark a conversation as addressed that this reply
+  # never answered, and detecting the mismatch only AFTER the reply would
+  # leave a posted reply on a thread the caller cannot safely resolve (a
+  # retry would double-post). The supplied thread must belong to this PR and
+  # contain the comment that was replied to; a mismatch is a typed failure,
+  # never a silent resolve — and gh is never reached with the reply.
   THREAD_CHECK="$(ORC_GITHUB_APP_ENFORCEMENT=required orc_lib_gh_service api graphql 2>/dev/null \
     -f id="$RESOLVE_THREAD_ID" \
     -f query='query($id:ID!){node(id:$id){... on PullRequestReviewThread{id isResolved comments(first:100){nodes{databaseId}} pullRequest{number repository{name owner{login}}}}}}')" || THREAD_CHECK=""
@@ -154,9 +142,26 @@ if [ -n "$RESOLVE_THREAD_ID" ]; then
         and (.data.node.pullRequest.repository.name == $repo)
         and (.data.node.pullRequest.repository.owner.login == $owner)
         and any(.data.node.comments.nodes[]; .databaseId == $cid)' >/dev/null 2>&1; then
-    echo "error: --resolve thread $RESOLVE_THREAD_ID is not a thread of PR #$PR containing comment $COMMENT_ID — refusing to resolve an unrelated conversation" >&2
+    echo "error: --resolve thread $RESOLVE_THREAD_ID is not a thread of PR #$PR containing comment $COMMENT_ID — refusing to reply/resolve an unrelated conversation (no reply was posted)" >&2
     exit "$ORC_ERR_CONFIG"
   fi
+fi
+
+# Mutating call: service route or typed failure — never silent personal auth.
+# ORC_GITHUB_APP_ENFORCEMENT=required is pinned (env wins over layered config):
+# even when the github_app config is absent/incomplete, the labelled
+# personal-account fallback is refused — the reply/resolve mutations MUST
+# attribute to the App service identity (owner mandate 2026-10-02).
+REPLY_OUT="$(ORC_GITHUB_APP_ENFORCEMENT=required orc_lib_run_or_dry_run REPLY_ARGS gh)" || {
+  echo "error: failed to post the thread reply on PR #$PR comment $COMMENT_ID" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+}
+REPLY_URL="$(printf '%s' "$REPLY_OUT" | jq -r '.html_url // empty' 2>/dev/null)" || REPLY_URL=""
+echo "Replied on PR #$PR comment thread $COMMENT_ID${REPLY_URL:+: $REPLY_URL}" >&2
+
+if [ -n "$RESOLVE_THREAD_ID" ]; then
+  # Identity was verified before the reply posted (fail-closed above); the
+  # thread was also already confirmed UNRESOLVED there, so resolve directly.
   RESOLVE_ARGS=(-f query='mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }' -F threadId="$RESOLVE_THREAD_ID")
   RESULT="$(ORC_GITHUB_APP_ENFORCEMENT=required orc_lib_run_or_dry_run RESOLVE_ARGS graphql)" || {
     echo "error: reply posted but resolveReviewThread failed for thread $RESOLVE_THREAD_ID" >&2

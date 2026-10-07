@@ -247,8 +247,8 @@ pub struct PushBranchArgs {
     #[arg(long)]
     pub remote_branch: Option<String>,
     /// Base branch the local branch was cut from; its tree is the diff base
-    /// for a NEW remote branch (default: `origin/main`, then `main` if
-    /// `origin/main` cannot be resolved). The diff base for an EXISTING
+    /// for a NEW remote branch (default: the repository's default branch,
+    /// read from the GitHub API). The diff base for an EXISTING
     /// remote branch is always that branch's head tree, so a second landing
     /// carries only the delta.
     #[arg(long)]
