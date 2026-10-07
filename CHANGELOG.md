@@ -26,7 +26,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   gitconfig and stamped the human owner's identity onto PR commits.
 - `orc github push-branch` now works out of the box from a worktree: the
   target repository resolves from the `origin` remote (with `--owner`/`--repo`
-  as typed overrides), the local branch defaults to HEAD, and the commit
+  as typed overrides; `--repo` accepts either a bare name or the full
+  `owner/name` slug, which is used verbatim rather than re-prepended with the
+  origin-derived owner), the local branch defaults to HEAD, and the commit
   message body comes from `--body-file` (`-` = stdin). A `--dry-run` flag
   prints the resolved landing plan (paths and statuses only, never blob
   contents) without touching the remote. The diff base for a NEW remote

@@ -254,10 +254,12 @@ Arguments and defaults:
   error).
 - `--remote-branch <name>` — the remote branch to create or force-move.
   Defaults to the local branch name.
-- `--owner <owner>` / `--repo <name>` — the target repository. Defaults to
-  the owner/repo parsed from the `origin` remote of the current directory
+- `--owner <owner>` / `--repo <name>` — the target repository. `--repo` also
+  accepts the full `owner/name` slug, which is used as-is (a bare name
+  combines with the owner resolved from the `--owner` flag or the `origin`
+  remote of the current directory
   (`git@github.com:owner/repo.git` or the https shape; anything else is a
-  typed error telling you to pass both flags).
+  typed error telling you to pass both flags)).
 - `--base <ref>` — the diff base for a NEW remote branch. Defaults to the
   repository's default branch, read from the API. For an EXISTING remote
   branch the diff base is always that branch's remote head tree (an earlier
