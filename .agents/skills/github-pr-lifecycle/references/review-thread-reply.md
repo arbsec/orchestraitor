@@ -25,13 +25,20 @@ The reply endpoint on a review comment. `comment-id` is the REST `id` (=
 `databaseId` from the GraphQL `comments.nodes`):
 
 ```sh
-gh api "repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment-id}/replies" \
+orc github gh-env -- gh api \
+  "repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment-id}/replies" \
   -f body="Fixed in <sha>: <explanation>"
 ```
 
+The `orc github gh-env --` wrapper is REQUIRED: a bare `gh api` call
+authenticates with ambient personal credentials and attributes the reply to
+the personal account (CWE-863 — the App service identity is the only
+authorized principal for PR mutations on this repo).
+
 Verified field name: `body` (same as all comment-creation endpoints; the
-response carries `html_url` of the new reply). This is exactly what
-`pr-thread-reply` posts via `orc_lib_gh_service`:
+response carries `html_url` of the new reply). The PREFERRED form is the
+wrapper script, which routes through `orc_lib_gh_service` and fails closed
+when the service identity is unavailable:
 
 ```sh
 scripts/pr-thread-reply <pr-number> <comment-id> <body-file | -f body=...> \
@@ -41,22 +48,32 @@ scripts/pr-thread-reply <pr-number> <comment-id> <body-file | -f body=...> \
 ## GraphQL: addPullRequestReviewThreadReply (alternative)
 
 Reply via the thread instead of the comment — same effect, different handle
-(`thread-id` is the GraphQL `PRRT_...` id from `review-threads`):
+(`thread-id` is the GraphQL `PRRT_...` id from `review-threads`). Must run
+under `orc github gh-env --` for the service identity, same as above:
 
 ```sh
-gh api graphql -f query='
+orc github gh-env -- gh api graphql -f query='
   mutation($threadId: ID!, $body: String!) {
     addPullRequestReviewThreadReply(input: { threadId: $threadId, body: $body }) {
       comment { id body url }
-      thread { id isResolved }
     }
   }' -F threadId="$THREAD_ID" -f body="$BODY"
 ```
+
+The mutation returns only `comment` — selecting a `thread { ... }` field on
+it fails GraphQL validation; query the thread separately if its state is
+needed.
 
 Note: `addPullRequestReviewThreadReply` takes a **thread** id, not a comment
 id. `pr-thread-reply` uses the REST endpoint because the remediation loop
 already has the comment `databaseId` from `review-threads` output; the REST
 reply automatically lands in the same thread.
+
+Known limitation: `pr-thread-reply --resolve` verifies thread membership
+against the first 100 comments of the thread (`comments(first:100)`). A
+comment nested deeper than 100 replies in its thread fails the identity
+check (fail-closed). CodeRabbit threads are never that deep; no pagination
+loop is implemented for this case.
 
 ## Resolving a thread
 
@@ -65,7 +82,7 @@ After the fix lands and the reply is posted, the thread can be resolved
 it has answered when project policy allows):
 
 ```sh
-gh api graphql -f query='
+orc github gh-env -- gh api graphql -f query='
   mutation resolveReviewThread($threadId: ID!) {
     resolveReviewThread(input: { threadId: $threadId }) {
       thread { id isResolved }

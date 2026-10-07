@@ -441,23 +441,8 @@ fn sqlite_cached_head_hit_fallback_and_invalidation() -> Result<(), EventError> 
     {
         let mut rival = SqliteAuditStore::open(&path)?;
         rival.r#import(&json_lines(&[{
-            let mut divergent = InMemoryAuditStore::default();
-            divergent.append(event(
-                1,
-                EventCategory::SessionLifecycle,
-                json!({"state":"diverged"}),
-                None,
-            )?)?;
-            divergent.export(PrivacyExportMode::Full)?;
-            // Build one-record export: re-run through a fresh store.
-            let mut one = InMemoryAuditStore::default();
-            let record = one.append(event(
-                1,
-                EventCategory::SessionLifecycle,
-                json!({"state":"diverged"}),
-                None,
-            )?)?;
-            let _ = record;
+            // Build the one-record divergent export directly: a fresh store
+            // whose only record is the "diverged" event at sequence 1.
             let mut one = InMemoryAuditStore::default();
             one.append(event(
                 1,

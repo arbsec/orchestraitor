@@ -413,10 +413,11 @@ orc_lib_require_mergeable() {
     # the typed config refusal wins and this read never runs.
     local probe_status=0
     orc_lib_has_github_app_config || probe_status=$?
+    local read_failed=0
     if [ "$probe_status" -eq 0 ]; then
       # Service route: the read rides the App installation token via gh-env,
       # the same route the subsequent mutating call takes.
-      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || raw=""
+      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
     elif orc_lib_enforcement_required; then
       # Ambient route is forbidden in required mode: the read must not become
       # the personal-auth call the enforcement gate exists to refuse. Same
@@ -428,7 +429,15 @@ orc_lib_require_mergeable() {
       exit "$ORC_ERR_CONFIG"
     else
       # Config absent, recommended/unset enforcement: labelled ambient read.
-      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || raw=""
+      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
+    fi
+    if [ "$read_failed" -eq 1 ]; then
+      # A FAILED read is not the same as an UNKNOWN mergeable state: GitHub
+      # reporting "still computing" is retryable, a read failure is not —
+      # retrying cannot make a broken route answer. Fail closed immediately
+      # with a distinct typed message.
+      echo "error: failed to read PR #$pr mergeable state (the pr view read itself failed): refusing to proceed fail-closed — check auth/route and retry once the read succeeds" >&2
+      exit "$ORC_ERR_BLOCKED"
     fi
     state="$(printf '%s' "$raw" | jq -r '.mergeable // "UNKNOWN"' 2>/dev/null)" || state=""
     case "$state" in
