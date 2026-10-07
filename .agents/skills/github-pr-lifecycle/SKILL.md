@@ -133,6 +133,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
                   resolved. See pr-convergence.md.
+                  The remediation loop MAY use
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local` for
+                  fast per-commit CodeRabbit feedback; the GitHub-side CodeRabbit
+                  review generation clean against the final head REMAINS the
+                  recorded convergence evidence before merge (the local run
+                  accelerates iteration, it does not replace the recorded gate).
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
