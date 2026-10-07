@@ -46,7 +46,7 @@ use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 use crate::decision::{NoOpReason, SelectedTask};
 use crate::error::CampaignError;
 use crate::run_state::{LoopRunStore, RunRowStatus, StartRun};
-use crate::session::{BoardSnapshot, plan_pass_with_selector, task_id_for};
+use crate::session::{BoardSnapshot, plan_pass_with_selector_async, task_id_for};
 
 /// The supervisor-visible handle of one in-flight worker run.
 pub struct WorkerProcess {
@@ -1102,8 +1102,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         snapshot
             .ready
             .retain(|item| !excluded.contains(&task_id_for(&item.repo, item.number)));
-        let stored =
-            plan_pass_with_selector(&snapshot, &self.routing, self.decisions, self.task_selector)?;
+        let stored = plan_pass_with_selector_async(
+            &snapshot,
+            &self.routing,
+            self.decisions,
+            self.task_selector,
+        )
+        .await?;
         let selected = stored.decision.selected.as_ref();
         events.push(LoopEvent::PassPlanned {
             decision_id: stored.id,

@@ -479,10 +479,7 @@ pub fn resolve_decision_provider_with(
             .as_ref()
             .and_then(|routing| routing.base_url.clone()),
         model: routing.as_ref().and_then(|routing| routing.model.clone()),
-        api_key_uri: routing
-            .as_ref()
-            .and_then(|routing| routing.api_key.as_ref())
-            .map(orchestraitor_core::SecretUri::as_uri),
+        api_key_uri: routing.as_ref().and_then(|routing| routing.api_key.clone()),
     };
     match configured.as_deref() {
         None => Ok(None),

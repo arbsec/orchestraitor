@@ -334,7 +334,7 @@ fn decision_provider_routing_keys_are_project_scoped_and_layer_merged()
             provider: Some("systemone".to_string()),
             base_url: Some("https://api.neuralwatt.com/v1".to_string()),
             model: Some("clef-flash".to_string()),
-            api_key: Some(SecretUri::parse("secret://env/NEURALWATT_API_KEY").unwrap()),
+            api_key: Some("secret://env/NEURALWATT_API_KEY".to_string()),
         }),
         ..OrchestraitorConfig::default()
     };

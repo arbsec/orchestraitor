@@ -63,12 +63,13 @@ pub struct RoutingDecisionProviderConfig {
     /// Optional decision model id override — any model the endpoint
     /// serves. Defaults to `clef-flash`.
     pub model: Option<String>,
-    /// Optional secret URI for the decision endpoint credential (for
-    /// example `secret://env/NEURALWATT_API_KEY`). Absent means the
-    /// endpoint takes no auth (a local/self-hosted deployment); the value
-    /// is resolved through the standard secret chain and never logged,
-    /// serialized, or carried in an error.
-    pub api_key: Option<SecretUri>,
+    /// Optional credential reference for the decision endpoint, as a
+    /// `secret://` URI (`secret://env/NEURALWATT_API_KEY`) or the literal
+    /// `none`. Absent (or `none`) means the endpoint takes no auth (a
+    /// local/self-hosted deployment) and no `Authorization` header is
+    /// sent; a `secret://` URI resolves through the standard secret chain
+    /// and the resolved value never enters an error or log line.
+    pub api_key: Option<String>,
 }
 
 /// Enforcement mode for the GitHub App service identity (AGENTS.md; spec

@@ -28,13 +28,30 @@ pub struct SelectorDecision {
     pub confidence: Option<f64>,
 }
 
-/// Consults a decision provider's task-selection surface synchronously.
-/// The production pass runs inside a tokio runtime (loop runner, one-shot
-/// campaign under `Runtime::block_on`), so `Handle::block_on` on the ambient
-/// handle is the only path; the dedicated-runtime fallback covers a truly
-/// synchronous caller. Building a runtime while one is ambient fails as a
-/// selector unavailability — never as a pass-killer panic.
+/// Consults a decision provider's task-selection surface. The ASYNC form
+/// ([`consult_task_selection_async`]) is the production path — the loop
+/// runner awaits it so supervision and the shutdown race keep running
+/// during the provider call. The synchronous form below exists only for
+/// the one-shot CLI caller, which has no ambient runtime context to await
+/// in and must not spin one up inside an async context.
 fn consult_task_selection(
+    provider: &dyn DecisionProvider,
+    ready_task_ids: &[String],
+) -> Result<SelectorDecision, String> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return handle.block_on(consult_task_selection_async(provider, ready_task_ids));
+    }
+    tokio::runtime::Runtime::new()
+        .map_err(|error| format!("decision-provider runtime build failed: {error}"))?
+        .block_on(consult_task_selection_async(provider, ready_task_ids))
+}
+
+/// The async consultation: awaits the provider call directly (never blocks
+/// a worker thread), so loop supervision, the shutdown race, and the
+/// run-budget check keep running while the endpoint answers. Bounded by
+/// [`DECISION_CONSULT_TIMEOUT`] — a slow endpoint degrades to the
+/// deterministic selector, never a stalled loop.
+async fn consult_task_selection_async(
     provider: &dyn DecisionProvider,
     ready_task_ids: &[String],
 ) -> Result<SelectorDecision, String> {
@@ -42,19 +59,26 @@ fn consult_task_selection(
         task_id: selection.task_id,
         confidence: Some(selection.confidence),
     };
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return tokio::task::block_in_place(|| {
-            handle.block_on(provider.propose_task_selection(ready_task_ids))
-        })
-        .map(flatten)
-        .map_err(|error| error.to_string());
+    match tokio::time::timeout(
+        DECISION_CONSULT_TIMEOUT,
+        provider.propose_task_selection(ready_task_ids),
+    )
+    .await
+    {
+        Ok(Ok(selection)) => Ok(flatten(selection)),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!(
+            "decision provider did not answer within \
+             {DECISION_CONSULT_TIMEOUT:?}; fell back to the deterministic selector"
+        )),
     }
-    tokio::runtime::Runtime::new()
-        .map_err(|error| format!("decision-provider runtime build failed: {error}"))?
-        .block_on(provider.propose_task_selection(ready_task_ids))
-        .map(flatten)
-        .map_err(|error| error.to_string())
 }
+
+/// Upper bound on one decision-provider consultation (spec
+/// `30-model-routing.md` §9.45): a slow
+/// or hung endpoint degrades to the deterministic selector instead of
+/// stalling loop supervision past the shutdown budget.
+pub const DECISION_CONSULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Spawns the worker for a selected task on the daemon-less direct path.
 /// Production wires the bootstrap transport (fixture task source, mediated
@@ -212,7 +236,10 @@ pub fn plan_pass(
 /// [`plan_pass`] with an optional configured decision provider (spec
 /// `30-model-routing.md` §9.45): `Some` consults the provider for task
 /// selection first and falls back to the deterministic P0-first selector on
-/// any provider error.
+/// any provider error. The SYNCHRONOUS form — for the one-shot CLI caller
+/// (`run_once_with_selector`), which has no ambient async context. The loop
+/// runner uses [`plan_pass_with_selector_async`], which awaits the
+/// consultation so supervision and the shutdown race keep running.
 ///
 /// # Errors
 ///
@@ -223,15 +250,33 @@ pub fn plan_pass_with_selector(
     store: &CampaignDecisionStore,
     selector: Option<&dyn DecisionProvider>,
 ) -> Result<StoredCampaignDecision, CampaignError> {
-    let decision = campaign_decision(snapshot, routing, selector);
+    let decision = campaign_decision_sync(snapshot, routing, selector);
+    store.record(&decision)
+}
+
+/// [`plan_pass_with_selector`] for async callers (the loop runner): the
+/// provider consultation is awaited — bounded by
+/// [`DECISION_CONSULT_TIMEOUT`] — so loop supervision and the shutdown race
+/// keep running while the decision endpoint answers. Same fallback
+/// semantics and decision-record shape as the synchronous form.
+///
+/// # Errors
+///
+/// Returns [`CampaignError::Store`] when the record cannot be persisted.
+pub async fn plan_pass_with_selector_async(
+    snapshot: &BoardSnapshot,
+    routing: &RoleRoutingDecision,
+    store: &CampaignDecisionStore,
+    selector: Option<&dyn DecisionProvider>,
+) -> Result<StoredCampaignDecision, CampaignError> {
+    let decision = campaign_decision_async(snapshot, routing, selector).await;
     store.record(&decision)
 }
 
 /// Constructs the exactly-one §9.35 decision record for a pass: the
 /// Selected branch for the first eligible item, else the typed no-op
-/// classification. The single construction path shared by
-/// [`plan_pass_with_selector`] (loop runner) and [`run_once_with_selector`]
-/// (one-shot CLI) — the two consumers can never drift apart. With a
+/// classification. The single construction path shared by the sync and
+/// async planners — the two consumers can never drift apart. With a
 /// configured selector (spec `30-model-routing.md` §9.45) a well-formed
 /// proposal selects its task and the confidence lands in `precedence_path`;
 /// a provider error, an id outside the eligible set, or a missing selector
@@ -240,22 +285,10 @@ pub fn plan_pass_with_selector(
 fn campaign_decision(
     snapshot: &BoardSnapshot,
     routing: &RoleRoutingDecision,
-    selector: Option<&dyn DecisionProvider>,
+    consulted: Option<(&str, &Result<SelectorDecision, String>)>,
 ) -> CampaignDecision {
     let ordered = compute_selection(&snapshot.ready, &snapshot.open);
     let skipped = skipped_records(snapshot);
-    // Decision-provider consultation (spec `30-model-routing.md` §9.45): consult only when the
-    // ready queue is non-empty — a no-op pass has nothing to select.
-    let consulted = selector.filter(|_| !ordered.is_empty()).map(|selector| {
-        let ready_task_ids: Vec<String> = ordered
-            .iter()
-            .map(|item| task_id_for(&item.repo, item.number))
-            .collect();
-        (
-            selector.id().as_str(),
-            consult_task_selection(selector, &ready_task_ids),
-        )
-    });
     if let Some(provider_choice) = match &consulted {
         // A well-formed, eligible proposal wins over the deterministic first
         // item (spec `30-model-routing.md` §9.45): resolve it back to its ready item.
@@ -333,6 +366,65 @@ fn campaign_decision(
             skipped,
         }
     }
+}
+
+/// Consults only when the ready queue is non-empty — a no-op pass has
+/// nothing to select. Synchronous form for the one-shot CLI path.
+fn campaign_decision_sync(
+    snapshot: &BoardSnapshot,
+    routing: &RoleRoutingDecision,
+    selector: Option<&dyn DecisionProvider>,
+) -> CampaignDecision {
+    let ordered = compute_selection(&snapshot.ready, &snapshot.open);
+    let consulted = selector.filter(|_| !ordered.is_empty()).map(|selector| {
+        let ready_task_ids: Vec<String> = ordered
+            .iter()
+            .map(|item| task_id_for(&item.repo, item.number))
+            .collect();
+        (
+            selector.id().as_str(),
+            consult_task_selection(selector, &ready_task_ids),
+        )
+    });
+    campaign_decision(
+        snapshot,
+        routing,
+        consulted
+            .as_ref()
+            .map(|(provider_id, result)| (*provider_id, result)),
+    )
+}
+
+/// Async form for the loop runner: the consultation is awaited (bounded by
+/// [`DECISION_CONSULT_TIMEOUT`]) so supervision and the shutdown race keep
+/// running while the endpoint answers.
+fn campaign_decision_async<'a>(
+    snapshot: &'a BoardSnapshot,
+    routing: &'a RoleRoutingDecision,
+    selector: Option<&'a dyn DecisionProvider>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CampaignDecision> + Send + 'a>> {
+    Box::pin(async move {
+        let ordered = compute_selection(&snapshot.ready, &snapshot.open);
+        let consulted = match selector.filter(|_| !ordered.is_empty()) {
+            None => None,
+            Some(selector) => {
+                let ready_task_ids: Vec<String> = ordered
+                    .iter()
+                    .map(|item| task_id_for(&item.repo, item.number))
+                    .collect();
+                let provider_id = selector.id().as_str();
+                let result = consult_task_selection_async(selector, &ready_task_ids).await;
+                Some((provider_id, result))
+            }
+        };
+        campaign_decision(
+            snapshot,
+            routing,
+            consulted
+                .as_ref()
+                .map(|(provider_id, result)| (*provider_id, result)),
+        )
+    })
 }
 
 /// Computes the `precedence_path` and `rationale` a Selected record carries:
