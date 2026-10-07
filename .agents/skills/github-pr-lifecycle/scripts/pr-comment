@@ -59,6 +59,16 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
+# Conflict gate (owner directive 2026-10-07): no review trigger of any kind
+# (including an `@coderabbitai review` comment) may be posted while the PR
+# conflicts with its base — the automated review would evaluate an
+# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY. Runs AFTER
+# the enforcement decision inside orc_lib_run_or_dry_run's service routing —
+# this precondition read must never become the personal-auth write path the
+# enforcement gate exists to refuse (required + missing config refuses here
+# first, with the typed config error and rc:2, gh never invoked).
+orc_lib_require_mergeable "$PR" "$REPO"
+
 # Mutating call: service route or typed failure — never silent personal auth.
 COMMENT_URL="$(orc_lib_run_or_dry_run ARGS gh)"
 echo "Commented on PR #$PR: $COMMENT_URL" >&2

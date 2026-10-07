@@ -23,6 +23,24 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 /// guarantees).
 pub struct SqliteAuditStore {
     conn: Connection,
+    /// The last fully-verified record (sequence + hash), cached so `append`
+    /// can validate `prev_hash` linkage WITHOUT re-reading and re-hashing
+    /// the whole history (O(1) append instead of O(n)). `None` means
+    /// "unknown" — an empty store, or another connection may have replaced
+    /// the history (a concurrent `import`), in which case `append`
+    /// re-verifies from disk before trusting the head.
+    ///
+    /// Cache discipline: refreshed from the verified head after every
+    /// successful `append`/`import` on this connection. The cache is never
+    /// proactively cleared — on any staleness signal (foreign write, missing
+    /// or edited head row) or validation error the append falls back to full
+    /// verification or fails, and the NEXT append re-derives the head from
+    /// disk; the cache is only overwritten with a freshly verified head.
+    /// Other connections' writes are detected via the
+    /// `data_version` pragma inside the append transaction (a foreign change
+    /// bumps it), degrading to the full re-verification path.
+    cached_data_version: i64,
+    verified_head: Option<AuditRecord>,
 }
 
 impl std::fmt::Debug for SqliteAuditStore {
@@ -79,7 +97,11 @@ impl SqliteAuditStore {
             )",
             [],
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            cached_data_version: -1,
+            verified_head: None,
+        })
     }
 
     /// Loads and re-validates the record with the highest sequence number.
@@ -89,6 +111,62 @@ impl SqliteAuditStore {
     /// diverge from the write that follows it.
     fn head_record(conn: &Connection) -> Result<Option<AuditRecord>, EventError> {
         Ok(Self::load_verified_records(conn)?.pop())
+    }
+
+    /// The trusted head for an append about to run inside `transaction`
+    /// (IMMEDIATE — the write lock is already held), given the store's
+    /// cached head and its `data_version` snapshot.
+    ///
+    /// Uses the cache when it can be proven current:
+    ///   - a cached head exists AND `data_version` (bumped by every write
+    ///     transaction, including other connections') matches the value
+    ///     recorded with the cache — no other connection changed the file;
+    ///   - the cached head's `monotonic_seq` row still exists and its stored
+    ///     hash matches the cached hash — no row was added/edited under us.
+    ///
+    /// Anything else (no cache, foreign write, seq/hash mismatch) falls
+    /// back to `head_record`: full-chain verification from disk, exactly
+    /// the pre-cache behavior.
+    fn trusted_head_with_version(
+        cached: Option<&AuditRecord>,
+        cached_data_version: i64,
+        transaction: &Connection,
+    ) -> Result<(Option<AuditRecord>, i64), EventError> {
+        let data_version: i64 =
+            transaction.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+        let Some(cached) = cached else {
+            let head = Self::head_record(transaction)?;
+            return Ok((head, data_version));
+        };
+        if data_version != cached_data_version {
+            // Another connection wrote the file since the cache was taken
+            // (e.g. a concurrent `import` replaced the history): the cache
+            // is unproven, fall back to full verification.
+            let head = Self::head_record(transaction)?;
+            return Ok((head, data_version));
+        }
+        let row: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT monotonic_seq, hash FROM audit_records
+                 WHERE monotonic_seq = ?1",
+                params![i64::try_from(cached.envelope.monotonic_seq).map_err(|_| {
+                    EventError::SequenceGap {
+                        expected: 1,
+                        observed: cached.envelope.monotonic_seq,
+                    }
+                })?],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let trusted = matches!(row, Some((_, hash)) if hash == cached.hash.as_str());
+        if trusted {
+            Ok((Some(cached.clone()), data_version))
+        } else {
+            // A row disappeared or changed under the cache: fall back to
+            // full verification rather than trusting the stale head.
+            let head = Self::head_record(transaction)?;
+            Ok((head, data_version))
+        }
     }
 
     /// Decodes and re-validates one stored envelope against its recomputed hash.
@@ -234,7 +312,11 @@ impl AuditStore for SqliteAuditStore {
         // the write lock before the head snapshot, so the validated head is
         // still the head at commit time.
         let transaction = self.conn.unchecked_transaction()?;
-        let head = Self::head_record(&transaction)?;
+        let (head, data_version) = Self::trusted_head_with_version(
+            self.verified_head.as_ref(),
+            self.cached_data_version,
+            &transaction,
+        )?;
         if let Some(record) = &head {
             validate_next_envelope(std::slice::from_ref(record), &envelope)?;
         } else if envelope.monotonic_seq != 1 || envelope.prev_hash.is_some() {
@@ -246,6 +328,13 @@ impl AuditStore for SqliteAuditStore {
         let record = AuditRecord::try_from_envelope(envelope)?;
         Self::insert(&transaction, &record)?;
         transaction.commit()?;
+        // The appended record is now the verified head: it was hash-checked
+        // at decode time above (try_from_envelope recomputes the digest) and
+        // its prev_hash linkage was validated inside the transaction. Cache
+        // the head with the transaction-observed data_version: a foreign
+        // write after this point bumps the pragma and invalidates the cache.
+        self.verified_head = Some(record.clone());
+        self.cached_data_version = data_version;
         Ok(record)
     }
 
@@ -338,6 +427,13 @@ impl AuditStore for SqliteAuditStore {
             Self::insert(&transaction, record)?;
         }
         transaction.commit()?;
+        // The imported chain is fully validated above; its last record is
+        // the new verified head.
+        self.verified_head = imported.last().cloned();
+        self.cached_data_version = self
+            .conn
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(self.cached_data_version);
         Ok(imported)
     }
 }
