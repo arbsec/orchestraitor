@@ -1220,11 +1220,14 @@ fn remote_head_tree(
     if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
         return Ok(tree);
     }
-    // Last resort: an explicit --base ref, but ONLY when its fetch actually
-    // delivered the HEAD commit object (proving the fetch carried the remote
-    // head's history, and with it the true head tree). Falling back to the
-    // base's own tree would mask remote-only paths as an empty diff.
-    if fallback_base.is_some()
+    // Last resort: fetch the explicit --base ref, then re-check the HEAD —
+    // the base fetch may carry the head's history into the local object
+    // store even when the direct head fetch failed. The base is NEVER used
+    // as a stand-in for the head tree: only a head whose object is now
+    // locally verified proceeds (falling back to the base's own tree would
+    // mask remote-only paths as an empty diff).
+    if let Some(base) = fallback_base
+        && git_fetch_authenticated(token, owner, repo, base)
         && git(&["rev-parse", "--verify", "--quiet", head]).is_ok()
         && let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")])
     {
@@ -1232,7 +1235,8 @@ fn remote_head_tree(
     }
     bail!(
         "cannot read the remote head {head} tree of `{remote_branch}` locally — run \
-         `git fetch https://github.com/{owner}/{repo}.git` first or pass --base <ref>"
+         `git fetch https://github.com/{owner}/{repo}.git` first or pass --base <ref> \
+         (its fetch may deliver the head's objects)"
     )
 }
 
