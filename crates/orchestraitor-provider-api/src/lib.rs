@@ -8,9 +8,9 @@
 //! behind the separate [`DecisionProvider`] trait: a single-shot
 //! structured-output request/response class with calibrated confidence — no
 //! message streams. The [`FixtureDecisionProvider`] is the deterministic
-//! conformance target and the only shipped implementation; real adapters
-//! (TypeSafe/jev, tech-stack §17) stay default-off until their license is
-//! allowlisted (tech-stack §18).
+//! conformance target; the Neuralwatt-hosted Clef Flash decision model
+//! (Apache-2.0, open source) is the reference decision model behind the
+//! `NeuralwattDecisionProvider` in `orchestraitor-provider-neuralwatt`.
 
 #![forbid(unsafe_code)]
 
@@ -30,6 +30,8 @@ pub use capabilities::{
 };
 pub use decision::{
     DecisionAlternative, DecisionProposal, DecisionProvider, DecisionResult, TaskSelection,
+    TaskSplitProposal, TaskSplitSubtask, TaskSummary, ToolDescriptor, ToolQueryContext,
+    ToolSelection,
 };
 pub use decision_fixture::{FixtureDecisionProvider, FixtureMode};
 pub use error::{DecisionProviderError, ProviderTransportError};

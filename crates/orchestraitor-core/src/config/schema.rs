@@ -49,10 +49,28 @@ pub struct OrchestraitorConfig {
 /// the fallback chain when the provider is unavailable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoutingDecisionProviderConfig {
-    /// Decision provider implementation name. The only shipped value is
-    /// `fixture` (deterministic, table-driven); any other value is a typed
-    /// unknown-provider error at resolve time.
+    /// Decision provider implementation name. Shipped values are `fixture`
+    /// (deterministic, table-driven, offline) and `neuralwatt-clef-flash`
+    /// (the Clef Flash decision model through the Neuralwatt transport);
+    /// any other value is a typed unknown-provider error at resolve time.
     pub provider: Option<String>,
+    /// Optional decision-endpoint base URL override (spec §10.3). When
+    /// absent, the provider implementation's documented default applies
+    /// (the Neuralwatt API for `neuralwatt-clef-flash`). A self-hosted
+    /// deployment points this at its local OpenAI-compatible-style
+    /// decision endpoint; the URL is operator configuration, never
+    /// hardcoded in code.
+    pub base_url: Option<String>,
+    /// Optional decision model id override. Defaults to the provider
+    /// implementation's documented model (`clef-flash` for
+    /// `neuralwatt-clef-flash`).
+    pub model: Option<String>,
+    /// Optional secret URI for the decision endpoint credential (for
+    /// example `secret://env/NEURALWATT_API_KEY`). Absent means the
+    /// endpoint takes no auth (a local/self-hosted deployment); the value
+    /// is resolved through the standard secret chain and never logged,
+    /// serialized, or carried in an error.
+    pub api_key: Option<SecretUri>,
 }
 
 /// Enforcement mode for the GitHub App service identity (AGENTS.md; spec

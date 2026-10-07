@@ -38,13 +38,19 @@
 
 pub mod config;
 pub mod cost;
+pub mod decision_provider;
 pub mod error;
 pub mod stream;
+pub mod systemone;
 pub mod transport;
 pub mod wire;
 
 pub use config::{DEFAULT_NEURALWATT_BASE_URL, NEURALWATT_ENV_VAR, NeuralwattConfig};
 pub use cost::{CostSink, InMemoryCostSink, LedgerCostSink};
+pub use decision_provider::{
+    DEFAULT_DECISION_MODEL, NEURALWATT_DECISION_PROVIDER_ID, NeuralwattDecisionProvider,
+    NeuralwattDecisionProviderError,
+};
 pub use error::NeuralwattError;
 pub use transport::NeuralwattTransport;
 pub use wire::ChatCompletionRequest;

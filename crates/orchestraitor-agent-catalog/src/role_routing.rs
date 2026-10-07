@@ -372,19 +372,42 @@ pub enum DecisionProviderConfigError {
     /// read (for example an ambiguous same-layer conflict naming the key).
     #[error("decision provider configuration resolution failed: {0}")]
     Config(#[from] orchestraitor_core::OrchestraitorError),
+    /// A transport-backed decision provider recognized the configured name
+    /// but could not be built (for example an unresolvable API key).
+    #[error("decision provider `{name}` could not be built: {message}")]
+    Build {
+        /// Configured provider name.
+        name: String,
+        /// Log-safe build failure reason.
+        message: String,
+    },
 }
 
 /// The only shipped decision-provider implementation name (the deterministic
-/// fixture; tech-stack §17 keeps real adapters default-off until allowlisted).
+/// fixture; the Neuralwatt Clef Flash adapter is built by the CLI layer,
+/// which owns the transport dependency).
 pub const FIXTURE_DECISION_PROVIDER: &str = "fixture";
 
+/// The Neuralwatt-hosted Clef Flash decision provider's config name (spec
+/// §9.45). The implementation lives in `orchestraitor-provider-neuralwatt`;
+/// this constant is the `routing.provider` value that selects it.
+pub const NEURALWATT_CLEF_FLASH_DECISION_PROVIDER: &str = "neuralwatt-clef-flash";
+
 /// Available decision-provider implementation names, in stable order.
-pub const AVAILABLE_DECISION_PROVIDERS: [&str; 1] = [FIXTURE_DECISION_PROVIDER];
+pub const AVAILABLE_DECISION_PROVIDERS: [&str; 2] = [
+    FIXTURE_DECISION_PROVIDER,
+    NEURALWATT_CLEF_FLASH_DECISION_PROVIDER,
+];
 
 /// Builds the decision provider named by the effective `routing.provider`
 /// config value (spec §9.45, default off): `None` when the flag is unset
-/// (heuristic table only), the deterministic fixture behind `"fixture"`, and
-/// a typed unknown-provider error for any other value.
+/// (heuristic table only), the deterministic fixture behind `"fixture"`,
+/// and a typed unknown-provider error for any other value. The
+/// `neuralwatt-clef-flash` name is recognized by the CLI layer (which owns
+/// the transport dependency and builds
+/// `orchestraitor_provider_neuralwatt::NeuralwattDecisionProvider`); pass
+/// that implementation through [`resolve_decision_provider_with`] when it
+/// must resolve here.
 ///
 /// # Errors
 ///
@@ -395,19 +418,87 @@ pub const AVAILABLE_DECISION_PROVIDERS: [&str; 1] = [FIXTURE_DECISION_PROVIDER];
 pub fn resolve_decision_provider(
     resolver: &ConfigResolver,
 ) -> Result<Option<Box<dyn DecisionProvider>>, DecisionProviderConfigError> {
-    let configured = resolver
-        .resolve_config()?
-        .routing
-        .and_then(|routing| routing.provider);
+    resolve_decision_provider_with(resolver, &|_name, _endpoint| Ok(None))
+}
+
+/// The decision-endpoint configuration the effective `routing.*` block
+/// carries (spec `30-model-routing.md` §9.45): everything the
+/// transport-backed factories need beyond the provider name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecisionEndpointConfig {
+    /// Optional endpoint base URL override (for example a self-hosted
+    /// decision engine over tailscale). Absent keeps the implementation
+    /// default.
+    pub base_url: Option<String>,
+    /// Optional decision model id override. Absent keeps the
+    /// implementation default.
+    pub model: Option<String>,
+    /// Optional non-secret credential reference (`secret://…` URI text).
+    /// Absent means the endpoint takes no auth; the factory resolves the
+    /// reference, and the resolved value never enters this struct, an
+    /// error, or a log.
+    pub api_key_uri: Option<String>,
+}
+
+/// A caller-supplied factory for transport-backed decision-provider names:
+/// `Ok(None)` for names the factory does not own, `Err(message)` for a
+/// recognized name that cannot be built. Receives the endpoint
+/// configuration resolved from the `routing.*` block so self-hosted
+/// endpoints flow through without the factory re-reading config. The
+/// `api_key` carries the non-secret URI reference only — the factory
+/// resolves it, and the value never enters this struct, an error, or a log.
+pub type ExternalDecisionProviderFactory<'a> =
+    &'a dyn Fn(&str, &DecisionEndpointConfig) -> Result<Option<Box<dyn DecisionProvider>>, String>;
+
+/// [`resolve_decision_provider`] with a caller-supplied factory for names
+/// this crate does not build itself (the transport-backed adapters). The
+/// factory returns `Ok(None)` for names it does not own and
+/// `Err(message)` when a provider it owns cannot be built (for example an
+/// unresolvable API key) — the message surfaces as a typed config error so
+/// a broken decision-provider configuration is never silently degraded to
+/// the heuristic table.
+///
+/// # Errors
+///
+/// Returns [`DecisionProviderConfigError::Unknown`] for a configured name
+/// that no implementation claims, [`DecisionProviderConfigError::Build`]
+/// when the external factory fails, and
+/// [`DecisionProviderConfigError::Config`] when layered configuration
+/// resolution itself fails.
+pub fn resolve_decision_provider_with(
+    resolver: &ConfigResolver,
+    external: ExternalDecisionProviderFactory<'_>,
+) -> Result<Option<Box<dyn DecisionProvider>>, DecisionProviderConfigError> {
+    let routing = resolver.resolve_config()?.routing;
+    let configured = routing
+        .as_ref()
+        .and_then(|routing| routing.provider.clone());
+    let endpoint = DecisionEndpointConfig {
+        base_url: routing
+            .as_ref()
+            .and_then(|routing| routing.base_url.clone()),
+        model: routing.as_ref().and_then(|routing| routing.model.clone()),
+        api_key_uri: routing
+            .as_ref()
+            .and_then(|routing| routing.api_key.as_ref())
+            .map(orchestraitor_core::SecretUri::as_uri),
+    };
     match configured.as_deref() {
         None => Ok(None),
         Some(FIXTURE_DECISION_PROVIDER) => Ok(Some(Box::new(
             orchestraitor_provider_api::FixtureDecisionProvider::new(),
         ))),
-        Some(name) => Err(DecisionProviderConfigError::Unknown {
-            name: name.to_string(),
-            available: AVAILABLE_DECISION_PROVIDERS.join(", "),
-        }),
+        Some(name) => match external(name, &endpoint) {
+            Ok(Some(provider)) => Ok(Some(provider)),
+            Ok(None) => Err(DecisionProviderConfigError::Unknown {
+                name: name.to_string(),
+                available: AVAILABLE_DECISION_PROVIDERS.join(", "),
+            }),
+            Err(message) => Err(DecisionProviderConfigError::Build {
+                name: name.to_string(),
+                message,
+            }),
+        },
     }
 }
 
@@ -556,6 +647,68 @@ mod decision_provider_tests {
         assert_eq!(
             built.as_ref().map(|provider| provider.id().as_str()),
             Some("fixture")
+        );
+    }
+
+    #[test]
+    fn resolve_decision_provider_with_builds_external_named_provider() {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+        )]);
+        let built = resolve_decision_provider_with(&resolver, &|name, _endpoint| match name {
+            NEURALWATT_CLEF_FLASH_DECISION_PROVIDER => Ok(Some(Box::new(
+                orchestraitor_provider_api::FixtureDecisionProvider::new(),
+            ))),
+            _ => Ok(None),
+        })
+        .unwrap();
+        assert!(built.is_some());
+    }
+
+    #[test]
+    fn resolve_decision_provider_without_external_factory_rejects_transport_names() {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+        )]);
+        // Without a factory that owns the transport-backed name, the base
+        // resolver reports the typed unknown-provider error listing both
+        // shipped names.
+        let Err(error) = resolve_decision_provider(&resolver) else {
+            panic!("transport-backed names need an owning factory");
+        };
+        assert!(
+            error.to_string().contains("unknown decision provider"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("neuralwatt-clef-flash"),
+            "available list must name the shipped implementations: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_decision_provider_with_surfaces_build_failures() {
+        let resolver = resolver_from(&[(
+            ConfigLayer::Project,
+            "project",
+            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+        )]);
+        let Err(error) = resolve_decision_provider_with(&resolver, &|name, _endpoint| match name {
+            NEURALWATT_CLEF_FLASH_DECISION_PROVIDER => {
+                Err("neuralwatt decision auth resolution failed: key missing".to_string())
+            }
+            _ => Ok(None),
+        }) else {
+            panic!("a failed external build must surface as a typed error");
+        };
+        assert!(error.to_string().contains("could not be built"), "{error}");
+        assert!(
+            error.to_string().contains("key missing"),
+            "build message must be carried: {error}"
         );
     }
 

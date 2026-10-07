@@ -62,11 +62,62 @@ layer) overrides the built-in default field by field:
   resolution; its typed proposal — provider, model, calibrated confidence
   (`0.0..=1.0`, validated at the boundary), and the alternatives it
   considered with skip reasons — wins over the table when the target
-  provider is routable in the effective configuration. Any other value is a
-  typed `unknown decision provider` error naming the available
-  implementations; no TypeSafe/jev adapter exists and no network calls are
-  made (tech-stack §17 keeps that adapter default-off until its license is
-  allowlisted, tech-stack §18).
+  provider is routable in the effective configuration. When set to
+  `neuralwatt-clef-flash`, the Clef Flash decision model (Cloudflare,
+  open source, Apache-2.0) served through the Neuralwatt `POST /v1/systemone`
+  endpoint is consulted (model id `clef-flash`): a single-shot decision
+  request with typed questions and calibrated probabilities, zero generated
+  text. It requires a resolvable Neuralwatt API key (`NEURALWATT_API_KEY`
+  or the keyring entry); an unresolvable key is a typed startup error, not
+  a silent fallback. Any other value is a typed `unknown decision provider`
+  error naming the available implementations (`fixture`,
+  `neuralwatt-clef-flash`).
+- `routing.base_url` — optional decision-endpoint base URL override (spec
+  §10.3). Absent keeps the implementation default (the Neuralwatt API for
+  `neuralwatt-clef-flash`). A self-hosted decision engine — for example a
+  local Metal-native Clef server reachable over tailscale — points this at
+  its endpoint; the URL lives in configuration, never in code.
+- `routing.model` — optional decision model id override. Absent keeps the
+  implementation default (`clef-flash`). Confirm the exact id against the
+  endpoint's model list (`GET /v1/models`) when pointing at a custom
+  deployment.
+- `routing.api_key` — optional credential reference for the decision
+  endpoint, as a `secret://` URI (`secret://env/NEURALWATT_API_KEY` or
+  `secret://keyring/neuralwatt`). Absent means the endpoint takes no auth
+  (a local/self-hosted deployment); the literal value `none` also selects
+  the no-auth path. The resolved credential never enters an error or log
+  line. Data classification of the endpoint (spec §9.28) is an operator
+  choice through the `data_classification` rules — this key makes no
+  assumption about what the endpoint may receive.
+
+### Example: self-hosted decision engine
+
+```toml
+# orchestraitor.toml (project layer) — a local Clef inference engine
+# (OpenAI-compatible-style decision endpoint on the tailnet, no auth):
+[routing]
+provider = "neuralwatt-clef-flash"
+base_url = "http://mekbook.tail1e276.ts.net:8080/v1"
+model = "clef-flash"
+# api_key absent / "none" → no Authorization header is sent.
+```
+
+```toml
+# orchestraitor.toml (project layer) — the hosted Neuralwatt deployment:
+[routing]
+provider = "neuralwatt-clef-flash"
+api_key = "secret://env/NEURALWATT_API_KEY"
+# base_url absent → the Neuralwatt API default; model defaults to
+# clef-flash.
+```
+
+### Decision model defaults
+
+When a decision provider is configured, decision calls route to
+`clef-flash` by default (`routing.model` overrides it). The role the
+decision calls themselves run as is not part of the role-routing table —
+decision consultation is a control-plane surface, not a worker role — so no
+`[roles.decision.routing]` entry is required or read.
 
 ### Decision-provider fallback
 
@@ -83,6 +134,15 @@ confidence in `precedence_path`
 Confidence, structured alternatives, and per-alternative skip reasons land
 as typed columns in a future `SCHEMA_V2` decision-store migration; the
 current store keeps working unchanged.
+
+The same chain applies to campaign task selection (`orc campaign run` and
+`orc loop`): a configured provider is consulted with the eligible ready
+task ids first, a well-formed proposal for an eligible task wins and the
+campaign decision record names it in `precedence_path`
+(`decision-provider:neuralwatt-clef-flash (confidence 0.99)`), and any
+provider error, a proposal for an id outside the eligible set, or an empty
+ready queue falls back to the deterministic P0-first selection with the
+cause recorded in the record's `rationale`.
 
 Because layers merge field-wise, a project entry that sets only `provider`
 inherits `model` from lower layers. A typed error naming the missing
