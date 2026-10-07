@@ -54,10 +54,7 @@ book/src/adr/
 .orchestraitor/loop.db*
 .orchestraitor/loop-worktrees/
 .orchestraitor/codegraph.json
-.orchestraitor/loop.db*
 .orchestraitor/loop.lock
-.orchestraitor/campaign.db*
-.orchestraitor/loop-worktrees/
 .orchestraitor/worker-tasks/
 
 # Local GitHub Project config (contains real org/project number once the Project exists) — NOT checked in.

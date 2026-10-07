@@ -96,16 +96,16 @@ fi
 # slurped raw and merged locally: `add` concatenates the per-page arrays into
 # one flat commit array.
 # The endpoint caps a SINGLE page at 250 commits regardless of per_page, so
-# the only shape pagination cannot disambiguate from truncation is a TOTAL of
-# exactly 250: a page walk of 100+100+50 for a PR with 300 commits ends in a
-# non-full page and would otherwise pass. The audit therefore FAILS CLOSED
-# when the merged total is exactly 250 (the documented endpoint limit) — an
-# exact-250-commit PR must be audited out-of-band. Totals of 100/200 are NOT
-# ambiguous: a page walk reaching exactly per_page*pages always continues to a
-# terminal short page (Link headers), so a 100/200 total means the walk ended
-# legitimately. Any total > 250 is impossible from this endpoint and fails.
+# a walk never yields MORE than 250: the only shape pagination cannot
+# disambiguate from truncation is a total of 250 or more. A page walk of
+# 100+100+50 for a PR with 300 commits ends in a non-full page and would
+# otherwise pass. The audit therefore FAILS CLOSED when the merged total is
+# >= 250 (the documented endpoint limit) — such PRs must be audited
+# out-of-band. Totals of 100/200 are NOT ambiguous: a page walk reaching
+# exactly per_page*pages always continues to a terminal short page (Link
+# headers), so a 100/200 total means the walk ended legitimately.
 COMMIT_ARGS=(api --paginate --slurp "repos/$REPO/pulls/$PR/commits?per_page=100")
-COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce '(add // []) | if length == 250 then error("ambiguous total at the 250-commit endpoint limit; audit out-of-band") else . end')" || {
+COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce '(add // []) | if length >= 250 then error("ambiguous total at the 250-commit endpoint limit; audit out-of-band") else . end')" || {
   echo "error: cannot read PR #$PR commits (pulls/$PR/commits)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }

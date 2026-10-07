@@ -211,7 +211,7 @@ persisted. The bot-user lookup is authenticated with the installation token
 for the configured organization's installation (GitHub rejects the App JWT on
 `GET /users`, and on an Enterprise Managed Users organization the bot profile
 is not publicly visible — an unauthenticated request would answer 404). The
-other three subcommands (`mint-token`, `api`, `gh-env`) keep using
+other subcommands (`mint-token`, `api`, `gh-env`) keep using
 installation tokens.
 
 ```sh
@@ -241,24 +241,54 @@ at merge time (skill `verified-commit-path.md`; spec `10-orchestrator.md`
 §9.41 service identity):
 
 ```sh
-orc github push-branch feat/my-change \
+orc github push-branch --branch feat/my-change \
   --message "feat(widget): add blinking" \
-  --body "Body paragraph." \
+  --body-file body.md \
   --owner arbsec --repo orchestraitor
 ```
+
+Arguments and defaults:
+
+- `--branch <name>` — the local branch whose HEAD tree is landed. Defaults to
+  the current branch of the working directory (detached HEAD is a typed
+  error).
+- `--remote-branch <name>` — the remote branch to create or force-move.
+  Defaults to the local branch name.
+- `--owner <owner>` / `--repo <name>` — the target repository. `--repo` also
+  accepts the full `owner/name` slug, which is used as-is (a bare name
+  combines with the owner resolved from the `--owner` flag or the `origin`
+  remote of the current directory
+  (`git@github.com:owner/repo.git` or the https shape; anything else is a
+  typed error telling you to pass both flags)).
+- `--base <ref>` — the diff base for a NEW remote branch. Defaults to the
+  repository's default branch, read from the API. For an EXISTING remote
+  branch the diff base is always that branch's remote head tree (an earlier
+  landing may have moved it past the base; a second landing carries only the
+  delta), so `--base` only decides what is fetched for comparison.
+- `--message <headline>` (required) and `--body-file <file>` (`-` = stdin) —
+  the squashed commit's message.
+- `--re-land` — see the re-land section below.
+- `--dry-run` — resolve everything (owner/repo, branches, diff base, change
+  set) and print the plan (paths and statuses only — never blob contents)
+  without creating or moving anything on the remote.
 
 Mechanics:
 
 - Computes the local branch's tree (`git rev-parse <branch>^{tree}`). The
   change set is the diff from the REMOTE HEAD's tree when the branch exists on
   the remote (fetched locally first — an earlier landing may have moved the
-  remote tree past the base), or from the base branch tree (`--base`, default
-  `origin/main` then `main`) for a new branch. `A`/`M` additions carry the
-  branch's committed blob contents (`git cat-file blob` — never the working
-  directory); `D` deletions carry the path. An empty diff (the local tree
-  equals the remote head tree) is a no-op — the decision needs the remote
-  head, so one minted token and the branch-ref request are spent before the
-  refusal.
+  remote tree past the base), or from the base branch tree for a new branch.
+  `A`/`M` additions carry the branch's committed blob CONTENTS, base64-encoded
+  (`git cat-file blob` — never the working directory, and never blob OIDs
+  pasted as contents: that was the corrupted-FileAddition incident this
+  subcommand exists to prevent). `D` deletions carry the path. An empty diff
+  (the local tree equals the remote head tree) is a no-op — the decision
+  needs the remote head, so one minted token and the branch-ref request are
+  spent before the refusal.
+- **Squash-landing:** a local branch with multiple commits lands as ONE
+  remote commit — the landing is a tree operation (local HEAD tree vs. the
+  remote head tree), never a history replay. The local branch keeps its own
+  history; the remote branch receives exactly one squashed commit.
 - **Landing via a temporary branch:** the commit is created on
   `push-branch/tmp-<uuid>` — a fresh, invocation-unique name created with
   `createRef` (`createCommitOnBranch` does NOT auto-create branches),
@@ -273,16 +303,31 @@ Mechanics:
   `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
   deletes the temp ref and leaves the real remote branch untouched.
   Diagnostics never contain the token.
-- **Ref move with an exact-head precondition:** the verified landing commit
-  was created ON TOP of the observed remote head; the real ref is moved with
-  the `updateRefs` mutation carrying `RefUpdate.beforeOid = <observed head>`
-  and `force = false`. `beforeOid` is an exact precondition: a concurrent
-  writer that ADVANCES the branch in the window makes the update
-  non-fast-forward, and one that REWINDS it makes `beforeOid` mismatch —
-  both FAIL with a typed error, and the concurrent commit is never
-  overwritten in either direction. A new remote branch is created directly
-  at the verified commit. The real branch head therefore never regresses
-  through an ancestor-of-main state (the auto-close pitfall).
+- **Ref move with an exact-head precondition AND a false-negative guard:**
+  the verified landing commit was created ON TOP of the observed remote head;
+  the real ref is moved with the `updateRefs` mutation carrying
+  `RefUpdate.beforeOid = <observed head>` and `force = false`. `beforeOid` is
+  an exact precondition: a concurrent writer that ADVANCES the branch in the
+  window makes the update non-fast-forward, and one that REWINDS it makes
+  `beforeOid` mismatch — both FAIL with a typed error, and the concurrent
+  commit is never overwritten in either direction. A new remote branch is
+  created directly at the verified commit. Additionally, the
+  `updateRefs`/`clientMutationId` response is KNOWN to be flaky: GitHub has
+  answered with a malformed-payload/GraphQL error envelope AFTER the mutation
+  actually applied. Whenever an updateRefs error or a missing
+  `clientMutationId` occurs, the subcommand re-reads the branch ref through
+  the API before failing: a ref that provably points at the new head
+  degrades the failure to a WARNING on stderr and reports success — a
+  mutation that moved the ref is never reported as an error.
+- **Executable-file mode limitation:** `createCommitOnBranch` `FileAddition`
+  always lands files as 100644 — it cannot set the executable bit. When a
+  file being ADDED is 100755 in the local tree (and was not already 100755 in
+  the diff base), the subcommand prints a WARNING on stderr before landing:
+  the remote tree will carry 100644 and the tree gate will then refuse the
+  landing. Fix by committing the file as 100644 locally, or land it first
+  with mode 100644 and chmod locally afterwards. Files that already exist in
+  the diff base with 100755 are unaffected (modifications keep GitHub's
+  stored mode).
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 
@@ -308,10 +353,39 @@ this case:
 Without `--re-land`, an identical-tree landing stays the safe no-op it has
 always been.
 
+## `orc github verify-identity`
+
+Verifies that the ambient git commit identity of a checkout matches the
+App-derived canonical commit identity — the Rust twin of the
+`commit-identity` skill script (agents run the shell script pre-commit; orc
+uses the native check in its own flows):
+
+```sh
+orc github verify-identity            # current directory
+orc github verify-identity ../orchestraitor-my-slice   # explicit path
+```
+
+- Compares `git config user.name` and `user.email` exactly as a commit in
+  PATH would resolve them (repo-local → global precedence, git's normal
+  rules) against the service-identity pair printed by
+  `orc github commit-author` — derived live from the App, never hardcoded.
+- Exit 0 prints `identity OK: <name> <<email>>` on stderr. On mismatch the
+  typed error names the ambient identity, the expected identity, and BOTH
+  exact fixes:
+  `git -c user.name='…' -c user.email='…' commit …` (per-command) and
+  `git config user.name '…' && git config user.email '…'` (per-checkout).
+- An UNSET `user.name`/`user.email` is also a typed error: git would fall
+  back to an auto-detected identity, which is exactly how a fresh worktree
+  inherited the global personal gitconfig and stamped the human owner's
+  identity onto PR #486's commits.
+- Run it before any local `git commit` destined for a PR branch — or let
+  `orc github gh-env` pin the identity for you in `required` mode (it sets
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in the child environment).
+
 ## Rollback
 
 Removing the `github_app` configuration (or unsetting any of `client_id`,
-`installation_id`, `private_key_uri`) makes all five subcommands fail closed
+`installation_id`, `private_key_uri`) makes all six subcommands fail closed
 with a typed `github_app.*` configuration error — the commands mint nothing and
 fall back to nothing. Roll back the binary by reverting this change; there is
 no persisted state to clean up.

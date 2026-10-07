@@ -53,11 +53,13 @@ KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
 # Classify checks. The not-applicable exemption requires BOTH the known-disabled
 # name AND the skipped state: a known-disabled job that actually ran and failed
 # is a failure, never a pass (state-blind exemption would launder real failures).
+# The aggregate flags are computed in a separate `|` stage over the classified
+# array — an older jq/jaq grammar (CI) rejects `key: (a) and (b)` inside an
+# object construction, but accepts the same expression applied to a stream.
 echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
   def disabled($name): ($known_disabled | index($name)) != null;
   def exempt: disabled(.name) and .bucket == "skipping";
-  {
-  checks: map({
+  map({
     name: .name,
     state: .state,
     bucket: .bucket,
@@ -73,8 +75,10 @@ echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
       else "unknown"
       end
     )
-  }),
-  all_passed: (length > 0) and all(.[]; .bucket == "pass" or exempt),
-  any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
-  any_pending: any(.[]; .bucket == "pending")
+  })
+  | {
+  checks: .,
+  all_passed: ((length > 0) and all(.[]; .classification == "pass" or .classification == "not-applicable")),
+  any_failing: any(.[]; .classification == "fail"),
+  any_pending: any(.[]; .classification == "pending")
 }'

@@ -234,7 +234,7 @@ impl DirectLoopStarter {
     fn materialize_task_fixture(
         tasks_dir: &Path,
         selected: &SelectedTask,
-    ) -> Result<(), CampaignError> {
+    ) -> Result<orchestraitor_worker::WorkerTask, CampaignError> {
         let task = orchestraitor_worker::WorkerTask {
             id: selected.task_id.clone(),
             slug: selected.task_id.clone(),
@@ -260,7 +260,7 @@ impl DirectLoopStarter {
             task_id: selected.task_id.clone(),
             message: format!("task fixture rename failed: {error}"),
         })?;
-        Ok(())
+        Ok(task)
     }
 
     /// Attaches per-call cost tracking when the ledger is available: one
@@ -336,17 +336,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 message: format!("worker-tasks dir creation failed: {error}"),
             });
         }
-        Self::materialize_task_fixture(&tasks_dir, selected)?;
-        let task = orchestraitor_worker::WorkerTask {
-            id: selected.task_id.clone(),
-            slug: selected.task_id.clone(),
-            description: format!(
-                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
-                 the issue and its referenced spec sections. Work in the checked-out task \
-                 worktree; deliver per the worker contract.",
-                selected.number, selected.repo, selected.title, selected.url,
-            ),
-        };
+        let task = Self::materialize_task_fixture(&tasks_dir, selected)?;
         let transport = Arc::new(
             build_bootstrap_transport(self.provider_endpoint.clone()).map_err(|error| {
                 CampaignError::Spawn {
@@ -467,7 +457,7 @@ fn spawn_signal_task() -> (
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(stream) => Some(stream),
                 Err(error) => {
-                    report_signal_failure(&format!(
+                    report_loop_warning(&format!(
                         "SIGTERM handler registration failed: {error}; \
                          SIGTERM will use the process default action"
                     ));
@@ -478,7 +468,7 @@ fn spawn_signal_task() -> (
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
                 Ok(stream) => Some(stream),
                 Err(error) => {
-                    report_signal_failure(&format!(
+                    report_loop_warning(&format!(
                         "SIGINT handler registration failed: {error}; \
                          SIGINT will use the process default action"
                     ));
@@ -488,7 +478,7 @@ fn spawn_signal_task() -> (
         if terminate.is_none() && interrupt.is_none() {
             // No channel registered: signals take the process default
             // action (terminate) — fail loudly, never run unkillable.
-            report_signal_failure(
+            report_loop_warning(
                 "no signal handlers could be installed; shutdown signals \
                  will terminate the process abruptly",
             );
@@ -531,7 +521,7 @@ fn spawn_signal_task() -> (
         // console handler on each iteration.
         loop {
             if tokio::signal::ctrl_c().await.is_err() {
-                report_signal_failure("ctrl-c handler registration failed");
+                report_loop_warning("ctrl-c handler registration failed");
                 return;
             }
             let count = count_rx.borrow().wrapping_add(1);
@@ -541,9 +531,11 @@ fn spawn_signal_task() -> (
     (signal_rx, signals)
 }
 
-/// Writes a signal-handling warning to stderr (the crate's stderr idiom —
-/// the lint denies `eprintln!`; write failures are best-effort diagnostics).
-fn report_signal_failure(message: &str) {
+/// Writes a best-effort loop warning to stderr (the crate's stderr idiom —
+/// the lint denies `eprintln!`; write failures are ignored). Used for
+/// degraded-but-fatal-to-nothing conditions: signal-handler fallbacks and
+/// the cost-ledger open failure.
+fn report_loop_warning(message: &str) {
     let stderr = std::io::stderr();
     let mut lock = stderr.lock();
     let _ignore = writeln!(lock, "orc loop: {message}");
@@ -601,7 +593,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
         match orchestraitor_cost_ledger::CostLedger::open(&paths.config_dir.join("cost.db")) {
             Ok(ledger) => Some(Arc::new(std::sync::Mutex::new(ledger))),
             Err(error) => {
-                report_signal_failure(&format!("cost ledger open failed: {error}"));
+                report_loop_warning(&format!("cost ledger open failed: {error}"));
                 None
             }
         };
