@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# audit-pr-commits: read-only commit-hygiene audit of a PR's recorded commits.
+#
+# Nothing in the local hook chain (lefthook: `cog verify`,
+# check-unsigned-bot-commits) runs on agent commits: they are created via the
+# GitHub App API (`createCommitOnBranch`), which bypasses every local hook.
+# This script audits the PR AFTER the fact and classifies per commit:
+#
+#   - `unauthorized-identity`   : commit author is not a declared service
+#                                 principal (allowed set:
+#                                 arbsec-agent[bot], renovate[bot]). A commit
+#                                 whose `.author` is null (email resolves to no
+#                                 GitHub account = NO_USER) and a commit authored
+#                                 as the human owner (identity misuse) are both
+#                                 this class.
+#   - `committer-mismatch`      : committer login exists, differs from the
+#                                 author login, and is NOT GitHub's web-flow
+#                                 committer (`web-flow` / `GitHub` — the
+#                                 expected committer on App-API-created,
+#                                 verified commits; never flagged).
+#   - `unverified-commit`       : `.commit.verification.verified` is not true
+#                                 (the `required_signatures` ruleset blocks
+#                                 these at merge time).
+#   - `non-conventional-message`: subject line is not a Conventional Commits
+#                                 message for the repo's type list (AGENTS.md).
+#
+# Scope note: the allowed set is the declared service-identity principals of
+# this repository. The audit is aimed at agent-created PRs — it deliberately
+# does NOT carve out the human owner: a mekwall-authored commit riding an
+# agent-created PR is exactly the identity-misuse case this gate exists for.
+# (A human's own PRs are outside this script's contract.)
+#
+# Usage: audit-pr-commits <pr-number> [-R OWNER/REPO] [--json]
+# Reads are ambient gh (pr-checks precedent); the script is read-only, so it
+# never routes through `orc_lib_gh_service` and has no --dry-run.
+#
+# Exit codes (repo convention):
+#   0  all PR commits clean
+#   1  unrecoverable error (network, auth, unexpected gh/jq output)
+#   2  config/state error (PR not found, bad arguments, repo unresolved)
+#   3  policy violation (one or more commits carry violations)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "audit-pr-commits" "Audit a PR's commits for identity, signature-verification, and Conventional Commits violations (read-only). Positional: <pr-number>. Flags: -R/--repo <owner/name>."
+  exit "$ORC_OK"
+fi
+
+PR="${ORC_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: numeric PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+if [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ]; then
+  echo "error: unexpected extra argument '${ORC_LIB_EXTRA_ARGS[1]}'" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+
+# Declared service-identity principals of this repo (workflow policy
+# .agents/project/orchestraitor-workflow.md; AGENTS.md service-identity rules).
+# Extend here if the declared set grows (spec 10-orchestrator.md §9.41).
+ALLOWED_IDENTITIES=("arbsec-agent[bot]" "renovate[bot]")
+
+# Conventional Commits types for this repo (AGENTS.md; `cog verify` enforces
+# the same set locally with cocogitto defaults).
+CONVENTIONAL_RE='^(feat|fix|security|docs|refactor|test|ci|chore|build|perf|revert)(\([A-Za-z0-9_./,-]+\))?!?: .+'
+
+# --- Locate the PR -------------------------------------------------------------
+PR_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json state,baseRefName,headRefName,headRefOid)" ||
+  { echo "error: cannot read PR #$PR (not found or gh failure)" >&2; exit "$ORC_ERR_CONFIG"; }
+STATE="$(jq -r '.state' <<<"$PR_STATE")"
+BASE_REF="$(jq -r '.baseRefName' <<<"$PR_STATE")"
+HEAD_REF="$(jq -r '.headRefName' <<<"$PR_STATE")"
+HEAD_OID="$(jq -r '.headRefOid' <<<"$PR_STATE")"
+if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
+  echo "note: PR #$PR is $STATE; auditing its recorded commits anyway" >&2
+fi
+if [ -z "$HEAD_OID" ] || [ "$HEAD_OID" = "null" ]; then
+  echo "error: PR #$PR has no head OID (deleted head branch?)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+# --- Fetch the commit list (the PR's RECORDED commits; reads stay ambient) ----
+# `GET /pulls/<n>/commits` returns exactly the commits the PR carries — for
+# OPEN and MERGED/CLOSED PRs alike. A `compare/base...head` would be wrong for
+# a merged PR (the head commits are already ON the base, so the comparison is
+# empty). gh 2.102 refuses `--slurp` combined with `--jq`, so the pages are
+# slurped raw and merged locally: `add` concatenates the per-page arrays into
+# one flat commit array.
+# The endpoint caps a SINGLE page at 250 commits regardless of per_page, so
+# the only shape pagination cannot disambiguate from truncation is a TOTAL of
+# exactly 250: a page walk of 100+100+50 for a PR with 300 commits ends in a
+# non-full page and would otherwise pass. The audit therefore FAILS CLOSED
+# when the merged total is exactly 250 (the documented endpoint limit) — an
+# exact-250-commit PR must be audited out-of-band. Totals of 100/200 are NOT
+# ambiguous: a page walk reaching exactly per_page*pages always continues to a
+# terminal short page (Link headers), so a 100/200 total means the walk ended
+# legitimately. Any total > 250 is impossible from this endpoint and fails.
+COMMIT_ARGS=(api --paginate --slurp "repos/$REPO/pulls/$PR/commits?per_page=100")
+COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce '(add // []) | if length == 250 then error("ambiguous total at the 250-commit endpoint limit; audit out-of-band") else . end')" || {
+  echo "error: cannot read PR #$PR commits (pulls/$PR/commits)" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+}
+if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$COMMITS_JSON"; then
+  echo "error: unexpected gh commits output for PR #$PR (expected a commit array)" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+if [ "$(jq 'length' <<<"$COMMITS_JSON")" -eq 0 ]; then
+  echo "error: PR #$PR reports zero commits (empty or deleted head branch?)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+# --- Classify (pure jq over the recorded-commits payload) ----------------------
+# Same filter classifies the live payload and a mock commits fixture:
+# a mock on $GH_BIN substitutes the transport, never this logic.
+AUDIT_JSON="$(jq -e --arg conventional_re "$CONVENTIONAL_RE" --arg pr "$PR" \
+  --arg base_ref "$BASE_REF" --arg head_ref "$HEAD_REF" '
+  def allowed: ((.author.login // "") as $login
+    | ["arbsec-agent[bot]", "renovate[bot]"] | index($login) != null);
+  def webflow: . == "web-flow" or . == "GitHub";
+  def subject: (.commit.message | split("\n")[0]);
+  def violations:
+    [ (if ((.author.login // "") | length) == 0 then
+         {class: "unauthorized-identity", detail: "NO_USER: author email resolves to no GitHub account"}
+       elif (allowed) then empty
+       else {class: "unauthorized-identity", detail: ("author login \"" + .author.login + "\" is not a declared service principal")}
+       end),
+      (if ((.committer.login // "") | length) > 0
+          and .committer.login != (.author.login // "")
+          and ((.committer.login | webflow) | not) then
+         {class: "committer-mismatch",
+          detail: ("committer \"" + .committer.login + "\" differs from author \"" + (.author.login // "NO_USER") + "\"")}
+       else empty end),
+      (if (.commit.verification.verified != true) then
+         {class: "unverified-commit",
+          detail: ("verification.reason=" + (.commit.verification.reason // "missing"))}
+       else empty end),
+      (if (subject | test($conventional_re) | not) then
+         {class: "non-conventional-message", detail: ("subject: " + subject)}
+       else empty end)
+    ];
+  {
+    pr: ($pr | tonumber),
+    base: $base_ref,
+    head: $head_ref,
+    commits: [ .[] | {
+      sha: .sha,
+      author: (.author.login // "NO_USER"),
+      verified: (.commit.verification.verified == true),
+      subject: subject,
+      violations: violations
+    } ],
+    violation_count: ([ .[] | violations | length ] | add),
+    verdict: (if ([ .[] | violations | length ] | add) == 0 then "clean" else "violations" end)
+  }' <<<"$COMMITS_JSON")" || {
+  echo "error: failed to classify PR #$PR commits (jq)" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+}
+
+# --- Output --------------------------------------------------------------------
+VERDICT="$(jq -r '.verdict' <<<"$AUDIT_JSON")"
+
+if [ "$OPT_JSON" = true ]; then
+  echo "$AUDIT_JSON"
+else
+  COUNT="$(jq -r '.commits | length' <<<"$AUDIT_JSON")"
+  echo "PR #$PR commit hygiene audit ($REPO): $COUNT commit(s), $BASE_REF...$HEAD_REF"
+  echo
+  jq -r '.commits[] |
+    "  " + .sha[0:8] + "  " + (.author | if . == "NO_USER" then "NO_USER" else . end) +
+    "  verified=" + (if .verified then "true " else "FALSE" end) +
+    "  " + .subject +
+    (if (.violations | length) > 0 then
+       "\n" + (.violations | map("    ! " + .class + ": " + .detail) | join("\n"))
+     else "" end)' <<<"$AUDIT_JSON"
+  echo
+  if [ "$VERDICT" = "clean" ]; then
+    echo "verdict: clean — every commit is authored by a declared principal, verified, and conventional"
+  else
+    echo "verdict: VIOLATIONS — $(jq -r '.violation_count' <<<"$AUDIT_JSON") violation(s) across $(jq '[.commits[] | select(.violations | length > 0)] | length' <<<"$AUDIT_JSON") commit(s)"
+    echo "remediation: see .agents/skills/github-pr-lifecycle/references/commit-hygiene-remediation.md"
+    echo "(recreate the offending commit(s) via the verified-commit path; never reroll, never force-push)"
+  fi
+fi
+
+if [ "$VERDICT" = "clean" ]; then
+  exit "$ORC_OK"
+fi
+exit "$ORC_ERR_POLICY"

@@ -41,14 +41,27 @@ REPO="$(orc_lib_resolve_repo)"
 # Extend here if the service-identity set grows (§9.41 configuration).
 SERVICE_IDENTITIES=("app/arbsec-agent" "arbsec-agent[bot]")
 
+# Governance areas: these get the maintainer REVIEWER DOMAIN (a reviewer
+# request per workflow policy "PR labeling and human attention") — never the
+# `needs-human-review` label. Path classification skips them entirely;
+# CONTENT classification below still applies, because a governance-path file
+# can still IMPLEMENT a security control (e.g. a lefthook commit-provenance
+# guard under .agents/), and classification is by diff content, not intent.
+GOVERNANCE_PATHS=(
+  "^\.github/"
+  "^\.agents/"
+  "^AGENTS\.md$"
+  "^docs/spec/"
+)
+
 # §21.1 security-sensitive path classes (workflow policy
-# .agents/project/orchestraitor-workflow.md; AGENTS.md review invariants).
+# .agents/project/orchestraitor-workflow.md "PR labeling and human attention";
+# spec 50-contracts-data.md §21.1: privilege boundaries, sandboxing, policy,
+# capability issuance, filesystem projection, network/secret handling, unsafe).
 SENSITIVE_PATHS=(
   "^\.arbitraitor"
   "^arbitraitor"
   "arbitraitor"
-  "^\.github/workflows"
-  "^\.agents/"
   "commands/github\.rs"
   "github_app"
   "push-branch"
@@ -73,7 +86,11 @@ SENSITIVE_PATHS=(
 
 # §21.1 security-sensitive CONTENT markers: an added line carrying one of
 # these (word-ish boundary, case-insensitive) triggers the human gate even
-# when every path is innocuous — e.g. a new `unsafe` block in `src/lib.rs`.
+# when every path is innocuous — e.g. a new `unsafe` block in `src/lib.rs`,
+# or a policy-enforcement script (.agents/**, lefthook config) implementing
+# the service-identity / verified-commit controls: classification is by
+# diff content, not by intent, so such scripts are security-sensitive
+# regardless of their path.
 SENSITIVE_CONTENT=(
   "unsafe fn"
   "unsafe impl"
@@ -90,6 +107,10 @@ SENSITIVE_CONTENT=(
   "landlock"
   "seccomp"
   "namespac"
+  "%g?"
+  "bot_identities"
+  "pre-push"
+  "use_stdin"
 )
 
 # --- Launch facts (read-only) -------------------------------------------------
@@ -139,6 +160,42 @@ WANT_HUMAN_REVIEW=false
 while IFS= read -r path; do
   [ -z "$path" ] && continue
   lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  # Governance paths never trigger via path prefix (reviewer-domain routing,
+  # not the label); their ADDED-LINE content is still classified below, and a
+  # governance filename whose stem names a §21.1 subject (e.g.
+  # `check-unsigned-bot-commits`, `service-identity-enforcement`) still
+  # classifies: match its filename part against the same §21.1 patterns, so a
+  # governance-path change touching a security-control subject is not hidden
+  # by the routing carve-out.
+  governance=false
+  for gpattern in "${GOVERNANCE_PATHS[@]}"; do
+    if printf '%s' "$lower" | grep -qE "$gpattern"; then
+      governance=true
+      break
+    fi
+  done
+  if [ "$governance" = true ]; then
+    stem="${lower##*/}"
+    base="${stem%.*}"
+    # Only a compound stem that NAMES a control counts as content-bearing:
+    # either a governance-subject × control-mechanism pair (e.g.
+    # `check-unsigned-bot-commits`, `service-identity-enforcement`), or a
+    # control-mechanism pair on a governance path (e.g.
+    # `unsigned-bot-commits`, `verified-commit-path`). A single adjective
+    # (`security.yml` — GitHub's own workflow naming) or a process noun
+    # (`remediation`, `review`) does not.
+    control_mechanism="(^|-)(guard|enforcement|audit|verification|verified|unsigned|signing|signature|check|checks|blocking|block|gate)(-|$)"
+    gov_subject="identity|bot|commits?|service|app|secret|credential|token|auth|keyring|sandbox|network|projection|capabilit|permission|unsafe|policy"
+    if printf '%s' "$base" | grep -qE "$control_mechanism" && printf '%s' "$base" | grep -qE "$gov_subject"; then
+      for pattern in "${SENSITIVE_PATHS[@]}"; do
+        if printf '%s' "$base" | grep -q "$pattern"; then
+          WANT_HUMAN_REVIEW=true
+          break 2
+        fi
+      done
+    fi
+    continue
+  fi
   for pattern in "${SENSITIVE_PATHS[@]}"; do
     if printf '%s' "$lower" | grep -q "$pattern"; then
       WANT_HUMAN_REVIEW=true
