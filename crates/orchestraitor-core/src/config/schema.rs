@@ -50,20 +50,18 @@ pub struct OrchestraitorConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoutingDecisionProviderConfig {
     /// Decision provider implementation name. Shipped values are `fixture`
-    /// (deterministic, table-driven, offline) and `neuralwatt-clef-flash`
-    /// (the Clef Flash decision model through the Neuralwatt transport);
-    /// any other value is a typed unknown-provider error at resolve time.
+    /// (deterministic, table-driven, offline) and `systemone` (the System
+    /// One decision protocol against any compatible endpoint — REQUIRED
+    /// `base_url`); any other value is a typed unknown-provider error at
+    /// resolve time.
     pub provider: Option<String>,
-    /// Optional decision-endpoint base URL override (spec §10.3). When
-    /// absent, the provider implementation's documented default applies
-    /// (the Neuralwatt API for `neuralwatt-clef-flash`). A self-hosted
-    /// deployment points this at its local OpenAI-compatible-style
-    /// decision endpoint; the URL is operator configuration, never
-    /// hardcoded in code.
+    /// Decision-endpoint base URL (spec §10.3), REQUIRED for
+    /// `routing.provider = "systemone"`: any System One-compatible endpoint
+    /// — the Neuralwatt cloud or a self-hosted decision engine alike. The
+    /// URL is per-project operator configuration, never hardcoded in code.
     pub base_url: Option<String>,
-    /// Optional decision model id override. Defaults to the provider
-    /// implementation's documented model (`clef-flash` for
-    /// `neuralwatt-clef-flash`).
+    /// Optional decision model id override — any model the endpoint
+    /// serves. Defaults to `clef-flash`.
     pub model: Option<String>,
     /// Optional secret URI for the decision endpoint credential (for
     /// example `secret://env/NEURALWATT_API_KEY`). Absent means the

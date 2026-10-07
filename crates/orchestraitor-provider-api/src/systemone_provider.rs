@@ -1,12 +1,13 @@
-//! [`DecisionProvider`] implementation for the Neuralwatt-hosted Clef Flash
-//! decision model (spec `30-model-routing.md` §9.45).
+//! [`DecisionProvider`] implementation for the **System One** decision
+//! protocol (spec `30-model-routing.md` §9.45).
 //!
-//! Clef Flash (Cloudflare, Apache-2.0, model id `clef-flash`) answers typed
-//! questions about a state in a single `POST /v1/systemone` pass with
-//! calibrated probabilities and zero generated text. The model id is
-//! confirmed live on the authenticated `GET /v1/models` catalog
-//! (`metadata.capabilities.task = "decision"`) and via a `200` from
-//! `POST /v1/systemone` (2026-10-07).
+//! System One is an open protocol, not a vendor: a decision endpoint accepts
+//! a state plus typed questions in one `POST <base_url>/systemone` pass and
+//! answers every question with calibrated probabilities and zero generated
+//! text. Any endpoint serving the shape works — the Neuralwatt cloud
+//! (`https://api.neuralwatt.com/v1`, model id `clef-flash`) and self-hosted
+//! Clef inference engines are both example deployments; this type is
+//! endpoint-configured and names neither.
 //!
 //! Every method maps exactly one decision surface onto one System One
 //! request:
@@ -22,180 +23,133 @@
 //! [`DecisionProviderError`]; callers fall back to the heuristic table and
 //! never error the loop. No secret material enters error or log output.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use orchestraitor_model::ProviderId;
-use orchestraitor_provider_api::{
-    DecisionAlternative, DecisionProposal, DecisionProvider, DecisionProviderError, DecisionResult,
-    TaskSelection, TaskSplitProposal, TaskSplitSubtask, TaskSummary, ToolQueryContext,
-    ToolSelection,
-};
 use secrecy::ExposeSecret;
 
-use crate::config::NeuralwattConfig;
+use crate::decision::{
+    DecisionAlternative, DecisionProposal, DecisionProvider, DecisionResult, TaskSelection,
+    TaskSplitProposal, TaskSplitSubtask, TaskSummary, ToolQueryContext, ToolSelection,
+};
+use crate::error::DecisionProviderError;
 use crate::systemone::{
     SystemOneQuestion, SystemOneQuestionBody, SystemOneRequest, SystemOneResponse,
     parse_choice_answer, parse_noul_answer, question_body,
 };
-use crate::transport::{CONNECT_TIMEOUT, REQUEST_TIMEOUT};
 
-/// Decision-provider id surfaced in decision records.
-pub const NEURALWATT_DECISION_PROVIDER_ID: &str = "neuralwatt-clef-flash";
+/// Decision-provider id surfaced in decision records (the protocol name —
+/// records also carry the endpoint host through the decision path, never a
+/// vendor name).
+pub const SYSTEMONE_DECISION_PROVIDER_ID: &str = "systemone";
 
-/// Default decision model id (confirmed live on the Neuralwatt catalog).
+/// Default decision model id (the Neuralwatt cloud's Clef Flash id;
+/// `routing.model` overrides it per project for any other endpoint).
 pub const DEFAULT_DECISION_MODEL: &str = "clef-flash";
 
-/// Auth-URI sentinel for a no-auth decision endpoint (a self-hosted
-/// deployment, spec §10.3): the config value `routing.api_key = "none"`
-/// maps here, key resolution short-circuits to an empty secret, and the
-/// request omits the `Authorization` header entirely. The sentinel never
-/// appears in an error or log line.
-pub(crate) const NO_AUTH_URI: &str = "secret://none";
+/// HTTP connect timeout.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Resolves the endpoint credential from the config's auth URI. The
-/// no-auth sentinel short-circuits to an empty secret; a real URI follows
-/// the standard `secret://` resolution chain. The resolved value never
-/// enters an error or log line.
-fn resolve_key(
-    config: &NeuralwattConfig,
-) -> Result<secrecy::SecretString, NeuralwattDecisionProviderError> {
-    if config.auth_uri() == NO_AUTH_URI {
-        return Ok(secrecy::SecretString::from(String::new()));
-    }
-    config
-        .resolve_api_key()
-        .map_err(|error| NeuralwattDecisionProviderError::Auth(error.to_string()))
+/// HTTP total request timeout.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// Endpoint configuration for [`SystemOneDecisionProvider`] — pure data,
+/// resolved from the project-scoped `[routing]` config block by the caller.
+/// No default URL lives here: the endpoint is operator configuration.
+#[derive(Debug, Clone)]
+pub struct SystemOneEndpointConfig {
+    /// Decision endpoint base URL (for example `https://api.neuralwatt.com/v1`
+    /// or a self-hosted engine over tailscale). REQUIRED — there is no
+    /// protocol-level default.
+    pub base_url: String,
+    /// Decision model id the endpoint serves (for example `clef-flash`).
+    pub model: String,
+    /// Resolved endpoint credential, when the endpoint takes auth. `None`
+    /// (or an empty secret) sends no `Authorization` header. The value is
+    /// never logged, serialized, or carried in an error.
+    pub api_key: Option<secrecy::SecretString>,
 }
 
-/// Neuralwatt decision provider backed by the Clef Flash System One endpoint.
-pub struct NeuralwattDecisionProvider {
+/// Maps the layered `[routing]` config onto the endpoint configuration:
+/// `routing.api_key = "none"` (or absence) means no auth; a `secret://…`
+/// URI is resolved through the standard secret chain. The resolved value
+/// never enters an error or log line.
+///
+/// # Errors
+///
+/// Returns [`SystemOneDecisionProviderError::Auth`] when a configured
+/// `secret://` URI cannot be resolved.
+pub fn resolve_endpoint(
+    base_url: String,
+    model: Option<String>,
+    api_key_uri: Option<&str>,
+) -> Result<SystemOneEndpointConfig, SystemOneDecisionProviderError> {
+    let api_key = match api_key_uri {
+        None => None,
+        Some(uri) if uri.eq_ignore_ascii_case("none") => None,
+        Some(uri) => {
+            let parsed = orchestraitor_core::SecretUri::parse(uri)
+                .map_err(|error| SystemOneDecisionProviderError::Auth(error.to_string()))?;
+            let secret = parsed
+                .resolve(orchestraitor_core::DEFAULT_KEYRING_SERVICE)
+                .map_err(|error| SystemOneDecisionProviderError::Auth(error.to_string()))?;
+            Some(secret)
+        }
+    };
+    Ok(SystemOneEndpointConfig {
+        base_url,
+        model: model.unwrap_or_else(|| DEFAULT_DECISION_MODEL.to_string()),
+        api_key,
+    })
+}
+
+/// System One decision provider: any endpoint serving the protocol.
+pub struct SystemOneDecisionProvider {
     provider_id: ProviderId,
+    endpoint_host: String,
     http: reqwest::Client,
-    config: NeuralwattConfig,
-    api_key: secrecy::SecretString,
-    decision_model: String,
+    endpoint: SystemOneEndpointConfig,
 }
 
-impl NeuralwattDecisionProvider {
-    /// Creates a decision provider with default configuration (default base
-    /// URL and the `secret://keyring/neuralwatt` auth resolution chain) and
-    /// the default decision model (`clef-flash`).
+impl SystemOneDecisionProvider {
+    /// Creates a provider from the project-scoped endpoint configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`NeuralwattDecisionProviderError`] when the API key cannot
-    /// be resolved or the HTTP client cannot be built.
-    pub fn from_env() -> Result<Self, NeuralwattDecisionProviderError> {
-        Self::from_config(NeuralwattConfig::new())
-    }
-
-    /// Creates a decision provider from explicit configuration with the
-    /// default decision model (`clef-flash`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NeuralwattDecisionProviderError`] when the API key cannot
-    /// be resolved or the HTTP client cannot be built.
-    pub fn from_config(config: NeuralwattConfig) -> Result<Self, NeuralwattDecisionProviderError> {
-        let api_key = config
-            .resolve_api_key()
-            .map_err(|error| NeuralwattDecisionProviderError::Auth(error.to_string()))?;
-        Self::with_key(config, api_key)
-    }
-
-    /// Creates a decision provider from explicit configuration with an
-    /// explicit decision model id and an optional endpoint/credential
-    /// override (spec `30-model-routing.md` §9.45 + §10.3):
-    ///
-    /// - `endpoint_override` — `Some` replaces the configuration's base URL
-    ///   (a self-hosted decision engine, for example over tailscale); `None`
-    ///   keeps `config`'s base URL.
-    /// - `api_key_override` — `Some` replaces the configuration's auth URI
-    ///   before resolution; `None` keeps `config`'s. When the override is
-    ///   `"none"` the endpoint takes no auth and requests go out without an
-    ///   `Authorization` header.
-    /// - `decision_model` — the model id requests name.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NeuralwattDecisionProviderError`] when the URL is invalid,
-    /// the credential cannot be resolved, or the HTTP client cannot be
-    /// built. Errors never carry the credential value.
-    pub fn with_endpoint(
-        config: NeuralwattConfig,
-        endpoint_override: Option<String>,
-        api_key_override: Option<&str>,
-        decision_model: String,
-    ) -> Result<Self, NeuralwattDecisionProviderError> {
-        let config = match endpoint_override {
-            Some(base_url) => config
-                .with_base_url(base_url)
-                .map_err(|error| NeuralwattDecisionProviderError::Auth(error.to_string()))?,
-            None => config,
-        };
-        let config = match api_key_override {
-            Some(uri) if uri.eq_ignore_ascii_case("none") => {
-                config.with_auth_uri(NO_AUTH_URI.to_string())
-            }
-            Some(uri) => config.with_auth_uri(uri.to_string()),
-            None => config,
-        };
-        let api_key = resolve_key(&config)?;
-        Self::with_decision_model(config, api_key, decision_model)
-    }
-
-    /// Creates a decision provider from configuration with an explicit API
-    /// key and the default decision model (`clef-flash`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NeuralwattDecisionProviderError`] when the HTTP client
-    /// cannot be built or the base URL is invalid.
-    pub fn with_key(
-        config: NeuralwattConfig,
-        api_key: secrecy::SecretString,
-    ) -> Result<Self, NeuralwattDecisionProviderError> {
-        Self::with_decision_model(config, api_key, DEFAULT_DECISION_MODEL.to_string())
-    }
-
-    /// Creates a decision provider with an explicit decision model id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NeuralwattDecisionProviderError`] when the HTTP client
-    /// cannot be built or the base URL is invalid.
-    pub fn with_decision_model(
-        config: NeuralwattConfig,
-        api_key: secrecy::SecretString,
-        decision_model: String,
-    ) -> Result<Self, NeuralwattDecisionProviderError> {
+    /// Returns [`SystemOneDecisionProviderError`] when the base URL is
+    /// invalid or the HTTP client cannot be built.
+    pub fn new(endpoint: SystemOneEndpointConfig) -> Result<Self, SystemOneDecisionProviderError> {
         // URL validity is validated at configuration time (not per request)
         // so a malformed base URL fails before it can enter the campaign
-        // loop; `NeuralwattConfig::with_endpoint` rejects unparseable and
-        // forbidden hosts before this constructor runs.
-        let _base = config
-            .base_url()
+        // loop. The host is carried for decision-record attribution (the
+        // endpoint identity, not a vendor name).
+        let base = endpoint
+            .base_url
             .parse::<url::Url>()
-            .map_err(|source| NeuralwattDecisionProviderError::InvalidBaseUrl { source })?;
+            .map_err(|source| SystemOneDecisionProviderError::InvalidBaseUrl { source })?;
+        let endpoint_host = base.host_str().unwrap_or_default().to_string();
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map_err(|source| NeuralwattDecisionProviderError::HttpRequest { source })?;
+            .map_err(|source| SystemOneDecisionProviderError::HttpRequest { source })?;
         Ok(Self {
-            provider_id: ProviderId::from_string(NEURALWATT_DECISION_PROVIDER_ID.to_string()),
+            provider_id: ProviderId::from_string(SYSTEMONE_DECISION_PROVIDER_ID.to_string()),
+            endpoint_host,
             http,
-            config,
-            api_key,
-            decision_model,
+            endpoint,
         })
     }
 
     /// Returns the decision model id requests are sent to.
     #[must_use]
     pub fn decision_model(&self) -> &str {
-        &self.decision_model
+        &self.endpoint.model
+    }
+
+    /// Returns the endpoint host recorded for decision attribution.
+    #[must_use]
+    pub fn endpoint_host(&self) -> &str {
+        &self.endpoint_host
     }
 
     /// Sends one System One request and returns the parsed response.
@@ -203,38 +157,40 @@ impl NeuralwattDecisionProvider {
         &self,
         state: String,
         questions: Vec<SystemOneQuestion>,
-    ) -> Result<SystemOneResponse, NeuralwattDecisionProviderError> {
+    ) -> Result<SystemOneResponse, SystemOneDecisionProviderError> {
         if questions.is_empty() {
-            return Err(NeuralwattDecisionProviderError::NoQuestions);
+            return Err(SystemOneDecisionProviderError::NoQuestions);
         }
         let mut map = serde_json::Map::new();
         for question in questions {
             map.insert(question.name.clone(), question_body(&question.question));
         }
         let request = SystemOneRequest {
-            model: self.decision_model.clone(),
+            model: self.endpoint.model.clone(),
             state,
             questions: map,
         };
-        let url = format!("{}/systemone", self.config.base_url());
+        let url = format!("{}/systemone", self.endpoint.base_url);
         let mut request = self.http.post(&url).json(&request);
-        // A no-auth endpoint (self-hosted decision engine) sends no
-        // `Authorization` header; the sentinel auth URI yields an empty
-        // secret and the header is omitted entirely — never sent empty.
-        if !self.api_key.expose_secret().is_empty() {
+        // A no-auth endpoint (a self-hosted decision engine) sends no
+        // `Authorization` header; the header is omitted entirely — never
+        // sent empty.
+        if let Some(api_key) = &self.endpoint.api_key
+            && !api_key.expose_secret().is_empty()
+        {
             request = request.header(
                 "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
+                format!("Bearer {}", api_key.expose_secret()),
             );
         }
         let response = request
             .send()
             .await
-            .map_err(|source| NeuralwattDecisionProviderError::HttpRequest { source })?;
+            .map_err(|source| SystemOneDecisionProviderError::HttpRequest { source })?;
         let status = response.status();
         if !status.is_success() {
             let body_excerpt = response.text().await.unwrap_or_default();
-            return Err(NeuralwattDecisionProviderError::ProviderStatus {
+            return Err(SystemOneDecisionProviderError::ProviderStatus {
                 status: status.as_u16(),
                 // Log-safe excerpt only; the body never contains secrets.
                 body_excerpt: body_excerpt.chars().take(200).collect(),
@@ -243,7 +199,7 @@ impl NeuralwattDecisionProvider {
         response
             .json::<SystemOneResponse>()
             .await
-            .map_err(|source| NeuralwattDecisionProviderError::ResponseParse { source })
+            .map_err(|source| SystemOneDecisionProviderError::ResponseParse { source })
     }
 
     /// Runs one `choice` question and returns the typed answer.
@@ -253,7 +209,7 @@ impl NeuralwattDecisionProvider {
         name: &str,
         criteria: Vec<(String, String)>,
         instructions: Option<String>,
-    ) -> Result<crate::systemone::SystemOneChoiceAnswer, NeuralwattDecisionProviderError> {
+    ) -> Result<crate::systemone::SystemOneChoiceAnswer, SystemOneDecisionProviderError> {
         let response = self
             .ask(
                 state,
@@ -267,12 +223,12 @@ impl NeuralwattDecisionProvider {
             )
             .await?;
         let raw = response.answers.get(name).ok_or_else(|| {
-            NeuralwattDecisionProviderError::MissingAnswer {
+            SystemOneDecisionProviderError::MissingAnswer {
                 question: name.to_string(),
             }
         })?;
         parse_choice_answer(name, raw)
-            .map_err(|reason| NeuralwattDecisionProviderError::MalformedAnswer { reason })
+            .map_err(|reason| SystemOneDecisionProviderError::MalformedAnswer { reason })
     }
 
     /// Runs one `noul` question and returns the probability.
@@ -281,7 +237,7 @@ impl NeuralwattDecisionProvider {
         state: String,
         name: &str,
         instructions: String,
-    ) -> Result<f64, NeuralwattDecisionProviderError> {
+    ) -> Result<f64, SystemOneDecisionProviderError> {
         let response = self
             .ask(
                 state,
@@ -292,12 +248,12 @@ impl NeuralwattDecisionProvider {
             )
             .await?;
         let raw = response.answers.get(name).ok_or_else(|| {
-            NeuralwattDecisionProviderError::MissingAnswer {
+            SystemOneDecisionProviderError::MissingAnswer {
                 question: name.to_string(),
             }
         })?;
         let answer = parse_noul_answer(name, raw)
-            .map_err(|reason| NeuralwattDecisionProviderError::MalformedAnswer { reason })?;
+            .map_err(|reason| SystemOneDecisionProviderError::MalformedAnswer { reason })?;
         Ok(answer.noul)
     }
 
@@ -312,10 +268,10 @@ impl NeuralwattDecisionProvider {
     }
 
     /// Maps a provider-level failure onto the caller-facing typed error.
-    fn map_failure(&self, error: NeuralwattDecisionProviderError) -> DecisionProviderError {
+    fn map_failure(&self, error: SystemOneDecisionProviderError) -> DecisionProviderError {
         match error {
-            NeuralwattDecisionProviderError::MalformedAnswer { reason }
-            | NeuralwattDecisionProviderError::MissingAnswer { question: reason } => {
+            SystemOneDecisionProviderError::MalformedAnswer { reason }
+            | SystemOneDecisionProviderError::MissingAnswer { question: reason } => {
                 self.unavailable(reason)
             }
             other => self.unavailable(other.to_string()),
@@ -323,30 +279,30 @@ impl NeuralwattDecisionProvider {
     }
 }
 
-/// Failures building or sending a [`NeuralwattDecisionProvider`] request.
+/// Failures building or sending a [`SystemOneDecisionProvider`] request.
 /// The caller-facing [`DecisionProviderError`] never carries secret material;
 /// this type carries only log-safe excerpts.
 #[derive(Debug, thiserror::Error)]
-pub enum NeuralwattDecisionProviderError {
+pub enum SystemOneDecisionProviderError {
     /// The API key could not be resolved from the configured auth URI.
-    #[error("neuralwatt decision auth resolution failed: {0}")]
+    #[error("systemone decision auth resolution failed: {0}")]
     Auth(String),
     /// The configured base URL could not be parsed.
-    #[error("invalid neuralwatt base URL: {source}")]
+    #[error("invalid systemone base URL: {source}")]
     InvalidBaseUrl {
         /// Underlying URL parse error.
         #[source]
         source: url::ParseError,
     },
     /// The HTTP client could not be built or the request failed.
-    #[error("neuralwatt decision HTTP request failed: {source}")]
+    #[error("systemone decision HTTP request failed: {source}")]
     HttpRequest {
         /// Underlying reqwest error.
         #[source]
         source: reqwest::Error,
     },
     /// The System One endpoint returned a non-success status.
-    #[error("neuralwatt decision endpoint returned HTTP {status}")]
+    #[error("systemone decision endpoint returned HTTP {status}")]
     ProviderStatus {
         /// HTTP status code.
         status: u16,
@@ -354,31 +310,31 @@ pub enum NeuralwattDecisionProviderError {
         body_excerpt: String,
     },
     /// The response body could not be parsed.
-    #[error("neuralwatt decision response parse failed: {source}")]
+    #[error("systemone decision response parse failed: {source}")]
     ResponseParse {
         /// Underlying JSON error.
         #[source]
         source: reqwest::Error,
     },
     /// The response omitted the answer for a posed question.
-    #[error("neuralwatt decision response omitted answer for `{question}`")]
+    #[error("systemone decision response omitted answer for `{question}`")]
     MissingAnswer {
         /// Question name whose answer was missing.
         question: String,
     },
     /// An answer had the wrong shape for its question type.
-    #[error("neuralwatt decision answer malformed: {reason}")]
+    #[error("systemone decision answer malformed: {reason}")]
     MalformedAnswer {
         /// Log-safe reason.
         reason: String,
     },
     /// A request was attempted without any question (programmer error).
-    #[error("neuralwatt decision request posed no questions")]
+    #[error("systemone decision request posed no questions")]
     NoQuestions,
 }
 
 #[async_trait]
-impl DecisionProvider for NeuralwattDecisionProvider {
+impl DecisionProvider for SystemOneDecisionProvider {
     fn id(&self) -> &ProviderId {
         &self.provider_id
     }
@@ -578,13 +534,4 @@ impl DecisionProvider for NeuralwattDecisionProvider {
         ToolSelection::new(vec![answer.choice], answer.confidence)
             .map_err(|error| self.unavailable(format!("selection rejected: {error}")))
     }
-}
-
-/// Convenience alias so `with_cost_sink`-style builders can stay on the
-/// shared transport crate without re-importing.
-pub type SharedDecisionProvider = Arc<NeuralwattDecisionProvider>;
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 }

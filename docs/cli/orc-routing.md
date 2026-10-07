@@ -63,53 +63,66 @@ layer) overrides the built-in default field by field:
   (`0.0..=1.0`, validated at the boundary), and the alternatives it
   considered with skip reasons — wins over the table when the target
   provider is routable in the effective configuration. When set to
-  `neuralwatt-clef-flash`, the Clef Flash decision model (Cloudflare,
-  open source, Apache-2.0) served through the Neuralwatt `POST /v1/systemone`
-  endpoint is consulted (model id `clef-flash`): a single-shot decision
-  request with typed questions and calibrated probabilities, zero generated
-  text. It requires a resolvable Neuralwatt API key (`NEURALWATT_API_KEY`
-  or the keyring entry); an unresolvable key is a typed startup error, not
-  a silent fallback. Any other value is a typed `unknown decision provider`
-  error naming the available implementations (`fixture`,
-  `neuralwatt-clef-flash`).
-- `routing.base_url` — optional decision-endpoint base URL override (spec
-  §10.3). Absent keeps the implementation default (the Neuralwatt API for
-  `neuralwatt-clef-flash`). A self-hosted decision engine — for example a
-  local Metal-native Clef server reachable over tailscale — points this at
-  its endpoint; the URL lives in configuration, never in code.
-- `routing.model` — optional decision model id override. Absent keeps the
-  implementation default (`clef-flash`). Confirm the exact id against the
+  `systemone`, the **System One decision protocol** is consulted (spec
+  §9.45): a single-shot `POST <base_url>/systemone` request with typed
+  questions and calibrated probabilities, zero generated text. System One
+  is an open protocol served by multiple endpoints — the Neuralwatt cloud
+  and self-hosted Clef inference engines alike are example deployments,
+  never built-ins. It requires `routing.base_url` (below); an
+  unresolvable credential is a typed startup error, not a silent
+  fallback. Any other value is a typed `unknown decision provider`
+  error naming the available implementations (`fixture`, `systemone`).
+- `routing.base_url` — decision-endpoint base URL, **REQUIRED** for
+  `systemone` (spec §10.3): any System One-compatible endpoint. Examples:
+  the Neuralwatt cloud `https://api.neuralwatt.com/v1` or a self-hosted
+  local Metal-native Clef engine such as
+  `http://mekbook.tail1e276.ts.net:8080/v1`. The URL lives in
+  configuration, never in code; there is no protocol-level default.
+- `routing.model` — optional decision model id — any model the endpoint
+  serves. Defaults to `clef-flash`. Confirm the exact id against the
   endpoint's model list (`GET /v1/models`) when pointing at a custom
   deployment.
 - `routing.api_key` — optional credential reference for the decision
   endpoint, as a `secret://` URI (`secret://env/NEURALWATT_API_KEY` or
-  `secret://keyring/neuralwatt`). Absent means the endpoint takes no auth
-  (a local/self-hosted deployment); the literal value `none` also selects
-  the no-auth path. The resolved credential never enters an error or log
-  line. Data classification of the endpoint (spec §9.28) is an operator
-  choice through the `data_classification` rules — this key makes no
-  assumption about what the endpoint may receive.
+  `secret://keyring/neuralwatt`). Absent (or the literal `none`) means the
+  endpoint takes no auth (a local/self-hosted deployment) and no
+  `Authorization` header is sent. The resolved credential never enters an
+  error or log line. Data classification of the endpoint (spec §9.28) is
+  an operator choice through the `data_classification` rules — this key
+  makes no assumption about what the endpoint may receive.
 
-### Example: self-hosted decision engine
+### Per-project decision-provider configuration
+
+Decision-provider configuration is **per-project**: the `[routing]` block
+reads through the same layered chain as every other key (built-in defaults
+→ user/org layers → the project's `orchestraitor.toml`), and the project
+layer wins field by field. A project without a `[routing]` block (in any
+layer) keeps heuristic routing — no decision model is consulted and no
+network call is made.
 
 ```toml
-# orchestraitor.toml (project layer) — a local Clef inference engine
-# (OpenAI-compatible-style decision endpoint on the tailnet, no auth):
+# <project>/orchestraitor.toml (project layer) — a local Clef inference
+# engine (System One-compatible decision endpoint on the tailnet, no auth):
 [routing]
-provider = "neuralwatt-clef-flash"
+provider = "systemone"
 base_url = "http://mekbook.tail1e276.ts.net:8080/v1"
 model = "clef-flash"
-# api_key absent / "none" → no Authorization header is sent.
+# api_key absent (or "none") → no Authorization header is sent.
 ```
 
 ```toml
-# orchestraitor.toml (project layer) — the hosted Neuralwatt deployment:
+# another project's orchestraitor.toml — the hosted Neuralwatt endpoint
+# with an authenticated key:
 [routing]
-provider = "neuralwatt-clef-flash"
+provider = "systemone"
+base_url = "https://api.neuralwatt.com/v1"
+model = "clef-flash"
 api_key = "secret://env/NEURALWATT_API_KEY"
-# base_url absent → the Neuralwatt API default; model defaults to
-# clef-flash.
 ```
+
+A third project sets no `[routing]` at all and keeps the deterministic
+heuristic table. Every project picks its own endpoint/model/credential —
+or none.
 
 ### Decision model defaults
 
@@ -139,7 +152,7 @@ The same chain applies to campaign task selection (`orc campaign run` and
 `orc loop`): a configured provider is consulted with the eligible ready
 task ids first, a well-formed proposal for an eligible task wins and the
 campaign decision record names it in `precedence_path`
-(`decision-provider:neuralwatt-clef-flash (confidence 0.99)`), and any
+(`decision-provider:systemone (confidence 0.99)`), and any
 provider error, a proposal for an id outside the eligible set, or an empty
 ready queue falls back to the deterministic P0-first selection with the
 cause recorded in the record's `rationale`.

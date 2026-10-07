@@ -8,9 +8,11 @@
 //! behind the separate [`DecisionProvider`] trait: a single-shot
 //! structured-output request/response class with calibrated confidence — no
 //! message streams. The [`FixtureDecisionProvider`] is the deterministic
-//! conformance target; the Neuralwatt-hosted Clef Flash decision model
-//! (Apache-2.0, open source) is the reference decision model behind the
-//! `NeuralwattDecisionProvider` in `orchestraitor-provider-neuralwatt`.
+//! conformance target; the **System One** decision protocol
+//! ([`systemone`] + [`systemone_provider::SystemOneDecisionProvider`]) is
+//! the real-decision-model path — an open protocol served by multiple
+//! endpoints (the Neuralwatt cloud and self-hosted Clef engines alike), with
+//! the reference model Clef Flash (Apache-2.0, open source).
 
 #![forbid(unsafe_code)]
 
@@ -19,6 +21,8 @@ pub mod capabilities;
 pub mod decision;
 pub mod decision_fixture;
 pub mod error;
+pub mod systemone;
+pub mod systemone_provider;
 pub mod trace;
 pub mod transport;
 
@@ -35,6 +39,10 @@ pub use decision::{
 };
 pub use decision_fixture::{FixtureDecisionProvider, FixtureMode};
 pub use error::{DecisionProviderError, ProviderTransportError};
+pub use systemone_provider::{
+    DEFAULT_DECISION_MODEL, SYSTEMONE_DECISION_PROVIDER_ID, SystemOneDecisionProvider,
+    SystemOneDecisionProviderError, SystemOneEndpointConfig, resolve_endpoint,
+};
 pub use trace::{RedactingLayer, is_sensitive_trace_field};
 pub use transport::{
     MessageRole, ModelEvent, ModelEventStream, ModelMessage, ModelRequest, ProviderDescriptor,

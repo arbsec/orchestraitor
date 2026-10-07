@@ -388,26 +388,27 @@ pub enum DecisionProviderConfigError {
 /// which owns the transport dependency).
 pub const FIXTURE_DECISION_PROVIDER: &str = "fixture";
 
-/// The Neuralwatt-hosted Clef Flash decision provider's config name (spec
-/// §9.45). The implementation lives in `orchestraitor-provider-neuralwatt`;
-/// this constant is the `routing.provider` value that selects it.
-pub const NEURALWATT_CLEF_FLASH_DECISION_PROVIDER: &str = "neuralwatt-clef-flash";
+/// The System One decision-protocol provider's config name (spec §9.45):
+/// `routing.provider = "systemone"` selects the protocol-level
+/// `SystemOneDecisionProvider` in `orchestraitor-provider-api`, pointed at
+/// any System One-compatible endpoint through the REQUIRED
+/// `routing.base_url`. Provider- and model-agnostic: the endpoint and model
+/// are per-project configuration, never vendor names in code.
+pub const SYSTEMONE_DECISION_PROVIDER: &str = "systemone";
 
 /// Available decision-provider implementation names, in stable order.
-pub const AVAILABLE_DECISION_PROVIDERS: [&str; 2] = [
-    FIXTURE_DECISION_PROVIDER,
-    NEURALWATT_CLEF_FLASH_DECISION_PROVIDER,
-];
+pub const AVAILABLE_DECISION_PROVIDERS: [&str; 2] =
+    [FIXTURE_DECISION_PROVIDER, SYSTEMONE_DECISION_PROVIDER];
 
 /// Builds the decision provider named by the effective `routing.provider`
 /// config value (spec §9.45, default off): `None` when the flag is unset
 /// (heuristic table only), the deterministic fixture behind `"fixture"`,
 /// and a typed unknown-provider error for any other value. The
-/// `neuralwatt-clef-flash` name is recognized by the CLI layer (which owns
-/// the transport dependency and builds
-/// `orchestraitor_provider_neuralwatt::NeuralwattDecisionProvider`); pass
-/// that implementation through [`resolve_decision_provider_with`] when it
-/// must resolve here.
+/// `systemone` name is recognized by the CLI layer (which resolves the
+/// project-scoped endpoint configuration and builds
+/// `orchestraitor_provider_api::SystemOneDecisionProvider`); pass that
+/// implementation through [`resolve_decision_provider_with`] when it must
+/// resolve here.
 ///
 /// # Errors
 ///
@@ -655,10 +656,10 @@ mod decision_provider_tests {
         let resolver = resolver_from(&[(
             ConfigLayer::Project,
             "project",
-            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+            "[routing]\nprovider = \"systemone\"\n",
         )]);
         let built = resolve_decision_provider_with(&resolver, &|name, _endpoint| match name {
-            NEURALWATT_CLEF_FLASH_DECISION_PROVIDER => Ok(Some(Box::new(
+            SYSTEMONE_DECISION_PROVIDER => Ok(Some(Box::new(
                 orchestraitor_provider_api::FixtureDecisionProvider::new(),
             ))),
             _ => Ok(None),
@@ -672,7 +673,7 @@ mod decision_provider_tests {
         let resolver = resolver_from(&[(
             ConfigLayer::Project,
             "project",
-            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+            "[routing]\nprovider = \"systemone\"\n",
         )]);
         // Without a factory that owns the transport-backed name, the base
         // resolver reports the typed unknown-provider error listing both
@@ -685,7 +686,7 @@ mod decision_provider_tests {
             "{error}"
         );
         assert!(
-            error.to_string().contains("neuralwatt-clef-flash"),
+            error.to_string().contains("systemone"),
             "available list must name the shipped implementations: {error}"
         );
     }
@@ -695,10 +696,10 @@ mod decision_provider_tests {
         let resolver = resolver_from(&[(
             ConfigLayer::Project,
             "project",
-            "[routing]\nprovider = \"neuralwatt-clef-flash\"\n",
+            "[routing]\nprovider = \"systemone\"\n",
         )]);
         let Err(error) = resolve_decision_provider_with(&resolver, &|name, _endpoint| match name {
-            NEURALWATT_CLEF_FLASH_DECISION_PROVIDER => {
+            SYSTEMONE_DECISION_PROVIDER => {
                 Err("neuralwatt decision auth resolution failed: key missing".to_string())
             }
             _ => Ok(None),

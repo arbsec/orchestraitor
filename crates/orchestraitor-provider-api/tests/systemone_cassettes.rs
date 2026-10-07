@@ -1,10 +1,11 @@
-//! Wire-level cassette tests for the Clef Flash decision provider
-//! (`NeuralwattDecisionProvider`, spec `30-model-routing.md` §9.45).
+//! Wire-level cassette tests for the System One decision provider
+//! (`SystemOneDecisionProvider`, spec `30-model-routing.md` §9.45).
 //!
-//! Shapes replayed here were captured live from
-//! `POST https://api.neuralwatt.com/v1/systemone` with model `clef-flash`
-//! (2026-10-07). No live provider is contacted: the mock HTTP server is
-//! built on raw TCP like the transport cassettes.
+//! Shapes replayed here were captured live from a System One endpoint
+//! (`POST /v1/systemone`, model `clef-flash`, 2026-10-07). No live provider
+//! is contacted: the mock HTTP server is built on raw TCP, so the fixtures
+//! are endpoint-agnostic — any System One-compatible deployment serves the
+//! same shape.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 // Test-only allowances mirror `tests/cassettes.rs`: a failed expectation must
@@ -14,23 +15,23 @@
 
 mod mock_server;
 
-use orchestraitor_provider_api::{DecisionProvider, DecisionProviderError};
-use orchestraitor_provider_neuralwatt::{
-    DEFAULT_DECISION_MODEL, NEURALWATT_DECISION_PROVIDER_ID, NeuralwattDecisionProvider,
-    config::NeuralwattConfig,
+use orchestraitor_provider_api::{
+    DEFAULT_DECISION_MODEL, DecisionProvider, DecisionProviderError,
+    SYSTEMONE_DECISION_PROVIDER_ID, SystemOneDecisionProvider, SystemOneEndpointConfig,
 };
 use secrecy::SecretString;
 
 use mock_server::MockServer;
 
-const TEST_API_KEY: &str = "test-neuralwatt-key";
+const TEST_API_KEY: &str = "test-endpoint-key";
 
-fn make_provider(url: String) -> NeuralwattDecisionProvider {
-    let config =
-        NeuralwattConfig::with_endpoint(url, "secret://env/NEURALWATT_API_KEY".to_string())
-            .unwrap();
-    NeuralwattDecisionProvider::with_key(config, SecretString::from(TEST_API_KEY.to_string()))
-        .unwrap()
+fn make_provider(url: String) -> SystemOneDecisionProvider {
+    SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: url,
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
+    })
+    .unwrap()
 }
 
 /// Live response shape: a `choice` answer over ready-task ids.
@@ -54,7 +55,7 @@ async fn task_selection_parses_choice_answer_into_typed_selection() {
 
     assert_eq!(selection.task_id, "board--42");
     assert!((selection.confidence - 0.9875).abs() < 1e-9);
-    assert_eq!(provider.id().as_str(), NEURALWATT_DECISION_PROVIDER_ID);
+    assert_eq!(provider.id().as_str(), SYSTEMONE_DECISION_PROVIDER_ID);
     assert_eq!(provider.decision_model(), DEFAULT_DECISION_MODEL);
 }
 
@@ -98,7 +99,7 @@ async fn transport_failure_maps_to_unavailable_not_a_loop_error() {
         .unwrap_err();
     assert!(
         matches!(&error, DecisionProviderError::Unavailable { provider_id, reason }
-            if provider_id.as_str() == "neuralwatt-clef-flash"
+            if provider_id.as_str() == "systemone"
                 && reason.contains("HTTP request failed")),
         "unexpected error: {error}"
     );
@@ -254,15 +255,47 @@ async fn split_request_without_shape_answer_is_unavailable() {
 
 #[test]
 fn base_url_parse_failure_fails_at_construction() {
-    // `NeuralwattConfig::with_endpoint` rejects hostless URLs before the
-    // provider constructor runs, so configuration-time failure is the
-    // documented surface.
-    let error = NeuralwattConfig::with_endpoint(
-        "not a url".to_string(),
-        "secret://env/NEURALWATT_API_KEY".to_string(),
+    // A malformed `routing.base_url` fails at provider construction — the
+    // configuration-time surface, before any campaign pass can start.
+    let Err(error) = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: "not a url".to_string(),
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        api_key: None,
+    }) else {
+        panic!("a malformed base URL must fail at construction")
+    };
+    assert!(error.to_string().contains("invalid systemone base URL"));
+}
+
+#[test]
+fn resolve_endpoint_maps_none_and_secret_uris() {
+    // `routing.api_key` mapping: absent or `none` -> no auth; a `secret://`
+    // URI resolves through the standard chain.
+    let none = orchestraitor_provider_api::resolve_endpoint(
+        "http://127.0.0.1:1/v1".to_string(),
+        None,
+        Some("none"),
+    )
+    .unwrap();
+    assert!(none.api_key.is_none());
+    assert_eq!(none.model, DEFAULT_DECISION_MODEL);
+
+    let absent = orchestraitor_provider_api::resolve_endpoint(
+        "http://127.0.0.1:1/v1".to_string(),
+        Some("custom-model".to_string()),
+        None,
+    )
+    .unwrap();
+    assert!(absent.api_key.is_none());
+    assert_eq!(absent.model, "custom-model");
+
+    let err = orchestraitor_provider_api::resolve_endpoint(
+        "http://127.0.0.1:1/v1".to_string(),
+        None,
+        Some("secret://env/SYSTEMONE_TEST_UNSET_VAR_42"),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("invalid base URL"));
+    assert!(err.to_string().contains("auth resolution failed"), "{err}");
 }
 
 #[tokio::test]
@@ -296,19 +329,13 @@ async fn no_auth_endpoint_sends_no_authorization_header() {
         }
     });
 
-    let config = NeuralwattConfig::with_endpoint(
-        format!("http://{addr}/v1"),
-        // The `routing.api_key = "none"` mapping lands on this sentinel.
-        "secret://none".to_string(),
-    )
+    let provider = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+        base_url: format!("http://{addr}/v1"),
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        // The `routing.api_key` absent/`none` mapping: no auth at all.
+        api_key: None,
+    })
     .unwrap();
-    let provider =
-        orchestraitor_provider_neuralwatt::NeuralwattDecisionProvider::with_decision_model(
-            config,
-            secrecy::SecretString::from(String::new()),
-            "clef-flash".to_string(),
-        )
-        .unwrap();
     let selection = provider
         .propose_task_selection(&["board--42".to_string()])
         .await
@@ -324,24 +351,16 @@ async fn no_auth_endpoint_sends_no_authorization_header() {
 }
 
 #[tokio::test]
-async fn endpoint_override_reaches_the_wire() {
-    // `routing.base_url` override: the request lands on the overridden
-    // endpoint, not the default Neuralwatt API.
+async fn project_endpoint_reaches_the_wire() {
+    // The project-scoped `routing.base_url`: the request lands on whatever
+    // endpoint the project config names — here, the localhost mock standing
+    // in for any System One-compatible deployment.
     let server = MockServer::start(CHOICE_BODY, "application/json", false);
-    let default_config = NeuralwattConfig::new();
-    let config =
-        NeuralwattConfig::with_endpoint(server.url(), default_config.auth_uri().to_string())
-            .unwrap();
-    let provider = orchestraitor_provider_neuralwatt::NeuralwattDecisionProvider::with_endpoint(
-        config,
-        None,
-        Some("secret://env/NEURALWATT_API_KEY"),
-        "clef-flash".to_string(),
-    )
-    .unwrap();
+    let provider = make_provider(server.url());
     let selection = provider
         .propose_task_selection(&["board--42".to_string()])
         .await
         .unwrap();
     assert_eq!(selection.task_id, "board--42");
+    assert_eq!(provider.endpoint_host(), "127.0.0.1");
 }

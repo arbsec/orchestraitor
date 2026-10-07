@@ -374,6 +374,48 @@ orc_lib_resolve_repo() {
   exit "$ORC_ERR_CONFIG"
 }
 
+# --- Conflict gate (owner directive 2026-10-07) --------------------------------
+# NO review of any kind may be requested or triggered while a PR conflicts
+# with its base: a human reviewer request on a DIRTY/CONFLICTING PR consumes
+# human attention on an unmergeable diff, and an automated reviewer
+# (@coderabbitai review) would review a diff that cannot land. Callers
+# (pr-request-review, pr-review-post, pr-comment) invoke this before their
+# mutating call and exit ORC_ERR_BLOCKED (typed refusal) when the PR is not
+# mergeable.
+#
+# Usage: orc_lib_require_mergeable <pr-number> <owner/repo>
+#   - mergeable=MERGEABLE                -> return 0 (may proceed).
+#   - mergeable=CONFLICTING or DIRTY     -> typed refusal to stderr, exit 5.
+#   - mergeable=UNKNOWN (recomputing)    -> one bounded retry, then typed
+#                                           refusal (fail closed: an UNKNOWN
+#                                           state must never pass the gate).
+#   - PR read failure                    -> typed error, exit 1 (fail closed).
+orc_lib_require_mergeable() {
+  local pr="$1" repo="$2" state attempts=0
+  while :; do
+    state="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable --jq '.mergeable // "UNKNOWN"' 2>/dev/null)" || true
+    case "$state" in
+      MERGEABLE) return 0 ;;
+      CONFLICTING)
+        echo "error: PR #$pr conflicts with its base branch (mergeable=CONFLICTING): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
+        exit "$ORC_ERR_BLOCKED" ;;
+      DIRTY)
+        echo "error: PR #$pr is unmergeable (mergeStateStatus=DIRTY, mergeable=CONFLICTING): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
+        exit "$ORC_ERR_BLOCKED" ;;
+      UNKNOWN)
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 3 ]; then
+          echo "error: PR #$pr mergeable state is UNKNOWN (GitHub still computing): refusing to proceed on an unproven state; retry once GitHub reports MERGEABLE" >&2
+          exit "$ORC_ERR_BLOCKED"
+        fi
+        sleep 5 ;;
+      *)
+        echo "error: cannot read PR #$pr mergeable state${state:+ (got: $state)}: refusing to proceed fail-closed" >&2
+        exit "$ORC_ERR_BLOCKED" ;;
+    esac
+  done
+}
+
 # --- Pre-flight check ----------------------------------------------------------
 # Verifies gh is installed and that the gh route that will actually run the
 # calls is authenticated. Under service-identity enforcement (github_app

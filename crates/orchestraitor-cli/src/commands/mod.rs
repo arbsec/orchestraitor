@@ -9,25 +9,29 @@ pub mod models;
 pub mod routing;
 pub mod worker;
 
-use orchestraitor_agent_catalog::{
-    DecisionEndpointConfig, NEURALWATT_CLEF_FLASH_DECISION_PROVIDER,
-};
+use orchestraitor_agent_catalog::{DecisionEndpointConfig, SYSTEMONE_DECISION_PROVIDER};
 
-/// Builds the transport-backed decision provider named by the
-/// `routing.provider` config flag (spec `30-model-routing.md` §9.45). This
-/// crate owns the transport dependency, so the `neuralwatt-clef-flash`
-/// adapter is constructed here; names this factory does not own return
-/// `Ok(None)` (the agent-catalog resolver reports the typed
-/// unknown-provider error for those). The `routing.base_url` /
-/// `routing.model` / `routing.api_key` keys flow through
-/// [`DecisionEndpointConfig`]: a self-hosted decision engine (for example a
-/// local Metal-native Clef server over tailscale) sets `routing.base_url`
-/// and leaves `routing.api_key` unset (no auth); the hosted Neuralwatt
-/// deployment sets `routing.api_key = "secret://env/NEURALWATT_API_KEY"`.
-/// Configuration failures (unresolvable credential, invalid base URL)
-/// surface as a diagnostic — the operator asked for a decision provider, so
-/// silently degrading to the heuristic table would mask a broken
-/// configuration. The credential value never enters an error or log line.
+/// Builds the decision provider named by the `routing.provider` config flag
+/// (spec `30-model-routing.md` §9.45). The `systemone` name selects the
+/// protocol-level `SystemOneDecisionProvider` in `orchestraitor-provider-api`
+/// — provider- and model-agnostic, pointed at whatever System
+/// One-compatible endpoint the PROJECT's `[routing]` block names:
+///
+/// - `routing.base_url` — REQUIRED for `systemone` (the Neuralwatt cloud,
+///   a local self-hosted Clef engine over tailscale, anything else serving
+///   the protocol). Its absence is a typed build failure, never a silent
+///   default URL: the endpoint is per-project operator configuration.
+/// - `routing.model` — any model id the endpoint serves (default
+///   `clef-flash`).
+/// - `routing.api_key` — optional `secret://…` URI; absent or `none` sends
+///   no `Authorization` header. The resolved credential never enters an
+///   error or log line.
+///
+/// Names this factory does not own return `Ok(None)` (the agent-catalog
+/// resolver reports the typed unknown-provider error). Configuration
+/// failures surface as a typed build failure — the operator asked for a
+/// decision provider, so silently degrading to the heuristic table would
+/// mask a broken configuration.
 ///
 /// # Errors
 ///
@@ -38,28 +42,20 @@ pub(crate) fn build_named_decision_provider(
     endpoint: &DecisionEndpointConfig,
 ) -> std::result::Result<Option<Box<dyn orchestraitor_provider_api::DecisionProvider>>, String> {
     match name {
-        NEURALWATT_CLEF_FLASH_DECISION_PROVIDER => {
-            let config = match endpoint.base_url.as_deref() {
-                Some(base_url) => {
-                    orchestraitor_provider_neuralwatt::NeuralwattConfig::with_endpoint(
-                        base_url.to_string(),
-                        // The override below replaces this placeholder before
-                        // resolution; a no-auth endpoint never reads it.
-                        "secret://none".to_string(),
-                    )
-                    .map_err(|error| error.to_string())?
-                }
-                None => orchestraitor_provider_neuralwatt::NeuralwattConfig::new(),
-            };
-            let provider =
-                orchestraitor_provider_neuralwatt::NeuralwattDecisionProvider::with_endpoint(
-                    config,
-                    None,
-                    endpoint.api_key_uri.as_deref(),
-                    endpoint.model.clone().unwrap_or_else(|| {
-                        orchestraitor_provider_neuralwatt::DEFAULT_DECISION_MODEL.to_string()
-                    }),
-                )
+        SYSTEMONE_DECISION_PROVIDER => {
+            let base_url = endpoint.base_url.clone().ok_or_else(|| {
+                "routing.base_url is required for routing.provider = \"systemone\": \
+                 the System One protocol has no default endpoint — point it at \
+                 your decision endpoint in the project's orchestraitor.toml"
+                    .to_string()
+            })?;
+            let resolved = orchestraitor_provider_api::resolve_endpoint(
+                base_url,
+                endpoint.model.clone(),
+                endpoint.api_key_uri.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+            let provider = orchestraitor_provider_api::SystemOneDecisionProvider::new(resolved)
                 .map_err(|error| error.to_string())?;
             Ok(Some(Box::new(provider)))
         }

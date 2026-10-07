@@ -3,7 +3,7 @@
 //! The System One request carries a state plus typed questions; the response
 //! answers every question with calibrated probabilities and **zero generated
 //! text** (`output_tokens: 0`), which is what makes the decision model
-//! dramatically cheaper than a chat-completion round trip (spec §9.45).
+//! dramatically cheaper than a chat-completion round trip (spec `30-model-routing.md` §9.45).
 //!
 //! Shapes verified live on `https://api.neuralwatt.com/v1/systemone`
 //! (model id `clef-flash`, 2026-10-07):

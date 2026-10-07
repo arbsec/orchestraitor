@@ -333,8 +333,8 @@ fn selected_pass_spawns_the_worker_via_the_direct_path() -> miette::Result<()> {
 /// campaign task selection and the consultation is recorded. The fixture
 /// provider (`routing.provider = "fixture"`) is offline and deterministic,
 /// so this exercises the full CLI wiring without any decision-model network
-/// call (spec §21.3; the transport-backed `neuralwatt-clef-flash` adapter is
-/// covered by its own wire-level cassette tests).
+/// call (spec §21.3; the `systemone` protocol adapter is covered by its own
+/// wire-level cassette tests in `orchestraitor-provider-api`).
 #[test]
 fn a_configured_decision_provider_is_consulted_for_task_selection() -> miette::Result<()> {
     let server = ScriptServer::start(vec![
