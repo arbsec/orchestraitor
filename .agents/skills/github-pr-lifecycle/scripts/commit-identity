@@ -67,10 +67,11 @@ fi
 # the same principal, e.g. a bare slug without the [bot] suffix). Both
 # separators are honored so `BOT_IDENTITIES=alias-one,alias-two` yields two
 # names, not one combined string.
+BOT_IDENTITIES_RAW="${BOT_IDENTITIES:-}"
 BOT_IDENTITIES=()
-if [ -n "${BOT_IDENTITIES:-}" ]; then
+if [ -n "$BOT_IDENTITIES_RAW" ]; then
   # shellcheck disable=SC2206  # intentional splitting on commas/whitespace
-  BOT_IDENTITIES+=(${BOT_IDENTITIES//,/ })
+  BOT_IDENTITIES+=(${BOT_IDENTITIES_RAW//,/ })
 fi
 BOT_IDENTITIES+=("$SVC_NAME")
 
