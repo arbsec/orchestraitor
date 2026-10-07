@@ -147,11 +147,16 @@ impl SystemOneDecisionProvider {
             .as_ref()
             .is_some_and(|key| !key.expose_secret().is_empty());
         if has_credential && base.scheme() != "https" {
-            let loopback = base.host_str().is_some_and(|host| {
-                host == "localhost"
-                    || host == "::1"
-                    || host.parse::<std::net::Ipv4Addr>() == Ok(std::net::Ipv4Addr::LOCALHOST)
-            });
+            // `host_str()` brackets IPv6 hosts (`[::1]`), so the typed
+            // `url::Host` is matched instead: loopback is the whole
+            // `127.0.0.0/8` and `::1` ranges plus the `localhost` domain.
+            // A missing host fails closed as non-loopback.
+            let loopback = match base.host() {
+                Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                None => false,
+            };
             if !loopback {
                 return Err(SystemOneDecisionProviderError::CleartextCredential {
                     scheme: base.scheme().to_string(),

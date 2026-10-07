@@ -414,12 +414,18 @@ fn no_credential_over_cleartext_http_is_accepted() {
 fn credential_over_cleartext_http_to_loopback_is_accepted() {
     // Loopback is the one plain-`http` case where a credential stays
     // local: no network observer exists between this process and the
-    // engine.
-    let provider = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
-        base_url: "http://127.0.0.1:8080/v1".to_string(),
-        model: DEFAULT_DECISION_MODEL.to_string(),
-        api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
-    })
-    .unwrap();
-    assert_eq!(provider.endpoint_host(), "127.0.0.1");
+    // engine. `127.0.0.0/8` and `::1` both count.
+    for (base_url, expected_host) in [
+        ("http://127.0.0.1:8080/v1", "127.0.0.1"),
+        ("http://[::1]:8080/v1", "[::1]"),
+        ("http://localhost:8080/v1", "localhost"),
+    ] {
+        let provider = SystemOneDecisionProvider::new(SystemOneEndpointConfig {
+            base_url: base_url.to_string(),
+            model: DEFAULT_DECISION_MODEL.to_string(),
+            api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
+        })
+        .unwrap_or_else(|error| panic!("{base_url} must be accepted: {error}"));
+        assert_eq!(provider.endpoint_host(), expected_host);
+    }
 }
