@@ -869,7 +869,9 @@ fn build_file_changes(changes: &[(String, std::path::PathBuf)], branch: &str) ->
                 let object_type = git(&["cat-file", "-t", &spec])?;
                 if object_type != "blob" {
                     bail!(
-                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob —                          symlinks and submodules are not supported by the GraphQL fileChanges                          payload"
+                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
+                         symlinks and submodules are not supported by the GraphQL fileChanges \
+                         payload"
                     );
                 }
                 let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
@@ -1970,14 +1972,9 @@ mod tests {
 
     #[test]
     fn build_file_changes_shapes_deletions_as_path_objects() {
-        let changes = vec![
-            ("A".to_string(), std::path::PathBuf::from("new.txt")),
-            ("D".to_string(), std::path::PathBuf::from("base.txt")),
-        ];
-        // The branch is irrelevant for deletions and for cat-file on A/M we
-        // use the fixture repo? No — this test only covers the D branch of
-        // the builder plus the payload shape; an A record would need a real
-        // blob, so only D is exercised here.
+        // This test covers only the D branch of the builder plus the payload
+        // shape; an A record would need a real blob, so only D is exercised
+        // here.
         let result = build_file_changes(
             &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
             "any-branch",
@@ -1987,6 +1984,5 @@ mod tests {
             payload,
             serde_json::json!({"additions": [], "deletions": [{"path": "base.txt"}]})
         );
-        let _ = changes;
     }
 }

@@ -122,18 +122,24 @@ FILES="$(orc_lib_gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filen
 
 # ADDED lines only (paths alone are necessary but not sufficient: the
 # workflow policy classifies "by path and diff content"). Bounded to the
-# first 2000 added lines — collected via an if-guarded command
-# substitution so `head` closing the pipe early (SIGPIPE) under
-# `set -o pipefail` can never launder a real failure into an empty scan.
+# first 2000 added lines — the fetch writes to a temporary file and its
+# exit status is checked BEFORE truncation, so no pipeline stage can
+# die of SIGPIPE and launder a real fetch failure into an empty scan
+# (or vice versa).
 # An EMPTY result is valid (a delete/rename-only PR has no added lines);
 # only a genuine fetch/pipe failure exits.
 ADDED_LINES=""
 fetch_rc=0
-ADDED_LINES="$(orc_lib_gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].patch // empty' |
-  { grep '^+' || true; } | { grep -v '^+++' || true; } | head -2000)" || fetch_rc=$?
-# gh SIGPIPE-exits the paginate pipe when head truncates; treat 141 as the
-# intended bounded truncation, anything else as a real failure.
-if [ "$fetch_rc" -ne 0 ] && [ "$fetch_rc" -ne 141 ]; then
+PATCH_FILE="$(mktemp "${TMPDIR:-/tmp}/pr-labels-patch.XXXXXX")"
+orc_lib_gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].patch // empty' > "$PATCH_FILE" || fetch_rc=$?
+if [ "$fetch_rc" -eq 0 ]; then
+  # Filter from the file: no `head` closing the writer's pipe mid-fetch, so
+  # no SIGPIPE (141) can be laundered into either direction; the bounded
+  # truncation happens AFTER the fetch has fully succeeded.
+  ADDED_LINES="$( { grep '^+' "$PATCH_FILE" || true; } | { grep -v '^+++' || true; } | head -2000 )"
+fi
+rm -f "$PATCH_FILE"
+if [ "$fetch_rc" -ne 0 ]; then
   echo "error: cannot read PR #$PR diff patches (exit $fetch_rc)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 fi

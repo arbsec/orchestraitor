@@ -98,9 +98,14 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
     index=$((index + 1))
   done
   CHECKS_JSON="$(mktemp)"
-  if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
-    REASONS+=("pr-checks could not classify checks")
+  PR_CHECKS_ERR="$(mktemp)"
+  if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>"$PR_CHECKS_ERR"; then
+    # Surface WHY classification failed (e.g. CI-only stub/gh differences):
+    # the stderr is bounded diagnostic text, safe to echo into the reason.
+    PR_CHECKS_DETAIL="$(head -c 300 "$PR_CHECKS_ERR" | tr '\n' ' ')"
+    REASONS+=("pr-checks could not classify checks (stderr: ${PR_CHECKS_DETAIL:-<empty>})")
   fi
+  rm -f "$PR_CHECKS_ERR"
   if [ -s "$CHECKS_JSON" ]; then
     ALL_PASSED="$(jq -r '.all_passed // false' "$CHECKS_JSON")"
     ANY_PENDING="$(jq -r '.any_pending // false' "$CHECKS_JSON")"
@@ -119,7 +124,11 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
   fi
   rm -f "$CHECKS_JSON"
   if [ "${#REASONS[@]}" -gt 0 ]; then
-    echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"--add-reviewer\",\"reasons\":[$(printf '"%s",' "${REASONS[@]}" | sed 's/,$//')]}" >&2
+    # jq builds the JSON so embedded quotes/backslashes/newlines in reason
+    # text (e.g. pr-checks stderr) can never produce invalid JSON.
+    printf '%s\n' "${REASONS[@]}" | jq -R . | jq -s \
+      --argjson pr "$PR" \
+      '{"pr":$pr,"requested":false,"reviewer":"--add-reviewer","reasons":.}' >&2
     exit "$ORC_ERR_BLOCKED"
   fi
 fi

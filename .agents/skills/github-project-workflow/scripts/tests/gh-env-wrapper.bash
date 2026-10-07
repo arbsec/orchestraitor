@@ -283,6 +283,9 @@ echo "PASS gh-env service wrapper routing"
 : > "$ORC_LOG"; : > "$GH_LOG"
 rm -f "$WORK/orc" # no orc on PATH at all
 ( set -euo pipefail; export PATH="$WORK:$PATH"; export GH_BIN="$WORK/gh"
+  # An inherited ORC_BIN would bypass the "no orc on PATH" premise (the probe
+  # runs the binary at ORC_BIN directly), so unset it like case 16 does.
+  unset ORC_BIN
   export ORC_GITHUB_APP_ENFORCEMENT="Required" # wrong case: operator error
   # shellcheck source=/dev/null
   . "$LIB"
@@ -370,14 +373,16 @@ if grep -q 'WRONGROUTE' <<<"$LOGIN"; then
 fi
 
 # Case C: orc absent (config probe reports absent) AND gh fails — empty
-# output (callers must treat as a typed failure).
+# output (callers must treat as a typed failure). PATH is controlled: only
+# the stub dir plus the minimal system dirs — an inherited directory with a
+# stray `orc` binary must not leak into this case.
 mv "$WORK/orc" "$WORK/orc.hidden"
 cat > "$WORK/gh" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
 chmod +x "$WORK/gh"
-LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; unset ORC_BIN; export GH_BIN="$WORK/gh"
+LOGIN="$( ( set -euo pipefail; export PATH="$WORK:/usr/bin:/bin"; unset ORC_BIN; export GH_BIN="$WORK/gh"
     # shellcheck source=/dev/null
     . "$LIB"; orc_lib_resolve_my_login ) )"
 mv "$WORK/orc.hidden" "$WORK/orc"
@@ -430,6 +435,26 @@ LOGIN="$( ( set -euo pipefail; export PATH="$WORK:$PATH"; export ORC_BIN="$WORK/
 if [ -s "$GH_LOG" ]; then
   fail "ambient gh api user must not fire on a failing service-route resolution: $(cat "$GH_LOG")"
 fi
+
+# Restore the LOGGING gh stub: Case C left the `exit 1` stub in $WORK/gh, and
+# every later case (pr-create/pr-comment/pr-review-post/pr-mutate) expects the
+# stub that records its argv and exits 0. (Case C rewrites $WORK/orc twice but
+# never rewrites $WORK/gh — the last writer was Case C's `exit 1` stub.)
+# The stub also emulates `gh pr checks --json` with a fully-passing set: the
+# pr-mutate reviewer-request gate runs pr-checks, and a stub env has no real
+# checks to report — the gate must pass so the service-path assertion below
+# is exercised (a pending/failing classification would block the mutation
+# before it routes through gh-env).
+cat > "$WORK/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "gh:$*" >> "$GH_LOG"
+if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
+  printf '%s\n' '[{"name":"Stub Check","state":"SUCCESS","bucket":"pass","workflow":"Stub","link":"http://stub/0"}]'
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$WORK/gh"
 
 echo "PASS gh-env service wrapper routing (login resolution)"
 
@@ -727,13 +752,19 @@ echo "PASS bot self-approval refusal + verdict body requirements"
 PRMUTATE="$HERE/../../../github-pr-lifecycle/scripts/pr-mutate"
 
 # --- 24. service path: pr-mutate edit routes through gh-env with the
-#         intended gh subcommand; the stub gh is never invoked directly.
+#         intended gh subcommand. The reviewer-request gate also performs an
+#         AMBIENT READ (`gh pr view` via orc_lib_gh — read-only calls are
+#         allowed on ambient auth; only MUTATIONS must ride the service
+#         path), so the stub gh legitimately logs a `gh:pr view` line here:
+#         assert no MUTATING gh call reached the stub directly.
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub required
 OUT="$(run_script "$PRMUTATE" required edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
 grep -qx 'orc:github gh-env -- /.*/gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' "$ORC_LOG" \
   || fail "pr-mutate edit must take the service path: orc=[$(cat "$ORC_LOG")] out=[$OUT]"
-if grep -q '^gh:' "$GH_LOG"; then fail "pr-mutate edit ran gh directly (personal auth)"; fi
+if grep -qE '^gh:pr (edit|ready|close|merge|comment|review)' "$GH_LOG"; then
+  fail "pr-mutate edit ran a MUTATING gh call directly (personal auth): $(cat "$GH_LOG")"
+fi
 grep -qx 'rc:0' "$GH_LOG" || fail "pr-mutate edit service path must not fail: $(cat "$GH_LOG")"
 
 # --- 25. ready and close route the same way.
@@ -767,14 +798,20 @@ if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
   fail "pr-mutate reached gh or orc gh-env despite required + missing config: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
 fi
 
-# --- 27. dry-run: previews the gh command, writes nothing.
+# --- 27. dry-run: previews the gh command, writes nothing. The
+#         reviewer-request gate performs its ambient READS even in dry-run
+#         mode (they only classify; they write nothing), so assert no gh-env
+#         route and no MUTATING direct gh call — not zero network activity.
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub required
 OUT="$(run_script "$PRMUTATE" required --dry-run edit 42 -R arbsec/orchestraitor --add-reviewer human1 2>&1)" || true
 grep -q '\[dry-run\] gh pr edit 42 --repo arbsec/orchestraitor --add-reviewer human1' <<<"$OUT" \
   || fail "pr-mutate --dry-run must preview the gh command: $OUT"
-if [ -s "$ORC_LOG" ] || grep -q '^gh:' "$GH_LOG"; then
-  fail "pr-mutate --dry-run must not reach orc gh-env or gh: orc=[$(cat "$ORC_LOG")] gh=[$(cat "$GH_LOG")]"
+if grep -q 'orc:github gh-env' "$ORC_LOG"; then
+  fail "pr-mutate --dry-run must not route through orc gh-env: $(cat "$ORC_LOG")"
+fi
+if grep -qE '^gh:pr (edit|ready|close|merge|comment|review)' "$GH_LOG"; then
+  fail "pr-mutate --dry-run ran a MUTATING gh call: $(cat "$GH_LOG")"
 fi
 
 # --- 28. argument validation: unknown subcommand, missing PR number,

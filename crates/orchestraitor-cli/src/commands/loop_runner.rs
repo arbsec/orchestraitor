@@ -765,3 +765,92 @@ fn render_text(
     writeln!(writer, "elapsed = {}s", summary.elapsed_secs).into_diagnostic()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DirectLoopStarter;
+    use miette::IntoDiagnostic;
+    use orchestraitor_campaign::SelectedTask;
+    use std::io::Read;
+
+    /// The campaign tests drive `orc loop` with fake starters, so the
+    /// production fixture (`materialize_task_fixture`) is only covered here:
+    /// assert the written task JSON carries the selected board identity
+    /// (id, repo, issue number, title, URL) and that re-materializing the
+    /// same task with a CHANGED title atomically replaces the fixture.
+    #[test]
+    fn materialize_task_fixture_writes_and_replaces_selected_task() -> miette::Result<()> {
+        let tasks_dir = tempfile::tempdir().into_diagnostic()?;
+        let dir = tasks_dir.path();
+
+        let selected = SelectedTask {
+            repo: "arbsec/orchestraitor".to_string(),
+            number: 519,
+            title: "commit-identity guard & thread-reply discipline".to_string(),
+            url: "https://github.com/arbsec/orchestraitor/pull/519".to_string(),
+            item_node_id: "PRR_519".to_string(),
+            task_id: "pr519-agent-ops".to_string(),
+        };
+        DirectLoopStarter::materialize_task_fixture(dir, &selected)
+            .map_err(|error| miette::miette!("fixture materialization failed: {error}"))?;
+
+        let path = dir.join(format!("{}.json", selected.task_id));
+        let first = read_fixture(&path)?;
+        assert_eq!(first["id"], selected.task_id);
+        assert_eq!(first["slug"], selected.task_id);
+        let description = first["description"].as_str().unwrap_or_default();
+        assert!(description.contains("#519"), "issue number in description");
+        assert!(
+            description.contains("arbsec/orchestraitor"),
+            "repo in description"
+        );
+        assert!(
+            description.contains("commit-identity guard & thread-reply discipline"),
+            "title in description"
+        );
+        assert!(
+            description.contains("https://github.com/arbsec/orchestraitor/pull/519"),
+            "url in description"
+        );
+
+        // Re-materialize with a changed title: the write+rename contract
+        // must REPLACE the fixture, not fail on the existing file.
+        let renamed = SelectedTask {
+            title: "renamed: ops discipline".to_string(),
+            ..selected
+        };
+        DirectLoopStarter::materialize_task_fixture(dir, &renamed)
+            .map_err(|error| miette::miette!("replacement materialization failed: {error}"))?;
+        let second = read_fixture(&path)?;
+        assert!(
+            second["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("renamed: ops discipline"),
+            "re-materialization must carry the new title"
+        );
+        // No temp half-file may survive the rename.
+        let leftover: Vec<_> = std::fs::read_dir(dir)
+            .into_diagnostic()?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no temp files may survive: {leftover:?}"
+        );
+        Ok(())
+    }
+
+    /// Reads and parses one task fixture from `path`.
+    fn read_fixture(path: &std::path::Path) -> miette::Result<serde_json::Value> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .into_diagnostic()?
+            .read_to_end(&mut bytes)
+            .into_diagnostic()?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| miette::miette!("fixture must be valid JSON: {error}"))
+    }
+}

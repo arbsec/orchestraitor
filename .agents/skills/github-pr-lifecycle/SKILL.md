@@ -31,6 +31,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/graphql.md`](references/graphql.md) — the `pullRequest.reviewThreads` connection with `isResolved`/`isOutdated`/`comments`; resolve/unresolve mutations.
   - [`references/documentation-gate.md`](references/documentation-gate.md) — what counts as "public behavior" requiring same-PR doc updates (spec `10-orchestrator.md` §9.33).
   - [`references/verified-commit-path.md`](references/verified-commit-path.md) — why unsigned local bot-identity commits never verify, and the App-API replay path for unsigned chains (documented procedure; replay script not yet implemented).
+  - [`references/review-thread-reply.md`](references/review-thread-reply.md) — the thread-reply contract: answers to inline review comments are posted as REPLIES on that comment's thread (REST replies endpoint / `addPullRequestReviewThreadReply`), never as new main-thread comments (owner directive 2026-10-07).
   - [`references/commit-hygiene-remediation.md`](references/commit-hygiene-remediation.md) — failure-class → detection → remediation map for commit-hygiene violations (identity, verification, message format, mode/permission and ghost-commit anomalies); what `audit-pr-commits` flags and how to fix it.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
 
@@ -67,6 +68,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   landing path — NEVER plain `git push`, which produces
                   unverified commits the `required_signatures` ruleset
                   rejects at merge time); watch checks with `pr-checks`.
+                  Before any local `git commit` destined for a PR branch, run
+                  `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity
+                  check` (or export the identity via
+                  `eval "$(bash .agents/skills/github-pr-lifecycle/scripts/commit-identity
+                  env)"`) — an ambient human identity
+                  is a policy violation (audit class unauthorized-identity).
                   Audit commit hygiene with `audit-pr-commits <pr>` alongside
                   `pr-checks` — every PR commit must be authored by a declared
                   service principal, GitHub-verified, and Conventional Commits.
@@ -107,6 +114,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 5. REMEDIATE       Apply fixes in a FRESH context (not the implementer's). Land
                    them with `orc github push-branch` (never plain `git push`).
+                   Replies to inline review comments go through `pr-thread-reply`
+                   on the comment's thread — never as new main-thread comments
+                   (owner directive 2026-10-07; see references/review-thread-reply.md).
                    Each new commit INVALIDATES earlier review convergence — the next
                    review generation targets the CURRENT HEAD, not the prior diff.
                    This loop is AUTOMATIC: every review generation's findings are
@@ -195,7 +205,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 - **No admin bypass.** This skill never passes `--admin` to `gh pr merge`. Reaching a limit is a `blocked` state, not a merge path.
 - **Fresh-context reviews only.** The skill tracks review *generations*; it does not let a reviewer approve their own implementation (spec `50-contracts-data.md` §21.1, `10-orchestrator.md` §9.33.3). Security-sensitive changes require human review before release.
 - **HEAD is authoritative.** Reviews rerun against the current HEAD after each commit. Stale convergence is not convergence.
-- **Verified commits / service-identity push path.** Agent branch pushes MUST land as GitHub-signed commits via `orc github push-branch` (GraphQL `createCommitOnBranch` + ref force-move, tree-equality and `verified = true` gates, fail-closed) — never as plain `git push` and never as locally-created unsigned bot-identity commits (the `required_signatures` ruleset blocks them; locally-attributed commits fail closed). The subcommand lands the local branch's tree as ONE squashed App-signed commit and creates or force-moves the remote branch by itself; no manual GraphQL recipe is needed. For existing unsigned chains, replay per `references/verified-commit-path.md` (the replay script `scripts/github-app-recreate-branch.sh` is designated but not yet implemented — follow the documented steps). Pitfall: never reset a PR branch to an ancestor of main mid-replay — that auto-closes the PR; replay on a temp branch and swing the ref once.
+- **Verified commits / service-identity push path.** Agent branch pushes MUST land as GitHub-signed commits via `orc github push-branch` (GraphQL `createCommitOnBranch` + `updateRefs` with an exact-head precondition — never overwrites a concurrent commit; tree-equality and `verified = true` gates, fail-closed) — never as plain `git push` and never as locally-created unsigned bot-identity commits (the `required_signatures` ruleset blocks them; locally-attributed commits fail closed). The subcommand lands the local branch's tree as ONE squashed App-signed commit and creates or fast-forwards the remote branch by itself; no manual GraphQL recipe is needed. For existing unsigned chains, replay per `references/verified-commit-path.md` (the replay script `scripts/github-app-recreate-branch.sh` is designated but not yet implemented — follow the documented steps). Pitfall: never reset a PR branch to an ancestor of main mid-replay — that auto-closes the PR; replay on a temp branch and swing the ref once.
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.

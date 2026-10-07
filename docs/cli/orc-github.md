@@ -302,8 +302,10 @@ this case:
   can still block the merge (range repair needs the manual replay in
   `references/verified-commit-path.md`);
 - is a no-op (exit 0, no mutation) when the remote head is already verified;
-- fails closed (typed error, including the documented `gh api` restore
-  command) if the landed empty commit is not verified.
+- fails closed (typed error) if the landed empty commit is not verified —
+  the real ref never moves in that case (the landing went to the temporary
+  branch and the gate fires before the `updateRefs` swing), so no manual
+  restore is needed.
 
 Without `--re-land`, an identical-tree landing stays the safe no-op it has
 always been.

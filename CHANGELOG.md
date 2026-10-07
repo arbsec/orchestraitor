@@ -169,7 +169,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   the agent push path for repositories with `required_signatures` rulesets,
   where plain `git push` produces unverified commits that are rejected at
   merge time. The commit is created on a temporary branch
-  (`push-branch/tmp-<tree>`, bootstrapped via `createRef` — the mutation does
+  (`push-branch/tmp-<uuid>`, bootstrapped via `createRef` — the mutation does
   not auto-create branches) at the observed remote head (or the base commit
   for a new branch) so the tree-equality and `signature.isValid` gates run
   before the real ref moves; the swing is `updateRefs` with
@@ -183,14 +183,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   deletes the temp ref and leaves the real branch untouched. The
   `github-pr-lifecycle` skill's push steps now route through this subcommand
   instead of `git push`.
+- `orc github push-branch --re-land`: re-signs a rebased PR branch whose tree
+  already matches the remote head by landing ONE empty App-signed commit on
+  top of the remote head, so the PR HEAD commit becomes verified (fixing the
+  unsigned-head case that forced plain pushes after conflict rebases);
+  it is a no-op on an already verified head and fails closed if the landing
+  is not verified. LIMITATION: unsigned ancestors are NOT rewritten — a
+  ruleset that range-checks every commit can still block the merge (range
+  repair needs the manual replay in
+  `.agents/skills/github-pr-lifecycle/references/verified-commit-path.md`).
 
 ### Changed
-
-  A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
-  remote head: it lands one empty App-signed commit on top of the remote head so
-  the evaluated head chain is fully verified (fixing the unsigned-head case that
-  forced plain pushes after conflict rebases); it is a no-op on an already
-  verified head and fails closed if the landing is not verified.
 
 - **Service-identity enforcement is now pinned to `required` for this
   repository** (owner mandate, 2026-10-02: no GitHub writes under the
@@ -262,8 +265,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   layer registers a custom role that `orc routing resolve --role <id>` and
   `orc config get roles.<id>.routing.*` resolve through the same path as the
   six built-in roles — identical layer precedence, field-wise merge, typed
-  errors for partial entries, and the `neuralwatt`/`glm-5.2` bootstrap
-  fallback. Role ids follow the provider id shape (1–64 lowercase ASCII
+  errors for partial entries, and the `neuralwatt` bootstrap fallback
+  (`glm-5.3-flash`). Role ids follow the provider id shape (1–64 lowercase ASCII
   letters, digits, `-` or `_`); ids that are neither built-in nor configured
   remain a typed `unknown role` error. Same-layer shard conflicts on
   `roles.<id>.routing.*` keys are rejected by `orc config validate` with the

@@ -182,12 +182,15 @@ pub enum GitHubCommand {
     /// Land a local branch's tree as ONE App-signed squashed commit on the
     /// remote branch.
     ///
-    /// Computes the branch's tree versus the base branch, creates or
-    /// force-moves the remote branch via the GitHub GraphQL API
-    /// (`createCommitOnBranch` + ref update), and verifies tree equality and
-    /// `verified = true` before reporting success — fail-closed with a typed
-    /// error when the landed commit is not GitHub-signed. Never uses plain
-    /// `git push`.
+    /// Computes the branch's tree versus the REMOTE HEAD's tree when the
+    /// branch already exists on the remote (fetched locally first), or
+    /// versus the base branch tree for a NEW remote branch; creates the
+    /// remote branch or fast-forwards it with an exact-head precondition
+    /// (never overwrites a concurrent commit) via the GitHub GraphQL API
+    /// (`createCommitOnBranch` + `updateRefs` with `beforeOid`), and verifies
+    /// tree equality and `verified = true` before reporting success —
+    /// fail-closed with a typed error when the landed commit is not
+    /// GitHub-signed. Never uses plain `git push`.
     PushBranch(PushBranchArgs),
 }
 
@@ -229,7 +232,8 @@ pub struct PushBranchArgs {
     #[arg(long)]
     pub remote_branch: Option<String>,
     /// Base branch the local branch was cut from; its tree is the diff base
-    /// (default: the merge-base with `origin/main`).
+    /// (default: `origin/main`, then `main` if `origin/main` cannot be
+    /// resolved).
     #[arg(long)]
     pub base: Option<String>,
     /// Commit message headline (first line).
