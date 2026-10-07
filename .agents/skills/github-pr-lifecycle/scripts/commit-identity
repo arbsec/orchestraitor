@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# commit-identity: verify that the ambient git commit identity in a worktree
+# or clone resolves to a declared service principal.
+#
+# Incident background: a fresh clone/worktree on this workstation inherits the
+# global gitconfig (user.name=mekwall / user.email=marcus.ekwall@gmail.com);
+# the main checkout masks it with local config. Any `git commit` made there
+# attributes PR commits to the human owner — a policy violation
+# (.agents/project/orchestraitor-workflow.md "GitHub service identity":
+# commits are authored with the bot identity, never a personal account).
+#
+# Subcommands:
+#   check [worktree-or-repo-path]   Verify the identity configured for PATH
+#                                   (default: $PWD) resolves to a declared
+#                                   service principal (from
+#                                   `orc github commit-author`). Mismatch or
+#                                   non-principal identity -> exit 3 with a
+#                                   remediation hint. --json output.
+#   env                             Print export lines (GIT_AUTHOR_NAME/EMAIL,
+#                                   GIT_COMMITTER_NAME/EMAIL) sourced from
+#                                   `orc github commit-author`, for `eval`.
+#                                   Read-only; prints no secrets (none exist).
+#
+# Usage (agents): before ANY local `git commit` destined for a PR branch:
+#   commit-identity check                    # in the worktree about to commit
+#   eval "$(commit-identity env)"            # or force the identity per-command
+#   git -c user.name=... -c user.email=... commit ...
+#
+# Exit codes: 0 ok | 1 unrecoverable (orc missing/failed, unexpected output)
+#             | 2 config/state (bad path, not a git repo) | 3 policy violation
+#             (identity mismatch or not a declared principal; audit class
+#             unauthorized-identity) | 4 n/a | 5 n/a.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "commit-identity" "Verify the ambient git commit identity resolves to a declared service principal. Subcommands: check [path] | env."
+  exit "$ORC_OK"
+fi
+
+ORC="${ORC_BIN:-orc}"
+if ! command -v "$ORC" >/dev/null 2>&1; then
+  echo "error: orc not found on PATH (set ORC_BIN to the orc binary); cannot resolve the service-identity commit author" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+
+# --- Resolve the canonical service identity -----------------------------------
+# orc github commit-author prints `name=<slug>[bot]` / `email=<id>+<slug>[bot]@users.noreply.github.com`
+# derived from the authenticated App (never hardcoded).
+ORC_OUT="$("$ORC" github commit-author)" || {
+  echo "error: \`orc github commit-author\` failed; cannot resolve the service-identity commit author" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+}
+SVC_NAME="$(printf '%s\n' "$ORC_OUT" | sed -n 's/^name=//p')"
+SVC_EMAIL="$(printf '%s\n' "$ORC_OUT" | sed -n 's/^email=//p')"
+if [ -z "$SVC_NAME" ] || [ -z "$SVC_EMAIL" ]; then
+  echo "error: unexpected \`orc github commit-author\` output (expected name=/email= lines)" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+
+# Declared principals: the canonical identity plus configured renames
+# (BOT_IDENTITIES: whitespace/comma-separated extra name forms that resolve to
+# the same principal, e.g. a bare slug without the [bot] suffix). Both
+# separators are honored so `BOT_IDENTITIES=alias-one,alias-two` yields two
+# names, not one combined string.
+BOT_IDENTITIES=()
+if [ -n "${BOT_IDENTITIES:-}" ]; then
+  # shellcheck disable=SC2206  # intentional splitting on commas/whitespace
+  BOT_IDENTITIES+=(${BOT_IDENTITIES//,/ })
+fi
+BOT_IDENTITIES+=("$SVC_NAME")
+
+identity_is_principal() {
+  local candidate="$1"
+  local principal
+  for principal in "${BOT_IDENTITIES[@]}"; do
+    [ -n "$principal" ] && [ "$candidate" = "$principal" ] && return 0
+  done
+  return 1
+}
+
+SUBCOMMAND="${ORC_LIB_EXTRA_ARGS[0]:-}"
+case "$SUBCOMMAND" in
+  env)
+    printf 'export GIT_AUTHOR_NAME=%q\n' "$SVC_NAME"
+    printf 'export GIT_AUTHOR_EMAIL=%q\n' "$SVC_EMAIL"
+    printf 'export GIT_COMMITTER_NAME=%q\n' "$SVC_NAME"
+    printf 'export GIT_COMMITTER_EMAIL=%q\n' "$SVC_EMAIL"
+    exit "$ORC_OK"
+    ;;
+  check)
+    TARGET_PATH="${ORC_LIB_EXTRA_ARGS[1]:-$PWD}"
+    if [ ! -d "$TARGET_PATH" ]; then
+      echo "error: path does not exist or is not a directory: $TARGET_PATH" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    TOP="$(git -C "$TARGET_PATH" rev-parse --show-toplevel 2>/dev/null)" || {
+      echo "error: not a git repository (or worktree): $TARGET_PATH" >&2
+      exit "$ORC_ERR_CONFIG"
+    }
+    # A plain `git commit` takes the author/committer identity from the
+    # GIT_AUTHOR_*/GIT_COMMITTER_* environment variables FIRST and falls
+    # back to user.name/user.email config only when the env is unset.
+    # `check` must evaluate exactly what the commit would use, or the
+    # documented `eval "$(commit-identity env)" && git commit ...` workflow
+    # is rejected here (env holds the service principal, config holds a
+    # human identity) and a human identity smuggled in via env passes.
+    AMBIENT_NAME="${GIT_AUTHOR_NAME:-$(git -C "$TARGET_PATH" config user.name 2>/dev/null || true)}"
+    AMBIENT_EMAIL="${GIT_AUTHOR_EMAIL:-$(git -C "$TARGET_PATH" config user.email 2>/dev/null || true)}"
+    # Git resolves the committer from GIT_COMMITTER_* env, falling back to
+    # user.name/user.email config INDEPENDENTLY of the author resolution —
+    # never from the author env values (mirroring git-commit(1) semantics).
+    COMMITTER_NAME="${GIT_COMMITTER_NAME:-$(git -C "$TARGET_PATH" config user.name 2>/dev/null || true)}"
+    COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git -C "$TARGET_PATH" config user.email 2>/dev/null || true)}"
+    MATCH=true
+    REASON=""
+    if [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
+      MATCH=false
+      REASON="no user.name/user.email configured in this checkout (and no GIT_AUTHOR_* env)"
+    # A declared principal name (BOT_IDENTITIES) with the canonical email is
+    # the service principal under an alternate name form — accept it.
+    elif [ "$AMBIENT_EMAIL" != "$SVC_EMAIL" ] || ! identity_is_principal "$AMBIENT_NAME"; then
+      MATCH=false
+      if identity_is_principal "$AMBIENT_NAME"; then
+        REASON="identity email does not match the service principal email"
+      else
+        REASON="identity is not a declared service principal (audit class: unauthorized-identity)"
+      fi
+    elif ! identity_is_principal "$COMMITTER_NAME" || [ "$COMMITTER_EMAIL" != "$SVC_EMAIL" ]; then
+      MATCH=false
+      REASON="committer identity (GIT_COMMITTER_* env) is not the service principal"
+    fi
+    # A locally-gpg-signed bot-identity commit can never be GitHub-verified:
+    # the bot's signing key is not registered with GitHub, so the repository
+    # records verification.reason=unknown_key and the required_signatures
+    # ruleset rejects the commit at merge time. Local signing is therefore a
+    # policy violation in its own right, independent of the identity match
+    # (audit class: local-signing-not-verified-path).
+    if [ "$(git -C "$TARGET_PATH" config --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
+      MATCH=false
+      GPGSIGN_REASON="commit.gpgsign=true in this checkout — a locally-signed bot commit can never be GitHub-verified (audit class: local-signing-not-verified-path)"
+      REASON="${REASON:+$REASON; }$GPGSIGN_REASON"
+    fi
+    if [ "$OPT_JSON" = true ]; then
+      jq -n \
+        --arg path "$TOP" --arg service_name "$SVC_NAME" --arg service_email "$SVC_EMAIL" \
+        --arg ambient_name "$AMBIENT_NAME" --arg ambient_email "$AMBIENT_EMAIL" \
+        --arg committer_name "$COMMITTER_NAME" --arg committer_email "$COMMITTER_EMAIL" \
+        --arg reason "$REASON" \
+        '{"path":$path,"service_name":$service_name,"service_email":$service_email,"ambient_name":$ambient_name,"ambient_email":$ambient_email,"committer_name":$committer_name,"committer_email":$committer_email,"match":($reason == ""),"reason":$reason}'
+    else
+      echo "path:          $TOP"
+      echo "service:       $SVC_NAME <$SVC_EMAIL>"
+      echo "ambient:       ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
+      if [ "$MATCH" = true ]; then
+        echo "result:        OK (matches the service principal)"
+      else
+        echo "result:        POLICY VIOLATION — $REASON"
+      fi
+    fi
+    if [ "$MATCH" = false ]; then
+      echo "" >&2
+      echo "remediation: commits in this checkout MUST be authored as the service principal. Either:" >&2
+      echo "  eval \"\$(commit-identity env)\" && git commit ...   # force author+committer via env" >&2
+      echo "  git -c user.name='$SVC_NAME' -c user.email='$SVC_EMAIL' commit ...   # or per-command" >&2
+      echo "NOTE: if GIT_AUTHOR_*/GIT_COMMITTER_* env vars are set, they OVERRIDE the -c" >&2
+      echo "flags — either unset them (env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u" >&2
+      echo "GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL git commit ...) or export the service" >&2
+      echo "identity into all four variables first (eval \"\$(commit-identity env)\")." >&2
+      case "$GPGSIGN_REASON" in
+        ?*)
+          echo "LOCAL SIGNING: disable commit signing in this checkout with" >&2
+          echo "  git config commit.gpgsign false   # local signing is not the verified-commit path" >&2
+          echo "  — land commits via \`orc github push-branch\`, the only path that yields" >&2
+          echo "  GitHub-verified (web-flow signed) commits." >&2
+          ;;
+      esac
+      echo "A human-identity commit on a PR branch is an audit violation (unauthorized-identity)." >&2
+      exit "$ORC_ERR_POLICY"
+    fi
+    exit "$ORC_OK"
+    ;;
+  *)
+    echo "error: subcommand required (check [path] | env)" >&2
+    exit "$ORC_ERR_CONFIG"
+    ;;
+esac
