@@ -625,7 +625,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         // --base is still honored as a fallback source for the head objects
         // (see `remote_head_tree`).
         let tree = remote_head_tree(
-            &graphql,
+            token.token().expose_secret(),
             existing.as_ref(),
             args.base.as_deref(),
             &remote_branch,
@@ -676,7 +676,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             Err(error) => return Err(error),
         };
         let repo_url = format!("https://github.com/{owner}/{repo}.git");
-        if git(&["fetch", "--quiet", &repo_url, &base_head]).is_err() {
+        if !git_fetch_authenticated(token.token().expose_secret(), &owner, &repo, &base_head) {
             // Fall through: the rev-parse below produces the typed error
             // when the object is truly unavailable.
         }
@@ -921,8 +921,11 @@ fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
     let trimmed = url.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let tail = if let Some((_, rest)) = trimmed.split_once("://") {
-        let (host, path) = rest.split_once('/')?;
-        // Only github.com (and ssh git@github.com over https-style URLs).
+        let (authority, path) = rest.split_once('/')?;
+        // The authority is `[user@]host` — an ssh:// URL carries the git user
+        // (`ssh://git@github.com/owner/repo.git`); strip it before validating
+        // the host. Only github.com is accepted.
+        let host = authority.rsplit('@').next()?;
         if !host.eq_ignore_ascii_case("github.com") {
             return None;
         }
@@ -1144,6 +1147,42 @@ fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::pa
     Ok(parse_diff_tree_z(&raw))
 }
 
+/// Runs `git fetch` against `https://github.com/<owner>/<repo>.git`
+/// AUTHENTICATED as the App installation: the token rides the
+/// `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` environment
+/// pair scoped to `http.https://github.com/.extraheader` — the token NEVER
+/// appears in process arguments (invisible to other local users via the
+/// argv list), on disk, or in any diagnostic. Required for private
+/// repositories; a public-repo fetch behaves identically.
+///
+/// `what` is a ref-ish spec (an OID, a branch name); failure is the caller's
+/// decision (callers retry or fall back), so the result is just a bool.
+fn git_fetch_authenticated(token: &str, owner: &str, repo: &str, what: &str) -> bool {
+    const URL_PREFIX: &str = "http.https://github.com/.extraheader";
+    let authorization = format!(
+        "basic {}",
+        base64_encode(format!("x-access-token:{token}").as_bytes())
+    );
+    let output = Command::new("git")
+        .args([
+            "fetch",
+            "--quiet",
+            &format!("https://github.com/{owner}/{repo}.git"),
+            what,
+        ])
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", URL_PREFIX)
+        .env("GIT_CONFIG_VALUE_0", authorization)
+        .output();
+    matches!(output, Ok(out) if out.status.success())
+}
+
+/// Standard base64 (RFC 4648 with padding) for the HTTP basic-auth header.
+fn base64_encode(input: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
+}
+
 /// Resolves the tree the landing change set is computed against: the remote
 /// head's tree when the branch exists on the remote (an earlier landing may
 /// have moved the remote tree past the base; a file removed locally that the
@@ -1157,7 +1196,7 @@ fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::pa
 /// base would report an empty change set and silently drop them. A head whose
 /// objects are still locally unavailable is a typed error.
 fn remote_head_tree(
-    _graphql: &GraphqlSession<'_>,
+    token: &str,
     existing: Option<&Value>,
     fallback_base: Option<&str>,
     remote_branch: &str,
@@ -1173,10 +1212,10 @@ fn remote_head_tree(
         .ok_or_else(|| miette!("branch ref response is malformed: missing target.oid"))?;
     // Fetch directly from the target repository URL — never the ambient
     // `origin` remote, which may point at a different repository (or not
-    // exist) in this worktree.
-    let repo_url = format!("https://github.com/{owner}/{repo}.git");
-    if git(&["fetch", "--quiet", &repo_url, head]).is_err() {
-        git(&["fetch", "--quiet", &repo_url, remote_branch]).ok();
+    // exist) in this worktree. The fetch is App-authenticated (private
+    // repos); token never appears in URLs or diagnostics.
+    if !git_fetch_authenticated(token, owner, repo, head) {
+        git_fetch_authenticated(token, owner, repo, remote_branch);
     }
     if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
         return Ok(tree);
@@ -1192,8 +1231,8 @@ fn remote_head_tree(
         return Ok(tree);
     }
     bail!(
-        "cannot read the remote head {head} tree of `{remote_branch}` locally — fetch from \
-         {repo_url} first or pass --base <ref>"
+        "cannot read the remote head {head} tree of `{remote_branch}` locally — run \
+         `git fetch https://github.com/{owner}/{repo}.git` first or pass --base <ref>"
     )
 }
 
@@ -2683,6 +2722,17 @@ mod tests {
             parse_github_owner_repo("https://github.com/arbsec/orchestraitor"),
             Some(("arbsec".to_string(), "orchestraitor".to_string()))
         );
+        // The explicit ssh:// scheme with a user in the authority.
+        assert_eq!(
+            parse_github_owner_repo("ssh://git@github.com/arbsec/orchestraitor.git"),
+            Some(("arbsec".to_string(), "orchestraitor".to_string()))
+        );
+        assert_eq!(
+            parse_github_owner_repo("ssh://github.com/arbsec/orchestraitor"),
+            Some(("arbsec".to_string(), "orchestraitor".to_string()))
+        );
+        // A non-GitHub host stays rejected in every scheme shape.
+        assert_eq!(parse_github_owner_repo("ssh://git@gitlab.com/o/r"), None);
         // A local filesystem path or an absolute scp-ish path is NOT a repo.
         assert_eq!(parse_github_owner_repo("/tmp/.tmpabc/repo"), None);
         assert_eq!(parse_github_owner_repo("https://gitlab.com/o/r"), None);

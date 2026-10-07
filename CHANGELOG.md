@@ -79,13 +79,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   replayed verbatim, never executed. Every successful append records an
   audit event with the delegation chain (`chain_source: client-asserted`,
   `claimed:`-prefixed labels); the audit event carries only a summary,
-  never record content. In this slice the MCP tool requires a
-  session-scoped in-memory store (append-only row ids observable across
-  the session); without one the gateway disables the tool and calls are
-  refused with `decision_record_unconfigured`. Documented in
+  never record content. The MCP tool requires a session-scoped in-memory
+  store (append-only row ids observable across the session); without one the
+  gateway disables the tool and calls are refused with
+  `decision_record_unconfigured`. Documented in
   [docs/cli/orc-decision-record.md](docs/cli/orc-decision-record.md).
-- The `board.move` coordinator decision tool (spec `10-orchestrator.md`
-  §9.39, §9.40, §9.43; #333): guarded board status-class transitions —
+- The `board.move` coordinator decision tool: guarded board status-class
+  transitions —
   never a raw provider write. Transitions validate against the
   workflow-policy matrix (scheduling forward, pause/resume, completion,
   retirement; `Triage` is a human/PM gate both ways, reopening `Done` and
@@ -113,15 +113,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   requested field or edge writes refuse `out-of-scope`, never silently
   narrowed. Request values are untrusted input (§6.1) — a hostile status
   name matches nothing and refuses `unknown-status`. Surfaced as
-  `orc board guarded-move` (against the deterministic in-memory fixture
-  board in this slice — the sqlite provider is the #318 follow-up) and as
-  the `board.move` MCP gateway tool when a board provider AND lease
-  registry are configured; when either is missing, the gateway's tool
-  router disables both board tool routes. Documented in
+  `orc board guarded-move` and as the `board.move` MCP gateway tool when a
+  board provider AND lease registry are configured; when either is missing,
+  the gateway's tool router disables both board tool routes. Documented in
   [docs/cli/orc-board.md](docs/cli/orc-board.md).
-- The `board.query` coordinator decision tool (spec `10-orchestrator.md`
-  §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
-  with two modes — a conjunctive filter search (item type, status, typed
+- The `board.query` coordinator decision tool: a read-only, typed query over
+  a `BoardProvider` with two modes — a conjunctive filter search (item type, status, typed
   field values) returning typed items (id, type, title, status, fields,
   dependency edges), never raw provider JSON; and a blocked-graph mode that
   walks the board's native `blockedBy` edges transitively with back-edge
@@ -131,13 +128,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   carrying the tool name, the filters as data (string values truncated), a
   result summary, and the §9.25.1 delegation chain labeled
   `chain_source: client-asserted` with a `claimed:` prefix per label — the
-  tool never fabricates verified identity. In this slice the event store is
-  per-invocation (written and hash-chain-validated, not yet durable);
-  persistence lands with the daemon event-store wiring (§9.17). Filter
-  values are untrusted input (§6.1): instruction-shaped values are matched
-  as inert data and never executed. Surfaced as `orc board query` (against a
-  deterministic in-memory fixture board in this slice — the sqlite provider
-  is the #318 follow-up) and as the `board.query` MCP gateway tool when a
+  tool never fabricates verified identity. The event store is per-invocation
+  (written and hash-chain-validated, not yet durable). Filter values are
+  untrusted input: instruction-shaped values are matched as inert
+  data and never executed. Surfaced as `orc board query` and as the
+  `board.query` MCP gateway tool when a
   board provider is configured; when none is, the gateway's tool router
   disables the route (hidden from `tools/list`, calls rejected). Documented
   in [docs/cli/orc-board.md](docs/cli/orc-board.md).
@@ -146,15 +141,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (board config, explicit board auth, optional GitHub App service identity), first
   invocation, what a normal pass does, how to read `loop.db` rows and the end-of-run
   summary, stall/timeout/budget-stop semantics, safe shutdown, and the fixed bootstrap
-  guard set. Served on GitHub Pages with the rest of `book/` (the loop runner itself lands
-  with #434). Documented at
+  guard set. Served on GitHub Pages with the rest of `book/`. Documented at
   [book/src/getting-started/loop-quickstart.md](book/src/getting-started/loop-quickstart.md)
   and linked from the README.
 - GitHub Pages documentation site (the mdBook under `book/` builds and deploys
   via the previously disabled `docs.yml` workflow): the book introduction now
   reflects the loop-first product framing and links to the rendered repo docs
-  instead of broken out-of-tree paths. Site goes live on the first push to
-  `main` that touches `book/**` or `docs/**`.
+  instead of broken out-of-tree paths.
 - `orc github push-branch`: lands a local branch's tree as ONE App-signed
   squashed commit on the remote branch via GraphQL `createCommitOnBranch` —
   the agent push path for repositories with `required_signatures` rulesets,
@@ -577,13 +570,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   replayed verbatim, never executed. Every successful append records an
   audit event with the delegation chain (`chain_source: client-asserted`,
   `claimed:`-prefixed labels); the audit event carries only a summary,
-  never record content. In this slice the MCP tool requires a
-  session-scoped in-memory store (append-only row ids observable across
-  the session); without one the gateway disables the tool and calls are
-  refused with `decision_record_unconfigured`. Documented in
+  never record content. The MCP tool requires a session-scoped in-memory
+  store (append-only row ids observable across the session); without one the
+  gateway disables the tool and calls are refused with
+  `decision_record_unconfigured`. Documented in
   [docs/cli/orc-decision-record.md](docs/cli/orc-decision-record.md).
-- The `board.move` coordinator decision tool (spec `10-orchestrator.md`
-  §9.39, §9.40, §9.43; #333): guarded board status-class transitions —
+- The `board.move` coordinator decision tool: guarded board status-class
+  transitions —
   never a raw provider write. Transitions validate against the
   workflow-policy matrix (scheduling forward, pause/resume, completion,
   retirement; `Triage` is a human/PM gate both ways, reopening `Done` and
@@ -611,15 +604,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   requested field or edge writes refuse `out-of-scope`, never silently
   narrowed. Request values are untrusted input (§6.1) — a hostile status
   name matches nothing and refuses `unknown-status`. Surfaced as
-  `orc board guarded-move` (against the deterministic in-memory fixture
-  board in this slice — the sqlite provider is the #318 follow-up) and as
-  the `board.move` MCP gateway tool when a board provider AND lease
-  registry are configured; when either is missing, the gateway's tool
-  router disables both board tool routes. Documented in
+  `orc board guarded-move` and as the `board.move` MCP gateway tool when a
+  board provider AND lease registry are configured; when either is missing,
+  the gateway's tool router disables both board tool routes. Documented in
   [docs/cli/orc-board.md](docs/cli/orc-board.md).
-- The `board.query` coordinator decision tool (spec `10-orchestrator.md`
-  §9.39, §9.40, §9.43; #332): a read-only, typed query over a `BoardProvider`
-  with two modes — a conjunctive filter search (item type, status, typed
+- The `board.query` coordinator decision tool: a read-only, typed query over
+  a `BoardProvider` with two modes — a conjunctive filter search (item type, status, typed
   field values) returning typed items (id, type, title, status, fields,
   dependency edges), never raw provider JSON; and a blocked-graph mode that
   walks the board's native `blockedBy` edges transitively with back-edge
@@ -629,13 +619,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   carrying the tool name, the filters as data (string values truncated), a
   result summary, and the §9.25.1 delegation chain labeled
   `chain_source: client-asserted` with a `claimed:` prefix per label — the
-  tool never fabricates verified identity. In this slice the event store is
-  per-invocation (written and hash-chain-validated, not yet durable);
-  persistence lands with the daemon event-store wiring (§9.17). Filter
-  values are untrusted input (§6.1): instruction-shaped values are matched
-  as inert data and never executed. Surfaced as `orc board query` (against a
-  deterministic in-memory fixture board in this slice — the sqlite provider
-  is the #318 follow-up) and as the `board.query` MCP gateway tool when a
+  tool never fabricates verified identity. The event store is per-invocation
+  (written and hash-chain-validated, not yet durable). Filter values are
+  untrusted input: instruction-shaped values are matched as inert
+  data and never executed. Surfaced as `orc board query` and as the
+  `board.query` MCP gateway tool when a
   board provider is configured; when none is, the gateway's tool router
   disables the route (hidden from `tools/list`, calls rejected). Documented
   in [docs/cli/orc-board.md](docs/cli/orc-board.md).
@@ -644,15 +632,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   (board config, explicit board auth, optional GitHub App service identity), first
   invocation, what a normal pass does, how to read `loop.db` rows and the end-of-run
   summary, stall/timeout/budget-stop semantics, safe shutdown, and the fixed bootstrap
-  guard set. Served on GitHub Pages with the rest of `book/` (the loop runner itself lands
-  with #434). Documented at
+  guard set. Served on GitHub Pages with the rest of `book/`. Documented at
   [book/src/getting-started/loop-quickstart.md](book/src/getting-started/loop-quickstart.md)
   and linked from the README.
 - GitHub Pages documentation site (the mdBook under `book/` builds and deploys
   via the previously disabled `docs.yml` workflow): the book introduction now
   reflects the loop-first product framing and links to the rendered repo docs
-  instead of broken out-of-tree paths. Site goes live on the first push to
-  `main` that touches `book/**` or `docs/**`.
+  instead of broken out-of-tree paths.
 - `orc github push-branch`: lands a local branch's tree as ONE App-signed
   squashed commit on the remote branch via GraphQL `createCommitOnBranch` —
   the agent push path for repositories with `required_signatures` rulesets,

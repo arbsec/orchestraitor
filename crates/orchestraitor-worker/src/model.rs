@@ -55,12 +55,24 @@ pub(super) async fn call_model(
     loop {
         state.model_calls += 1;
         let started = std::time::Instant::now();
+        // Wall-clock start of THIS attempt: the ledger's `started_at` must
+        // reflect when the call began, not when the (later) record write
+        // happens — `completed_at` + `wall_ms` otherwise contradict each
+        // other (zero-span timestamps vs. real elapsed time).
+        let started_at = chrono::Utc::now();
         match transport.stream(request.clone()).await {
             Ok(events) => {
                 match collect_events(events) {
                     Ok((text, usage)) => {
                         accumulate_usage(state, config, usage);
-                        record_call_cost(config, &request, usage, CallOutcome::Completed, started);
+                        record_call_cost(
+                            config,
+                            &request,
+                            usage,
+                            CallOutcome::Completed,
+                            started,
+                            started_at,
+                        );
                         return Ok(text);
                     }
                     Err((failure, usage)) => {
@@ -68,13 +80,27 @@ pub(super) async fn call_model(
                         // produced usage before the stream went invalid:
                         // record the failed call with any partial usage so
                         // the ledger reflects the spend (spec §9.26.4).
-                        record_call_cost(config, &request, usage, CallOutcome::Failed, started);
+                        record_call_cost(
+                            config,
+                            &request,
+                            usage,
+                            CallOutcome::Failed,
+                            started,
+                            started_at,
+                        );
                         return Err(failure);
                     }
                 }
             }
             Err(ProviderTransportError::RequestFailed { .. }) => {
-                record_call_cost(config, &request, None, CallOutcome::Failed, started);
+                record_call_cost(
+                    config,
+                    &request,
+                    None,
+                    CallOutcome::Failed,
+                    started,
+                    started_at,
+                );
                 if retries >= budgets.max_provider_retries {
                     return Err(TypedFailure {
                         class: FailureClass::ProviderError,
@@ -87,14 +113,28 @@ pub(super) async fn call_model(
                 tokio::time::sleep(delay).await;
             }
             Err(ProviderTransportError::InvalidEvent) => {
-                record_call_cost(config, &request, None, CallOutcome::Failed, started);
+                record_call_cost(
+                    config,
+                    &request,
+                    None,
+                    CallOutcome::Failed,
+                    started,
+                    started_at,
+                );
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-invalid-event",
                 });
             }
             Err(ProviderTransportError::CapabilityUnavailable { .. }) => {
-                record_call_cost(config, &request, None, CallOutcome::Failed, started);
+                record_call_cost(
+                    config,
+                    &request,
+                    None,
+                    CallOutcome::Failed,
+                    started,
+                    started_at,
+                );
                 return Err(TypedFailure {
                     class: FailureClass::ProviderError,
                     reason: "provider-capability-unavailable",
@@ -267,6 +307,7 @@ fn record_call_cost(
     usage: Option<TokenCount>,
     outcome: CallOutcome,
     started: std::time::Instant,
+    started_at: chrono::DateTime<chrono::Utc>,
 ) {
     let (Some(attribution), Some(sink)) = (&config.attribution, &config.cost_sink) else {
         return;
@@ -281,7 +322,7 @@ fn record_call_cost(
                 u.cached_tokens,
             )
         });
-    let now = chrono::Utc::now();
+    let completed_at = chrono::Utc::now();
     let entry = CostEntry {
         model: request.model_id.clone(),
         provider: request.provider_id.clone(),
@@ -301,8 +342,8 @@ fn record_call_cost(
         // number gives the row a stable, unique, dedupable key.
         request_id: format!("{}/call-{call_number}", attribution.session.as_str()),
         parent_request_id: None,
-        started_at: now,
-        completed_at: now,
+        started_at,
+        completed_at,
         wall_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         monetary_cost_measured: None,
         monetary_cost_estimated: None,
