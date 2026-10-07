@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# pr-review-local: run `coderabbit review --agent` LOCALLY against the current
+# PR head for fast remediation-loop feedback — without the GitHub trigger or
+# the poll cycle. The GitHub-side CodeRabbit review generation against the
+# final head REMAINS the recorded convergence evidence before merge (see
+# SKILL.md step 6/CONVERGE); this local run only accelerates iteration.
+#
+# Read-only: this script NEVER posts to GitHub. It only reads PR state
+# (the mergeable gate) and runs the local CLI.
+#
+# Flow:
+#   1. Resolve the PR for the current branch (or --pr <number>).
+#   2. Reuse the shared mergeable gate (`orc_lib_require_mergeable`, same
+#      pattern as pr-request-review/pr-review-post/pr-comment): a
+#      conflicting/unmergeable PR is refused (typed, exit 5), consistent
+#      with the no-review-while-conflicting rule.
+#   3. Run `coderabbit review --agent` in the current worktree (environment
+#      passes through). A missing binary is a typed error — falling back to
+#      an `@coderabbitai review` trigger is NOT automatic.
+#   4. Print the raw findings to stdout.
+#   5. --json wraps the output as {pr, head, findings_raw} via jq (when jq
+#      is available; without jq, --json is a typed config error).
+#
+# Exit codes: 0 = review completed (regardless of findings);
+# 2 = config/state error (no PR for branch, jq missing for --json);
+# 3 = coderabbit CLI failure (non-zero exit);
+# 5 = mergeable-gate refusal (PR conflicts with base / unproven state).
+# Missing coderabbit binary: exit 3 with the typed install message.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-review-local" "Run coderabbit review --agent locally against the current PR head for fast remediation feedback. Read-only: never posts to GitHub. Flags: --pr <number> (default: the PR for the current branch). --json wraps stdout as {pr, head, findings_raw}."
+  exit "$ORC_OK"
+fi
+
+# --- PR resolution --------------------------------------------------------------
+# --pr <number> wins; otherwise resolve the PR for the current branch via
+# `gh pr list --head <branch>` (exact head match; empty = no PR yet).
+PR=""
+REST=()
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --pr)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --pr requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      PR="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --pr=*) PR="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    *)      REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+  esac
+done
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ -z "$PR" ]; then
+  PR="$(orc_lib_gh pr list --repo "$REPO" --head "$BRANCH" --state all \
+        --json number --limit 1 --jq '.[0].number // ""')" ||
+    { echo "error: could not look up the PR for branch $BRANCH" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+fi
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: no PR found for branch '$BRANCH' — open one with pr-create or pass --pr <number>" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+HEAD_SHA="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid --jq '.headRefOid')" ||
+  { echo "error: cannot read PR #$PR head" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+
+# --- Mergeable gate (shared; identical rule as the GitHub-trigger scripts) ------
+# A local review of a conflicting PR would remediate a diff that cannot land;
+# the typed refusal (exit 5) is the same no-review-while-conflicting rule.
+orc_lib_require_mergeable "$PR" "$REPO"
+
+# --- coderabbit CLI --------------------------------------------------------------
+if ! command -v coderabbit >/dev/null 2>&1; then
+  echo "error: coderabbit CLI not installed/authed — see coderabbit docs; falling back to @coderabbitai review is NOT automatic" >&2
+  exit "$ORC_ERR_POLICY"
+fi
+
+set +e
+FINDINGS_RAW="$(coderabbit review --agent)"
+CR_RC=$?
+set -e
+if [ "$CR_RC" -ne 0 ]; then
+  echo "error: coderabbit review --agent failed with exit code $CR_RC (output above, if any)" >&2
+  exit "$ORC_ERR_POLICY"
+fi
+
+# --- Output ----------------------------------------------------------------------
+if [ "$OPT_JSON" = true ]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: --json requires jq, which is not installed" >&2
+    exit "$ORC_ERR_CONFIG"
+  }
+  jq -n --arg pr "$PR" --arg head "$HEAD_SHA" --arg findings_raw "$FINDINGS_RAW" \
+    '{pr: ($pr | tonumber), head: $head, findings_raw: $findings_raw}'
+else
+  printf '%s\n' "$FINDINGS_RAW"
+fi
