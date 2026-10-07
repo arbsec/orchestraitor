@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# audit-pr-commits: read-only commit-hygiene audit of a PR's commits (base..head).
+# audit-pr-commits: read-only commit-hygiene audit of a PR's recorded commits.
 #
 # Nothing in the local hook chain (lefthook: `cog verify`,
 # check-unsigned-bot-commits) runs on agent commits: they are created via the
@@ -88,25 +88,35 @@ if [ -z "$HEAD_OID" ] || [ "$HEAD_OID" = "null" ]; then
   exit "$ORC_ERR_CONFIG"
 fi
 
-# --- Fetch the commit list (compare base...head; reads stay ambient) -----------
-COMPARE_ARGS=(api "repos/$REPO/compare/$BASE_REF...$HEAD_OID"
-  --jq '.commits')
-COMPARE_JSON=""
-COMPARE_JSON="$(orc_lib_gh "${COMPARE_ARGS[@]}")" || {
-  echo "error: cannot read PR #$PR commits (compare $BASE_REF...$HEAD_OID)" >&2
+# --- Fetch the commit list (the PR's RECORDED commits; reads stay ambient) ----
+# `GET /pulls/<n>/commits` returns exactly the commits the PR carries — for
+# OPEN and MERGED/CLOSED PRs alike. A `compare/base...head` would be wrong for
+# a merged PR (the head commits are already ON the base, so the comparison is
+# empty) and silently truncates at 250 commits. gh 2.102 refuses `--slurp`
+# combined with `--jq`, so the pages are slurped raw and merged locally:
+# `add` concatenates the per-page arrays into one flat commit array.
+COMMIT_ARGS=(api --paginate --slurp "repos/$REPO/pulls/$PR/commits?per_page=100")
+COMMITS_JSON=""
+COMMITS_JSON="$(orc_lib_gh "${COMMIT_ARGS[@]}" | jq -ce 'add // []')" || {
+  echo "error: cannot read PR #$PR commits (pulls/$PR/commits)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
-if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$COMPARE_JSON"; then
-  echo "error: unexpected gh compare output for PR #$PR (expected a commit array)" >&2
+if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$COMMITS_JSON"; then
+  echo "error: unexpected gh commits output for PR #$PR (expected a commit array)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 fi
+if [ "$(jq 'length' <<<"$COMMITS_JSON")" -eq 0 ]; then
+  echo "error: PR #$PR reports zero commits (empty or deleted head branch?)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
 
-# --- Classify (pure jq over the compare payload) -------------------------------
-# Same filter classifies the live payload and the mock-compare fixture:
+# --- Classify (pure jq over the recorded-commits payload) ----------------------
+# Same filter classifies the live payload and a mock commits fixture:
 # a mock on $GH_BIN substitutes the transport, never this logic.
 AUDIT_JSON="$(jq -e --arg conventional_re "$CONVENTIONAL_RE" --arg pr "$PR" \
   --arg base_ref "$BASE_REF" --arg head_ref "$HEAD_REF" '
-  def allowed: ["arbsec-agent[bot]", "renovate[bot]"] | index(.) != null;
+  def allowed: ((.author.login // "") as $login
+    | ["arbsec-agent[bot]", "renovate[bot]"] | index($login) != null);
   def webflow: . == "web-flow" or . == "GitHub";
   def subject: (.commit.message | split("\n")[0]);
   def violations:
@@ -142,7 +152,7 @@ AUDIT_JSON="$(jq -e --arg conventional_re "$CONVENTIONAL_RE" --arg pr "$PR" \
     } ],
     violation_count: ([ .[] | violations | length ] | add),
     verdict: (if ([ .[] | violations | length ] | add) == 0 then "clean" else "violations" end)
-  }' <<<"$COMPARE_JSON")" || {
+  }' <<<"$COMMITS_JSON")" || {
   echo "error: failed to classify PR #$PR commits (jq)" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }

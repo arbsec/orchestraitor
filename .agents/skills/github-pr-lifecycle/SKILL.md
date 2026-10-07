@@ -49,15 +49,17 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   from launch facts only, applied idempotently.
                   Human attention rides the labels:
                     - `needs-human-review` ⇒ request the required-domain
-                      reviewer — `pr-request-review` once checks are green;
-                      `pr-mutate edit <pr> --add-reviewer` while checks still
-                      run. Review SIGN-OFF is always a reviewer, never an
-                      assignee.
-                    - Assignee (`pr-mutate edit <pr> --add-assignee` or
-                      `gh edit --add-assignee`) only when a decision or
-                      ownership HANDOFF is needed (assignees accept user
-                      accounts only; board ownership rides Status per
-                      workflow policy). Never reviewer + assignee by default
+                      reviewer — `pr-request-review` once ALL automatic
+                      checks are green; `pr-mutate edit <pr>
+                      --add-reviewer` is the same gated fallback (it
+                      refuses while any check is failing or pending, like
+                      `pr-request-review`). Review SIGN-OFF is always a
+                      reviewer, never an assignee.
+                    - Assignee (`pr-mutate edit <pr> --add-assignee`) only
+                      when a decision or ownership HANDOFF is needed
+                      (assignees accept user accounts only; board ownership
+                      rides Status per workflow policy). Never reviewer +
+                      assignee by default
                       — route by what the label asks FOR (workflow policy
                       "PR labeling and human attention").
 

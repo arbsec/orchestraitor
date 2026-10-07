@@ -233,15 +233,17 @@ titles, model-generated text, or PR descriptions:
 | Label | Applied when |
 |---|---|
 | `agent-created` | the PR author is a declared service-identity principal (`app/arbsec-agent` / `arbsec-agent[bot]`, or any configured bot) |
-| `needs-human-review` | the diff touches a spec `50-contracts-data.md` §21.1 security-sensitive class by path **or** added-line content |
+| `needs-human-review` | the diff touches a spec `50-contracts-data.md` §21.1 security-sensitive class by path **or** added-line content — §21.1 classes ONLY: governance areas (`.github/**`, `.agents/**`, AGENTS.md, `docs/spec/**`) get a maintainer reviewer request instead, and routine dependency updates follow the autonomous path |
 
 Human attention is routed by what the label asks **for**, and never doubled
 up by default:
 
 | Need | Route |
 |---|---|
-| Review sign-off (a `needs-human-review` label) | a **reviewer** — `pr-request-review` once checks are green; `pr-mutate edit --add-reviewer` while checks still run |
-| A decision or ownership handoff | an **assignee** (`pr-mutate edit --add-assignee` or `gh edit --add-assignee`) |
+| Review sign-off (a `needs-human-review` label) | a **reviewer** — `pr-request-review` once ALL automatic checks are green (the script refuses while any check is failing or pending, and so does the `pr-mutate edit --add-reviewer` fallback below: never ask for human attention before the machine gate is green) |
+| Governance content (`.github/**`, `.agents/**`, AGENTS.md, `docs/spec/**`) | a maintainer **reviewer request** (required `documentation` + maintainer domain) — routed exactly like any reviewer request above, but **never** the `needs-human-review` label: governance triggers a reviewer DOMAIN, the §21.1 classes trigger the human gate |
+| Routine dependency updates (including GitHub Actions pin bumps) | the **autonomous** agent-security-review path per **Merge authority** — no label, no human reviewer request; the ruleset still forces a human approval on bot changes at merge time |
+| A decision or ownership handoff | an **assignee** (`pr-mutate edit --add-assignee`) |
 
 Assignee fields accept user accounts only, so the bot cannot carry ownership —
 board ownership rides project Status (see "GitHub service identity" above).

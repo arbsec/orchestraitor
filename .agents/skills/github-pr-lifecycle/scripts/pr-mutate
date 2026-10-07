@@ -53,6 +53,40 @@ REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 [ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")
 
+# Reviewer-request gate (workflow policy "PR labeling and human attention"):
+# an `edit --add-reviewer` asks for human attention exactly like
+# `pr-request-review`, so it carries the same gate — ALL automatic checks
+# must pass first (the machine finishes its own verification before
+# consuming human attention). Any other edit/ready/close is unaffected.
+if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-reviewer"; then
+  REASONS=()
+  CHECKS_JSON="$(mktemp)"
+  if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
+    REASONS+=("pr-checks could not classify checks")
+  fi
+  if [ -s "$CHECKS_JSON" ]; then
+    ALL_PASSED="$(jq -r '.all_passed // false' "$CHECKS_JSON")"
+    ANY_PENDING="$(jq -r '.any_pending // false' "$CHECKS_JSON")"
+    ANY_FAILING="$(jq -r '.any_failing // false' "$CHECKS_JSON")"
+    if [ "$ANY_FAILING" = "true" ]; then
+      FAILING_NAMES="$(jq -r '[.checks[] | select(.classification == "fail") | .name] | join(", ")' "$CHECKS_JSON")"
+      REASONS+=("checks failing: ${FAILING_NAMES:-unknown}")
+    fi
+    if [ "$ANY_PENDING" = "true" ]; then
+      PENDING_NAMES="$(jq -r '[.checks[] | select(.classification == "pending") | .name] | join(", ")' "$CHECKS_JSON")"
+      REASONS+=("checks pending: ${PENDING_NAMES:-unknown}")
+    fi
+    if [ "$ALL_PASSED" != "true" ] && [ "$ANY_FAILING" != "true" ] && [ "$ANY_PENDING" != "true" ]; then
+      REASONS+=("checks not all passed (all_passed=$ALL_PASSED)")
+    fi
+  fi
+  rm -f "$CHECKS_JSON"
+  if [ "${#REASONS[@]}" -gt 0 ]; then
+    echo "{\"pr\":$PR,\"requested\":false,\"reviewer\":\"--add-reviewer\",\"reasons\":[$(printf '"%s",' "${REASONS[@]}" | sed 's/,$//')]}" >&2
+    exit "$ORC_ERR_BLOCKED"
+  fi
+fi
+
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh ${ARGS[*]}" >&2
   echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2

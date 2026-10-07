@@ -47,6 +47,29 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
   unsigned bot-identity commit never verifies (attribution metadata is not a
   signature; the `required_signatures` ruleset blocks it at merge).
 
+## committer-mismatch
+
+- **Detection**: `audit-pr-commits` class `committer-mismatch`; the
+  committer login exists, differs from the author login, and is not
+  GitHub's `web-flow`/`GitHub` committer. `web-flow` is the EXPECTED
+  committer on App-API-created commits (`createCommitOnBranch` produces
+  GitHub-signing commits whose committer is `web-flow`) — the audit never
+  flags it; anything else is a violation.
+- **Why it happens**: the commit was created outside the App API with an
+  ambient or tool-injected committer — e.g. a renovate-authored commit
+  committed by `arbsec-agent[bot]` from a locally run rebase, or a plain
+  `git commit` where the local git config committer differs from the
+  author. Committer metadata alone proves nothing (it is attacker-
+  controlled); the audit reports it because a committer/author split on
+  this repo means the commit did not take the intended landing path.
+- **Remediation**: recreate the commit via the verified-commit path
+  (App-API `createCommitOnBranch`); the recreated commit carries the
+  `web-flow` committer automatically — never set committer metadata by
+  hand. Tree content is unchanged; only authorship/committer metadata is
+  re-derived. If the commit was part of a rebase of someone else's
+  commits, replay ALL commits oldest→newest so the whole chain lands
+  App-signed.
+
 ## unverified-commit
 
 - **Detection**: `audit-pr-commits` class `unverified-commit`;
