@@ -8,7 +8,7 @@
 //! infinite retry (issue #310; spec `10-orchestrator.md` §9.24).
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use orchestraitor_provider_api::transport::{MessageRole, ModelMessage, ProviderTransport};
 use tracing::{debug, warn};
@@ -17,10 +17,14 @@ use crate::action::{ActionRejection, WorkerAction, parse_action};
 use crate::delivery::{DeliveryOutcome, DeliveryRequest, DeliverySink};
 use crate::error::WorkerError;
 use crate::mediator::BashMediator;
-use crate::model::{RunState, call_model};
-use crate::prompt::{SYSTEM_PROMPT, task_prompt};
+use crate::model::{
+    RunState, SubsessionEvent, SubsessionEventOutcome, SubsessionEventRefusal, call_model,
+};
+use crate::prompt::task_prompt;
 use crate::result::{FailureClass, RunStatus, TypedFailure, UsageTotals, WorkerConfig, WorkerRun};
+use crate::subsession::{SubsessionParent, run_subsession};
 use crate::task::WorkerTask;
+use crate::tooldef::ToolMechanism;
 use crate::tools::ToolExecutor;
 
 /// Internal outcome of one attempt.
@@ -57,7 +61,12 @@ pub async fn run_worker(
     config: &WorkerConfig,
 ) -> Result<WorkerRun, WorkerError> {
     let root = canonical_root(worktree)?;
-    let mut executor = ToolExecutor::new(&root, bash);
+    let policy = crate::tooldef::ToolPolicy {
+        declared: config.tools.clone(),
+        allowed_internal: std::collections::BTreeSet::new(),
+        subsession_depth: config.subsession_depth,
+    };
+    let mut executor = ToolExecutor::new(&root, bash).with_policy(policy);
     let budgets = &config.budgets;
     let deadline = budgets.run_deadline();
     let started = Instant::now();
@@ -67,6 +76,14 @@ pub async fn run_worker(
         usage: UsageTotals::default(),
         spend_soft_cap_exceeded: false,
         progress_beat: 0,
+        subsession_events: Vec::new(),
+        subsession_wall_secs: 0,
+        worktree_root: root.clone(),
+        project: "local".to_string(),
+        repository: root.display().to_string(),
+        session_id: format!("run-{}", task.id),
+        transport,
+        progress: config.progress.clone(),
     };
 
     let mut attempts = 0_u32;
@@ -166,13 +183,17 @@ pub async fn run_worker(
     clippy::too_many_arguments,
     reason = "attempt state is threaded explicitly; grouping into a context struct would hide the data flow this thin slice needs to audit"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the attempt loop's budget + declared-tool branches are the audited surface; splitting them would scatter the exhaustion semantics the reviewer must see together"
+)]
 async fn run_attempt(
     task: &WorkerTask,
     transport: &dyn ProviderTransport,
     delivery: &dyn DeliverySink,
     config: &WorkerConfig,
     executor: &mut ToolExecutor<'_>,
-    state: &mut RunState,
+    state: &mut RunState<'_>,
     replan_note: Option<&'static str>,
     started: Instant,
 ) -> AttemptOutcome {
@@ -180,7 +201,7 @@ async fn run_attempt(
     let mut messages = vec![
         ModelMessage {
             role: MessageRole::System,
-            content: SYSTEM_PROMPT.to_string(),
+            content: crate::prompt::system_prompt(config),
         },
         ModelMessage {
             role: MessageRole::User,
@@ -250,6 +271,41 @@ async fn run_attempt(
             }
             Ok(action) => {
                 emit_beat(config, state);
+                // Declared-tool subagent dispatch (issue #535, T3): handled
+                // HERE, not in the executor — the child await needs the
+                // transport and the run context, and the beats below must
+                // cover the child window (the supervision-gap fix).
+                if let WorkerAction::DeclaredTool { tool_id, question } = &action {
+                    let tool = config.tools.iter().find(|tool| &tool.id == tool_id);
+                    let turn = match tool.map(|tool| &tool.mechanism) {
+                        Some(ToolMechanism::Subagent { .. }) => {
+                            let outcome = dispatch_subagent(
+                                config,
+                                state,
+                                executor,
+                                tool_id,
+                                question.as_deref(),
+                            )
+                            .await;
+                            crate::tools::ToolTurn {
+                                observation: outcome,
+                                mediation_failure: None,
+                            }
+                        }
+                        _ => executor.dispatch(&action).await,
+                    };
+                    let mediation_failure = turn.mediation_failure;
+                    messages.push(ModelMessage {
+                        role: MessageRole::User,
+                        content: turn.observation,
+                    });
+                    last_progress = Instant::now();
+                    format_errors = 0;
+                    if let Some(reason) = mediation_failure {
+                        return attempt_failure(FailureClass::MediationRefused, reason);
+                    }
+                    continue;
+                }
                 let turn = executor.dispatch(&action).await;
                 let mediation_failure = turn.mediation_failure;
                 messages.push(ModelMessage {
@@ -268,6 +324,121 @@ async fn run_attempt(
 
 fn attempt_failure(class: FailureClass, reason: &'static str) -> AttemptOutcome {
     AttemptOutcome::Failed(TypedFailure { class, reason })
+}
+
+/// Runs one declared subagent tool as a sub-session (issue #535, T3) and
+/// renders the model-facing observation. Beats around the child await are
+/// emitted by [`run_subsession`](crate::subsession::run_subsession) so the
+/// supervisor's staleness detection covers the child window.
+///
+/// Refusals (role unrouted, budget carve impossible) are observation text
+/// fed back to the model, never run-fatal: the parent can re-plan around a
+/// failed auxiliary question. The child's typed failure rides the outcome
+/// into the observation. A parent-side receipt records the dispatch so the
+/// run's receipt stream is complete (the child's own receipts ride the
+/// outcome/decision record).
+async fn dispatch_subagent(
+    config: &WorkerConfig,
+    state: &mut RunState<'_>,
+    executor: &mut ToolExecutor<'_>,
+    tool_id: &str,
+    question: Option<&str>,
+) -> String {
+    let Some(tool) = config.tools.iter().find(|tool| tool.id == tool_id) else {
+        state
+            .subsession_events
+            .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
+                tool_id: tool_id.to_string(),
+                reason: "tool-not-allowed",
+            }));
+        executor.record_subagent_refusal(tool_id, "tool-not-allowed");
+        return "tool call refused: tool-not-allowed".to_string();
+    };
+    let ToolMechanism::Subagent { role, .. } = &tool.mechanism else {
+        state
+            .subsession_events
+            .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
+                tool_id: tool_id.to_string(),
+                reason: "not-a-subagent-tool",
+            }));
+        executor.record_subagent_refusal(tool_id, "not-a-subagent-tool");
+        return "tool call refused: not-a-subagent-tool".to_string();
+    };
+    let Some((provider, model)) = config.subsession_routing.get(role) else {
+        state
+            .subsession_events
+            .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
+                tool_id: tool_id.to_string(),
+                reason: "subsession-role-unrouted",
+            }));
+        executor.record_subagent_refusal(tool_id, "subsession-role-unrouted");
+        return format!("tool call refused: subsession-role-unrouted ({role})");
+    };
+    // The parent context: the run's remaining wall clock, depth, and
+    // attribution labels. The deadline carve computes from the tool budget
+    // inside run_subsession.
+    let remaining = config
+        .budgets
+        .run_deadline()
+        .saturating_sub(Duration::from_secs(state.subsession_wall_secs));
+    let parent = SubsessionParent {
+        worktree_root: state.worktree_root.clone(),
+        remaining,
+        depth: config.subsession_depth,
+        prior_daily_spend_usd: config.prior_daily_spend_usd,
+        role: role.clone(),
+        project: state.project.clone(),
+        repository: state.repository.clone(),
+        session_id: state.session_id.clone(),
+    };
+    match Box::pin(run_subsession(
+        &parent,
+        tool,
+        question,
+        state.transport,
+        (provider.as_str(), model.as_str()),
+        state.progress.as_ref(),
+    ))
+    .await
+    {
+        Ok(outcome) => {
+            executor.record_subagent_completion(tool_id, outcome.status == RunStatus::Completed);
+            state
+                .subsession_events
+                .push(SubsessionEvent::Outcome(SubsessionEventOutcome {
+                    tool_id: tool_id.to_string(),
+                    role: role.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: outcome.status,
+                    usage: outcome.usage,
+                    routing: outcome.routing.clone(),
+                }));
+            // Size cap: the tool budget's max_result_bytes, floor 0-safe.
+            let cap = usize::try_from(tool.budget.max_result_bytes).unwrap_or(usize::MAX);
+            match outcome.summary {
+                Some(summary) => format!(
+                    "[subsession '{}' completed]\n{}",
+                    tool_id,
+                    crate::search::truncate_chars(&summary, cap)
+                ),
+                None => format!(
+                    "[subsession '{tool_id}' failed: {:?}]",
+                    outcome.failure.as_ref().map(|f| f.reason)
+                ),
+            }
+        }
+        Err(error) => {
+            executor.record_subagent_refusal(tool_id, "subsession-spawn-failed");
+            state
+                .subsession_events
+                .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
+                    tool_id: tool_id.to_string(),
+                    reason: "subsession-spawn-failed",
+                }));
+            format!("subsession spawn failed closed: {error}")
+        }
+    }
 }
 
 /// Sends one progress beat on the optional supervisor channel.

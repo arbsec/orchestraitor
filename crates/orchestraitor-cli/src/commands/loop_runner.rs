@@ -92,6 +92,11 @@ struct DirectLoopStarter {
     /// Loop invocation id, minted once per `orc loop` run; names each
     /// worker run's cost-attribution session.
     invocation_id: String,
+    /// Layered config resolver snapshot for declared-tool resolution
+    /// (issue #535, T2). The layer-trust gate runs at registry build; a
+    /// broken tool definition is a typed spawn failure, never a silent
+    /// reduction.
+    tools_resolver: orchestraitor_core::ConfigResolver,
 }
 
 impl DirectLoopStarter {
@@ -356,6 +361,11 @@ impl LoopWorkerStarter for DirectLoopStarter {
             self.budgets.clone(),
         );
         config.prior_daily_spend_usd = prior_daily_spend_usd;
+        let config = super::attach_declared_tools(config, &self.tools_resolver, &routing.role)
+            .map_err(|error| CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!("declared-tool resolution failed: {error:?}"),
+            })?;
         let config = self.with_cost_tracking(config, selected, routing);
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
@@ -642,6 +652,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             budgets: loop_config.budgets.clone(),
             cost_ledger: cost_ledger.clone(),
             invocation_id: invocation_id.clone(),
+            tools_resolver: layers.resolver.clone(),
         };
         let runner = LoopRunner::new(
             loop_config,

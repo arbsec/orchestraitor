@@ -37,6 +37,9 @@ struct DirectSpawner<'a> {
     paths: &'a ConfigPaths,
     tasks_dir: Option<std::path::PathBuf>,
     provider_endpoint: Option<String>,
+    /// Layered config resolver snapshot for declared-tool resolution
+    /// (issue #535, T2); the layer-trust gate runs at registry build.
+    tools_resolver: orchestraitor_core::ConfigResolver,
 }
 
 impl WorkerSpawner for DirectSpawner<'_> {
@@ -77,6 +80,11 @@ impl WorkerSpawner for DirectSpawner<'_> {
             ModelId::from_string(routing.model.clone()),
             WorkerBudgets::bootstrap_defaults(),
         );
+        let config = super::attach_declared_tools(config, &self.tools_resolver, &routing.role)
+            .map_err(|error| CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: format!("declared-tool resolution failed: {error:?}"),
+            })?;
         runtime
             .block_on(run_worker(
                 &task,
@@ -162,6 +170,7 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
         paths,
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
+        tools_resolver: layers.resolver.clone(),
     };
     let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
         .into_diagnostic()?;
@@ -282,6 +291,7 @@ mod tests {
             paths: &paths,
             tasks_dir: None,
             provider_endpoint: None,
+            tools_resolver: orchestraitor_core::ConfigResolver::new(),
         };
         let routing = RoleRoutingDecision {
             role: "implement".to_string(),

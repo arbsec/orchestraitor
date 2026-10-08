@@ -38,7 +38,9 @@ mod prompt;
 mod result;
 mod run;
 mod search;
+mod subsession;
 mod task;
+mod tooldef;
 mod tools;
 
 pub use budget::{
@@ -57,5 +59,13 @@ pub use orchestraitor_arbitraitor_client::mediation::{MediatedRun, MediationErro
 pub use orchestraitor_model::{ModelId, ProviderId};
 pub use result::{FailureClass, RunStatus, TypedFailure, UsageTotals, WorkerConfig, WorkerRun};
 pub use run::run_worker;
+pub use subsession::{
+    RoleRoutingEvidence, SubsessionError, SubsessionOutcome, SubsessionParent,
+    default_internal_tools, parent_failure_class, run_subsession,
+};
 pub use task::{FixtureTaskSource, TaskLoadError, TaskSource, WorkerTask};
+pub use tooldef::{
+    InternalTool, MAX_QUESTION_CHARS, MAX_TOOL_ID_CHARS, ToolBudget, ToolDefinition, ToolMechanism,
+    is_reserved_tool_id, is_valid_tool_id,
+};
 pub use tools::ToolReceipt;

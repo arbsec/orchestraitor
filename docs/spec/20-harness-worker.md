@@ -228,6 +228,8 @@ test.run
 task.run
 ```
 
+**Declared tools (issue #535).** Beyond the default surface, tools are configuration: each `[tools.<id>]` entry in the layered config is either a `command` (a fixed argv dispatched through the same Arbitraitor-mediated bash seam as every other shell surface — one mediation path, no second executor) or a `subagent` (a cheap-model sub-session with a scoped internal-tool allowlist and operator-authored instructions). Tool definitions are honored from the trusted config layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in the project or a lower layer is a typed error naming the tool — never a silent drop (§9.22.9). Every declared-tool call is receipted with static reason codes; sub-session output is worker output and begins untrusted (§9.14, no "trusted-role" exception). Sub-sessions cannot spawn sub-sessions (depth-1, structural, no config path raises it) and cannot deliver; their `finish` summary is a size-capped untrusted observation. Built-in declarations ship for `explore` and `review` (read-only, effort `low`).
+
 Every mutable file operation uses optimistic concurrency:
 
 ```text

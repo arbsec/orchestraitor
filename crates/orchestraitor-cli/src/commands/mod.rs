@@ -9,6 +9,8 @@ pub mod models;
 pub mod routing;
 pub mod worker;
 
+use miette::miette;
+
 use orchestraitor_agent_catalog::{DecisionEndpointConfig, SYSTEMONE_DECISION_PROVIDER};
 
 /// Builds the decision provider named by the `routing.provider` config flag
@@ -65,6 +67,100 @@ pub(crate) fn build_named_decision_provider(
 
 /// The role the dispatched workers run as.
 pub(crate) const WORKER_ROLE: &str = "implement";
+
+/// Builds the declared tools visible to the worker role and attaches them
+/// to the run config (issue #535, T2/T4).
+///
+/// T4: the subagent runtime is wired (`subagent_wired = true`) and each
+/// subagent tool's role resolves `(provider, model)` through the §9.45
+/// `RoleRouter` chain (the control plane routes; the parent never chooses).
+/// The resolved map lands on `WorkerConfig.subsession_routing`.
+///
+/// The registry enforces the layer-trust gate (trusted config layers only)
+/// and mechanism validation at build time; an error is fatal to the spawn —
+/// a broken tool definition is a typed startup failure, never a silently
+/// reduced tool surface. Role filtering happens here: only tools whose
+/// `visible_to` contains the worker role are mapped.
+///
+/// # Errors
+///
+/// Returns the registry error (untrusted layer, unknown kind, unresolvable
+/// role, invalid id, unknown effort) as a diagnostic.
+pub(crate) fn attach_declared_tools(
+    mut config: orchestraitor_worker::WorkerConfig,
+    resolver: &orchestraitor_core::ConfigResolver,
+    role: &str,
+) -> miette::Result<orchestraitor_worker::WorkerConfig> {
+    let catalog_roles: Vec<String> =
+        orchestraitor_agent_catalog::RoleRegistry::from_resolver(resolver)
+            .map_err(|error| miette!("{error}"))?
+            .list()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+    let registry = orchestraitor_core::ToolRegistry::from_resolver(resolver, &catalog_roles, true)
+        .map_err(|error| miette!("{error}"))?;
+    let router = orchestraitor_agent_catalog::RoleRouter::new(resolver);
+    let mut tools = Vec::new();
+    for id in registry.ids() {
+        let Some(tool) = registry.get(id) else {
+            continue;
+        };
+        if !tool.visible_to.contains(role) {
+            continue;
+        }
+        // Resolve the sub-session role now (fail fast at startup): a
+        // subagent tool whose role cannot route is a typed error, never a
+        // mid-run surprise.
+        if let orchestraitor_core::ResolvedToolMechanism::Subagent { role: sub_role, .. } =
+            &tool.mechanism
+        {
+            let decision = router
+                .resolve(sub_role)
+                .map_err(|error| miette!("{error}"))?;
+            config
+                .subsession_routing
+                .insert(sub_role.clone(), (decision.provider, decision.model));
+        }
+        tools.push(orchestraitor_worker::ToolDefinition {
+            id: tool.id.clone(),
+            mechanism: match &tool.mechanism {
+                orchestraitor_core::ResolvedToolMechanism::Command { argv } => {
+                    orchestraitor_worker::ToolMechanism::Command { argv: argv.clone() }
+                }
+                orchestraitor_core::ResolvedToolMechanism::Subagent {
+                    role,
+                    internal_tools,
+                    instructions,
+                } => orchestraitor_worker::ToolMechanism::Subagent {
+                    role: role.clone(),
+                    internal_tools: internal_tools
+                        .iter()
+                        .map(|internal| match internal {
+                            orchestraitor_core::ResolvedInternalTool::ReadFile => {
+                                orchestraitor_worker::InternalTool::ReadFile
+                            }
+                            orchestraitor_core::ResolvedInternalTool::Search => {
+                                orchestraitor_worker::InternalTool::Search
+                            }
+                            orchestraitor_core::ResolvedInternalTool::Bash => {
+                                orchestraitor_worker::InternalTool::Bash
+                            }
+                        })
+                        .collect(),
+                    instructions: instructions.clone(),
+                },
+            },
+            budget: orchestraitor_worker::ToolBudget {
+                max_turns: tool.max_turns.unwrap_or(12),
+                wall_clock_secs: tool.wall_clock_secs,
+                max_result_bytes: tool.max_result_bytes.unwrap_or(8 * 1024),
+            },
+            visible_to: tool.visible_to.clone(),
+        });
+    }
+    Ok(config.with_tools(tools))
+}
 
 /// Fails closed when the resolved routing does not target the bootstrap
 /// provider: the daemon-less direct path wires a bootstrap transport that

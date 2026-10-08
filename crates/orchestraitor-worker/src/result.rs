@@ -42,6 +42,19 @@ pub struct WorkerConfig {
     /// (`request_id` is the ledger primary key). Shared mutable state on
     /// the config because `call_model` takes `&WorkerConfig`.
     pub(crate) model_call_sequence: std::sync::atomic::AtomicU64,
+    /// Declared tools available to this run (issue #535, T2): the resolved
+    /// `[tools.<id>]` definitions visible to the run's role. Empty = the
+    /// bootstrap default (no declared tools).
+    pub tools: Vec<crate::tooldef::ToolDefinition>,
+    /// Sub-session depth of this run: 0 for a top-level worker, 1 inside a
+    /// sub-session. Declared-tool dispatch is refused at depth >= 1; there
+    /// is no config path to raise it (plan C.1/S5).
+    pub subsession_depth: u8,
+    /// The `(provider, model)` the control plane resolved for each
+    /// sub-session role (issue #535, T3): the parent never chooses a child
+    /// model. Keyed by orchestration role id. A subagent tool whose role is
+    /// missing here fails typed at dispatch (`subsession-role-unrouted`).
+    pub subsession_routing: std::collections::BTreeMap<String, (String, String)>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -60,6 +73,15 @@ impl std::fmt::Debug for WorkerConfig {
                     .model_call_sequence
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            )
+            .field("subsession_depth", &self.subsession_depth)
+            .field(
+                "subsession_routing",
+                &self.subsession_routing.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -77,7 +99,27 @@ impl WorkerConfig {
             attribution: None,
             cost_sink: None,
             model_call_sequence: std::sync::atomic::AtomicU64::new(0),
+            tools: Vec::new(),
+            subsession_depth: 0,
+            subsession_routing: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Sets the declared tools visible to this run and the sub-session
+    /// depth (issue #535, T2). Callers map the core `ToolRegistry` (already
+    /// layer-gated and role-filtered) into definitions here.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<crate::tooldef::ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Sets the sub-session depth (1 inside a sub-session; never raised by
+    /// configuration).
+    #[must_use]
+    pub const fn with_subsession_depth(mut self, depth: u8) -> Self {
+        self.subsession_depth = depth;
+        self
     }
 
     /// Attaches a progress-beat channel (see [`WorkerConfig::progress`]).
@@ -136,6 +178,18 @@ pub enum FailureClass {
     TaskNotCompleted,
     /// The delivery seam rejected a completed task.
     DeliveryFailed,
+    /// A declared-tool sub-session exhausted its carved budget (turns,
+    /// wall clock, or deadline) or failed its bounded guardrails. The child
+    /// class detail rides the reason code; the parent sees one uniform
+    /// budget-exhaustion class (issue #535, T3).
+    SubsessionBudgetExhausted,
+    /// A declared-tool dispatch was refused at the sub-session depth limit
+    /// (sub-sessions cannot spawn sub-sessions; issue #535, T3).
+    SubsessionDepthExceeded,
+    /// A declared-tool sub-session run failed for a non-budget reason
+    /// (provider error, mediation refusal, task-not-completed). The child
+    /// class detail rides the reason code (issue #535, T3).
+    SubsessionFailed,
 }
 
 /// A typed run failure: class plus static reason code.

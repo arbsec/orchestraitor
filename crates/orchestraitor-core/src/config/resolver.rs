@@ -7,7 +7,8 @@ use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
-    RoutingDecisionProviderConfig, SubscriptionConfig, parse_toml_config,
+    RoutingDecisionProviderConfig, SubscriptionConfig, ToolBudgetConfig, ToolConfig,
+    parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -106,6 +107,35 @@ impl ConfigResolver {
         }
         Ok(merged)
     }
+
+    /// Resolves the supplying layer for one whole map entry (e.g. a
+    /// `tools.<id>` tool definition): the highest-precedence layer whose
+    /// input carries the entry at all. Used by consumers that must gate on
+    /// WHERE a whole entry was defined rather than on merged field values
+    /// (the declared-tool registry's layer-trust gate, issue #535).
+    #[must_use]
+    pub fn supplying_layer_for_entry(&self, map: &str, key: &str) -> Option<ConfigSource> {
+        let mut sorted = self.inputs.clone();
+        sorted.sort_by_key(|input| input.source.layer);
+        let contains = |config: &OrchestraitorConfig| -> bool {
+            match map {
+                "tools" => config
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.contains_key(key)),
+                "roles" => config
+                    .roles
+                    .as_ref()
+                    .is_some_and(|roles| roles.contains_key(key)),
+                _ => false,
+            }
+        };
+        sorted
+            .iter()
+            .rev()
+            .find(|input| contains(&input.config))
+            .map(|input| input.source.clone())
+    }
 }
 
 impl OrchestraitorConfig {
@@ -118,6 +148,7 @@ impl OrchestraitorConfig {
         merge_map(&mut self.providers, next.providers, ProviderConfig::merge);
         merge_option(&mut self.agents, next.agents, AgentsConfig::merge);
         merge_map(&mut self.roles, next.roles, RoleConfig::merge);
+        merge_map(&mut self.tools, next.tools, ToolConfig::merge);
         merge_map(
             &mut self.subscriptions,
             next.subscriptions,
@@ -211,6 +242,29 @@ impl DomainConfig {
 impl RoleConfig {
     fn merge(&mut self, next: Self) {
         merge_option(&mut self.routing, next.routing, RoutingConfig::merge);
+    }
+}
+
+impl ToolConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.kind, next.kind);
+        merge_scalar(&mut self.command, next.command);
+        merge_scalar(&mut self.subagent_role, next.subagent_role);
+        merge_scalar(&mut self.internal_tools, next.internal_tools);
+        merge_scalar(&mut self.instructions, next.instructions);
+        merge_scalar(&mut self.visible_to, next.visible_to);
+        merge_scalar(&mut self.effort, next.effort);
+        merge_scalar(&mut self.max_summary_bytes, next.max_summary_bytes);
+        merge_scalar(&mut self.structured_summary, next.structured_summary);
+        merge_option(&mut self.budget, next.budget, ToolBudgetConfig::merge);
+    }
+}
+
+impl ToolBudgetConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.max_turns, next.max_turns);
+        merge_scalar(&mut self.wall_clock_secs, next.wall_clock_secs);
+        merge_scalar(&mut self.max_result_bytes, next.max_result_bytes);
     }
 }
 

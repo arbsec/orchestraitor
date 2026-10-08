@@ -460,7 +460,7 @@ Matches spec §16.6 layout. Reproduced here for completeness:
 
 ```text
 arbsec/orchestraitor
-├── crates/orchestraitor-core              # domain types, layered config, error/slog infra
+├── crates/orchestraitor-core              # domain types, layered config (incl. the [tools] registry with the layer-trust gate, issue #535), error/slog infra
 ├── crates/orchestraitor-daemon            # orcd: durable supervisor, scheduler, config resolver, event owner, mcp-gateway supervisor
 ├── crates/orchestraitor-model             # serializable domain types; no I/O
 ├── crates/orchestraitor-arb-client # typed client over arbitraitor crates (NOT a security authority)
@@ -473,7 +473,7 @@ arbsec/orchestraitor
 ├── crates/orchestraitor-provider-proxy   # OpenAI/Anthropic-compatible local proxy
 ├── crates/orchestraitor-mcp               # rmcp-based MCP gateway: project-scoped server resolution, tool namespacing, lifetime management
 ├── crates/orchestraitor-tui               # Ratatui+crossterm reference client
-├── crates/orchestraitor-cli               # orc / orchestraitor / orcd binaries
+├── crates/orchestraitor-cli               # orc / orchestraitor / orcd binaries (declared-tool mapping: ToolRegistry → WorkerConfig, issue #535)
 ├── crates/orchestraitor-agent-catalog     # domain+role catalog, detection heuristics, routing
 ├── crates/orchestraitor-cost-ledger       # per-call cost/usage ledger, subscription tracker
 ├── crates/orchestraitor-delivery           # spec-driven autonomous delivery: task DAG, review loop, backlog runner

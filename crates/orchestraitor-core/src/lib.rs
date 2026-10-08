@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod github_app;
 pub mod secret;
+pub mod tool;
 pub mod trace;
 
 pub use config::{ConfigLayer, ConfigResolver, ConfigSource, OrchestraitorConfig, ResolvedValue};
@@ -22,4 +23,8 @@ pub use github_app::{
     JWT_LIFETIME_SECS, PemResolver, TOKEN_REFRESH_SKEW_SECS, mint_app_jwt,
 };
 pub use secret::{DEFAULT_KEYRING_SERVICE, SecretStore, SecretUri};
+pub use tool::{
+    ResolvedEffort, ResolvedInternalTool, ResolvedTool, ResolvedToolMechanism, ToolRegistry,
+    ToolRegistryError,
+};
 pub use trace::{TracingFormat, TracingInit, TracingOptions, is_redacted_field};

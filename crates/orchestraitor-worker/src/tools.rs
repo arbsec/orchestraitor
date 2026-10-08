@@ -67,6 +67,11 @@ pub(crate) struct ToolExecutor<'a> {
     bash: &'a dyn BashMediator,
     receipts: Vec<ToolReceipt>,
     untrusted_writes: Vec<String>,
+    /// Declared-tool admission policy (issue #535, T1). `built_ins_only()`
+    /// for the bootstrap config; populated from the run's tool definitions
+    /// when `[tools]` configuration resolves.
+    #[allow(dead_code, reason = "carried for the T2 command/T3 subagent dispatch")]
+    policy: crate::tooldef::ToolPolicy,
 }
 
 impl<'a> ToolExecutor<'a> {
@@ -77,7 +82,41 @@ impl<'a> ToolExecutor<'a> {
             bash,
             receipts: Vec::new(),
             untrusted_writes: Vec::new(),
+            policy: crate::tooldef::ToolPolicy::built_ins_only(),
         }
+    }
+
+    /// Attaches the run's declared-tool policy (config-resolved tools and
+    /// the sub-session depth). Without this, every declared-tool dispatch
+    /// is refused as `tool-not-allowed` — the behavior-neutral default.
+    #[allow(dead_code, reason = "wired into the run loop by T2/T3")]
+    pub(crate) fn with_policy(mut self, policy: crate::tooldef::ToolPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// The attached declared-tool policy (the run loop and sub-session
+    /// runtime consult it for admission and prompt listing).
+    #[allow(dead_code, reason = "wired into the T4 prompt listing")]
+    pub(crate) fn policy(&self) -> &crate::tooldef::ToolPolicy {
+        &self.policy
+    }
+
+    /// Records one parent-side receipt for a completed subagent-tool
+    /// dispatch (issue #535, T3): the run's receipt stream stays complete
+    /// even though the sub-session runs outside the executor.
+    pub(crate) fn record_subagent_completion(&mut self, tool_id: &str, completed: bool) {
+        if completed {
+            self.push_receipt(tool_id, true, "completed", None, None);
+        } else {
+            self.push_receipt(tool_id, true, "failed", Some("subsession-failed"), None);
+        }
+    }
+
+    /// Records one parent-side refusal receipt for a subagent dispatch
+    /// refused before any run existed.
+    pub(crate) fn record_subagent_refusal(&mut self, tool_id: &str, reason: &'static str) {
+        self.push_receipt(tool_id, true, "refused", Some(reason), None);
     }
 
     /// Consumes the executor, returning all receipts and untrusted writes.
@@ -97,8 +136,60 @@ impl<'a> ToolExecutor<'a> {
             WorkerAction::Search { pattern, path } => self.search(pattern, path.as_deref()),
             WorkerAction::WriteFile { path, content } => self.write_file(path, content),
             WorkerAction::Bash { script } => self.bash(script).await,
+            WorkerAction::DeclaredTool { tool_id, .. } => self.dispatch_declared(tool_id).await,
             WorkerAction::Finish { .. } => self.record_refusal("finish", "misrouted-finish"),
         }
+    }
+
+    /// Admits and dispatches one declared-tool call (issue #535, T2).
+    /// Admission order is the audited surface: existence in the run's
+    /// policy, then sub-session depth (sub-sessions cannot spawn), then
+    /// mechanism execution. Every refusal is receipted with a static reason.
+    async fn dispatch_declared(&mut self, tool_id: &str) -> ToolTurn {
+        if self.policy.subsession_depth > 0 {
+            return self.declared_refusal(tool_id, "subsession-depth-exceeded");
+        }
+        // The mechanism is cloned (a small owned value: fixed argv or the
+        // sub-session spec) to release the policy borrow across the await.
+        let Some(mechanism) = self.policy.find(tool_id).map(|tool| tool.mechanism.clone()) else {
+            return self.declared_refusal(tool_id, "tool-not-allowed");
+        };
+        match &mechanism {
+            crate::tooldef::ToolMechanism::Command { argv } => {
+                self.declared_command(tool_id, argv).await
+            }
+            crate::tooldef::ToolMechanism::Subagent { .. } => {
+                self.declared_refusal(tool_id, "declared-tool-execution-unwired")
+            }
+        }
+    }
+
+    /// Records an admitted-but-refused declared-tool dispatch (T1: the
+    /// execution mechanisms land in T2/T3; the action protocol and refusal
+    /// shape land here so the surface is stable).
+    fn declared_refusal(&mut self, tool_id: &str, reason: &'static str) -> ToolTurn {
+        self.push_receipt(tool_id, true, "refused", Some(reason), None);
+        ToolTurn {
+            observation: format!("tool call refused: {reason}"),
+            mediation_failure: None,
+        }
+    }
+
+    /// Dispatches a declared `command` tool: shell-quotes the fixed argv
+    /// (quoting is Orchestraitor's code, never config interpolation) and
+    /// runs it through the SAME mediated bash seam as the built-in `bash`
+    /// tool — one mediation path, no second executor (plan A.1).
+    async fn declared_command(&mut self, tool_id: &str, argv: &[String]) -> ToolTurn {
+        let script = quote_argv(argv);
+        let turn = self.bash(&script).await;
+        // Re-label the receipt: the mediated bash receipt names `bash`; the
+        // caller must see the declared tool id.
+        if let Some(receipt) = self.receipts.last_mut()
+            && receipt.tool == "bash"
+        {
+            receipt.tool = tool_id.to_string();
+        }
+        turn
     }
 
     /// Records a refusal issued before dispatch (e.g. an unknown tool
@@ -264,6 +355,29 @@ impl<'a> ToolExecutor<'a> {
             }
         }
     }
+}
+
+/// Shell-quotes one argv into a single `exec` line. Every argument is
+/// single-quoted with embedded `'` escaped — the quoting lives HERE, in
+/// Orchestraitor code, never in config text; adversarial property tests
+/// cover metacharacter-bearing argv (spec §21.1).
+#[must_use]
+pub(crate) fn quote_argv(argv: &[String]) -> String {
+    let mut line = String::from("exec");
+    for arg in argv {
+        line.push(' ');
+        line.push('\'');
+        for c in arg.chars() {
+            if c == '\'' {
+                // End the quoted segment, escape the quote, reopen.
+                line.push_str("'\\''");
+            } else {
+                line.push(c);
+            }
+        }
+        line.push('\'');
+    }
+    line
 }
 
 /// Maps a mediation failure to a static, log-safe reason code.
@@ -468,5 +582,201 @@ mod tests {
         let a_pos = turn.observation.find("a.txt").unwrap();
         let c_pos = turn.observation.find("b/c.txt").unwrap();
         assert!(a_pos < c_pos, "matches must be in sorted path order");
+    }
+
+    fn command_tool(id: &str) -> crate::tooldef::ToolDefinition {
+        crate::tooldef::ToolDefinition {
+            id: id.to_string(),
+            mechanism: crate::tooldef::ToolMechanism::Command {
+                argv: vec!["cargo".to_string(), "clippy".to_string()],
+            },
+            budget: crate::tooldef::ToolBudget::bootstrap_defaults(),
+            visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_tool_without_policy_is_refused_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+
+        let turn = executor
+            .dispatch(&WorkerAction::DeclaredTool {
+                tool_id: "explain-clippy".to_string(),
+                question: None,
+            })
+            .await;
+
+        assert!(turn.observation.contains("tool-not-allowed"));
+        assert!(turn.mediation_failure.is_none());
+        let receipt = executor.receipts.last().unwrap();
+        assert_eq!(receipt.tool, "explain-clippy");
+        assert!(receipt.admitted);
+        assert_eq!(receipt.outcome, "refused");
+    }
+
+    #[tokio::test]
+    async fn declared_command_tool_executes_through_the_mediator() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: vec![command_tool("explain-clippy")],
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 0,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+
+        // T2: the command mechanism runs through the SAME mediated seam as
+        // the built-in bash tool, receipted under the declared tool id.
+        let turn = executor
+            .dispatch(&WorkerAction::DeclaredTool {
+                tool_id: "explain-clippy".to_string(),
+                question: None,
+            })
+            .await;
+        assert!(turn.observation.contains("hello"));
+        assert!(turn.mediation_failure.is_none());
+        let receipt = executor.receipts.last().unwrap();
+        assert_eq!(receipt.tool, "explain-clippy");
+        assert_eq!(receipt.outcome, "completed");
+        assert_eq!(receipt.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn declared_tool_unknown_to_policy_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: vec![command_tool("explain-clippy")],
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 0,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+
+        let turn = executor
+            .dispatch(&WorkerAction::DeclaredTool {
+                tool_id: "nope".to_string(),
+                question: None,
+            })
+            .await;
+        assert!(turn.observation.contains("tool-not-allowed"));
+        let receipt = executor.receipts.last().unwrap();
+        assert_eq!(receipt.tool, "nope");
+        assert_eq!(receipt.outcome, "refused");
+    }
+
+    #[tokio::test]
+    async fn declared_tool_inside_subsession_is_depth_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: vec![command_tool("explain-clippy")],
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 1,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+
+        // Depth-1 negative (issue #535): a sub-session can never dispatch a
+        // declared tool — no nested spawns, structurally.
+        let turn = executor
+            .dispatch(&WorkerAction::DeclaredTool {
+                tool_id: "explain-clippy".to_string(),
+                question: None,
+            })
+            .await;
+        assert!(turn.observation.contains("subsession-depth-exceeded"));
+        assert!(executor.policy().find("explain-clippy").is_some());
+    }
+
+    #[test]
+    fn quote_argv_is_injection_safe() {
+        // Adversarial argv (spec §21.1 negative): metacharacters, quotes,
+        // command substitution, semicolons, newlines. The strongest check
+        // is the round-trip test below; this one asserts the per-argument
+        // structure: each argument contributes exactly one opening quote,
+        // and the ONLY `'` sequences inside segments are the escape.
+        let argv = vec![
+            "echo".to_string(),
+            "it's".to_string(),
+            "$(rm -rf /)".to_string(),
+            "a; b".to_string(),
+            "line1\nline2".to_string(),
+            "'quoted'".to_string(),
+        ];
+        let script = quote_argv(&argv);
+        assert!(script.starts_with("exec "));
+        // Reconstruct the argv by shell-quoting each argument independently
+        // and comparing: the joined script must equal quote_argv applied to
+        // each piece — i.e. quoting is per-argument, never cross-argument.
+        let args_part = script.strip_prefix("exec ").unwrap();
+        let mut cursor = 0usize;
+        for (index, arg) in argv.iter().enumerate() {
+            let expected_segment = {
+                let mut one = String::new();
+                one.push('\'');
+                for c in arg.chars() {
+                    if c == '\'' {
+                        one.push_str("'\\''");
+                    } else {
+                        one.push(c);
+                    }
+                }
+                one.push('\'');
+                one
+            };
+            let rest = &args_part[cursor..];
+            let Some(offset) = rest.find(&expected_segment) else {
+                panic!("argument {index} ({arg:?}) not found as a quoted segment in: {script}");
+            };
+            cursor += offset + expected_segment.len();
+            // Exactly one separator space follows each non-final segment.
+            if index + 1 < argv.len() {
+                assert_eq!(
+                    args_part.get(cursor..cursor + 1),
+                    Some(" "),
+                    "arguments must be space-separated: {script}"
+                );
+                cursor += 1;
+            }
+        }
+        assert_eq!(
+            cursor,
+            args_part.len(),
+            "script has trailing content: {script}"
+        );
+    }
+
+    #[test]
+    fn quote_argv_round_trips_through_a_real_shell() {
+        // The strongest negative: the forbidden effect did NOT happen. Run
+        // the quoted argv through the system shell and observe the exact
+        // argument echo — a quoting bug would splice arguments or execute.
+        let argv = vec![
+            "printf".to_string(),
+            "%s\n".to_string(),
+            "it's; $(echo pwned) `echo pwned`".to_string(),
+        ];
+        let script = quote_argv(&argv);
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout, "it's; $(echo pwned) `echo pwned`\n",
+            "argv must survive the shell as ONE literal argument"
+        );
+    }
+
+    #[test]
+    fn built_ins_only_policy_is_the_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let executor = ToolExecutor::new(temp.path(), &bash);
+        assert!(executor.policy().declared.is_empty());
+        assert_eq!(executor.policy().subsession_depth, 0);
     }
 }

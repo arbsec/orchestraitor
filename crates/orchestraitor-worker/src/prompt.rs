@@ -18,8 +18,26 @@ Every response MUST contain exactly one fenced ```json block selecting one of th
 {\"tool\": \"bash\", \"script\": \"<bash script>\"}
 
 Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}
-or success=false when the task cannot be completed. No other tools exist:
-any other capability is refused and recorded.";
+or success=false when the task cannot be completed. Any tool not listed
+above (and not listed as a declared tool) is refused and recorded.";
+
+/// Builds the system prompt: the static bootstrap prompt plus the one
+/// sentence listing the run's role-visible declared tools (issue #535, T2).
+/// Declared-tool lines are static, config-derived text (trusted layers by
+/// the registry's gate); unknown tool names still produce typed refusals at
+/// dispatch.
+pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
+    let mut prompt = SYSTEM_PROMPT.to_string();
+    if config.tools.is_empty() {
+        return prompt;
+    }
+    prompt.push_str("\n\nDeclared tools available to you (invoked like any other tool):\n");
+    for tool in &config.tools {
+        prompt.push_str(&tool.prompt_line());
+        prompt.push('\n');
+    }
+    prompt
+}
 
 pub(super) fn task_prompt(task: &WorkerTask, replan_note: Option<&'static str>) -> String {
     let mut prompt = format!("Task {} ({}):\n{}", task.id, task.slug, task.description);

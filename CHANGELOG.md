@@ -13,6 +13,27 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Declared tools (issue #535)**: tools are now configuration. Each
+  `[tools.<id>]` entry in the layered config declares a tool as either a
+  `command` (a fixed argv dispatched through the same Arbitraitor-mediated
+  bash seam as the built-in `bash` tool — argv is quoted by Orchestraitor,
+  never interpreted from config text) or a `subagent` (a cheap-model
+  sub-session with a typed internal-tool allowlist, default read-only,
+  operator-authored instructions, carved budgets, and a depth limit of one
+  — sub-sessions cannot spawn sub-sessions and cannot deliver). Tool
+  definitions are honored from trusted config layers only (built-in
+  defaults, plugin defaults, user, org); a definition in the project layer
+  is a typed startup error naming the tool — never a silent drop. Every
+  declared-tool call is receipted with static reason codes; sub-session
+  output is size-capped, marker-wrapped untrusted data. Role-level effort
+  (`effort = low|medium|high`), `max_summary_bytes`, and
+  `structured_summary` resolve through the layered chain with provenance
+  and ride the spawn decision records; an unknown effort value is a typed
+  config error. Built-in declarations ship for `explore` (read-only
+  explorer, structured summaries) and `review` (the declarative surface the
+  pre-landing review loop consumes), both visible to the `implement` role.
+  Beats are emitted around the sub-session await so supervisor stall
+  detection covers the child window.
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a

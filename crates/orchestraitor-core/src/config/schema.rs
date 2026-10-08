@@ -18,6 +18,11 @@ pub struct OrchestraitorConfig {
     pub agents: Option<AgentsConfig>,
     /// Role routing table keyed by role id (spec `30-model-routing.md` §9.45).
     pub roles: Option<BTreeMap<String, RoleConfig>>,
+    /// Declared-tool registry keyed by tool id (issue #535). Tool
+    /// definitions are honored from trusted layers only (built-in defaults,
+    /// plugin defaults, global user, organization/team); a definition in a
+    /// project or lower layer is a typed registry error, never a silent drop.
+    pub tools: Option<BTreeMap<String, ToolConfig>>,
     /// Subscription definitions keyed by subscription id.
     pub subscriptions: Option<BTreeMap<String, SubscriptionConfig>>,
     /// Budget definitions keyed by budget id.
@@ -164,6 +169,54 @@ pub struct DomainConfig {
 pub struct RoleConfig {
     /// Routing defaults for this role.
     pub routing: Option<RoutingConfig>,
+}
+
+/// Per-invocation budget for a declared tool (issue #535, T2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolBudgetConfig {
+    /// Maximum conversation turns for one sub-session invocation.
+    pub max_turns: Option<u32>,
+    /// Hard wall-clock bound for one invocation (seconds). Absent inherits
+    /// the parent run's remaining deadline.
+    pub wall_clock_secs: Option<u64>,
+    /// Cap on the bytes of the result fed back to the parent.
+    pub max_result_bytes: Option<u64>,
+}
+
+/// Declared-tool configuration block for one `[tools.<id>]` entry (issue
+/// #535, T2). Each tool is either a rule-driven command invocation or a
+/// cheap-model sub-session with a scoped internal-tool allowlist.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolConfig {
+    /// Tool mechanism: `command` (fixed argv, mediated dispatch) or
+    /// `subagent` (cheap-model sub-session). `hybrid` is schema-reserved
+    /// and rejected at resolve time in v1.
+    pub kind: Option<String>,
+    /// Fixed argv for `command` tools. No shell interpretation: quoting
+    /// into the mediated script is Orchestraitor's code, never config text.
+    pub command: Option<Vec<String>>,
+    /// Orchestration role id for `subagent` tools (spec `30-model-routing.md`
+    /// §9.45 chain).
+    pub subagent_role: Option<String>,
+    /// Scoped internal-tool allowlist for `subagent` tools; typed values
+    /// (`read_file`, `search`, `bash`), never free strings.
+    pub internal_tools: Option<Vec<String>>,
+    /// Operator-authored instructions prepended to the sub-session prompt.
+    pub instructions: Option<String>,
+    /// Orchestration roles that may invoke the tool. Empty/absent = nobody
+    /// (an undeclared visibility is a refusal, never an implicit grant).
+    pub visible_to: Option<Vec<String>>,
+    /// Per-invocation budget.
+    pub budget: Option<ToolBudgetConfig>,
+    /// Role-level reasoning-effort policy (issue #535, owner-approved):
+    /// `low`, `medium`, or `high`; resolved through the layered chain with
+    /// provenance and recorded in decision records.
+    pub effort: Option<String>,
+    /// Cap on the sub-session finish summary returned to the parent (bytes).
+    pub max_summary_bytes: Option<u64>,
+    /// Structured-only finish for `explore`-class roles: the finish summary
+    /// MUST be a compact fielded payload, not prose narrative.
+    pub structured_summary: Option<bool>,
 }
 
 /// Model routing configuration block.
