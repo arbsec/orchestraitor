@@ -292,7 +292,39 @@ async fn run_attempt(
                     _ => false,
                 };
                 let dispatch_started = Instant::now();
-                let turn = executor.dispatch(&action).await;
+                // The budget BOUNDS the dispatch, not just the accounting:
+                // a poll-shaped Bash call is cancelled at the remaining
+                // budget (the mediated path's kill-on-drop guard reaps the
+                // process group), so the wait's wall-clock can never
+                // overrun the budget — the charge below then observes the
+                // elapse and fails the attempt typed (spec §21.10).
+                let turn = if is_poll {
+                    match poll_budget.remaining() {
+                        Some(remaining) => {
+                            match tokio::time::timeout(remaining, executor.dispatch(&action)).await
+                            {
+                                Ok(turn) => turn,
+                                Err(_elapsed) => {
+                                    // The dispatch consumed the remaining
+                                    // budget: record the elapse and fail the
+                                    // attempt typed. `charge` can report
+                                    // false on the exact-boundary case (spent
+                                    // == budget, not >), but the timeout
+                                    // proves the budget is gone either way —
+                                    // report the exhaustion unconditionally.
+                                    let _fired = poll_budget.charge(remaining);
+                                    return attempt_failure(
+                                        FailureClass::PollBudgetExhausted,
+                                        "ci-poll-budget-exhausted",
+                                    );
+                                }
+                            }
+                        }
+                        None => executor.dispatch(&action).await,
+                    }
+                } else {
+                    executor.dispatch(&action).await
+                };
                 if guardrails.poll_budget_enabled()
                     && is_poll
                     && poll_budget.charge(dispatch_started.elapsed())

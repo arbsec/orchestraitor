@@ -399,6 +399,20 @@ impl PollBudget {
     pub fn spent(&self) -> Duration {
         self.spent
     }
+
+    /// Wall-clock left before the budget fires; `None` when the guard is
+    /// disabled (a poll-shaped dispatch then runs unbounded, as before).
+    /// The caller passes this to the dispatch timeout so a poll-shaped
+    /// Bash call is CANCELLED at the budget boundary instead of only being
+    /// charged after it returns (spec `50-contracts-data.md` §21.10: the
+    /// orchestrator never runs an unbounded poll loop).
+    #[must_use]
+    pub fn remaining(&self) -> Option<Duration> {
+        if self.budget.is_zero() {
+            return None;
+        }
+        Some(self.budget.saturating_sub(self.spent))
+    }
 }
 
 #[cfg(test)]
@@ -626,5 +640,26 @@ mod tests {
         assert!(!config.poll_budget_enabled());
         let mut budget = PollBudget::new(&config);
         assert!(!budget.charge(Duration::from_hours(100)));
+    }
+
+    #[test]
+    fn remaining_reports_wall_clock_left_until_the_budget_fires() {
+        let mut config = GuardrailsConfig::bootstrap_defaults();
+        config.ci_poll_budget = Duration::from_secs(30);
+        let mut budget = PollBudget::new(&config);
+        assert_eq!(budget.remaining(), Some(Duration::from_secs(30)));
+        assert!(!budget.charge(Duration::from_secs(10)));
+        assert_eq!(budget.remaining(), Some(Duration::from_secs(20)));
+        assert!(budget.charge(Duration::from_secs(21)), "exceeding fires");
+        assert_eq!(budget.remaining(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn remaining_is_none_for_a_disabled_budget() {
+        let config = GuardrailsConfig {
+            ci_poll_budget: Duration::ZERO,
+            ..GuardrailsConfig::bootstrap_defaults()
+        };
+        assert_eq!(PollBudget::new(&config).remaining(), None);
     }
 }
