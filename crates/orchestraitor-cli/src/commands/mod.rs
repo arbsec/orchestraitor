@@ -7,6 +7,7 @@ pub mod github;
 pub mod loop_runner;
 pub mod models;
 pub mod routing;
+pub mod simplify;
 pub mod worker;
 
 use orchestraitor_agent_catalog::{DecisionEndpointConfig, SYSTEMONE_DECISION_PROVIDER};

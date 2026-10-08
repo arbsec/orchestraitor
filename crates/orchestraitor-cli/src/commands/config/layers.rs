@@ -18,6 +18,20 @@ format_on_write = true
 max_passes = 2
 safe_fix_classifications = ["format", "organize-imports"]
 
+# Pre-landing simplify pass (fail-open quality tooling; never a push gate):
+# Format-class fixes auto-apply in the pre-commit hook; safe fixes stay
+# suggest-only until the review-loop PR adds the Arbitraitor classification
+# gate. `model_pass` is parsed but not wired in this slice — it activates
+# with the shared sub-session runtime.
+[simplify]
+enabled = true
+auto_apply_format = true
+auto_apply_safe_fixes = false
+max_passes = 2
+max_files = 200
+pedantic = false
+model_pass = false
+
 [retry]
 max_attempts = 3
 backoff_ms = 250

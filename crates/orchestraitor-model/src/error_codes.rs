@@ -35,6 +35,9 @@ pub enum ErrorComponent {
     /// Event store / event log errors.
     #[strum(serialize = "EVENTS")]
     Events,
+    /// Pre-landing simplify pass errors (fail-open quality tooling).
+    #[strum(serialize = "SIMPLIFY")]
+    Simplify,
 }
 
 impl ErrorComponent {
@@ -53,5 +56,6 @@ mod tests {
     fn error_code_format() {
         assert_eq!(ErrorComponent::Workspace.code(1), "ORC-WORKSPACE-001");
         assert_eq!(ErrorComponent::Provider.code(42), "ORC-PROVIDER-042");
+        assert_eq!(ErrorComponent::Simplify.code(1), "ORC-SIMPLIFY-001");
     }
 }

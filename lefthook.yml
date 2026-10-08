@@ -13,6 +13,14 @@ pre-commit:
       run: rumdl check {staged_files}
       glob: "*.{md,markdown}"
       stage_fixed: false
+    # Pre-landing simplify pass (fail-open quality tooling; spec §9.5): a
+    # fast-feedback affordance only — hooks are bypassable, and the real
+    # gate is the push path (the review-loop PR's pre-push gate). The pass
+    # never blocks: it exits 0 unless a tool fails to resolve config.
+    simplify:
+      run: orc simplify run --staged --fix=format
+      glob: "*.rs"
+      stage_fixed: false
 
 commit-msg:
   commands:
@@ -23,6 +31,15 @@ pre-push:
   commands:
     test:
       run: cargo nextest run --no-tests=pass
+      glob:
+        - "*.rs"
+        - "**/*.rs"
+    # Fast-feedback simplify check above Format class: exits 1 only when
+    # unaddressed safe-fix/semantic suggestions exist. This is NOT the
+    # enforcement point (hooks are bypassable and untrusted-adjacent);
+    # the pre-landing gate is the review-loop PR's push-branch gate.
+    simplify-push:
+      run: orc simplify run --staged --pedantic-check
       glob:
         - "*.rs"
         - "**/*.rs"

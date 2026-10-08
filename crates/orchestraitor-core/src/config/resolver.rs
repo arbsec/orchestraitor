@@ -7,7 +7,7 @@ use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
-    RoutingDecisionProviderConfig, SubscriptionConfig, parse_toml_config,
+    RoutingDecisionProviderConfig, SimplifyConfig, SubscriptionConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -109,11 +109,16 @@ impl ConfigResolver {
 }
 
 impl OrchestraitorConfig {
-    pub(crate) fn merge(&mut self, next: Self) {
+    pub(crate) fn merge(&mut self, mut next: Self) {
         merge_option(
             &mut self.normalization,
             next.normalization,
             NormalizationConfig::merge,
+        );
+        merge_option(
+            &mut self.simplify,
+            next.simplify.take(),
+            |current: &mut SimplifyConfig, next| current.merge(&next),
         );
         merge_map(&mut self.providers, next.providers, ProviderConfig::merge);
         merge_option(&mut self.agents, next.agents, AgentsConfig::merge);
@@ -181,6 +186,18 @@ impl NormalizationConfig {
             &mut self.safe_fix_classifications,
             next.safe_fix_classifications,
         );
+    }
+}
+
+impl SimplifyConfig {
+    fn merge(&mut self, next: &Self) {
+        merge_scalar(&mut self.enabled, next.enabled);
+        merge_scalar(&mut self.auto_apply_format, next.auto_apply_format);
+        merge_scalar(&mut self.auto_apply_safe_fixes, next.auto_apply_safe_fixes);
+        merge_scalar(&mut self.max_passes, next.max_passes);
+        merge_scalar(&mut self.max_files, next.max_files);
+        merge_scalar(&mut self.pedantic, next.pedantic);
+        merge_scalar(&mut self.model_pass, next.model_pass);
     }
 }
 

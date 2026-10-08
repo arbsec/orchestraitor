@@ -13,6 +13,26 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- The rule-driven pre-landing simplify pass, surfaced as
+  [`orc simplify run`](docs/cli/orc-simplify.md) and wired into lefthook
+  (`pre-commit` `simplify` + `pre-push` `simplify-push`): runs the tools the
+  repository already uses (cargo clippy, cargo fmt, rumdl, cargo-machete)
+  over a worktree and reports typed suggestions in the three §9.5
+  normalization classes — Format (auto-applies under
+  `--fix format` + `simplify.auto_apply_format`, the default), Safe fix
+  (suggest-only by default; auto-applies only under `--fix safe` +
+  `simplify.auto_apply_safe_fixes = true`, scoped to clippy
+  machine-applicable suggestions on `.rs` files pending the Arbitraitor
+  output-classification gate), and Semantic (suggest-only, never
+  auto-rewritten). Fail-open by design: an absent tool or a timeout is a
+  typed `ORC-SIMPLIFY-001` warning, never a blocker — the only non-zero
+  exit is `--pedantic-check` (the pre-push hook's fast-feedback signal; the
+  pre-landing enforcement point is the push path, landing with the
+  review-loop PR). New layered config table `[simplify]` with built-in
+  defaults: `enabled = true`, `auto_apply_format = true`,
+  `auto_apply_safe_fixes = false`, `max_passes = 2`, `max_files = 200`,
+  `pedantic = false`, and `model_pass = false` (parsed but not wired yet —
+  it activates with the review-loop PR's shared sub-session runtime).
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a

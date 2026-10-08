@@ -1,0 +1,20 @@
+[package]
+name = "orchestraitor-simplify"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Pre-landing code simplification pass: rule-driven clippy/format/dead-code suggestions over a worktree (spec §9.5 normalization classes)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
