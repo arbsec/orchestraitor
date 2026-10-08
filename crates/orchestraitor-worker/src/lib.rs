@@ -31,6 +31,7 @@ pub mod bootstrap;
 mod budget;
 pub mod delivery;
 mod error;
+pub mod guardrails;
 mod mediator;
 mod model;
 mod paths;
@@ -52,6 +53,10 @@ pub use delivery::{
     DeliveryError, DeliveryOutcome, DeliveryRequest, DeliverySink, PendingDeliverySink,
 };
 pub use error::WorkerError;
+pub use guardrails::{
+    ChurnWindow, ExitClass, GuardrailsConfig, NoProgressGuard, PollBudget, ToolCallShape,
+    poll_shaped, progress_fingerprint,
+};
 pub use mediator::{BashMediator, MediatedBashMediator};
 pub use orchestraitor_arbitraitor_client::mediation::{MediatedRun, MediationError};
 pub use orchestraitor_model::{ModelId, ProviderId};

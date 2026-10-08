@@ -8,9 +8,10 @@ pub use parse::{ConfigParseReport, parse_toml_config};
 pub use resolver::ConfigResolver;
 pub use schema::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigSource, DataClassificationConfig,
-    DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
-    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
-    RoutingDecisionProviderConfig, ServiceIdentityEnforcement, SubscriptionConfig,
+    DataGovernanceConfig, DomainConfig, GitHubAppConfig, LoopGuardrailsConfig, NormalizationConfig,
+    OrchestraitorConfig, ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig,
+    RoleConfig, RoutingConfig, RoutingDecisionProviderConfig, ServiceIdentityEnforcement,
+    SubscriptionConfig,
 };
 
 use crate::error::OrchestraitorError;

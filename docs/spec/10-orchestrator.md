@@ -18,6 +18,9 @@ failed                # task terminated abnormally; partial results may exist
 cancelled             # cancellation propagated; resources released
 rejected              # Arbitraitor refused the plan; never ran; receipt emitted
 orphaned              # process exit detected with task state still in `running`; recovery pending
+stuck                 # anti-stuck guards exhausted the task's cross-invocation retry
+                      # budget or its no-progress/backoff policy; never silently re-selected
+                      # — recovery is the needs-human/resumed-with-revised-plan path
 ```
 
 Orphaned is an explicit recovery state, not a silent failure. The controller MUST detect orphaned sessions (worker process gone, task still marked running) within a configurable heartbeat interval (default 30 s) and transition to either `failed` (with partial-result preservation) or `paused` (awaiting reconnect) per policy.
@@ -127,7 +130,13 @@ Configurable limits per session or per task (insertable at any §9.22.2 layer):
 - network (per-destination request rate, byte cap);
 - model calls (per session, per agent, per minute);
 - tokens (input + output + reasoning);
-- spend (per §9.19.5-§9.19.6 budgets).
+- spend (per §9.19.5-§9.19.6 budgets);
+- tool-call churn (same normalized tool-call shape K times in the last W
+  turns → the attempt fails as `tool-loop-churn`; see §9.36 detection);
+- no-progress state fingerprint (N consecutive identical worktree
+  fingerprints → the attempt fails as `no-progress`);
+- external poll wall-clock (cumulative poll-shaped bash execution time per
+  attempt → `poll-budget-exhausted`, the task parks blocked-on-external).
 
 #### 9.27.2 Backpressure and fair scheduling
 
@@ -219,7 +228,9 @@ The project-manager agent MAY continue until:
 - no task is currently eligible;
 - a configured budget or time limit is reached;
 - an approval or user decision is required;
-- repeated failures exceed policy;
+- repeated failures exceed policy (including the anti-stuck classes:
+  tool-loop churn, no-progress fingerprints, and the cross-invocation task
+  retry budget);
 - a security invariant or organization policy blocks progress;
 - the user pauses or cancels the run.
 
@@ -311,6 +322,9 @@ invalid agent output                       # re-prompt with fresh context, limit
 policy denial                              # NOT retryable — resolve in Arbitraitor
 approval required                          # NOT retryable — await user action
 non-retriable configuration or security failure  # NOT retryable — escalate
+tool-loop churn                            # NOT retryable blindly — escalate with evidence receipts
+no-progress (state fingerprint)            # NOT retryable blindly — escalate with revised plan
+poll-budget exhausted                      # NOT retryable — park blocked-on-external
 ```
 
 Use configurable bounded exponential backoff with jitter for transient failures (per §9.26.2). Support per-task, per-phase, provider, and global retry budgets.
@@ -446,8 +460,9 @@ The watch daemon (`orcd watch`) is the always-running supervision loop for §9.3
 
 - **Poll tick.** The daemon polls the board provider on a fixed default cadence, operator-configurable through the §9.22 layered configuration and adapted to provider rate-limit feedback (§9.43). Every tick is a reconcile pass: board-wins sync with `board-diverged` events, promotion of newly unblocked tasks (§9.40), and re-evaluation of kick-off conditions.
 - **Kick-off conditions.** The daemon spawns a campaign session when none is in flight and at least one condition holds: new eligible work appeared, a blocked task became unblocked, a lease or worker slot was released, a budget window reset, or an external GitHub event arrived (§9.47). Conditions are configurable; the daemon never nudges a human and never bypasses a budget to keep the loop moving.
-- **Stall and orphan detection.** The daemon enforces §9.24 leases and TTLs: heartbeats are local, lease expiry transitions to `orphaned` (never direct `failed`), and the reaper walks running tasks on its configured interval. A campaign session that produces no decision record within its lease is orphaned and re-run fresh; a stalled worker is detected the same way.
-- **Budget enforcement.** Before any spawn the daemon enforces three budget classes: monetary spend (§9.19.6), run/time budgets per task and per campaign, and subscription-usage budgets ([§9.46](30-model-routing.md#946-subscription-aware-routing)). Values are operator-configured; the spec fixes the classes and the failure behavior — a budget stop produces an explicit `blocked` or `needs-human` state (§9.33.4), never a silent skip and never a weakened retry.
+- **Stall and orphan detection.** The daemon enforces §9.24 leases and TTLs: heartbeats are local, lease expiry transitions to `orphaned` (never direct `failed`), and the reaper walks running tasks on its configured interval. A campaign session that produces no decision record within its lease is orphaned and re-run fresh; a stalled worker is detected the same way. Stalls catch SILENCE; churn detection catches NOISE: tool-call-shape repetition (§9.27.1), no-progress worktree fingerprints, and CI-poll wall-clock budgets complement the heartbeat path so a worker that beats every turn while doing nothing fails as a typed churn/no-progress class instead of burning its budget.
+- **Cross-invocation task budget.** Each task's durable retry state (total attempts, last failure class, no-progress streak, backoff window) survives invocations; a task that exceeds its budget is marked `stuck` (§9.24.1) with a typed skip reason in the pass decision record — never silently re-selected.
+- **Budget enforcement.** Before any spawn the daemon enforces four budget classes: monetary spend (§9.19.6), run/time budgets per task and per campaign, subscription-usage budgets ([§9.46](30-model-routing.md#946-subscription-aware-routing)), and the external CI-poll wait budget (§21.10: a bounded wait + parked task, never an unbounded poll loop). Values are operator-configured; the spec fixes the classes and the failure behavior — a budget stop produces an explicit `blocked` or `needs-human` state (§9.33.4), never a silent skip and never a weakened retry.
 - **Lifecycle mapping.** Everything the daemon does maps onto §9.24 lifecycle states and §9.26 retry semantics: worker crashes are `orphaned` transitions, transient provider failures follow bounded backoff, and non-retriable classes (merge conflict, verification failure, policy denial) never loop. The daemon is itself crash-safe: on restart it resumes from durable state per §9.24.2 — `paused` stays paused, `running` becomes `orphaned`, and the poll tick resumes.
 
 The daemon runs unprivileged; foreground and systemd-user-unit supervision are documented operating modes, not requirements.

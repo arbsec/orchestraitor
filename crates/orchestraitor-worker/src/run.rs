@@ -16,6 +16,9 @@ use tracing::{debug, warn};
 use crate::action::{ActionRejection, WorkerAction, parse_action};
 use crate::delivery::{DeliveryOutcome, DeliveryRequest, DeliverySink};
 use crate::error::WorkerError;
+use crate::guardrails::{
+    ChurnWindow, NoProgressGuard, PollBudget, poll_shaped, progress_fingerprint, tool_call_shape,
+};
 use crate::mediator::BashMediator;
 use crate::model::{RunState, call_model};
 use crate::prompt::{SYSTEM_PROMPT, task_prompt};
@@ -94,6 +97,19 @@ pub async fn run_worker(
                 if failure.class == FailureClass::MediationRefused {
                     break AttemptOutcome::Failed(failure);
                 }
+                // Anti-stuck guard kills are re-plan-fatal: a fresh re-plan
+                // note cannot fix a loop the model is mechanistically stuck
+                // in (churn, no progress, or an unbounded external poll).
+                // They surface as their own typed class, not as an attempt
+                // budget reclassification.
+                if matches!(
+                    failure.class,
+                    FailureClass::ToolLoopChurn
+                        | FailureClass::NoProgress
+                        | FailureClass::PollBudgetExhausted
+                ) {
+                    break AttemptOutcome::Failed(failure);
+                }
                 if attempts >= budgets.max_attempts {
                     break AttemptOutcome::Failed(TypedFailure {
                         class: FailureClass::AttemptBudgetExhausted,
@@ -166,6 +182,10 @@ pub async fn run_worker(
     clippy::too_many_arguments,
     reason = "attempt state is threaded explicitly; grouping into a context struct would hide the data flow this thin slice needs to audit"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the turn body is the guard state machine (stall, turn bound, format errors, poll budget, churn window, no-progress fingerprint) read top-to-bottom in dispatch order; extracting arms would scatter the exhaustion semantics the reviewer must see together"
+)]
 async fn run_attempt(
     task: &WorkerTask,
     transport: &dyn ProviderTransport,
@@ -190,6 +210,17 @@ async fn run_attempt(
     let mut format_errors = 0_u32;
     let mut last_progress = Instant::now();
     let mut turns_this_attempt = 0_u32;
+
+    // Anti-stuck guardrail state (spec `10-orchestrator.md` §9.36 detection): churn window,
+    // no-progress fingerprint streak, and the CI-poll wall-clock budget.
+    // All three are per-attempt; the wall-clock stall check above is
+    // untouched and still owns the hang case.
+    let guardrails = &config.guardrails;
+    let mut churn = ChurnWindow::new(guardrails);
+    let mut no_progress = NoProgressGuard::new(guardrails);
+    let mut poll_budget = PollBudget::new(guardrails);
+    let churn_enabled = guardrails.churn_enabled();
+    let no_progress_enabled = guardrails.no_progress_enabled();
 
     loop {
         if started.elapsed() > budgets.run_deadline() {
@@ -250,7 +281,27 @@ async fn run_attempt(
             }
             Ok(action) => {
                 emit_beat(config, state);
+                // Poll-shaped bash (sleep + CI wait) is charged and bounded
+                // BEFORE the dispatch it requested: the wait's wall-clock
+                // burns inside the dispatch, so exceeding the budget stops
+                // the attempt at the turn that asked for it (spec §21.10:
+                // a bounded wait budget + parked task, never an unbounded
+                // poll loop).
+                let is_poll = match &action {
+                    WorkerAction::Bash { script } => poll_shaped(script),
+                    _ => false,
+                };
+                let dispatch_started = Instant::now();
                 let turn = executor.dispatch(&action).await;
+                if guardrails.poll_budget_enabled()
+                    && is_poll
+                    && poll_budget.charge(dispatch_started.elapsed())
+                {
+                    return attempt_failure(
+                        FailureClass::PollBudgetExhausted,
+                        "ci-poll-budget-exhausted",
+                    );
+                }
                 let mediation_failure = turn.mediation_failure;
                 messages.push(ModelMessage {
                     role: MessageRole::User,
@@ -260,6 +311,23 @@ async fn run_attempt(
                 format_errors = 0;
                 if let Some(reason) = mediation_failure {
                     return attempt_failure(FailureClass::MediationRefused, reason);
+                }
+                // Post-dispatch churn + no-progress guards: the newest
+                // receipt drives the churn window; the worktree fingerprint
+                // drives no-progress. Both run before the next model call so
+                // a stuck loop stops instead of burning the turn budget.
+                if let Some(receipt) = executor.last_receipt() {
+                    if churn_enabled && churn.observe(tool_call_shape(&action, receipt)) {
+                        return attempt_failure(FailureClass::ToolLoopChurn, "tool-loop-churn");
+                    }
+                    if no_progress_enabled
+                        && no_progress.observe(progress_fingerprint(
+                            executor.root_path(),
+                            executor.untrusted_writes(),
+                        ))
+                    {
+                        return attempt_failure(FailureClass::NoProgress, "no-progress");
+                    }
                 }
             }
         }

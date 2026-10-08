@@ -13,6 +13,31 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orc loop` anti-stuck guardrails (default-on; spec `10-orchestrator.md`
+  §9.27.1/§9.36, 50-contracts-data.md §21.10). Worker-side:
+  `FailureClass::ToolLoopChurn` (the same normalized tool-call shape
+  repeating 4 times within an 8-turn window kills the attempt — the
+  mktemp-loop failure mode), `FailureClass::NoProgress` (5 consecutive
+  identical worktree progress fingerprints fail the attempt), and
+  `FailureClass::PollBudgetExhausted` (cumulative poll-shaped bash —
+  `sleep` + `gh pr checks`/`gh run watch` fingerprints — exceeding 30m per
+  attempt; the task parks blocked-on-external instead of burning the
+  session). Churn and no-progress kills are re-plan-fatal: a fresh re-plan
+  note cannot fix a loop the model is mechanistically stuck in. The
+  wall-clock stall detection is unchanged. Loop-side: a durable per-task
+  retry budget in `loop.db` (`task_retry_state`: total attempts, last
+  failure class, no-progress streak, backoff window) — a task that exceeds
+  `max_task_attempts` (3) is excluded from selection with a typed skip
+  reason on the pass decision record and never silently re-selected, and a
+  failed task is excluded for its `task_retry_backoff` (15m) window;
+  completed runs clear the backoff and streak. The `orc loop` summary
+  carries `tasks_stuck` and `task_budget_skips` counters. All thresholds
+  are configurable via the layered config keys
+  `loop.no_progress_turns`, `loop.tool_repeat_count`,
+  `loop.tool_repeat_window`, `loop.ci_poll_budget_secs`,
+  `loop.max_task_attempts`, `loop.task_retry_backoff_secs` (absent block =
+  defaults active; an explicit `0` disables a guard deliberately, reported
+  as a stderr warning — never silent).
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a

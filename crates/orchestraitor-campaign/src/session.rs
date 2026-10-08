@@ -269,8 +269,51 @@ pub async fn plan_pass_with_selector_async(
     store: &CampaignDecisionStore,
     selector: Option<&dyn DecisionProvider>,
 ) -> Result<StoredCampaignDecision, CampaignError> {
-    let decision = campaign_decision_async(snapshot, routing, selector).await;
+    plan_pass_with_skips_async(snapshot, routing, store, selector, &[]).await
+}
+
+/// [`plan_pass_with_selector_async`] with cross-invocation guard skip
+/// reasons: each `(task id, reason)` pair is appended to the persisted
+/// decision record's rationale — the typed skip evidence the
+/// never-silent-retry contract requires (spec `10-orchestrator.md` §9.35,
+/// §9.36), on the ONE record the pass persists. Guard-skipped task ids are
+/// excluded from the candidate set BEFORE the configured decision provider
+/// (spec `30-model-routing.md` §9.45) is consulted: a skipped task is never
+/// offered as a selectable candidate.
+///
+/// # Errors
+///
+/// Returns [`CampaignError::Store`] when the record cannot be persisted.
+pub async fn plan_pass_with_skips_async(
+    snapshot: &BoardSnapshot,
+    routing: &RoleRoutingDecision,
+    store: &CampaignDecisionStore,
+    selector: Option<&dyn DecisionProvider>,
+    budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
+) -> Result<StoredCampaignDecision, CampaignError> {
+    let mut decision = campaign_decision_async(snapshot, routing, selector).await;
+    append_budget_skips(&mut decision, budget_skips);
     store.record(&decision)
+}
+
+/// Appends the guardrail skip note to a decision record's rationale. Shared
+/// by the sync and async planners so the two consumers can never drift.
+fn append_budget_skips(
+    decision: &mut CampaignDecision,
+    budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
+) {
+    if budget_skips.is_empty() {
+        return;
+    }
+    let mut note = String::from("task budget skips:");
+    for (task_id, reason) in budget_skips {
+        note.push(' ');
+        note.push_str(task_id);
+        note.push('(');
+        note.push_str(reason.to_string().as_str());
+        note.push_str(");");
+    }
+    decision.rationale = format!("{} [{}]", decision.rationale, note);
 }
 
 /// Constructs the exactly-one §9.35 decision record for a pass: the

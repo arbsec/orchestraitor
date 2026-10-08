@@ -89,6 +89,17 @@ impl<'a> ToolExecutor<'a> {
         &self.untrusted_writes
     }
 
+    /// The most recent receipt, if any dispatch has happened (the
+    /// guardrails' churn window observes it per turn).
+    pub(crate) fn last_receipt(&self) -> Option<&ToolReceipt> {
+        self.receipts.last()
+    }
+
+    /// The canonicalized worktree root the fingerprint reads.
+    pub(crate) fn root_path(&self) -> &'a Path {
+        self.root
+    }
+
     /// Dispatches one parsed action. `finish` and unknown-tool refusals never
     /// reach this method — the loop records those receipts itself.
     pub(crate) async fn dispatch(&mut self, action: &WorkerAction) -> ToolTurn {

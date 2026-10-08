@@ -45,8 +45,18 @@ use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 
 use crate::decision::{NoOpReason, SelectedTask};
 use crate::error::CampaignError;
+use crate::guardrails::GuardrailsSettings;
 use crate::run_state::{LoopRunStore, RunRowStatus, StartRun};
-use crate::session::{BoardSnapshot, plan_pass_with_selector_async, task_id_for};
+use crate::session::{BoardSnapshot, plan_pass_with_skips_async, task_id_for};
+
+/// The exclusion set plus typed budget-skip reasons one pass computed.
+struct TaskExclusions {
+    /// Task ids excluded from selection this pass.
+    excluded: HashSet<String>,
+    /// Cross-invocation guard skips with their typed reason (each rides
+    /// the pass's decision record).
+    budget_skips: Vec<(String, crate::guardrails::TaskSkipReason)>,
+}
 
 /// The supervisor-visible handle of one in-flight worker run.
 pub struct WorkerProcess {
@@ -116,6 +126,10 @@ pub struct LoopConfig {
     /// Optional cycle bound (board polls) — a QA/evidence affordance; `None`
     /// runs until a terminal stop or shutdown.
     pub max_cycles: Option<u64>,
+    /// Anti-stuck guardrail thresholds (spec §9.27.1): worker-side guard
+    /// limits plus the cross-invocation task retry budget/backoff.
+    /// Defaults apply when absent (`Default::default()`).
+    pub guardrails: crate::guardrails::GuardrailsSettings,
 }
 
 impl LoopConfig {
@@ -132,10 +146,31 @@ impl LoopConfig {
         shutdown_budget: Duration,
         max_cycles: Option<u64>,
     ) -> Result<Self, CampaignError> {
+        Self::with_guardrails(
+            budgets,
+            shutdown_budget,
+            max_cycles,
+            GuardrailsSettings::default(),
+        )
+    }
+
+    /// Validates and returns the configuration with explicit guardrail
+    /// settings. See [`LoopConfig::new`] for the validation contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Loop`] naming the rejected guard.
+    pub fn with_guardrails(
+        budgets: WorkerBudgets,
+        shutdown_budget: Duration,
+        max_cycles: Option<u64>,
+        guardrails: GuardrailsSettings,
+    ) -> Result<Self, CampaignError> {
         let config = Self {
             budgets,
             shutdown_budget,
             max_cycles,
+            guardrails,
         };
         config.validate()?;
         Ok(config)
@@ -199,6 +234,10 @@ pub enum StopReason {
     CycleBudget,
     /// SIGTERM/SIGINT: clean stop within the shutdown budget.
     Shutdown,
+    /// A hard anti-stuck guardrail fired (rank-7 typed circuit summary;
+    /// soft guard hits only warn — this reason means the loop ended
+    /// because of one).
+    GuardrailsExhausted,
 }
 
 /// One observed loop event (the journal the QA evidence renders). Events
@@ -296,6 +335,12 @@ pub struct LoopSummary {
     pub aborted_on_stop: u64,
     /// Failed board polls.
     pub poll_failures: u64,
+    /// Tasks recorded `stuck` (cross-invocation retry budget exhausted) —
+    /// the needs-human signal count (spec §9.24.1).
+    pub tasks_stuck: u64,
+    /// Passes that skipped a candidate over the task retry budget/backoff
+    /// (the typed skip reason rides the decision record).
+    pub task_budget_skips: u64,
     /// Whole seconds of loop elapsed time (virtual under tests).
     pub elapsed_secs: u64,
     /// The event journal, in observation order.
@@ -351,6 +396,7 @@ fn drain_detail(reason: StopReason) -> &'static str {
         // The spend soft cap never aborts on its own; an abort during its
         // drain only ever carries a shutdown that preempted the cap.
         StopReason::SpendSoftCap => "spend-cap-abort",
+        StopReason::GuardrailsExhausted => "guardrails-abort",
     }
 }
 
@@ -471,6 +517,11 @@ struct Counters {
     timed_out: u64,
     aborted_on_stop: u64,
     poll_failures: u64,
+    /// Tasks recorded `stuck` this invocation (cross-invocation budget or
+    /// future hard-guard hits).
+    stuck: u64,
+    /// Passes that skipped a candidate over the task retry budget/backoff.
+    task_budget_skips: u64,
 }
 
 impl Counters {
@@ -482,6 +533,7 @@ impl Counters {
             RunRowStatus::Stalled => self.stalled += 1,
             RunRowStatus::TimedOut => self.timed_out += 1,
             RunRowStatus::AbortedShutdown => self.aborted_on_stop += 1,
+            RunRowStatus::Stuck => self.stuck += 1,
             RunRowStatus::Running => {}
         }
     }
@@ -792,6 +844,8 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             timed_out: counters.timed_out,
             aborted_on_stop: counters.aborted_on_stop,
             poll_failures: counters.poll_failures,
+            tasks_stuck: counters.stuck,
+            task_budget_skips: counters.task_budget_skips,
             elapsed_secs: final_elapsed.as_secs(),
             events,
         })
@@ -1098,17 +1152,23 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         now: u64,
         mut snapshot: BoardSnapshot,
     ) -> Result<bool, CampaignError> {
-        let excluded = self.excluded_tasks()?;
+        let task_exclusions = self.excluded_tasks(now)?;
+        let excluded = &task_exclusions.excluded;
+        let budget_skips = &task_exclusions.budget_skips;
         snapshot
             .ready
             .retain(|item| !excluded.contains(&task_id_for(&item.repo, item.number)));
-        let stored = plan_pass_with_selector_async(
+        let stored = plan_pass_with_skips_async(
             &snapshot,
             &self.routing,
             self.decisions,
             self.task_selector,
+            budget_skips,
         )
         .await?;
+        if !budget_skips.is_empty() {
+            counters.task_budget_skips += budget_skips.len() as u64;
+        }
         let selected = stored.decision.selected.as_ref();
         events.push(LoopEvent::PassPlanned {
             decision_id: stored.id,
@@ -1142,9 +1202,32 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             let process = match self.starter.start(selected, &self.routing, spend).await {
                 Ok(process) => process,
                 Err(CampaignError::Spawn { message, .. }) => {
-                    self.runs
-                        .finish(row.id, RunRowStatus::Failed, now, 0.0, &message)?;
-                    counters.failed += 1;
+                    // A spawn failure is a task outcome too: it counts
+                    // against the cross-invocation retry budget and arms
+                    // the backoff — a task that fails to spawn every
+                    // invocation must reach `stuck`, not loop forever.
+                    // Exhaustion (post-increment `attempts_total` reaching
+                    // the budget) upgrades the terminal row from `failed`
+                    // to `stuck`.
+                    let exhausted = self.record_task_outcome(
+                        &selected.task_id,
+                        RunRowStatus::Failed,
+                        "spawn-failed",
+                        false,
+                        now,
+                    )?;
+                    self.runs.finish(
+                        row.id,
+                        exhausted.unwrap_or(RunRowStatus::Failed),
+                        now,
+                        0.0,
+                        &message,
+                    )?;
+                    if exhausted.is_some() {
+                        counters.stuck += 1;
+                    } else {
+                        counters.failed += 1;
+                    }
                     events.push(LoopEvent::WorkerFinished {
                         run_id: row.id,
                         task_id: selected.task_id.clone(),
@@ -1187,17 +1270,61 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         }
     }
 
-    /// Tasks this invocation already ran or is running (the
-    /// never-silent-retry exclusion).
-    fn excluded_tasks(&self) -> Result<HashSet<String>, CampaignError> {
+    /// Tasks this invocation already ran or is running, plus tasks under an
+    /// active cross-invocation guard (the never-silent-retry exclusion
+    /// extended with the anti-stuck task budget, spec `10-orchestrator.md` §9.36):
+    ///
+    /// - in-flight or already-run tasks of THIS invocation (as before); and
+    /// - tasks whose durable `attempts_total` reached
+    ///   [`GuardrailsSettings::max_task_attempts`] or whose
+    ///   `backoff_until` is in the future.
+    ///
+    /// Every budget/backoff exclusion is returned with its typed skip
+    /// reason so the pass's decision record carries it — never a silent
+    /// suppression.
+    fn excluded_tasks(&self, now: u64) -> Result<TaskExclusions, CampaignError> {
         let mut excluded: HashSet<String> =
             self.slots.iter().map(|slot| slot.task_id.clone()).collect();
+        let mut skipped = Vec::new();
         // Rows of THIS invocation only: previous invocations' terminal rows
         // are board-visible audit history, not a silent suppression.
         for row in self.runs.runs_for_invocation(&self.invocation_id)? {
             excluded.insert(row.task_id);
         }
-        Ok(excluded)
+        // Cross-invocation budget/backoff: read the durable retry state.
+        if self.config.guardrails.max_task_attempts > 0
+            || !self.config.guardrails.task_retry_backoff.is_zero()
+        {
+            for row in self.runs.all_task_retry_states()? {
+                if excluded.contains(&row.task_id) {
+                    continue;
+                }
+                if self.config.guardrails.max_task_attempts > 0
+                    && row.attempts_total >= u64::from(self.config.guardrails.max_task_attempts)
+                {
+                    excluded.insert(row.task_id.clone());
+                    skipped.push((
+                        row.task_id,
+                        crate::guardrails::TaskSkipReason::AttemptBudget,
+                    ));
+                    continue;
+                }
+                // A disabled backoff (0) honors its opt-out even when a
+                // previous invocation stored a window: the config is the
+                // authority, not stale durable state.
+                if !self.config.guardrails.task_retry_backoff.is_zero()
+                    && let Some(until) = row.backoff_until_secs
+                    && now < until
+                {
+                    excluded.insert(row.task_id.clone());
+                    skipped.push((row.task_id, crate::guardrails::TaskSkipReason::Backoff));
+                }
+            }
+        }
+        Ok(TaskExclusions {
+            excluded,
+            budget_skips: skipped,
+        })
     }
 
     /// Paces the next pass after one that produced no spawn.
@@ -1276,6 +1403,28 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 Err(_) => (RunRowStatus::Failed, "worker-panicked".to_string(), false),
             };
             let now = self.now_secs(self.elapsed())?;
+            // Ordering: the retry outcome is recorded BEFORE `finish` — the
+            // exhaustion check needs the post-increment durable
+            // `attempts_total`, and `finish` must then see the final
+            // status (`stuck` when the budget is exhausted). Failure
+            // window: a crash between the two writes leaves the row
+            // `running`, which the next invocation's fatal-exit sweep
+            // aborts — bounded, never a stranded or double-terminal row.
+            let (failure_class, no_progress) = match status {
+                RunRowStatus::Failed => {
+                    // The detail spells the class Debug-style (`NoProgress`,
+                    // `AttemptBudgetExhausted`); normalize to the serde
+                    // kebab-case spelling the result JSON exposes.
+                    let class = detail.split(':').next().unwrap_or("unknown");
+                    (kebab_failure_class(class), class == "NoProgress")
+                }
+                RunRowStatus::Stalled => ("stalled".to_owned(), false),
+                RunRowStatus::TimedOut => ("worker-timeout".to_owned(), false),
+                _ => ("unknown".to_owned(), false),
+            };
+            let exhausted =
+                self.record_task_outcome(&slot.task_id, status, &failure_class, no_progress, now)?;
+            let status = exhausted.unwrap_or(status);
             self.runs.finish(slot.run_id, status, now, spend, &detail)?;
             let event = match status {
                 RunRowStatus::Completed | RunRowStatus::Failed => LoopEvent::WorkerFinished {
@@ -1296,9 +1445,11 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                     task_id: slot.task_id.clone(),
                     shutdown: detail == "shutdown-abort",
                 },
-                // `finish` rejects non-terminal statuses, so these never
-                // occur here.
-                RunRowStatus::Running => LoopEvent::WorkerFinished {
+                // `Stuck` rows re-use the WorkerFinished journal shape (a
+                // stuck classification is a terminal run observation).
+                // `finish` rejects non-terminal statuses, so `Running`
+                // never occurs here.
+                RunRowStatus::Stuck | RunRowStatus::Running => LoopEvent::WorkerFinished {
                     run_id: slot.run_id,
                     task_id: slot.task_id.clone(),
                     completed: false,
@@ -1308,6 +1459,76 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         }
         Ok(results)
     }
+    /// Records the durable per-task outcome the cross-invocation budget
+    /// reads (spec `10-orchestrator.md` §9.36 budget enforcement): successes clear the
+    /// no-progress streak; failures increment `attempts_total`, set the
+    /// typed `last_failure_class`, and arm the re-selection backoff. A task
+    /// that exhausted its budget is recorded `stuck` on the row — the
+    /// needs-human signal (spec §9.24.1), never a silent respawn.
+    ///
+    /// Returns the exhausted task's row status ([`RunRowStatus::Stuck`])
+    /// when this failure pushed the durable `attempts_total` to
+    /// `max_task_attempts`; the caller must write that status to the
+    /// terminal row. `None` for every other outcome (including
+    /// supervisor kills — only genuine per-task failures can exhaust the
+    /// budget).
+    fn record_task_outcome(
+        &self,
+        task_id: &str,
+        status: RunRowStatus,
+        failure_class: &str,
+        no_progress: bool,
+        now: u64,
+    ) -> Result<Option<RunRowStatus>, CampaignError> {
+        let guardrails = &self.config.guardrails;
+        match status {
+            RunRowStatus::Completed => {
+                self.runs.record_task_success(task_id)?;
+                Ok(None)
+            }
+            RunRowStatus::Failed | RunRowStatus::Stalled | RunRowStatus::TimedOut => {
+                let backoff_until = if guardrails.task_retry_backoff.is_zero() {
+                    None
+                } else {
+                    now.checked_add(guardrails.task_retry_backoff.as_secs())
+                };
+                self.runs.record_task_failure(
+                    task_id,
+                    failure_class,
+                    no_progress,
+                    backoff_until,
+                )?;
+                // Exhaustion is judged on the post-increment durable state
+                // (a disabled budget, 0, never exhausts).
+                let exhausted = guardrails.max_task_attempts > 0
+                    && self.runs.task_retry_state(task_id)?.is_some_and(|state| {
+                        state.attempts_total >= u64::from(guardrails.max_task_attempts)
+                    });
+                Ok(exhausted.then_some(RunRowStatus::Stuck))
+            }
+            // Rows aborted for loop-level reasons are not task outcomes:
+            // shutdown/budget drains re-record the same task in a later
+            // invocation, and `stuck` rows are terminal bookkeeping.
+            RunRowStatus::AbortedShutdown | RunRowStatus::Stuck | RunRowStatus::Running => Ok(None),
+        }
+    }
+}
+
+/// Converts a `FailureClass` Debug spelling (`NoProgress`) to its serde
+/// kebab-case spelling (`no-progress`) for the durable retry state.
+fn kebab_failure_class(debug: &str) -> String {
+    let mut kebab = String::with_capacity(debug.len() + 4);
+    for (index, ch) in debug.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                kebab.push('-');
+            }
+            kebab.push(ch.to_ascii_lowercase());
+        } else {
+            kebab.push(ch);
+        }
+    }
+    kebab
 }
 
 /// Estimated run spend: tokens × the configured per-token estimate (`0.0`
