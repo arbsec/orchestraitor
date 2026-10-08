@@ -33,6 +33,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/verified-commit-path.md`](references/verified-commit-path.md) — why unsigned local bot-identity commits never verify, and the App-API replay path for unsigned chains (documented procedure; replay script not yet implemented).
   - [`references/commit-hygiene-remediation.md`](references/commit-hygiene-remediation.md) — failure-class → detection → remediation map for commit-hygiene violations (identity, verification, message format, mode/permission and ghost-commit anomalies); what `audit-pr-commits` flags and how to fix it.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
+  - `scripts/pr-review-local` — per-commit LOCAL CodeRabbit feedback (`coderabbit review --agent`; read-only, never posts to GitHub). Exit codes: `0` review completed (findings or clean), `2` config/state error (no PR for branch, jq missing for `--json`), `3` coderabbit CLI failure (missing binary included), `5` mergeable-gate refusal (PR conflicts with base). Invoke as `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local ...` — skill scripts are intentionally non-executable (mode `100644`) because the App-signed landing path (`createCommitOnBranch` fileChanges) cannot create mode `100755`.
 
 ## Core procedure
 
@@ -118,6 +119,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                    NEVER reuse the PR's feature headline for a remediation
                    landing: identical duplicate commit titles destroy the
                    history's meaning and make review of the fix impossible.
+                   Per-commit CodeRabbit feedback runs LOCALLY via
+                   `pr-review-local` (`coderabbit review --agent`; read-only,
+                   never posts to GitHub). Do NOT trigger
+                   `@coderabbitai review` per commit.
 
 5b. HUMAN GATE    For PRs carrying `needs-human-review` (§21.1
                   security-sensitive classes): after checks turn GREEN and
@@ -133,12 +138,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
                   resolved. See pr-convergence.md.
-                  The remediation loop MAY use
-                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local` for
-                  fast per-commit CodeRabbit feedback; the GitHub-side CodeRabbit
-                  review generation clean against the final head REMAINS the
-                  recorded convergence evidence before merge (the local run
-                  accelerates iteration, it does not replace the recorded gate).
+                  EXACTLY ONE GitHub-side CodeRabbit review generation is
+                  triggered (`@coderabbitai review` via `pr-comment`) against
+                  the FINAL head after local remediation goes quiet; its
+                  SHA-pinned review + threads are the recorded convergence
+                  evidence consumed by `convergence-status`. Local CLI runs
+                  never substitute for this gate.
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
