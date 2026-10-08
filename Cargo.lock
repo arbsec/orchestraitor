@@ -4481,6 +4481,7 @@ dependencies = [
  "async-trait",
  "orchestraitor-agent-catalog",
  "orchestraitor-board",
+ "orchestraitor-provider-api",
  "orchestraitor-worker",
  "rusqlite",
  "serde",
@@ -4507,6 +4508,7 @@ dependencies = [
  "orchestraitor-events",
  "orchestraitor-mcp",
  "orchestraitor-model",
+ "orchestraitor-provider-api",
  "orchestraitor-provider-meta",
  "orchestraitor-provider-neuralwatt",
  "orchestraitor-testkit",
@@ -4692,6 +4694,7 @@ dependencies = [
  "async-trait",
  "orchestraitor-core",
  "orchestraitor-model",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
@@ -4699,6 +4702,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

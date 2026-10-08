@@ -329,6 +329,120 @@ fn selected_pass_spawns_the_worker_via_the_direct_path() -> miette::Result<()> {
     Ok(())
 }
 
+/// A decision provider configured via `routing.provider` is consulted for
+/// campaign task selection and the consultation is recorded. The fixture
+/// provider (`routing.provider = "fixture"`) is offline and deterministic,
+/// so this exercises the full CLI wiring without any decision-model network
+/// call (spec §21.3; the `systemone` protocol adapter is covered by its own
+/// wire-level cassette tests in `orchestraitor-provider-api`).
+#[test]
+fn a_configured_decision_provider_is_consulted_for_task_selection() -> miette::Result<()> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS),
+        },
+        Rule {
+            needle: "items(first",
+            response: RuleResponse::Json(ONE_P0_READY_ITEM),
+        },
+    ])
+    .into_diagnostic()?;
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let project_dir = temp.path().join("project");
+    let config_dir = temp.path().join("config");
+    let tasks_dir = temp.path().join("tasks");
+    fs::create_dir_all(project_dir.join(".agents").join("project")).into_diagnostic()?;
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    fs::create_dir_all(&tasks_dir).into_diagnostic()?;
+    fs::write(
+        project_dir
+            .join(".agents")
+            .join("project")
+            .join("github-project.local.toml"),
+        board_config(),
+    )
+    .into_diagnostic()?;
+    // Default-off gate: only this user-layer file enables the provider.
+    fs::write(
+        config_dir.join("user.toml"),
+        "[routing]\nprovider = \"fixture\"\n",
+    )
+    .into_diagnostic()?;
+    fs::write(
+        tasks_dir.join("board-arbsec_orchestraitor-42.json"),
+        r#"{"id": "board-arbsec_orchestraitor-42", "slug": "board-arbsec_orchestraitor-42", "description": "write the output file"}"#,
+    )
+    .into_diagnostic()?;
+
+    let endpoint = spawn_simulator(vec![
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content: "```json\n{\"tool\": \"write_file\", \"path\": \"campaign.txt\", \"content\": \"campaign-ok\"}\n```"
+                .to_string(),
+        },
+        orchestraitor_testkit::PlannedResponse::NonStreaming {
+            content:
+                "```json\n{\"tool\": \"finish\", \"summary\": \"wrote it\", \"success\": true}\n```"
+                    .to_string(),
+        },
+    ])?;
+
+    let args = vec![
+        "--config-dir".to_string(),
+        config_dir.display().to_string(),
+        "--project-dir".to_string(),
+        project_dir.display().to_string(),
+        "--github-graphql-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--board-cache-path".to_string(),
+        temp.path().join("cache").display().to_string(),
+        "campaign".to_string(),
+        "run".to_string(),
+        "--once".to_string(),
+        "--json".to_string(),
+        "--worker-tasks-dir".to_string(),
+        tasks_dir.display().to_string(),
+        "--worker-provider-endpoint".to_string(),
+        endpoint,
+    ];
+    let output = run_orc(&args).into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "configured-provider pass exits 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let json: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(json["kind"], "selected");
+    // The fixture selects the first ready id deterministically; the record
+    // must attribute the selection to the consulted provider.
+    assert_eq!(
+        json["precedence_path"],
+        "decision-provider:fixture (confidence 1.00)"
+    );
+    let rationale = json["rationale"]
+        .as_str()
+        .ok_or_else(|| miette::miette!("decision record carries a rationale"))?
+        .to_string();
+    assert!(
+        rationale.contains("decision provider selected"),
+        "rationale must attribute the selection: {rationale}"
+    );
+    let db = rusqlite::Connection::open(config_dir.join("campaign.db")).into_diagnostic()?;
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM campaign_decisions", [], |row| {
+            row.get(0)
+        })
+        .into_diagnostic()?;
+    assert_eq!(count, 1);
+    Ok(())
+}
+
 #[test]
 fn missing_once_flag_is_a_typed_error_naming_the_loop_lane() -> miette::Result<()> {
     let output = run_orc(&["campaign".to_string(), "run".to_string()]).into_diagnostic()?;

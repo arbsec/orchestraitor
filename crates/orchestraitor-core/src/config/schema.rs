@@ -49,10 +49,33 @@ pub struct OrchestraitorConfig {
 /// the fallback chain when the provider is unavailable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoutingDecisionProviderConfig {
-    /// Decision provider implementation name. The only shipped value is
-    /// `fixture` (deterministic, table-driven); any other value is a typed
-    /// unknown-provider error at resolve time.
+    /// Decision provider implementation name. Shipped values are `fixture`
+    /// (deterministic, table-driven, offline) and `systemone` (the System
+    /// One decision protocol against any compatible endpoint — REQUIRED
+    /// `base_url`); any other value is a typed unknown-provider error at
+    /// resolve time.
     pub provider: Option<String>,
+    /// Decision-endpoint base URL (spec §10.3), REQUIRED for
+    /// `routing.provider = "systemone"`: any System One-compatible endpoint
+    /// — the Neuralwatt cloud or a self-hosted decision engine alike. The
+    /// URL is per-project operator configuration, never hardcoded in code.
+    /// A trailing slash is normalized before the `/systemone` path is
+    /// appended. Plain-`http` endpoints are accepted for no-auth
+    /// local/tailnet deployments; startup fails closed when a credential
+    /// is configured against a non-`https` endpoint off loopback.
+    pub base_url: Option<String>,
+    /// Optional decision model id override — any model the endpoint
+    /// serves. Defaults to `clef-flash`.
+    pub model: Option<String>,
+    /// Optional credential reference for the decision endpoint, as a
+    /// `secret://` URI (`secret://env/NEURALWATT_API_KEY`) or the literal
+    /// `none`. Absent (or `none`) means the endpoint takes no auth (a
+    /// local/self-hosted deployment) and no `Authorization` header is
+    /// sent; a `secret://` URI resolves through the standard secret chain
+    /// and the resolved value never enters an error or log line. A
+    /// credential is never sent over plaintext `http` off loopback:
+    /// non-`https` endpoints must be no-auth (local/tailnet) or `https`.
+    pub api_key: Option<String>,
 }
 
 /// Enforcement mode for the GitHub App service identity (AGENTS.md; spec

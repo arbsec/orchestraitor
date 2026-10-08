@@ -58,4 +58,14 @@ pub enum DecisionProviderError {
     /// A structured output failed to deserialize with valid confidence.
     #[error("decision provider returned a malformed structured output: {0}")]
     MalformedOutput(String),
+    /// The provider does not implement a decision surface. Adding a trait
+    /// method is non-breaking: implementations inherit a default that
+    /// returns this variant and callers fall back to the deterministic path.
+    #[error("decision provider `{provider_id}` does not support `{capability}`")]
+    Unsupported {
+        /// Stable decision-provider id.
+        provider_id: ProviderId,
+        /// Machine-readable surface name (for example `task-splitting`).
+        capability: &'static str,
+    },
 }

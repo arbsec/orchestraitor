@@ -7,7 +7,7 @@ the compatibility index: it maps every legacy section identifier (`§N`, `§N.N`
 requests, code comments, and discussions that reference `spec §N.N` keep resolving.
 `docs/spec/tech-stack.md` is unchanged except for the crate-path drift fix (the tree-diagram
 reference now names the real crate directory `crates/orchestraitor-arb-client`) and the
-TypeSafe/jev license-status line.
+Clef Flash decision-model license note.
 
 To resolve a legacy reference, find its identifier in the table below and open the linked
 file and anchor. New references should cite the target document directly, for example

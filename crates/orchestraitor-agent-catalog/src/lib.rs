@@ -25,8 +25,9 @@ pub use registry::{
     RoleDefinition,
 };
 pub use role_routing::{
-    BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, DecisionProviderConfigError, RoleRouter,
-    RoleRoutingDecision, resolve_decision_provider,
+    AVAILABLE_DECISION_PROVIDERS, BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, DecisionEndpointConfig,
+    DecisionProviderConfigError, FIXTURE_DECISION_PROVIDER, RoleRouter, RoleRoutingDecision,
+    SYSTEMONE_DECISION_PROVIDER, resolve_decision_provider, resolve_decision_provider_with,
 };
 pub use roles_registry::{RegistryRole, RegistryRoleKind, RoleRegistry};
 pub use routing::{

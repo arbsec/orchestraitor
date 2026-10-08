@@ -157,6 +157,9 @@ impl OrchestraitorConfig {
 impl RoutingDecisionProviderConfig {
     fn merge(&mut self, next: Self) {
         merge_scalar(&mut self.provider, next.provider);
+        merge_scalar(&mut self.base_url, next.base_url);
+        merge_scalar(&mut self.model, next.model);
+        merge_scalar(&mut self.api_key, next.api_key);
     }
 }
 
