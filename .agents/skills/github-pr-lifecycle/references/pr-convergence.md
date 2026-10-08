@@ -38,6 +38,9 @@ review generation N (fresh context, current HEAD)
   → push (new commit → HEAD moved → prior convergence invalidated)
   → review generation N+1 (fresh context, new HEAD)
   → ...
+  → per commit, between remediation and the next generation:
+    local coderabbit review --agent (pr-review-local) feeds findings into
+    remediation without a GitHub generation
   → STOP when generation N finds no new noteworthy findings
     AND all earlier blocking findings are resolved
 ```
@@ -59,6 +62,7 @@ The PR stays open, unmerged, in `blocked` state until a human resolves the remai
 - Hitting the loop limit (giving up ≠ converging).
 - The implementer approving their own PR (spec `50-contracts-data.md` §21.1 — not valid for security-sensitive changes).
 - An admin using `--admin` to bypass a red check (spec `50-contracts-data.md` §21.10 — forbidden).
+- A local `pr-review-local` run clean at HEAD — iteration feedback, not the recorded generation (no GitHub review object exists as evidence).
 
 ## How `convergence-status` computes the verdict
 
