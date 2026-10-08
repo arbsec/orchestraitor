@@ -13,18 +13,25 @@ use miette::IntoDiagnostic;
 use orchestraitor_testkit::{OpenAiMockServer, PlannedResponse};
 
 /// Serves the scripted simulator on a dedicated thread/runtime and returns
-/// its base URL. The server lives until the test process exits.
-fn spawn_simulator(script: Vec<PlannedResponse>) -> miette::Result<String> {
+/// its base URL plus the server handle (for captured-request assertions).
+/// The server lives until the returned handle drops.
+fn spawn_simulator(
+    script: Vec<PlannedResponse>,
+) -> miette::Result<(String, std::sync::Arc<OpenAiMockServer>)> {
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("simulator runtime");
         runtime.block_on(async move {
-            let server = OpenAiMockServer::serve(script)
-                .await
-                .expect("simulator serve");
-            tx.send(server.base_url().to_string())
+            let server = std::sync::Arc::new(
+                OpenAiMockServer::serve(script)
+                    .await
+                    .expect("simulator serve"),
+            );
+            let url = server.base_url().to_string();
+            tx.send((url, std::sync::Arc::clone(&server)))
                 .expect("base url send");
-            // Keep the server alive for the whole test process.
+            // Keep the server alive while the caller holds the handle (the
+            // pending future parks this thread until the test ends).
             std::future::pending::<()>().await;
         });
     });
@@ -54,7 +61,7 @@ fn worker_run_completes_fixture_task_and_prints_structured_json() -> miette::Res
     )
     .into_diagnostic()?;
 
-    let endpoint = spawn_simulator(vec![
+    let (endpoint, _sim) = spawn_simulator(vec![
         PlannedResponse::NonStreaming {
             content: "```json\n{\"tool\": \"write_file\", \"path\": \"out.txt\", \"content\": \"cli-ok\"}\n```"
                 .to_string(),
@@ -159,7 +166,7 @@ fn declared_command_tool_configured_in_user_layer_runs_through_the_worker() -> m
     )
     .into_diagnostic()?;
 
-    let endpoint = spawn_simulator(vec![
+    let (endpoint, _sim) = spawn_simulator(vec![
         PlannedResponse::NonStreaming {
             content: "```json\n{\"tool\": \"echo-declared\"}\n```".to_string(),
         },
@@ -233,7 +240,7 @@ fn project_layer_tool_definition_is_a_typed_startup_failure() -> miette::Result<
     )
     .into_diagnostic()?;
 
-    let endpoint = spawn_simulator(vec![PlannedResponse::NonStreaming {
+    let (endpoint, _sim) = spawn_simulator(vec![PlannedResponse::NonStreaming {
         content: "```json\n{\"tool\": \"finish\", \"summary\": \"s\", \"success\": true}\n```"
             .to_string(),
     }])?;
@@ -297,7 +304,7 @@ fn unknown_effort_value_is_a_typed_startup_failure() -> miette::Result<()> {
     )
     .into_diagnostic()?;
 
-    let endpoint = spawn_simulator(vec![PlannedResponse::NonStreaming {
+    let (endpoint, _sim) = spawn_simulator(vec![PlannedResponse::NonStreaming {
         content: "```json\n{\"tool\": \"finish\", \"summary\": \"s\", \"success\": true}\n```"
             .to_string(),
     }])?;
@@ -350,7 +357,7 @@ fn builtin_explore_tool_resolves_and_runs_a_subsession() -> miette::Result<()> {
     // Simulator script: the PARENT loop asks explore; the SUB-SESSION (same
     // simulator) runs search then finish. The last planned response
     // repeats, so both conversations complete.
-    let endpoint = spawn_simulator(vec![
+    let (endpoint, sim) = spawn_simulator(vec![
         PlannedResponse::NonStreaming {
             content: "```json\n{\"tool\": \"explore\"}\n```".to_string(),
         },
@@ -402,6 +409,31 @@ fn builtin_explore_tool_resolves_and_runs_a_subsession() -> miette::Result<()> {
             .iter()
             .any(|receipt| receipt["tool"] == "explore" && receipt["outcome"] == "completed"),
         "explore must complete via the sub-session: stdout={stdout} receipts={receipts:?}"
+    );
+    // The child's search must have actually EXECUTED (broken allowlist or
+    // mapping would refuse or never dispatch it): the sub-session's
+    // follow-up model request carries the search observation in its
+    // conversation history.
+    let captured = sim.captured_requests();
+    assert!(
+        captured.len() >= 3,
+        "the parent + child (search, finish) conversations must each hit the \
+         provider: captured={captured:?}"
+    );
+    let child_search_observed = captured.iter().skip(1).any(|request| {
+        request
+            .body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message.get("content").and_then(|c| c.as_str()))
+            .any(|content| content.contains("[search]"))
+    });
+    assert!(
+        child_search_observed,
+        "the child's search tool must execute inside the sub-session (no \
+         allowlist/mapping refusal may take its place): captured={captured:?}"
     );
     Ok(())
 }

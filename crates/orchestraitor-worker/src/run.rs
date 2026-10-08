@@ -473,30 +473,38 @@ pub(crate) fn render_subsession_summary(
     max_result_bytes: u64,
     outcome: &SubsessionOutcome,
 ) -> String {
+    const MARKER: &str = "\n[truncated]";
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
-    match &outcome.summary {
-        Some(summary) => {
-            const MARKER: &str = "\n[truncated]";
-            let prefix = format!("[subsession '{tool_id}' completed]\n");
-            // Reserve headroom for the prefix and the truncation marker so
-            // the child summary cut leaves room for everything around it.
-            let body_budget = cap.saturating_sub(prefix.len() + MARKER.len());
-            let body = crate::search::truncate_bytes(summary, body_budget);
-            let mut rendered = format!("{prefix}{body}");
-            if rendered.len() > cap {
-                let mut cut = cap;
-                while cut > 0 && !rendered.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                rendered.truncate(cut);
-            }
-            rendered
+    let mut rendered = if let Some(summary) = &outcome.summary {
+        let prefix = format!("[subsession '{tool_id}' completed]\n");
+        // Reserve headroom for the prefix and the truncation marker so
+        // the child summary cut leaves room for everything around it.
+        let body_budget = cap.saturating_sub(prefix.len() + MARKER.len());
+        let body = crate::search::truncate_bytes(summary, body_budget);
+        format!("{prefix}{body}")
+    } else {
+        // The failure branch caps identically to the success branch (CR
+        // finding: the failure reason is child-controlled text too): the
+        // prefix, reason, and marker must all fit within `max_result_bytes`.
+        let prefix = format!("[subsession '{tool_id}' failed: ");
+        let reason = outcome.failure.as_ref().map_or("none", |f| f.reason);
+        // Reserve headroom for the prefix and the closing `"]"` before
+        // cutting the reason, so the assembled wrapper stays inside the cap.
+        let reason_budget = cap.saturating_sub(prefix.len() + 1);
+        let body = crate::search::truncate_bytes(reason, reason_budget);
+        format!("{prefix}{body}]")
+    };
+    if rendered.len() > cap {
+        // Reserve room for the marker: the cut leaves space so the
+        // re-appended marker keeps the whole wrapper inside the cap.
+        let mut cut = cap.saturating_sub(MARKER.len());
+        while cut > 0 && !rendered.is_char_boundary(cut) {
+            cut -= 1;
         }
-        None => format!(
-            "[subsession '{tool_id}' failed: {:?}]",
-            outcome.failure.as_ref().map(|f| f.reason)
-        ),
+        rendered.truncate(cut);
+        rendered.push_str(MARKER);
     }
+    rendered
 }
 
 /// Sends one progress beat on the optional supervisor channel.

@@ -421,3 +421,56 @@ async fn parent_observation_wrapper_is_capped_in_bytes() {
         "an over-cap child summary must carry the truncation marker in the wrapper"
     );
 }
+
+#[test]
+fn parent_observation_wrapper_is_capped_for_a_failed_outcome() {
+    // CR finding regression (failure branch): a HUGE failure reason is
+    // child-controlled text just like a summary — the failure observation
+    // must never exceed max_result_bytes, with the truncation marker
+    // accounted for in the byte budget. The reason rides the outcome as a
+    // `&'static str`, so the huge text lives in a lazily-built test static.
+    static HUGE_REASON: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| "水".repeat(4_000)); // 12_000 bytes
+    let outcome = crate::subsession::SubsessionOutcome {
+        tool_id: "explore-q".to_string(),
+        status: crate::result::RunStatus::Failed,
+        summary: None,
+        failure: Some(crate::result::TypedFailure {
+            class: FailureClass::SubsessionFailed,
+            reason: HUGE_REASON.as_str(),
+        }),
+        usage: crate::result::UsageTotals {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        receipts: Vec::new(),
+        untrusted_writes: Vec::new(),
+        routing: crate::subsession::RoleRoutingEvidence {
+            role: "explore".to_string(),
+            provider: "neuralwatt".to_string(),
+            model: "glm-5.3-flash".to_string(),
+            precedence_path: "subsession-spawn".to_string(),
+            fallback_reason: None,
+        },
+    };
+
+    let max_bytes = 4 * 1024_u64;
+    let observation = render_subsession_summary(&outcome.tool_id, max_bytes, &outcome);
+
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    assert!(
+        observation.len() <= cap,
+        "failure wrapper must respect the byte cap: {} > {}",
+        observation.len(),
+        max_bytes
+    );
+    assert!(observation.is_char_boundary(observation.len()));
+    assert!(
+        observation.starts_with("[subsession 'explore-q' failed: "),
+        "the failure prefix must survive capping: {observation:?}"
+    );
+    assert!(
+        observation.ends_with("\n[truncated]"),
+        "an over-cap failure reason must carry the truncation marker: {observation:?}"
+    );
+}
