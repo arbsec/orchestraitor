@@ -137,6 +137,7 @@ fn worker_run_unknown_task_fails_nonzero_and_names_no_task() -> miette::Result<(
 
 // --- Declared tools (issue #535, T2): config plumbing and the layer gate ---
 
+#[cfg(target_os = "linux")]
 #[test]
 fn declared_command_tool_configured_in_user_layer_runs_through_the_worker() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
