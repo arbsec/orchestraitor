@@ -466,8 +466,9 @@ fn aggregate_child_usage(config: &WorkerConfig, state: &mut RunState, child: Usa
 /// Renders the model-facing observation for a completed sub-session spawn.
 /// The COMPLETE parent-visible wrapper (completion prefix + summary +
 /// truncation markers) is capped at `max_result_bytes` bytes on a char
-/// boundary: marker/prefix headroom is reserved before the child summary is
-/// truncated, and the assembled wrapper is re-capped defensively.
+/// boundary: fit-first — a summary that fully fits is rendered verbatim
+/// with no marker; only an over-cap summary is cut (with marker headroom
+/// reserved), and the assembled wrapper is re-capped defensively.
 pub(crate) fn render_subsession_summary(
     tool_id: &str,
     max_result_bytes: u64,
@@ -477,22 +478,33 @@ pub(crate) fn render_subsession_summary(
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     let mut rendered = if let Some(summary) = &outcome.summary {
         let prefix = format!("[subsession '{tool_id}' completed]\n");
-        // Reserve headroom for the prefix and the truncation marker so
-        // the child summary cut leaves room for everything around it.
-        let body_budget = cap.saturating_sub(prefix.len() + MARKER.len());
-        let body = crate::search::truncate_bytes(summary, body_budget);
-        format!("{prefix}{body}")
+        // Fit-first: when the full summary fits inside the cap, render it
+        // verbatim with no marker; only cut (reserving marker headroom)
+        // when it does not.
+        if prefix.len() + summary.len() <= cap {
+            format!("{prefix}{summary}")
+        } else {
+            let body_budget = cap.saturating_sub(prefix.len() + MARKER.len());
+            let body = crate::search::truncate_bytes(summary, body_budget);
+            format!("{prefix}{body}{MARKER}")
+        }
     } else {
         // The failure branch caps identically to the success branch (CR
         // finding: the failure reason is child-controlled text too): the
-        // prefix, reason, and marker must all fit within `max_result_bytes`.
+        // prefix, reason, and closing `"]"` must all fit within
+        // `max_result_bytes`.
         let prefix = format!("[subsession '{tool_id}' failed: ");
         let reason = outcome.failure.as_ref().map_or("none", |f| f.reason);
-        // Reserve headroom for the prefix and the closing `"]"` before
-        // cutting the reason, so the assembled wrapper stays inside the cap.
-        let reason_budget = cap.saturating_sub(prefix.len() + 1);
-        let body = crate::search::truncate_bytes(reason, reason_budget);
-        format!("{prefix}{body}]")
+        // Fit-first: when the full reason fits inside the cap, render it
+        // verbatim; only cut (reserving headroom for the closing bracket
+        // and marker) when it does not.
+        if prefix.len() + reason.len() < cap {
+            format!("{prefix}{reason}]")
+        } else {
+            let reason_budget = cap.saturating_sub(prefix.len() + 1 + MARKER.len());
+            let body = crate::search::truncate_bytes(reason, reason_budget);
+            format!("{prefix}{body}]{MARKER}")
+        }
     };
     if rendered.len() > cap {
         // Reserve room for the marker: the cut leaves space so the

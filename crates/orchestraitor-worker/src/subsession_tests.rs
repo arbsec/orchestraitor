@@ -474,3 +474,96 @@ fn parent_observation_wrapper_is_capped_for_a_failed_outcome() {
         "an over-cap failure reason must carry the truncation marker: {observation:?}"
     );
 }
+
+#[test]
+fn observation_at_exact_cap_keeps_full_content_without_marker() {
+    // Fit-first regression: a summary that EXACTLY fills the cap (prefix +
+    // summary == max_result_bytes) must be rendered verbatim — no
+    // truncation, no marker (the old unconditional headroom reservation
+    // cut it short and could append a false `[truncated]`).
+    let tool_id = "explore-q";
+    let prefix = format!("[subsession '{tool_id}' completed]\n");
+    let cap = 4 * 1024_usize;
+    let summary = "a".repeat(cap - prefix.len());
+
+    let outcome = crate::subsession::SubsessionOutcome {
+        tool_id: tool_id.to_string(),
+        status: crate::result::RunStatus::Completed,
+        summary: Some(summary.clone()),
+        failure: None,
+        usage: crate::result::UsageTotals {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        receipts: Vec::new(),
+        untrusted_writes: Vec::new(),
+        routing: crate::subsession::RoleRoutingEvidence {
+            role: "explore".to_string(),
+            provider: "neuralwatt".to_string(),
+            model: "glm-5.3-flash".to_string(),
+            precedence_path: "subsession-spawn".to_string(),
+            fallback_reason: None,
+        },
+    };
+
+    let observation = render_subsession_summary(tool_id, cap as u64, &outcome);
+    assert_eq!(
+        observation.len(),
+        cap,
+        "an exactly-fitting summary must fill the cap exactly"
+    );
+    assert_eq!(
+        observation,
+        format!("{prefix}{summary}"),
+        "an exactly-fitting summary must be rendered verbatim"
+    );
+    assert!(
+        !observation.contains("\n[truncated]"),
+        "a fully-fitting summary must NOT carry a truncation marker"
+    );
+}
+
+#[test]
+fn observation_one_byte_over_cap_is_truncated_with_marker() {
+    // Fit-first regression: one byte over the cap → truncated with the
+    // marker, and the whole wrapper stays within max_result_bytes.
+    let tool_id = "explore-q";
+    let prefix = format!("[subsession '{tool_id}' completed]\n");
+    let cap = 4 * 1024_usize;
+    let summary = "b".repeat(cap - prefix.len() + 1);
+
+    let outcome = crate::subsession::SubsessionOutcome {
+        tool_id: tool_id.to_string(),
+        status: crate::result::RunStatus::Completed,
+        summary: Some(summary.clone()),
+        failure: None,
+        usage: crate::result::UsageTotals {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        receipts: Vec::new(),
+        untrusted_writes: Vec::new(),
+        routing: crate::subsession::RoleRoutingEvidence {
+            role: "explore".to_string(),
+            provider: "neuralwatt".to_string(),
+            model: "glm-5.3-flash".to_string(),
+            precedence_path: "subsession-spawn".to_string(),
+            fallback_reason: None,
+        },
+    };
+
+    let observation = render_subsession_summary(tool_id, cap as u64, &outcome);
+    assert!(
+        observation.len() <= cap,
+        "wrapper must respect the byte cap: {} > {cap}",
+        observation.len()
+    );
+    assert!(
+        observation.ends_with("\n[truncated]"),
+        "an over-cap summary must carry the truncation marker: {observation:?}"
+    );
+    assert!(
+        observation.starts_with(&prefix),
+        "the completion prefix must survive truncation"
+    );
+}
