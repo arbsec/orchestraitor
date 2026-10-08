@@ -6,8 +6,8 @@ use crate::report::{Suggestion, SuggestionClass, ToolStatus};
 use crate::{SimplifyConfig, TOOL_TIMEOUT};
 
 /// clippy invocation (base form; the pedantic variant appends one arg).
-const CLIPPY_ARGS: &[&str] = &["clippy", "--message-format", "json", "--quiet", "--"];
-const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
+pub(crate) const CLIPPY_ARGS: &[&str] = &["clippy", "--message-format", "json", "--quiet", "--"];
+pub(crate) const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
     "clippy",
     "--message-format",
     "json",
@@ -20,7 +20,20 @@ const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
 /// The clippy fix invocation (`cargo clippy --fix --allow-dirty`): applies
 /// machine-applicable suggestions. Runs ONLY under the safe-fix policy,
 /// AFTER the check pass; `applied` is true only when this succeeded.
-const CLIPPY_FIX_ARGS: &[&str] = &["clippy", "--fix", "--allow-dirty", "--quiet"];
+/// The trailing lint args mirror the check invocation exactly (same lint
+/// level), so the fix scope covers every suggestion the check reported —
+/// a pedantic `SafeFix` can never be marked applied by a fix run that never
+/// saw the pedantic lints.
+pub(crate) const CLIPPY_FIX_ARGS: &[&str] = &["clippy", "--fix", "--allow-dirty", "--quiet"];
+pub(crate) const CLIPPY_FIX_PEDANTIC_ARGS: &[&str] = &[
+    "clippy",
+    "--fix",
+    "--allow-dirty",
+    "--quiet",
+    "--",
+    "-W",
+    "clippy::pedantic",
+];
 
 /// Base clippy spec.
 const CLIPPY_SPEC: ToolSpec = ToolSpec {
@@ -36,10 +49,17 @@ const CLIPPY_PEDANTIC_SPEC: ToolSpec = ToolSpec {
     label: "clippy",
 };
 
-/// Clippy fix spec.
+/// Clippy fix spec (lint scope mirrors the check spec).
 const CLIPPY_FIX_SPEC: ToolSpec = ToolSpec {
     program: "cargo",
     args: CLIPPY_FIX_ARGS,
+    label: "clippy",
+};
+
+/// Pedantic clippy fix spec.
+const CLIPPY_FIX_PEDANTIC_SPEC: ToolSpec = ToolSpec {
+    program: "cargo",
+    args: CLIPPY_FIX_PEDANTIC_ARGS,
     label: "clippy",
 };
 
@@ -61,10 +81,10 @@ pub fn run(
     config: &SimplifyConfig,
     apply_safe: bool,
 ) -> (Vec<ToolStatus>, Vec<Suggestion>) {
-    let spec = if config.pedantic {
-        &CLIPPY_PEDANTIC_SPEC
+    let (spec, fix_spec) = if config.pedantic {
+        (&CLIPPY_PEDANTIC_SPEC, &CLIPPY_FIX_PEDANTIC_SPEC)
     } else {
-        &CLIPPY_SPEC
+        (&CLIPPY_SPEC, &CLIPPY_FIX_SPEC)
     };
     if !executor.available(spec.program) {
         return (
@@ -83,7 +103,7 @@ pub fn run(
             // The fix pass runs only under the policy AND only after a
             // successful check parse; `applied` is earned by its exit.
             let fix_succeeded = if apply_safe {
-                let fix = executor.run(&CLIPPY_FIX_SPEC, root, TOOL_TIMEOUT);
+                let fix = executor.run(fix_spec, root, TOOL_TIMEOUT);
                 let succeeded = matches!(&fix, ToolOutcome::Ran(outcome) if outcome.success());
                 statuses.push(ToolStatus::from_outcome(CLIPPY_FIX_SPEC.label, &fix));
                 succeeded

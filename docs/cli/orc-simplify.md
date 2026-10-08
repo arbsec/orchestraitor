@@ -18,9 +18,12 @@ orc simplify run [--staged] [--path <PATH> ...] [--fix none|format|safe] [--peda
 ## Fail semantics: fail-open, loudly
 
 Simplify is a quality tool, never a blocker. An absent tool, a spawn
-failure, or a timeout is recorded as a typed warning carrying error code
+failure, a timeout, or an unresolvable configuration (parse or validation
+failure in any layer) is recorded as a typed warning carrying error code
 `ORC-SIMPLIFY-001` and the pass continues — it never fails a commit, a
-worker, or a push. The ONLY non-zero exit is `--pedantic-check` (below).
+worker, or a push. A configuration failure skips the pass entirely
+(exit 0, warning on stderr); it is never propagated as a non-zero exit.
+The ONLY non-zero exit is `--pedantic-check` (below).
 
 Hooks are fast-feedback affordances, not enforcement points: they are
 bypassable and untrusted-adjacent. The enforcement point for pre-landing
@@ -98,7 +101,9 @@ fast-feedback only — the real pre-landing gate is the push path.
 ## Error codes
 
 - `ORC-SIMPLIFY-001` — a simplify tool could not run (absent binary, spawn
-  failure, timeout) or the pass configuration is invalid. Fail-open: the
-  warning names the tool and the static reason; execution continues.
+  failure, timeout) or the pass configuration could not be resolved (parse
+  or validation failure in any layer). Fail-open: the warning names the
+  tool or the config cause; execution continues (a config failure skips
+  the pass entirely, still exiting 0).
 - `ORC-SIMPLIFY-002` — `--pedantic-check` found unaddressed suggestions
   above Format class. The only non-zero exit path in the command.

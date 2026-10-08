@@ -242,3 +242,46 @@ fn simplify_unknown_config_key_warns_but_runs() {
     );
     assert!(output.status.success());
 }
+
+#[test]
+fn simplify_config_failure_fails_open_with_warning_and_skip() {
+    // A broken config (validation failure) must NOT propagate as a non-zero
+    // exit without --pedantic-check: the fail-open contract is a typed
+    // ORC-SIMPLIFY-001 warning and a skip (exit 0).
+    let temp = fixture_workspace();
+    let project = temp.path().join("project");
+    fs::write(
+        project.join("orchestraitor.toml"),
+        "[simplify]\nenabled = true\nmax_passes = 0\n",
+    )
+    .unwrap();
+    let output = run_orc(
+        &[
+            "--project-dir",
+            project.to_str().unwrap(),
+            "simplify",
+            "run",
+        ],
+        &project,
+    );
+    assert!(
+        output.status.success(),
+        "config failure must fail open (exit 0); stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ORC-SIMPLIFY-001"),
+        "expected typed ORC-SIMPLIFY-001 warning; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("skipping the pass"),
+        "expected fail-open skip notice; stderr: {stderr}"
+    );
+    // The pass never ran: stdout carries no report.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("simplify: ran ="),
+        "the pass must be skipped; stdout: {stdout}"
+    );
+}

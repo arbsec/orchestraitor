@@ -27,8 +27,9 @@ pub(crate) const SIMPLIFY_PEDANTIC_CODE: &str = "ORC-SIMPLIFY-002";
 /// Runs an `orc simplify` subcommand.
 ///
 /// # Errors
-/// Returns a diagnostic only when configuration resolution fails; the pass
-/// itself is fail-open (tool unavailability is reported, never fatal).
+/// Returns a diagnostic only when writing the report fails; the pass itself
+/// is fail-open (tool unavailability AND configuration-resolution failure
+/// are typed `ORC-SIMPLIFY-001` warnings followed by a skip, never fatal).
 pub fn run<W: Write>(paths: &ConfigPaths, command: SimplifyCommand, writer: &mut W) -> Result<()> {
     match command {
         SimplifyCommand::Run(args) => run_pass(paths, &args, writer),
@@ -47,7 +48,22 @@ struct ReportOutput<'a> {
 }
 
 fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut W) -> Result<()> {
-    let config = resolved_config(paths)?;
+    // Fail-open, loudly: an unresolvable config (parse/validation failure)
+    // is a typed ORC-SIMPLIFY-001 warning and a skip (exit 0) — matching the
+    // crate's never-blocks contract. --pedantic-check keeps its fast-feedback
+    // refusal: the skip is still the only non-zero exit path it owns.
+    let config = match resolved_config(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            writeln!(
+                std::io::stderr(),
+                "warning [{SIMPLIFY_UNAVAILABLE_CODE}]: simplify configuration failed ({error:#}); \
+                 skipping the pass (fail-open)"
+            )
+            .into_diagnostic()?;
+            return Ok(());
+        }
+    };
 
     // Master switch: a disabled pass is a no-op (exit 0), per the built-in
     // default's contract with the hooks.
@@ -90,14 +106,27 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     };
     let (pass_config, auto_apply_format, auto_apply_safe_fixes) = pass_settings(&config);
     let executor = ProcessExecutor;
-    let pass = SimplifyPass::new(
+    // Fail-open, loudly: an invalid pass config (e.g. a zero bound) is the
+    // same typed warning + skip as an unresolvable layered config — the
+    // pass never blocks on its own configuration.
+    let pass = match SimplifyPass::new(
         &pass_config,
         &executor,
         fix,
         auto_apply_format,
         auto_apply_safe_fixes,
-    )
-    .map_err(|error| miette::miette!("{SIMPLIFY_UNAVAILABLE_CODE}: {error}"))?;
+    ) {
+        Ok(pass) => pass,
+        Err(error) => {
+            writeln!(
+                std::io::stderr(),
+                "warning [{SIMPLIFY_UNAVAILABLE_CODE}]: simplify configuration failed ({error}); \
+                 skipping the pass (fail-open)"
+            )
+            .into_diagnostic()?;
+            return Ok(());
+        }
+    };
     let mut report = pass.run(&project_dir);
 
     // Scope filtering + path normalization for the report.

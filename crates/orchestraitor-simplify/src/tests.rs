@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::*;
+use crate::clippy::{CLIPPY_FIX_ARGS, CLIPPY_FIX_PEDANTIC_ARGS, CLIPPY_PEDANTIC_ARGS};
 use crate::executor::{ExecOutput, SimplifyError, SimplifyExecutor, ToolOutcome, ToolSpec};
 use crate::report::{SimplifyReport, Suggestion, SuggestionClass, ToolStatus};
 
@@ -166,6 +167,71 @@ fn clippy_without_safe_policy_never_runs_the_fix_pass() {
     );
     // Check only: the fix invocation never runs without the policy.
     assert_eq!(statuses.len(), 1);
+}
+
+#[test]
+fn clippy_fix_pass_scope_matches_check_scope() {
+    // Regression (CodeRabbit PR-536): the fix invocation must cover exactly
+    // the check's lint scope — the same lint level (clippy::pedantic
+    // included when the check enables it) — or a successful fix run could
+    // mark a pedantic SafeFix applied that the fix scope never saw.
+    //
+    // The ScriptedExecutor keys outcomes by exact argv, so scripting the fix
+    // outcome ONLY under the pedantic fix argv makes the pass's fix spawn
+    // observable: the pedantic run below only earns `applied` if the fix
+    // invocation actually carried `-W clippy::pedantic`.
+    let config = SimplifyConfig {
+        pedantic: true,
+        ..SimplifyConfig::default()
+    };
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_argv(
+        "cargo",
+        CLIPPY_PEDANTIC_ARGS,
+        ran_output(MACHINE_APPLICABLE),
+    );
+    executor.script_argv(
+        "cargo",
+        CLIPPY_FIX_PEDANTIC_ARGS,
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (_statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        suggestions[0].applied,
+        "pedantic fix pass earns applied only because its argv matches the check scope"
+    );
+
+    // Symmetric negative: with the same pedantic config, a fix outcome
+    // scripted ONLY under the non-pedantic fix argv is never selected, so
+    // `applied` stays false — proving the pedantic run never falls back to
+    // the base fix scope.
+    let mismatched = ScriptedExecutor::with_available(&["cargo"]);
+    mismatched.script_argv(
+        "cargo",
+        CLIPPY_PEDANTIC_ARGS,
+        ran_output(MACHINE_APPLICABLE),
+    );
+    mismatched.script_argv(
+        "cargo",
+        CLIPPY_FIX_ARGS,
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (_statuses, suggestions) =
+        crate::clippy::run(&mismatched, Path::new("/tmp"), &config, true);
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        !suggestions[0].applied,
+        "a fix run with the WRONG (base) scope must not mark pedantic suggestions applied"
+    );
 }
 
 #[test]
