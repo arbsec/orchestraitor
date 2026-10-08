@@ -182,9 +182,11 @@ pub(crate) struct ToolPolicy {
         reason = "carried for the T2 executor dispatch + T4 prompt listing"
     )]
     pub(crate) declared: Vec<ToolDefinition>,
-    /// Internal tools a sub-session spawned by this run may use (always
-    /// empty in v1: sub-sessions cannot spawn sub-sessions — depth-1).
-    #[allow(dead_code, reason = "carried for the T3 sub-session executor build")]
+    /// Internal tools this run's executor may dispatch. Populated for
+    /// sub-session runs from the spawning tool definition's allowlist;
+    /// empty for top-level runs, whose built-in tools are the bootstrap
+    /// four (issue #535, T3: the allowlist is the sub-session's entire
+    /// execution authority).
     pub(crate) allowed_internal: std::collections::BTreeSet<InternalTool>,
     /// Sub-session depth of this run: 0 for a top-level worker, 1 inside a
     /// sub-session. Declared-tool dispatch is refused at depth >= 1.

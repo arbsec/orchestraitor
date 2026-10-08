@@ -19,6 +19,7 @@ use crate::action::WorkerAction;
 use crate::mediator::{BashMediator, MediationError};
 use crate::paths::resolve_confined;
 use crate::search::{search_files, truncate_chars};
+use crate::tooldef::InternalTool;
 
 /// Read size cap for `read_file` (bytes).
 const MAX_READ_BYTES: u64 = 1024 * 1024;
@@ -128,9 +129,20 @@ impl<'a> ToolExecutor<'a> {
         &self.untrusted_writes
     }
 
+    /// Records one path written INSIDE a sub-session (CR finding #2): the
+    /// child executor's writes must reach the parent's untrusted-output
+    /// pipeline — dropped writes would hide mutations of the shared worktree
+    /// from the delivery seam.
+    pub(crate) fn record_child_write(&mut self, path: &str) {
+        self.untrusted_writes.push(path.to_string());
+    }
+
     /// Dispatches one parsed action. `finish` and unknown-tool refusals never
     /// reach this method — the loop records those receipts itself.
     pub(crate) async fn dispatch(&mut self, action: &WorkerAction) -> ToolTurn {
+        if let Some(turn) = self.admit_internal(action) {
+            return turn;
+        }
         match action {
             WorkerAction::ReadFile { path } => self.read_file(path),
             WorkerAction::Search { pattern, path } => self.search(pattern, path.as_deref()),
@@ -138,6 +150,39 @@ impl<'a> ToolExecutor<'a> {
             WorkerAction::Bash { script } => self.bash(script).await,
             WorkerAction::DeclaredTool { tool_id, .. } => self.dispatch_declared(tool_id).await,
             WorkerAction::Finish { .. } => self.record_refusal("finish", "misrouted-finish"),
+        }
+    }
+
+    /// Admits one built-in internal tool against the run's policy before
+    /// dispatch (CR finding #2, CWE-863: the allowlist is enforced HERE, in
+    /// the executor, not merely carried). Returns `Some(refusal)` when the
+    /// dispatch is not admitted.
+    ///
+    /// A top-level run (depth 0) keeps the bootstrap four-tool surface. A
+    /// sub-session (depth ≥ 1) may dispatch ONLY the tools carved from the
+    /// spawning tool definition's allowlist — and `write_file` is not part
+    /// of the grantable vocabulary at all (core's `ResolvedInternalTool`
+    /// rejects it), so a sub-session can never mutate the (shared parent)
+    /// worktree through the executor.
+    fn admit_internal(&mut self, action: &WorkerAction) -> Option<ToolTurn> {
+        if self.policy.subsession_depth == 0 {
+            return None;
+        }
+        // Only the four built-ins route through the internal admission gate;
+        // declared tools keep their own audited path (depth gate first, then
+        // policy lookup — do not pre-empt it here).
+        match internal_action_of(action) {
+            InternalAction::NotInternal => None,
+            InternalAction::NeverAdmissible(name) => {
+                Some(self.push_refusal(name, true, "tool-not-allowed"))
+            }
+            InternalAction::Allowed(tool) => {
+                if self.policy.allowed_internal.contains(&tool) {
+                    None
+                } else {
+                    Some(self.push_refusal(tool.tool_name(), true, "tool-not-allowed"))
+                }
+            }
         }
     }
 
@@ -234,6 +279,17 @@ impl<'a> ToolExecutor<'a> {
 
     fn admitted_refusal(&mut self, tool: &'static str, reason: &'static str) -> ToolTurn {
         self.push_receipt(tool, true, "refused", Some(reason), None);
+        ToolTurn {
+            observation: format!("tool call refused: {reason}"),
+            mediation_failure: None,
+        }
+    }
+
+    /// Records an allowlist refusal with a computed (non-static) tool name:
+    /// the same receipt shape as `admitted_refusal`, for admission checks
+    /// that know the tool name only as a `&str`.
+    fn push_refusal(&mut self, tool: &str, admitted: bool, reason: &'static str) -> ToolTurn {
+        self.push_receipt(tool, admitted, "refused", Some(reason), None);
         ToolTurn {
             observation: format!("tool call refused: {reason}"),
             mediation_failure: None,
@@ -353,6 +409,32 @@ impl<'a> ToolExecutor<'a> {
                     mediation_failure: Some(reason),
                 }
             }
+        }
+    }
+}
+
+/// How a parsed action classifies for sub-session internal admission.
+enum InternalAction {
+    /// An allowlistable internal tool (checked against the carved set).
+    Allowed(InternalTool),
+    /// `write_file`: no `InternalTool` variant exists, so inside a
+    /// sub-session it is never admissible (the shared parent worktree must
+    /// not be mutable through a child).
+    NeverAdmissible(&'static str),
+    /// Not an internal built-in (declared tools, finish): keeps its own
+    /// audited dispatch path.
+    NotInternal,
+}
+
+/// Classifies a parsed action for sub-session internal admission.
+fn internal_action_of(action: &WorkerAction) -> InternalAction {
+    match action {
+        WorkerAction::ReadFile { .. } => InternalAction::Allowed(InternalTool::ReadFile),
+        WorkerAction::Search { .. } => InternalAction::Allowed(InternalTool::Search),
+        WorkerAction::Bash { .. } => InternalAction::Allowed(InternalTool::Bash),
+        WorkerAction::WriteFile { .. } => InternalAction::NeverAdmissible("write_file"),
+        WorkerAction::DeclaredTool { .. } | WorkerAction::Finish { .. } => {
+            InternalAction::NotInternal
         }
     }
 }
@@ -748,6 +830,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn quote_argv_round_trips_through_a_real_shell() {
         // The strongest negative: the forbidden effect did NOT happen. Run
         // the quoted argv through the system shell and observe the exact

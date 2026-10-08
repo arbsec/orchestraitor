@@ -50,6 +50,13 @@ pub struct WorkerConfig {
     /// sub-session. Declared-tool dispatch is refused at depth >= 1; there
     /// is no config path to raise it (plan C.1/S5).
     pub subsession_depth: u8,
+    /// The internal tools a sub-session run may dispatch (the allowlist
+    /// carved from the spawning tool definition). Empty = no internal tool
+    /// is admissible inside a sub-session; top-level runs ignore this field
+    /// (their bootstrap four-tool surface is not re-admitted here — the
+    /// depth-0 path bypasses the internal admission gate). The executor
+    /// ENFORCES this set on every internal dispatch (CR finding #2).
+    pub subsession_allowed_internal: std::collections::BTreeSet<crate::tooldef::InternalTool>,
     /// The `(provider, model)` the control plane resolved for each
     /// sub-session role (issue #535, T3): the parent never chooses a child
     /// model. Keyed by orchestration role id. A subagent tool whose role is
@@ -79,6 +86,14 @@ impl std::fmt::Debug for WorkerConfig {
             )
             .field("subsession_depth", &self.subsession_depth)
             .field(
+                "subsession_allowed_internal",
+                &self
+                    .subsession_allowed_internal
+                    .iter()
+                    .map(|tool| tool.tool_name())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
                 "subsession_routing",
                 &self.subsession_routing.keys().collect::<Vec<_>>(),
             )
@@ -101,6 +116,7 @@ impl WorkerConfig {
             model_call_sequence: std::sync::atomic::AtomicU64::new(0),
             tools: Vec::new(),
             subsession_depth: 0,
+            subsession_allowed_internal: std::collections::BTreeSet::new(),
             subsession_routing: std::collections::BTreeMap::new(),
         }
     }
@@ -122,10 +138,29 @@ impl WorkerConfig {
         self
     }
 
+    /// Sets the internal-tool allowlist for a sub-session run (CR finding
+    /// #2): the executor refuses every internal dispatch outside this set.
+    #[must_use]
+    pub fn with_subsession_allowed_internal(
+        mut self,
+        allowed: std::collections::BTreeSet<crate::tooldef::InternalTool>,
+    ) -> Self {
+        self.subsession_allowed_internal = allowed;
+        self
+    }
+
     /// Attaches a progress-beat channel (see [`WorkerConfig::progress`]).
     #[must_use]
     pub fn with_progress(mut self, progress: tokio::sync::watch::Sender<u64>) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// Sets the daily spend already accrued before this run (fed into the
+    /// soft-cap check; sub-session configs inherit the parent's value).
+    #[must_use]
+    pub fn with_prior_daily_spend(mut self, prior_daily_spend_usd: f64) -> Self {
+        self.prior_daily_spend_usd = prior_daily_spend_usd;
         self
     }
 

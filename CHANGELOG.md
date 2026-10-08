@@ -11,6 +11,32 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sub-session allowlist enforcement (PR #539 review)**: the declared-tool
+  internal-tool allowlist is now ENFORCED by the sub-session executor — a
+  sub-session spawned with the read-only default can no longer dispatch
+  `write_file` or `bash` (each non-allowlisted internal dispatch is a typed
+  `tool-not-allowed` refusal with a receipt, and the file system is never
+  touched). The child's system prompt now lists ONLY the allowlisted tools
+  (previously it advertised the full bootstrap four). Child writes surface
+  on the parent's untrusted-writes list instead of being dropped.
+- **Sub-session deadline carve (PR #539 review)**: a sub-session's wall
+  clock is carved from the parent run's ACTUAL remaining time
+  (`run_deadline − elapsed`), not a never-updated counter — the total run
+  can no longer exceed its run deadline by stacking sub-sessions.
+- **Sub-session cost attribution (PR #539 review)**: child runs now carry
+  the parent's cost attribution and sink (role = the sub-session role,
+  session = `<parent-session>/tool-<id>`), inherit the parent's prior daily
+  spend for the soft-cap check, and their token usage aggregates into the
+  parent run result (re-evaluating the soft-cap flag).
+- **Sub-session beats (PR #539 review)**: the child shares the parent's
+  progress-beat channel, so a hung child transport call cannot masquerade
+  as a stalled parent.
+- **Sub-session result cap (PR #539 review)**: the finish summary is
+  truncated by BYTES against the tool's `max_result_bytes` (a char cut let
+  multibyte text exceed the declared bound up to ~4×).
+
 ### Added
 
 - **Declared tools (issue #535)**: tools are now configuration. Each

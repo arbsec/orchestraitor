@@ -605,6 +605,8 @@ fn subsession_parent(depth: u8) -> SubsessionParent {
         project: "test".to_string(),
         repository: "test".to_string(),
         session_id: "test-session".to_string(),
+        attribution: None,
+        cost_sink: None,
     }
 }
 

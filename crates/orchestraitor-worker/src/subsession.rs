@@ -39,11 +39,9 @@ use crate::tooldef::{InternalTool, ToolDefinition, ToolMechanism};
 
 /// Default carve when the tool budget does not pin `max_turns`.
 const DEFAULT_SUBSESSION_MAX_TURNS: u32 = 12;
-/// Default carve when the tool budget does not pin `max_result_bytes`.
-const DEFAULT_SUBSESSION_MAX_RESULT_BYTES: u64 = 8 * 1024;
 
 /// The parent context a sub-session is carved from.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SubsessionParent {
     /// The parent's worktree root (the child confines to the same tree).
     pub worktree_root: std::path::PathBuf,
@@ -65,6 +63,32 @@ pub struct SubsessionParent {
     /// The session id stem for cost attribution (child sessions suffix the
     /// tool id and sequence).
     pub session_id: String,
+    /// The parent run's cost attribution context; the child's model calls
+    /// inherit it with the sub-session role and a tool-suffixed session
+    /// stem (CR finding #3: child spend must land in the ledger).
+    pub attribution: Option<orchestraitor_provider_neuralwatt::cost::CostAttribution>,
+    /// The parent's cost sink; the child's per-call rows land in the same
+    /// ledger (CR finding #3).
+    pub cost_sink: Option<std::sync::Arc<dyn orchestraitor_provider_neuralwatt::CostSink>>,
+}
+
+impl std::fmt::Debug for SubsessionParent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The cost sink is a bare trait object (no `Debug`); echo presence,
+        // mirroring `WorkerConfig`'s debug shape.
+        f.debug_struct("SubsessionParent")
+            .field("worktree_root", &self.worktree_root)
+            .field("remaining", &self.remaining)
+            .field("depth", &self.depth)
+            .field("prior_daily_spend_usd", &self.prior_daily_spend_usd)
+            .field("role", &self.role)
+            .field("project", &self.project)
+            .field("repository", &self.repository)
+            .field("session_id", &self.session_id)
+            .field("attribution", &self.attribution)
+            .field("cost_sink", &self.cost_sink.is_some())
+            .finish()
+    }
 }
 
 /// One sub-session invocation's typed result.
@@ -83,6 +107,10 @@ pub struct SubsessionOutcome {
     pub usage: crate::result::UsageTotals,
     /// The child's receipts (count-capped by the parent's echo).
     pub receipts: Vec<crate::tools::ToolReceipt>,
+    /// Worktree-relative paths the CHILD wrote through its (allowlisted)
+    /// tool surface (CR finding #2: dropped writes would hide mutations of
+    /// the shared parent worktree from the untrusted-output pipeline).
+    pub untrusted_writes: Vec<String>,
     /// The role-resolved routing decision evidence (role, provider, model,
     /// precedence path, fallback reason) for the decision record.
     pub routing: RoleRoutingEvidence,
@@ -144,6 +172,59 @@ pub fn parent_failure_class(child: FailureClass) -> FailureClass {
         | FailureClass::TaskNotCompleted
         | FailureClass::DeliveryFailed => FailureClass::SubsessionFailed,
     }
+}
+
+/// The internal-tool allowlist carved from a tool definition (empty for
+/// command tools — they are never spawned as sub-sessions, but the type
+/// must stay total).
+fn allowlist_of(def: &ToolDefinition) -> std::collections::BTreeSet<InternalTool> {
+    match &def.mechanism {
+        ToolMechanism::Subagent { internal_tools, .. } => internal_tools.clone(),
+        ToolMechanism::Command { .. } => std::collections::BTreeSet::new(),
+    }
+}
+
+/// Builds the child run's config: depth+1, the carved allowlist ENFORCED by
+/// the child's executor (CR finding #2), the parent's prior daily spend and
+/// cost attribution/sink (CR finding #3 — the child's rows land in the same
+/// ledger under a tool-suffixed session stem), and the parent's progress
+/// channel (CR finding #4 — the child's beats land on the same supervisor
+/// stream, so a hung child call cannot masquerade as a stalled parent).
+fn child_worker_config(
+    parent: &SubsessionParent,
+    def: &ToolDefinition,
+    role: &str,
+    routed: (&str, &str),
+    budgets: crate::budget::WorkerBudgets,
+    allowed_internal: std::collections::BTreeSet<InternalTool>,
+    progress: Option<&tokio::sync::watch::Sender<u64>>,
+) -> WorkerConfig {
+    let mut config = WorkerConfig::new(
+        ProviderId::from_string(routed.0.to_string()),
+        ModelId::from_string(routed.1.to_string()),
+        budgets,
+    )
+    .with_subsession_depth(parent.depth.saturating_add(1))
+    .with_subsession_allowed_internal(allowed_internal)
+    .with_prior_daily_spend(parent.prior_daily_spend_usd);
+    if let (Some(attribution), Some(sink)) = (&parent.attribution, &parent.cost_sink) {
+        let child_attribution = orchestraitor_provider_neuralwatt::cost::CostAttribution {
+            agent_domain_id: attribution.agent_domain_id.clone(),
+            role: role.to_string(),
+            project: parent.project.clone(),
+            session: orchestraitor_model::SessionId::from_string(format!(
+                "{}/tool-{}",
+                attribution.session.as_str(),
+                def.id
+            )),
+            repository: orchestraitor_model::RepositoryId::from_string(parent.repository.clone()),
+        };
+        config = config.with_cost_tracking(child_attribution, sink.clone());
+    }
+    if let Some(sender) = progress {
+        config = config.with_progress(sender.clone());
+    }
+    config
 }
 
 /// Runs one sub-session for one declared `subagent` tool (issue #535, T3).
@@ -213,22 +294,28 @@ pub async fn run_subsession(
         description,
     };
 
-    // The child's mediator: constructed ONLY when the allowlist names bash
-    // (read-only sub-sessions never probe the sandbox preflight).
-    let bash_mediator: Option<MediatedBashMediator> = def
-        .internal_tool_names()
-        .contains(&"bash")
+    // The child's execution surface is built STRICTLY from the allowlist
+    // (CR finding #2, CWE-863): a bash mediator exists only when the
+    // allowlist names `bash` — read-only sub-sessions never probe the
+    // sandbox preflight — and the executor's admission gate refuses every
+    // non-allowlisted internal tool (see `ToolExecutor::admit_internal`).
+    let allowed_internal = allowlist_of(def);
+    let bash_mediator: Option<MediatedBashMediator> = allowed_internal
+        .contains(&InternalTool::Bash)
         .then(MediatedBashMediator::new);
     let bash: &dyn BashMediator = bash_mediator
         .as_ref()
         .map_or(&ReadOnlyBashStub, |mediator| mediator as &dyn BashMediator);
 
-    let child_config = WorkerConfig::new(
-        ProviderId::from_string(routed.0.to_string()),
-        ModelId::from_string(routed.1.to_string()),
+    let child_config = child_worker_config(
+        parent,
+        def,
+        role,
+        routed,
         budgets,
-    )
-    .with_subsession_depth(parent.depth.saturating_add(1));
+        allowed_internal,
+        progress,
+    );
 
     // BEAT: before the child await — the supervisor's staleness window
     // covers the child wait from here.
@@ -263,7 +350,13 @@ pub async fn run_subsession(
         },
     })?;
 
-    Ok(outcome_from_run(def.id.clone(), role.clone(), routed, run))
+    Ok(outcome_from_run(
+        def.id.clone(),
+        role.clone(),
+        routed,
+        def.budget.max_result_bytes,
+        run,
+    ))
 }
 
 /// Emits one opaque child-window beat through the parent's channel. The
@@ -280,24 +373,27 @@ fn outcome_from_run(
     tool_id: String,
     role: String,
     routed: (&str, &str),
+    max_result_bytes: u64,
     run: WorkerRun,
 ) -> SubsessionOutcome {
     let failure: Option<TypedFailure> = run.failure.map(|failure| TypedFailure {
         class: parent_failure_class(failure.class),
         reason: failure.reason,
     });
+    let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     SubsessionOutcome {
         tool_id,
         status: run.status,
-        summary: run.summary.as_ref().map(|summary| {
-            crate::search::truncate_chars(
-                summary,
-                usize::try_from(DEFAULT_SUBSESSION_MAX_RESULT_BYTES).unwrap_or(usize::MAX),
-            )
-        }),
+        // Size cap in BYTES, not chars (CR finding #5): a char cut lets
+        // multibyte text exceed the declared byte bound up to ~4×.
+        summary: run
+            .summary
+            .as_ref()
+            .map(|summary| crate::search::truncate_bytes(summary, cap)),
         failure: failure.filter(|_| run.status == RunStatus::Failed),
         usage: run.usage,
         receipts: run.receipts,
+        untrusted_writes: run.untrusted_writes,
         routing: RoleRoutingEvidence {
             role,
             provider: routed.0.to_string(),

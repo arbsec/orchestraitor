@@ -30,9 +30,11 @@ pub(super) struct RunState<'a> {
     /// invocation, carried on the run result for decision records and cost
     /// attribution.
     pub(super) subsession_events: Vec<SubsessionEvent>,
-    /// Wall seconds already consumed by completed sub-session waits (the
-    /// parent's remaining-wall-clock carve input).
-    pub(super) subsession_wall_secs: u64,
+    /// When THIS run started: the parent's remaining wall clock for the
+    /// sub-session deadline carve is `run_deadline − elapsed`, measured from
+    /// here (CR finding #1: a counter that never increments cannot bound the
+    /// total run).
+    pub(super) started: std::time::Instant,
     /// Run-context labels the sub-session parent context needs.
     pub(super) worktree_root: std::path::PathBuf,
     pub(super) project: String,

@@ -8,7 +8,7 @@
 //! infinite retry (issue #310; spec `10-orchestrator.md` §9.24).
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use orchestraitor_provider_api::transport::{MessageRole, ModelMessage, ProviderTransport};
 use tracing::{debug, warn};
@@ -22,7 +22,7 @@ use crate::model::{
 };
 use crate::prompt::task_prompt;
 use crate::result::{FailureClass, RunStatus, TypedFailure, UsageTotals, WorkerConfig, WorkerRun};
-use crate::subsession::{SubsessionParent, run_subsession};
+use crate::subsession::{SubsessionOutcome, SubsessionParent, run_subsession};
 use crate::task::WorkerTask;
 use crate::tooldef::ToolMechanism;
 use crate::tools::ToolExecutor;
@@ -63,7 +63,7 @@ pub async fn run_worker(
     let root = canonical_root(worktree)?;
     let policy = crate::tooldef::ToolPolicy {
         declared: config.tools.clone(),
-        allowed_internal: std::collections::BTreeSet::new(),
+        allowed_internal: config.subsession_allowed_internal.clone(),
         subsession_depth: config.subsession_depth,
     };
     let mut executor = ToolExecutor::new(&root, bash).with_policy(policy);
@@ -77,7 +77,7 @@ pub async fn run_worker(
         spend_soft_cap_exceeded: false,
         progress_beat: 0,
         subsession_events: Vec::new(),
-        subsession_wall_secs: 0,
+        started,
         worktree_root: root.clone(),
         project: "local".to_string(),
         repository: root.display().to_string(),
@@ -374,13 +374,15 @@ async fn dispatch_subagent(
         executor.record_subagent_refusal(tool_id, "subsession-role-unrouted");
         return format!("tool call refused: subsession-role-unrouted ({role})");
     };
-    // The parent context: the run's remaining wall clock, depth, and
-    // attribution labels. The deadline carve computes from the tool budget
-    // inside run_subsession.
+    // The parent context: the run's ACTUAL remaining wall clock (deadline
+    // minus elapsed; the never-incremented `subsession_wall_secs` counter
+    // cannot see the time burned inside the child await — CR finding #1),
+    // depth, and attribution labels. The deadline carve computes from the
+    // tool budget inside run_subsession.
     let remaining = config
         .budgets
         .run_deadline()
-        .saturating_sub(Duration::from_secs(state.subsession_wall_secs));
+        .saturating_sub(state.started.elapsed());
     let parent = SubsessionParent {
         worktree_root: state.worktree_root.clone(),
         remaining,
@@ -390,6 +392,8 @@ async fn dispatch_subagent(
         project: state.project.clone(),
         repository: state.repository.clone(),
         session_id: state.session_id.clone(),
+        attribution: config.attribution.clone(),
+        cost_sink: config.cost_sink.clone(),
     };
     match Box::pin(run_subsession(
         &parent,
@@ -414,19 +418,18 @@ async fn dispatch_subagent(
                     usage: outcome.usage,
                     routing: outcome.routing.clone(),
                 }));
-            // Size cap: the tool budget's max_result_bytes, floor 0-safe.
-            let cap = usize::try_from(tool.budget.max_result_bytes).unwrap_or(usize::MAX);
-            match outcome.summary {
-                Some(summary) => format!(
-                    "[subsession '{}' completed]\n{}",
-                    tool_id,
-                    crate::search::truncate_chars(&summary, cap)
-                ),
-                None => format!(
-                    "[subsession '{tool_id}' failed: {:?}]",
-                    outcome.failure.as_ref().map(|f| f.reason)
-                ),
+            // The child's spend belongs to the parent's day (CR finding #3):
+            // usage aggregates into the run totals and re-evaluates the soft
+            // cap, so a sub-session can push the parent over the cap.
+            aggregate_child_usage(config, state, outcome.usage);
+            // Child writes surface on the parent's receipt trail via the
+            // outcome (CR finding #2): the child's own writes ride
+            // `outcome.untrusted_writes` into the parent's untrusted-output
+            // list so the delivery seam sees every worktree mutation.
+            for path in &outcome.untrusted_writes {
+                executor.record_child_write(path);
             }
+            render_subsession_summary(tool_id, tool.budget.max_result_bytes, &outcome)
         }
         Err(error) => {
             executor.record_subagent_refusal(tool_id, "subsession-spawn-failed");
@@ -438,6 +441,47 @@ async fn dispatch_subagent(
                 }));
             format!("subsession spawn failed closed: {error}")
         }
+    }
+}
+
+/// Aggregates one child run's token usage into the parent state and
+/// re-evaluates the daily spend soft cap (CR finding #3): a sub-session's
+/// spend is the parent's spend — it must be able to push the parent over
+/// the cap.
+fn aggregate_child_usage(config: &WorkerConfig, state: &mut RunState, child: UsageTotals) {
+    state.usage.input_tokens += child.input_tokens;
+    state.usage.output_tokens += child.output_tokens;
+    let total = state.usage.input_tokens + state.usage.output_tokens;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counts are far below 2^53; the estimate only feeds a soft-cap comparison"
+    )]
+    let estimated = total as f64 * config.budgets.usd_per_token_estimate;
+    let spent = config.prior_daily_spend_usd + estimated;
+    if spent > config.budgets.daily_spend_soft_cap_usd {
+        state.spend_soft_cap_exceeded = true;
+    }
+}
+
+/// Renders the model-facing observation for a completed sub-session spawn
+/// (already byte-capped by the child carve; the echo re-caps defensively at
+/// the same budget bound).
+fn render_subsession_summary(
+    tool_id: &str,
+    max_result_bytes: u64,
+    outcome: &SubsessionOutcome,
+) -> String {
+    let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
+    match &outcome.summary {
+        Some(summary) => format!(
+            "[subsession '{}' completed]\n{}",
+            tool_id,
+            crate::search::truncate_bytes(summary, cap)
+        ),
+        None => format!(
+            "[subsession '{tool_id}' failed: {:?}]",
+            outcome.failure.as_ref().map(|f| f.reason)
+        ),
     }
 }
 
