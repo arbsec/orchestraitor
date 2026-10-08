@@ -98,6 +98,14 @@ pub trait SimplifyExecutor: Send + Sync {
     fn available(&self, program: &str) -> bool;
 }
 
+/// Reads a pipe to end on a reader thread (the buffer is joined after the
+/// child exits).
+fn read_all<R: std::io::Read + Send + 'static>(mut pipe: R) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut pipe, &mut buffer);
+    buffer
+}
+
 /// Default executor: spawns real processes with the given wall-clock cap.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessExecutor;
@@ -105,57 +113,64 @@ pub struct ProcessExecutor;
 impl SimplifyExecutor for ProcessExecutor {
     fn run(&self, spec: &ToolSpec, dir: &Path, timeout: Duration) -> ToolOutcome {
         let mut command = spec.command(dir);
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-        command.stdin(std::process::Stdio::null());
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
         let Ok(mut child) = command.spawn() else {
             return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
                 tool: spec.label,
                 reason: "spawn",
             });
         };
+        // Drain both pipes on reader threads from the start: a child that
+        // fills a pipe buffer must never block on a parent that is only
+        // polling (a deadlock would surface as a spurious timeout).
+        let stdout_handle = child
+            .stdout
+            .take()
+            .map(|pipe| std::thread::spawn(move || read_all(pipe)));
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|pipe| std::thread::spawn(move || read_all(pipe)));
+        let read_pipe = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| -> Vec<u8> {
+            match handle {
+                Some(handle) => handle.join().unwrap_or_else(|_| Vec::new()),
+                None => Vec::new(),
+            }
+        };
         // Bounded wait: a hung tool yields a typed status, never a hang.
         let deadline = std::time::Instant::now() + timeout;
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
-                        (Some(mut out), Some(mut err)) => {
-                            let mut stdout = Vec::new();
-                            let mut stderr = Vec::new();
-                            // The child has exited; pipes are closed, so
-                            // read_to_end returns promptly.
-                            let _ = std::io::Read::read_to_end(&mut out, &mut stdout);
-                            let _ = std::io::Read::read_to_end(&mut err, &mut stderr);
-                            (stdout, stderr)
-                        }
-                        _ => (Vec::new(), Vec::new()),
-                    };
-                    return ToolOutcome::Ran(ExecOutput {
-                        code: status.code(),
-                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    });
-                }
+                Ok(Some(status)) => break Some(status),
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
-                        let _ignore = child.kill();
-                        let _ignore = child.wait();
-                        return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
-                            tool: spec.label,
-                            reason: "timeout",
-                        });
+                        break None;
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
-                Err(_) => {
-                    return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
-                        tool: spec.label,
-                        reason: "spawn",
-                    });
-                }
+                Err(_) => break None,
             }
-        }
+        };
+        let Some(status) = status else {
+            let _ignore = child.kill();
+            let _ignore = child.wait();
+            return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
+                tool: spec.label,
+                reason: "timeout",
+            });
+        };
+        // The child has exited; the pipes are closed and the readers finish
+        // promptly. join() reclaims both buffers before we render output.
+        let stdout = read_pipe(stdout_handle);
+        let stderr = read_pipe(stderr_handle);
+        ToolOutcome::Ran(ExecOutput {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
     }
 
     fn available(&self, program: &str) -> bool {

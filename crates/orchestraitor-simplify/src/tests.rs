@@ -13,7 +13,9 @@ use crate::executor::{ExecOutput, SimplifyError, SimplifyExecutor, ToolOutcome, 
 use crate::report::{SimplifyReport, Suggestion, SuggestionClass, ToolStatus};
 
 /// Scripted executor: records whether a program was probed/ran and returns
-/// canned outcomes.
+/// canned outcomes. Outcomes are keyed by `program + args` (not just the
+/// label) so a test can give the check invocation and the apply invocation
+/// of the same tool different results.
 struct ScriptedExecutor {
     available_programs: Vec<&'static str>,
     outcomes: std::sync::Mutex<std::collections::BTreeMap<String, ToolOutcome>>,
@@ -33,14 +35,31 @@ impl ScriptedExecutor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(label.to_string(), outcome);
     }
+
+    /// Scripts an outcome for a specific argv (program + argument list).
+    fn script_argv(&self, program: &str, args: &[&str], outcome: ToolOutcome) {
+        self.outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(argv_key(program, args), outcome);
+    }
+}
+
+/// Outcome key for a program + argument list (used by `script_argv`).
+fn argv_key(program: &str, args: &[&str]) -> String {
+    format!("{program} {args:?}")
 }
 
 impl SimplifyExecutor for ScriptedExecutor {
     fn run(&self, spec: &ToolSpec, _dir: &Path, _timeout: Duration) -> ToolOutcome {
-        self.outcomes
+        let key = argv_key(spec.program, spec.args);
+        let outcomes = self
+            .outcomes
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(spec.label)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        outcomes
+            .get(&key)
+            .or_else(|| outcomes.get(spec.label))
             .cloned()
             .unwrap_or(ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
                 tool: spec.label,
@@ -142,16 +161,18 @@ fn format_absent_tools_yield_unavailable_statuses() {
 #[test]
 fn format_check_parses_unformatted_files() {
     let executor = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
-    executor.script(
-        "cargo-fmt",
+    executor.script_argv(
+        "cargo",
+        &["fmt", "--check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(1),
             stdout: String::new(),
             stderr: "Diff in src/lib.rs at line 1:\nDiff in src/other.rs at line 9:\n".to_string(),
         }),
     );
-    executor.script(
+    executor.script_argv(
         "rumdl",
+        &["check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(1),
             stdout: "docs/cli/x.md:12:1: MK001 rule\n".to_string(),
@@ -172,18 +193,32 @@ fn format_check_parses_unformatted_files() {
 }
 
 #[test]
-fn format_apply_marks_suggestions_applied() {
+fn format_apply_runs_plain_fmt_after_check_and_marks_applied() {
+    // The apply path is check FIRST (the finding source), then a plain
+    // `cargo fmt` WITHOUT `--check` performing the rewrite. Suggestions are
+    // marked applied only because the fixing command succeeded.
     let executor = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
-    executor.script(
-        "cargo-fmt",
+    executor.script_argv(
+        "cargo",
+        &["fmt", "--check"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "Diff in src/lib.rs at line 1:\n".to_string(),
+        }),
+    );
+    executor.script_argv(
+        "cargo",
+        &["fmt"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
             stderr: String::new(),
         }),
     );
-    executor.script(
+    executor.script_argv(
         "rumdl",
+        &["check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -191,7 +226,71 @@ fn format_apply_marks_suggestions_applied() {
         }),
     );
     let (statuses, suggestions) = crate::format::run(&executor, Path::new("/tmp"), true);
-    assert_eq!(statuses.len(), 2);
+    // Statuses: check + apply for cargo-fmt, check + apply for rumdl.
+    assert_eq!(statuses.len(), 4);
+    assert_eq!(suggestions.len(), 1);
+    assert!(suggestions[0].applied);
+    assert_eq!(suggestions[0].path.as_deref(), Some("src/lib.rs"));
+}
+
+#[test]
+fn format_failed_apply_keeps_suggestions_unapplied() {
+    // When the fixing command fails, findings stay suggest-only.
+    let executor = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
+    executor.script_argv(
+        "cargo",
+        &["fmt", "--check"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "Diff in src/lib.rs at line 1:\n".to_string(),
+        }),
+    );
+    executor.script_argv(
+        "cargo",
+        &["fmt"],
+        ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
+            tool: "cargo-fmt",
+            reason: "timeout",
+        }),
+    );
+    executor.script_argv(
+        "rumdl",
+        &["check"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (_statuses, suggestions) = crate::format::run(&executor, Path::new("/tmp"), true);
+    assert_eq!(suggestions.len(), 1);
+    assert!(!suggestions[0].applied, "failed fix must not claim applied");
+}
+
+#[test]
+fn format_apply_marks_suggestions_applied() {
+    let executor = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
+    executor.script_argv(
+        "cargo",
+        &["fmt", "--check"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    executor.script_argv(
+        "rumdl",
+        &["check"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (statuses, suggestions) = crate::format::run(&executor, Path::new("/tmp"), true);
+    assert_eq!(statuses.len(), 4);
     assert!(suggestions.is_empty(), "applied fixes leave no findings");
 }
 
@@ -207,8 +306,9 @@ fn deadcode_machete_absent_is_suggest_only_noop() {
 #[test]
 fn deadcode_machete_findings_are_never_applied() {
     let executor = ScriptedExecutor::with_available(&["cargo-machete"]);
-    executor.script(
+    executor.script_argv(
         "cargo-machete",
+        &[],
         ran_output("serde serde /tmp/probe/Cargo.toml\n"),
     );
     let config = SimplifyConfig::default();
@@ -301,10 +401,11 @@ fn pass_with_no_tools_reports_ran_false() {
 #[test]
 fn pass_report_is_deterministic_and_sorted() {
     let executor = ScriptedExecutor::with_available(&["cargo", "rumdl", "cargo-machete"]);
-    executor.script("cargo-fmt", ran_output(""));
-    executor.script("rumdl", ran_output(""));
-    executor.script(
-        "clippy",
+    executor.script_argv("cargo", &["fmt", "--check"], ran_output(""));
+    executor.script_argv("rumdl", &["check"], ran_output(""));
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
         ran_output(concat!(
             "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"a\",\"code\":{\"code\":\"clippy::aa\"},\"spans\":[{\"file_name\":\"src/z.rs\",\"is_primary\":true,\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":1}],\"children\":[]}}\n",
             "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"b\",\"code\":{\"code\":\"clippy::bb\"},\"spans\":[{\"file_name\":\"src/a.rs\",\"is_primary\":true,\"line_start\":2,\"line_end\":2,\"column_start\":1,\"column_end\":1}],\"children\":[]}}\n",
@@ -327,16 +428,18 @@ fn pass_report_is_deterministic_and_sorted() {
 fn fix_policy_respects_config_flags() {
     // Format fix requires BOTH the CLI policy and the config flag.
     let executor = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
-    executor.script(
-        "cargo-fmt",
+    executor.script_argv(
+        "cargo",
+        &["fmt", "--check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(1),
             stdout: String::new(),
             stderr: "Diff in src/lib.rs at line 1:\n".to_string(),
         }),
     );
-    executor.script(
+    executor.script_argv(
         "rumdl",
+        &["check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -355,16 +458,18 @@ fn fix_policy_respects_config_flags() {
     // With the flag on, findings are marked applied (the executor ran the
     // fixing invocation); a clean scripted run leaves nothing to apply.
     let clean = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
-    clean.script(
-        "cargo-fmt",
+    clean.script_argv(
+        "cargo",
+        &["fmt", "--check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
             stderr: String::new(),
         }),
     );
-    clean.script(
+    clean.script_argv(
         "rumdl",
+        &["check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -382,16 +487,27 @@ fn fix_policy_respects_config_flags() {
     // A run whose script reports findings and auto-applies them: the
     // suggestion is marked applied under the flag.
     let fixing = ScriptedExecutor::with_available(&["cargo", "rumdl"]);
-    fixing.script(
-        "cargo-fmt",
+    fixing.script_argv(
+        "cargo",
+        &["fmt", "--check"],
         ToolOutcome::Ran(ExecOutput {
-            code: Some(0),
+            code: Some(1),
             stdout: String::new(),
             stderr: "Diff in src/lib.rs at line 1:\n".to_string(),
         }),
     );
-    fixing.script(
+    fixing.script_argv(
+        "cargo",
+        &["fmt"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    fixing.script_argv(
         "rumdl",
+        &["check"],
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),

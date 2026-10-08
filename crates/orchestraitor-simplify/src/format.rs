@@ -14,10 +14,24 @@ const FMT_SPEC: ToolSpec = ToolSpec {
     label: "cargo-fmt",
 };
 
+/// `cargo fmt` (no `--check`): performs the rewrite.
+const FMT_APPLY_SPEC: ToolSpec = ToolSpec {
+    program: "cargo",
+    args: &["fmt"],
+    label: "cargo-fmt",
+};
+
 /// `rumdl check`: reports markdown lint findings with exit 1.
 const RUMDL_SPEC: ToolSpec = ToolSpec {
     program: "rumdl",
     args: &["check"],
+    label: "rumdl",
+};
+
+/// `rumdl check --fix`: performs the rewrite.
+const RUMDL_APPLY_SPEC: ToolSpec = ToolSpec {
+    program: "rumdl",
+    args: &["check", "--fix"],
     label: "rumdl",
 };
 
@@ -36,16 +50,24 @@ pub fn run(
     let mut statuses = Vec::new();
     let mut suggestions = Vec::new();
 
-    // rustfmt.
+    // rustfmt: check FIRST (the finding source), then — when applying — a
+    // second plain `cargo fmt` run that performs the rewrite. Suggestions
+    // are marked applied only when that fixing command succeeded.
     if executor.available(FMT_SPEC.program) {
-        let (check_spec, apply_spec) = (FMT_SPEC, FMT_SPEC);
-        let outcome = if apply {
-            executor.run(&apply_spec, root, TOOL_TIMEOUT)
-        } else {
-            executor.run(&check_spec, root, TOOL_TIMEOUT)
-        };
-        statuses.push(ToolStatus::from_outcome(FMT_SPEC.label, &outcome));
-        if let ToolOutcome::Ran(output) = outcome {
+        let check = executor.run(&FMT_SPEC, root, TOOL_TIMEOUT);
+        let fixed = apply.then(|| executor.run(&FMT_APPLY_SPEC, root, TOOL_TIMEOUT));
+        // Record BOTH invocations when applying (check + apply); check-only
+        // otherwise. The check status carries the finding signal; the apply
+        // status carries the rewrite result.
+        statuses.push(ToolStatus::from_outcome(FMT_SPEC.label, &check));
+        if let Some(apply_outcome) = &fixed {
+            statuses.push(ToolStatus::from_outcome(
+                FMT_APPLY_SPEC.label,
+                apply_outcome,
+            ));
+        }
+        let apply_succeeded = matches!(&fixed, Some(ToolOutcome::Ran(output)) if output.success());
+        if let ToolOutcome::Ran(output) = &check {
             for path in fmt_unformatted_files(&output.stderr) {
                 suggestions.push(Suggestion {
                     class: SuggestionClass::Format,
@@ -53,7 +75,7 @@ pub fn run(
                     line: None,
                     rule: "rustfmt".to_string(),
                     message: "file is not rustfmt-formatted".to_string(),
-                    applied: apply,
+                    applied: apply_succeeded,
                 });
             }
         }
@@ -64,21 +86,19 @@ pub fn run(
         });
     }
 
-    // rumdl (markdown). Skipped silently from suggestions when absent —
-    // recorded as unavailable.
+    // rumdl (markdown): same check-then-apply shape.
     if executor.available(RUMDL_SPEC.program) {
-        let spec = if apply {
-            ToolSpec {
-                program: "rumdl",
-                args: &["check", "--fix"],
-                label: "rumdl",
-            }
-        } else {
-            RUMDL_SPEC
-        };
-        let outcome = executor.run(&spec, root, TOOL_TIMEOUT);
-        statuses.push(ToolStatus::from_outcome(RUMDL_SPEC.label, &outcome));
-        if let ToolOutcome::Ran(output) = outcome {
+        let check = executor.run(&RUMDL_SPEC, root, TOOL_TIMEOUT);
+        let fixed = apply.then(|| executor.run(&RUMDL_APPLY_SPEC, root, TOOL_TIMEOUT));
+        statuses.push(ToolStatus::from_outcome(RUMDL_SPEC.label, &check));
+        if let Some(apply_outcome) = &fixed {
+            statuses.push(ToolStatus::from_outcome(
+                RUMDL_APPLY_SPEC.label,
+                apply_outcome,
+            ));
+        }
+        let apply_succeeded = matches!(&fixed, Some(ToolOutcome::Ran(output)) if output.success());
+        if let ToolOutcome::Ran(output) = &check {
             for path in rumdl_flagged_files(&output.stdout) {
                 suggestions.push(Suggestion {
                     class: SuggestionClass::Format,
@@ -86,7 +106,7 @@ pub fn run(
                     line: None,
                     rule: "rumdl".to_string(),
                     message: "markdown lint finding (rumdl)".to_string(),
-                    applied: apply,
+                    applied: apply_succeeded,
                 });
             }
         }

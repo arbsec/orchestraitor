@@ -58,6 +58,10 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
 
     // Scope: the pass always runs over the project directory; `--staged` and
     // `--paths` filter the REPORTED suggestions (presentation scoping).
+    // `staged = Some(None)` = git failed (fail-open: no staged filter);
+    // `staged = Some(Some(list))` = the index was readable (an empty list
+    // means genuinely nothing is staged, so file-scoped findings are out of
+    // scope — pathless workspace-level findings always remain).
     let project_dir = project_root(paths);
     let staged_paths = if args.staged {
         Some(staged_files(&project_dir))
@@ -197,13 +201,16 @@ fn pass_settings(config: &OrchestraitorConfig) -> (PassConfig, bool, bool) {
 
 /// Filters reported suggestions by staged/`--paths` scope. Staged paths are
 /// worktree-relative; a suggestion with no path survives (workspace-level
-/// findings are always reported).
+/// findings are always reported). `staged` is `Some(None)` when git failed
+/// (no staged filter — fail-open) and `Some(Some(list))` when the index was
+/// read (an empty list is a real empty scope).
 fn filter_report(
     report: &mut orchestraitor_simplify::SimplifyReport,
-    staged: Option<&Vec<String>>,
+    staged: Option<&Option<Vec<String>>>,
     paths: &[String],
     project_dir: &Path,
 ) {
+    let staged = staged.and_then(|inner| inner.as_ref());
     if staged.is_none() && paths.is_empty() {
         return;
     }
@@ -243,27 +250,29 @@ fn filter_report(
 }
 
 /// Staged (index) files, worktree-relative, via `git diff --cached --name-only`.
-/// Fail-open: a non-repository directory (or git failure) yields an empty
-/// scope, which reports everything rather than nothing.
-fn staged_files(project_dir: &Path) -> Vec<String> {
+/// `None` = git could not run or failed (fail-open: the caller drops the
+/// staged filter and reports everything, rather than silently narrowing to
+/// nothing); `Some(list)` = the index was read (possibly empty — a genuinely
+/// empty index is a real empty scope, not an error).
+fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
         .current_dir(project_dir)
         .args(["diff", "--cached", "--name-only", "-z"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
+        .output()
+        .ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect()
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// The directory the pass runs over: the project dir (never a colonized cwd —
