@@ -185,9 +185,11 @@ impl<'a> SimplifyPass<'a> {
 
         // Safe-fix + semantic classes: clippy.
         let apply_safe = matches!(self.fix, FixPolicy::Safe) && self.auto_apply_safe_fixes;
-        let (clippy_status, clippy_suggestions) =
+        let (clippy_statuses, clippy_suggestions) =
             clippy::run(self.executor, root, self.config, apply_safe);
-        report.record_tool(clippy_status);
+        for status in clippy_statuses {
+            report.record_tool(status);
+        }
         for suggestion in clippy_suggestions {
             report.push(suggestion);
         }

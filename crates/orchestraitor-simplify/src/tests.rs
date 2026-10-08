@@ -86,7 +86,7 @@ const MACHINE_APPLICABLE: &str = r#"{"reason":"compiler-message","message":{"lev
 
 #[test]
 fn clippy_parse_extracts_machine_applicable_suggestion() {
-    let suggestions = crate::clippy::parse(MACHINE_APPLICABLE, false);
+    let suggestions = crate::clippy::parse(MACHINE_APPLICABLE);
     assert_eq!(suggestions.len(), 1);
     let suggestion = &suggestions[0];
     assert_eq!(suggestion.class, SuggestionClass::SafeFix);
@@ -97,9 +97,75 @@ fn clippy_parse_extracts_machine_applicable_suggestion() {
 }
 
 #[test]
-fn clippy_parse_applies_only_under_flag_on_rs_files() {
-    let applied = crate::clippy::parse(MACHINE_APPLICABLE, true);
-    assert!(applied[0].applied);
+fn clippy_fix_pass_marks_rs_safe_fixes_applied_only_on_success() {
+    // The check runs first; the explicit `cargo clippy --fix` pass earns
+    // `applied = true` for machine-applicable suggestions on `.rs` files
+    // ONLY when it succeeds.
+    let config = SimplifyConfig::default();
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
+        ran_output(MACHINE_APPLICABLE),
+    );
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (_statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(suggestions.len(), 1);
+    assert!(suggestions[0].applied, "successful fix pass earns applied");
+}
+
+#[test]
+fn clippy_failed_fix_pass_keeps_suggestions_suggest_only() {
+    let config = SimplifyConfig::default();
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
+        ran_output(MACHINE_APPLICABLE),
+    );
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
+            tool: "clippy",
+            reason: "timeout",
+        }),
+    );
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        !suggestions[0].applied,
+        "failed fix pass must not claim applied"
+    );
+    // Both invocations are recorded: check + failed fix.
+    assert_eq!(statuses.len(), 2);
+}
+
+#[test]
+fn clippy_without_safe_policy_never_runs_the_fix_pass() {
+    let config = SimplifyConfig::default();
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
+        ran_output(MACHINE_APPLICABLE),
+    );
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, false);
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        !suggestions[0].applied,
+        "no policy, no fix pass, no applied"
+    );
+    // Check only: the fix invocation never runs without the policy.
+    assert_eq!(statuses.len(), 1);
 }
 
 #[test]
@@ -109,7 +175,7 @@ fn clippy_parse_ignores_non_diagnostic_lines() {
         "not json at all\n",
         "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"m\",\"code\":{\"code\":\"clippy::redundant_clone\"},\"spans\":[{\"file_name\":\"src/a.rs\",\"is_primary\":true,\"line_start\":7,\"line_end\":7,\"column_start\":1,\"column_end\":2}],\"children\":[]}}\n",
     );
-    let suggestions = crate::clippy::parse(stream, false);
+    let suggestions = crate::clippy::parse(stream);
     assert_eq!(suggestions.len(), 1);
     assert_eq!(suggestions[0].class, SuggestionClass::Semantic);
     assert_eq!(suggestions[0].line, Some(7));
@@ -121,7 +187,7 @@ fn clippy_parse_skips_errors_without_lint_code() {
         "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"could not compile\",\"code\":null,\"spans\":[],\"children\":[]}}\n",
         "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"unused variable\",\"code\":{\"code\":\"unused_variables\"},\"spans\":[{\"file_name\":\"src/b.rs\",\"is_primary\":true,\"line_start\":3,\"line_end\":3,\"column_start\":5,\"column_end\":6}],\"children\":[]}}\n",
     );
-    let suggestions = crate::clippy::parse(stream, false);
+    let suggestions = crate::clippy::parse(stream);
     assert_eq!(
         suggestions.len(),
         1,
@@ -134,13 +200,13 @@ fn clippy_parse_skips_errors_without_lint_code() {
 fn clippy_absent_tool_is_captured_not_fatal() {
     let executor = ScriptedExecutor::with_available(&[]);
     let config = SimplifyConfig::default();
-    let (status, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, false);
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, false);
     assert_eq!(
-        status,
-        ToolStatus::Unavailable {
+        statuses,
+        vec![ToolStatus::Unavailable {
             tool: "clippy".to_string(),
             reason: "spawn".to_string()
-        }
+        }]
     );
     assert!(suggestions.is_empty());
 }

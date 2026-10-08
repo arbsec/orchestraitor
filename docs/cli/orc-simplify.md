@@ -30,20 +30,31 @@ quality is the push path (the review-loop PR's push-branch gate).
 
 - `--staged` — scope the report to files staged for commit (what the
   pre-commit hook passes). Workspace-level findings without a file path are
-  always reported. Fail-open: a git failure yields an empty scope, which
-  reports everything rather than nothing.
+  always reported. Scope resolution distinguishes two cases: git itself
+  failing (or git absent) drops the staged filter entirely — the report is
+  unscoped rather than silently narrowed to nothing; a readable index with
+  NOTHING staged is a real empty scope — only findings without a file path
+  are reported. `--staged` also implies check-only: format fixes never
+  auto-apply over a staged scope, because rustfmt/rumdl rewrite whole
+  files and would touch unstaged (or partially staged) hunks the user
+  never asked to modify.
 - `--path <PATH>` — restrict the report to specific paths (repeatable).
 - `--fix none|format|safe` — fix policy (default `none`):
   - `format` auto-applies Format-class fixes when
-    `simplify.auto_apply_format` is true (the default);
-  - `safe` additionally auto-applies clippy machine-applicable suggestions
-    on `.rs` files when `simplify.auto_apply_safe_fixes` is true. Pending
-    the Arbitraitor output-classification gate (review-loop PR), safe-fix
-    auto-apply is limited to exactly this surface — everything above Format
-    is suggest-only otherwise.
+    `simplify.auto_apply_format` is true (the default): the check runs
+    first, then a second fixing invocation (`cargo fmt` without `--check`,
+    `rumdl check --fix`) performs the rewrite; suggestions are marked
+    applied only when that fixing command succeeded;
+  - `safe` additionally runs `cargo clippy --fix --allow-dirty` after the
+    check pass and marks clippy machine-applicable suggestions on `.rs`
+    files applied only when that fix invocation succeeded. Pending the
+    Arbitraitor output-classification gate (review-loop PR), safe-fix
+    auto-apply is limited to exactly this surface — everything above
+    Format is suggest-only otherwise.
 - `--pedantic-check` — exit 1 when unaddressed suggestions above Format
-  exist (safe-fix + semantic). This is the pre-push hook's fast-feedback
-  signal, not a gate.
+  exist (safe-fix + semantic), reported under error code
+  `ORC-SIMPLIFY-002`. This is the pre-push hook's fast-feedback signal,
+  not a gate.
 - `--json` — emit the typed report: `ran`, `ran_rules_only`,
   `unaddressed`, `auto_applied_count`, `suggestions[]`, `tools[]`.
 
@@ -89,3 +100,5 @@ fast-feedback only — the real pre-landing gate is the push path.
 - `ORC-SIMPLIFY-001` — a simplify tool could not run (absent binary, spawn
   failure, timeout) or the pass configuration is invalid. Fail-open: the
   warning names the tool and the static reason; execution continues.
+- `ORC-SIMPLIFY-002` — `--pedantic-check` found unaddressed suggestions
+  above Format class. The only non-zero exit path in the command.

@@ -17,6 +17,11 @@ const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
     "clippy::pedantic",
 ];
 
+/// The clippy fix invocation (`cargo clippy --fix --allow-dirty`): applies
+/// machine-applicable suggestions. Runs ONLY under the safe-fix policy,
+/// AFTER the check pass; `applied` is true only when this succeeded.
+const CLIPPY_FIX_ARGS: &[&str] = &["clippy", "--fix", "--allow-dirty", "--quiet"];
+
 /// Base clippy spec.
 const CLIPPY_SPEC: ToolSpec = ToolSpec {
     program: "cargo",
@@ -31,22 +36,31 @@ const CLIPPY_PEDANTIC_SPEC: ToolSpec = ToolSpec {
     label: "clippy",
 };
 
+/// Clippy fix spec.
+const CLIPPY_FIX_SPEC: ToolSpec = ToolSpec {
+    program: "cargo",
+    args: CLIPPY_FIX_ARGS,
+    label: "clippy",
+};
+
 /// Rule label for unused-dependency findings (shared with `deadcode`).
 pub(crate) const UNUSED_DEPENDENCY_RULE: &str = "unused-dependency";
 
 /// Runs clippy under `root` and renders its diagnostics as suggestions.
 ///
 /// Non-zero clippy exits are normal (findings exist) and still parse: only a
-/// spawn failure or timeout yields `Unavailable`. Applied suggestions carry
-/// `applied = true` only when `apply_safe` is set AND the replacement targets
-/// a `.rs` file — in this slice safe-fix auto-apply is conservatively narrow
-/// pending the Arbitraitor classification gate (PR-2).
+/// spawn failure or timeout yields `Unavailable`. When `apply_safe` is set,
+/// a second `cargo clippy --fix --allow-dirty` invocation runs AFTER the
+/// check; machine-applicable suggestions on `.rs` files are marked
+/// `applied` only when that fix run succeeded — never from the check output
+/// alone. The safe-fix surface stays conservatively narrow pending the
+/// Arbitraitor classification gate (PR-2).
 pub fn run(
     executor: &dyn SimplifyExecutor,
     root: &std::path::Path,
     config: &SimplifyConfig,
     apply_safe: bool,
-) -> (ToolStatus, Vec<Suggestion>) {
+) -> (Vec<ToolStatus>, Vec<Suggestion>) {
     let spec = if config.pedantic {
         &CLIPPY_PEDANTIC_SPEC
     } else {
@@ -54,21 +68,44 @@ pub fn run(
     };
     if !executor.available(spec.program) {
         return (
-            ToolStatus::Unavailable {
+            vec![ToolStatus::Unavailable {
                 tool: spec.label.to_string(),
                 reason: "spawn".to_string(),
-            },
+            }],
             Vec::new(),
         );
     }
-    let outcome = executor.run(spec, root, TOOL_TIMEOUT);
-    let status = ToolStatus::from_outcome(spec.label, &outcome);
-    match outcome {
+    let check = executor.run(spec, root, TOOL_TIMEOUT);
+    let mut statuses = vec![ToolStatus::from_outcome(spec.label, &check)];
+    match check {
         ToolOutcome::Ran(output) => {
-            let suggestions = parse(&output.stdout, apply_safe);
-            (status, suggestions)
+            let mut suggestions = parse(&output.stdout);
+            // The fix pass runs only under the policy AND only after a
+            // successful check parse; `applied` is earned by its exit.
+            let fix_succeeded = if apply_safe {
+                let fix = executor.run(&CLIPPY_FIX_SPEC, root, TOOL_TIMEOUT);
+                let succeeded = matches!(&fix, ToolOutcome::Ran(outcome) if outcome.success());
+                statuses.push(ToolStatus::from_outcome(CLIPPY_FIX_SPEC.label, &fix));
+                succeeded
+            } else {
+                false
+            };
+            if fix_succeeded {
+                for suggestion in &mut suggestions {
+                    if suggestion.class == SuggestionClass::SafeFix
+                        && suggestion.path.as_deref().is_some_and(|file| {
+                            std::path::Path::new(file)
+                                .extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                        })
+                    {
+                        suggestion.applied = true;
+                    }
+                }
+            }
+            (statuses, suggestions)
         }
-        ToolOutcome::Unavailable(_) => (status, Vec::new()),
+        ToolOutcome::Unavailable(_) => (statuses, Vec::new()),
     }
 }
 
@@ -77,11 +114,11 @@ pub fn run(
 ///
 /// A diagnostic becomes a suggestion when it carries a lint code
 /// (`clippy::*` or rustc lint codes) and a primary span. Diagnostics with a
-/// machine-applicable replacement render as `SafeFix` suggestions (applied
-/// only under the explicit flag on `.rs` files); everything else is
-/// Semantic and suggest-only.
+/// machine-applicable replacement render as `SafeFix` suggestions;
+/// everything else is Semantic and suggest-only. `applied` is set by the
+/// runner after a successful fix pass — never here.
 #[must_use]
-pub fn parse(stream: &str, apply_safe: bool) -> Vec<Suggestion> {
+pub fn parse(stream: &str) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
     for line in stream.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -106,11 +143,6 @@ pub fn parse(stream: &str, apply_safe: bool) -> Vec<Suggestion> {
             continue;
         };
         let (path, line_no) = primary_location(message);
-        let file_is_rs = path.as_deref().is_some_and(|file| {
-            std::path::Path::new(file)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-        });
         let machine_applicable = has_machine_applicable_replacement(message);
         suggestions.push(Suggestion {
             class: if machine_applicable {
@@ -126,7 +158,9 @@ pub fn parse(stream: &str, apply_safe: bool) -> Vec<Suggestion> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            applied: apply_safe && machine_applicable && file_is_rs,
+            // Never set here: the runner marks `applied` only after a real
+            // fix pass succeeds.
+            applied: false,
         });
     }
     suggestions

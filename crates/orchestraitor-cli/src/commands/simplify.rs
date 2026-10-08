@@ -19,6 +19,11 @@ use crate::commands::config::layers::load_layers;
 /// `orchestraitor-model` `ErrorComponent::Simplify`).
 pub(crate) const SIMPLIFY_UNAVAILABLE_CODE: &str = "ORC-SIMPLIFY-001";
 
+/// Distinct code for the `--pedantic-check` refusal (spec §9.34: different
+/// conditions carry different codes; this one signals unaddressed
+/// suggestions above Format, not tool unavailability).
+pub(crate) const SIMPLIFY_PEDANTIC_CODE: &str = "ORC-SIMPLIFY-002";
+
 /// Runs an `orc simplify` subcommand.
 ///
 /// # Errors
@@ -62,6 +67,13 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     // `staged = Some(Some(list))` = the index was readable (an empty list
     // means genuinely nothing is staged, so file-scoped findings are out of
     // scope — pathless workspace-level findings always remain).
+    //
+    // STAGED SAFETY RULE: with `--staged`, format fixes never auto-apply.
+    // rustfmt/rumdl rewrite whole files; applying them over a staged scope
+    // would also rewrite UNSTAGED (and partially staged) hunks the user
+    // never asked to touch. Under `--staged` the pass is check-only above
+    // reporting; the hook compensates by running the same command without
+    // `--staged` when the developer wants fixes.
     let project_dir = project_root(paths);
     let staged_paths = if args.staged {
         Some(staged_files(&project_dir))
@@ -70,6 +82,8 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     };
 
     let fix = match args.fix {
+        // Staged runs never auto-apply: see the STAGED SAFETY RULE above.
+        _ if args.staged => FixPolicy::None,
         SimplifyFixMode::None => FixPolicy::None,
         SimplifyFixMode::Format => FixPolicy::Format,
         SimplifyFixMode::Safe => FixPolicy::Safe,
@@ -129,7 +143,7 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
         if pedantic > 0 {
             writeln!(
                 std::io::stderr(),
-                "warning [{SIMPLIFY_UNAVAILABLE_CODE}]: {pedantic} unaddressed suggestion(s) \
+                "warning [{SIMPLIFY_PEDANTIC_CODE}]: {pedantic} unaddressed suggestion(s) \
                  above Format class (pedantic-check)"
             )
             .into_diagnostic()?;
