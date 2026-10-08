@@ -463,21 +463,35 @@ fn aggregate_child_usage(config: &WorkerConfig, state: &mut RunState, child: Usa
     }
 }
 
-/// Renders the model-facing observation for a completed sub-session spawn
-/// (already byte-capped by the child carve; the echo re-caps defensively at
-/// the same budget bound).
-fn render_subsession_summary(
+/// Renders the model-facing observation for a completed sub-session spawn.
+/// The COMPLETE parent-visible wrapper (completion prefix + summary +
+/// truncation markers) is capped at `max_result_bytes` bytes on a char
+/// boundary: marker/prefix headroom is reserved before the child summary is
+/// truncated, and the assembled wrapper is re-capped defensively.
+pub(crate) fn render_subsession_summary(
     tool_id: &str,
     max_result_bytes: u64,
     outcome: &SubsessionOutcome,
 ) -> String {
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     match &outcome.summary {
-        Some(summary) => format!(
-            "[subsession '{}' completed]\n{}",
-            tool_id,
-            crate::search::truncate_bytes(summary, cap)
-        ),
+        Some(summary) => {
+            const MARKER: &str = "\n[truncated]";
+            let prefix = format!("[subsession '{tool_id}' completed]\n");
+            // Reserve headroom for the prefix and the truncation marker so
+            // the child summary cut leaves room for everything around it.
+            let body_budget = cap.saturating_sub(prefix.len() + MARKER.len());
+            let body = crate::search::truncate_bytes(summary, body_budget);
+            let mut rendered = format!("{prefix}{body}");
+            if rendered.len() > cap {
+                let mut cut = cap;
+                while cut > 0 && !rendered.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                rendered.truncate(cut);
+            }
+            rendered
+        }
         None => format!(
             "[subsession '{tool_id}' failed: {:?}]",
             outcome.failure.as_ref().map(|f| f.reason)

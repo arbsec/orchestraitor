@@ -10,6 +10,7 @@ use super::{
     SubsessionError, SubsessionParent, default_internal_tools, parent_failure_class, run_subsession,
 };
 use crate::result::FailureClass;
+use crate::run::render_subsession_summary;
 use crate::tooldef::{ToolBudget, ToolDefinition, ToolMechanism};
 use orchestraitor_testkit::{OpenAiMockServer, PlannedResponse};
 
@@ -351,5 +352,72 @@ async fn child_summary_is_truncated_by_bytes_not_chars() {
     assert!(
         summary.ends_with(marker),
         "a capped summary must carry the truncation marker"
+    );
+}
+
+#[tokio::test]
+async fn parent_observation_wrapper_is_capped_in_bytes() {
+    // CR review regression: the parent-visible wrapper adds a completion
+    // prefix on top of the child's already-capped summary (which itself
+    // appends a marker outside its cap) — the COMPLETE wrapper must stay
+    // within max_result_bytes even for multibyte text near the cap.
+    let long_summary = "水".repeat(1_500); // 4_500 bytes, near the 4 KiB cap
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&serde_json::json!({
+                "tool": "search", "pattern": "水水水"
+            })),
+        },
+        PlannedResponse::NonStreaming {
+            content: action_text(&serde_json::json!({
+                "tool": "finish",
+                "summary": long_summary,
+                "success": true
+            })),
+        },
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+
+    let mut tool = explore_tool();
+    tool.budget.max_result_bytes = 4 * 1024;
+    let outcome = run_subsession(
+        &parent(0),
+        &tool,
+        None,
+        &transport,
+        ("neuralwatt", "glm-5.3-flash"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let summary = outcome
+        .summary
+        .as_ref()
+        .expect("completed run must carry a summary")
+        .clone();
+    let max_bytes = tool.budget.max_result_bytes;
+    let observation = render_subsession_summary(&tool.id, max_bytes, &outcome);
+
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    assert!(
+        observation.len() <= cap,
+        "complete wrapper must respect the byte cap: {} > {}",
+        observation.len(),
+        tool.budget.max_result_bytes
+    );
+    assert!(observation.is_char_boundary(observation.len()));
+    assert!(
+        observation.starts_with(&format!("[subsession '{}' completed]\n", tool.id)),
+        "the completion prefix must survive capping: {observation:?}"
+    );
+    // Content below the cap stays intact: the prefix plus at least the
+    // first child-summary characters remain readable.
+    let prefix_len = format!("[subsession '{}' completed]\n", tool.id).len();
+    let body = &observation[prefix_len..];
+    assert!(
+        body.contains("\n[truncated]") || body.len() == summary.len(),
+        "an over-cap child summary must carry the truncation marker in the wrapper"
     );
 }
