@@ -478,17 +478,298 @@ async fn cost_entries_recorded_per_model_call_with_attribution() {
     assert!(entries.iter().all(|e| e.request_count == 1));
 }
 
-/// Shared in-memory sink for attribution assertions: records entries and
-/// hands them back through the same Arc the config holds.
-struct SharedLedgerSink {
-    captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>>,
+fn guardrail_config(
+    budgets: WorkerBudgets,
+    guardrails: orchestraitor_worker::GuardrailsConfig,
+) -> WorkerConfig {
+    let mut config = WorkerConfig::new(
+        ProviderId::from_string("neuralwatt".to_string()),
+        ModelId::from_string("glm-5.2".to_string()),
+        budgets,
+    );
+    config.guardrails = guardrails;
+    config
 }
 
-impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
-    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
-        self.captured.lock().unwrap().push(entry.clone());
-        Ok(())
+/// The mktemp incident shape: K repeated poll-free bash calls with an
+/// interleaved second command. Fires `FailureClass::ToolLoopChurn`.
+#[tokio::test]
+async fn tool_loop_churn_kills_the_attempt_with_the_typed_class() {
+    let mut script = Vec::new();
+    // 4x mktemp + 3x printf interleaved (7 turns); K=4, W=8 fires on turn 7.
+    for _ in 0..3 {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({"tool": "bash", "script": "mktemp -d"})),
+        });
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({"tool": "bash", "script": "printf x > /dev/null"})),
+        });
     }
+    script.push(PlannedResponse::NonStreaming {
+        content: action_text(&json!({"tool": "bash", "script": "mktemp -d"})),
+    });
+    script.push(finish_action(true));
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-churn");
+    let mut guardrails = orchestraitor_worker::GuardrailsConfig::bootstrap_defaults();
+    guardrails.no_progress_turns = 0; // isolate the churn guard
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    let failure = run.failure.expect("typed failure");
+    assert_eq!(failure.class, FailureClass::ToolLoopChurn);
+    assert_eq!(failure.reason, "tool-loop-churn");
+    // The re-plan loop must NOT rescue a churn kill: it is attempt-fatal.
+    assert_eq!(run.attempts, 1);
+}
+
+/// Distinct-but-real work never churn-fires: 10 distinct bash commands and
+/// a `write_file` rewrite pattern complete normally.
+#[tokio::test]
+async fn normal_tool_diversity_completes_without_churn() {
+    let mut script = Vec::new();
+    for i in 0..10 {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({"tool": "bash", "script": format!("cmd{i} --flag")})),
+        });
+    }
+    script.push(finish_action(true));
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-diverse");
+    let mut guardrails = orchestraitor_worker::GuardrailsConfig::bootstrap_defaults();
+    guardrails.no_progress_turns = 0;
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+}
+
+/// A no-progress run (repeated no-op reads over an unchanged worktree)
+/// fires `FailureClass::NoProgress` at the configured streak.
+#[tokio::test]
+async fn no_progress_fingerprint_streak_fails_the_attempt() {
+    let mut script = Vec::new();
+    // 4 read_file turns over the same file — the worktree never changes, so
+    // the 3rd consecutive identical fingerprint fires (threshold 3).
+    for _ in 0..4 {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({"tool": "read_file", "path": "README.md"})),
+        });
+    }
+    script.push(finish_action(true));
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    std::fs::write(worktree.path().join("README.md"), "fixture").unwrap();
+    let task = fixture_task("t-noprogress");
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 3,
+        tool_repeat_count: 0, // isolate the no-progress guard
+        tool_repeat_window: 0,
+        ci_poll_budget: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults().ci_poll_budget,
+    };
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    let failure = run.failure.expect("typed failure");
+    assert_eq!(failure.class, FailureClass::NoProgress);
+    assert_eq!(failure.reason, "no-progress");
+}
+
+/// Real file writes reset the fingerprint: a write-then-read-then-finish
+/// run of the same length never fires no-progress.
+#[tokio::test]
+async fn real_progress_resets_the_fingerprint_streak() {
+    // Threshold 3: write(fp A) -> read(fp A, streak 2) -> write(fp B, reset)
+    // -> finish. A no-op turn keeps the streak, real work resets it.
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "write_file",
+                "path": "out.txt",
+                "content": "step one"
+            })),
+        },
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({"tool": "read_file", "path": "out.txt"})),
+        },
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "write_file",
+                "path": "out.txt",
+                "content": "step two"
+            })),
+        },
+        finish_action(true),
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-progress");
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 3,
+        tool_repeat_count: 0,
+        tool_repeat_window: 0,
+        ci_poll_budget: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults().ci_poll_budget,
+    };
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::Completed,
+        "failure: {:?}",
+        run.failure
+    );
+}
+
+/// Fixture mediator that actually sleeps the script's first `sleep N`
+/// argument (a bounded stand-in for the mediated interpreter).
+struct FixtureSleepingBash;
+
+#[async_trait]
+impl BashMediator for FixtureSleepingBash {
+    async fn run_bash(&self, script: &str) -> Result<MediatedRun, MediationError> {
+        // Parse `sleep <secs>` and honor it (capped at 50ms in tests).
+        let duration = script
+            .split_whitespace()
+            .nth(1)
+            .and_then(|secs| secs.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            .min(0.05);
+        tokio::time::sleep(std::time::Duration::from_secs_f64(duration)).await;
+        Ok(MediatedRun {
+            exit_code: Some(0),
+            stdout: b"fixture-bash-ok\n".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// Poll-shaped bash (sleep + `gh pr checks`) accumulates wall-clock; once
+/// the cumulative budget is exceeded the attempt fails
+/// `PollBudgetExhausted`. Deterministic: the fixture's wall-clock is real,
+/// so the test uses a 1ms budget and sleep scripts the model cannot shorten.
+#[tokio::test]
+async fn poll_budget_exhaustion_fails_the_attempt_typed() {
+    // 6 poll-shaped turns: each dispatch sleeps ~3ms; the 10ms budget
+    // fires on one of the middle charges.
+    let mut script = Vec::new();
+    for _ in 0..6 {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "bash",
+                "script": "sleep 0.003 && gh pr checks 42"
+            })),
+        });
+    }
+    script.push(finish_action(true));
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-poll");
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 0,
+        tool_repeat_count: 0,
+        tool_repeat_window: 0,
+        ci_poll_budget: std::time::Duration::from_millis(10),
+    };
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSleepingBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Failed, "failure: {:?}", run.failure);
+    let failure = run.failure.expect("typed failure");
+    assert_eq!(failure.class, FailureClass::PollBudgetExhausted);
+    assert_eq!(failure.reason, "ci-poll-budget-exhausted");
+}
+
+/// Non-poll bash (plain command work) never charges the budget even when
+/// it runs long: the heuristic is bounded by design.
+#[tokio::test]
+async fn non_poll_bash_never_charges_the_poll_budget() {
+    let mut script = Vec::new();
+    for _ in 0..5 {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "bash",
+                "script": "echo working"
+            })),
+        });
+    }
+    script.push(finish_action(true));
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-nopoll");
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 0,
+        tool_repeat_count: 0,
+        tool_repeat_window: 0,
+        ci_poll_budget: std::time::Duration::from_millis(1),
+    };
+    let config = guardrail_config(fast_budgets(), guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::Completed,
+        "failure: {:?}",
+        run.failure
+    );
 }
 
 // --- Declared tools (issue #535, T1): protocol shape and refusal surface ---
@@ -782,4 +1063,17 @@ async fn subsession_beats_cover_a_hung_child_window() {
     assert_eq!(outcome.status, RunStatus::Completed);
     let observed = *beats_rx.borrow();
     assert!(observed >= 2, "pre+post child beats must fire: {observed}");
+}
+
+/// Shared in-memory sink for attribution assertions: records entries and
+/// hands them back through the same Arc the config holds.
+struct SharedLedgerSink {
+    captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>>,
+}
+
+impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
+    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
+        self.captured.lock().unwrap().push(entry.clone());
+        Ok(())
+    }
 }

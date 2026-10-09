@@ -976,6 +976,8 @@ generated-file freshness checks     # cargo run -p xtask -- docs-check
 
 Use `cargo-nextest` for the main test suite, while running documentation tests separately where necessary. Retries MAY identify flaky tests but MUST NOT convert flaky behavior into a passing quality gate.
 
+Loop-side counterpart (§9.36 budget enforcement): flaky or red CI is a BOUNDED wait — the orchestrator charges cumulative poll-shaped executions against a per-attempt CI-poll wait budget, and on exhaustion fails the attempt with a typed `poll-budget-exhausted` failure class (preserved on the run row and the durable task retry state) that then follows the ordinary cross-invocation retry accounting and re-selection backoff. It never runs an unbounded poll loop, never re-spawns a burning session against a slow external system in the same invocation, and never forces a green result.
+
 Scheduled or manual CI:
 
 ```text

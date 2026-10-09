@@ -14,10 +14,11 @@ orc loop [--json] [--max-cycles N]
 
 ## Guard set
 
-Every guard is fixed in this slice — the issue #310 set pinned in
-`WorkerBudgets::bootstrap_defaults()` and shared between the worker and the loop (the
-loop hands its validated instance to the worker starter). No board field, config
-key, or flag adjusts them — the two enforcement layers can never drift apart:
+The issue #310 set is pinned in `WorkerBudgets::bootstrap_defaults()` and shared
+between the worker and the loop (the loop hands its validated instance to the
+worker starter). The anti-stuck guardrails are configurable through the layered
+config (`[loop]`; absent keys inherit the defaults, an explicit `0` disables a
+guard deliberately with a loud warning):
 
 | Guard | Default | Enforced by |
 | --- | --- | --- |
@@ -29,10 +30,21 @@ key, or flag adjusts them — the two enforcement layers can never drift apart:
 | backoff | 10s·2^n capped at 5m | loop pass pacing (same schedule the worker uses for provider retries) |
 | spend | $10/day soft cap | worker records exceedance; loop seals the intake (inert by default — the per-token spend estimate is `0.0` until the cost-ledger lane wires provider pricing in, so no accrual crosses the cap) |
 | run budget | 4h | loop (aborts in-flight runs, records them) |
+| tool-loop churn | 4 repeats in an 8-turn window | worker (`FailureClass::ToolLoopChurn`; re-plan-fatal) |
+| no-progress fingerprint | 5 consecutive identical worktree fingerprints | worker (`FailureClass::NoProgress`; re-plan-fatal) |
+| CI-poll budget | 30m cumulative poll-shaped bash per attempt | worker (`FailureClass::PollBudgetExhausted`; typed `poll-budget-exhausted` failure class on the attempt, then ordinary cross-invocation retry accounting + backoff apply — no dedicated board lifecycle state) |
+| task retry budget | 3 cross-invocation attempts per task | loop (row `stuck` + typed skip reason; never silently re-selected) |
+| task retry backoff | 15m | loop (excludes re-selection until the window elapses) |
 
-A configuration that weakens a guard (zero concurrency, zero stall timeout, zero
-shutdown budget, negative spend cap, zero run deadline) is rejected fail-closed: a
-weakened guard is a runaway loop.
+A configuration that weakens a pinned guard (zero concurrency, zero stall
+timeout, zero shutdown budget, negative spend cap, zero run deadline) is
+rejected fail-closed: a weakened guard is a runaway loop. The anti-stuck
+guardrails differ by design: they are default-ON, and an explicit `0` key is an
+operator's deliberate opt-out — reported as a stderr warning, never silent.
+
+Config keys (layered, spec §9.22): `loop.no_progress_turns`,
+`loop.tool_repeat_count`, `loop.tool_repeat_window`, `loop.ci_poll_budget_secs`,
+`loop.max_task_attempts`, `loop.task_retry_backoff_secs`.
 
 ## Supervision semantics
 
@@ -79,10 +91,13 @@ weakened guard is a runaway loop.
 ## Retry and reselection
 
 One worker run per task per loop invocation. A task that failed, stalled, or was
-killed is never silently re-selected during the same invocation; any retry is a fresh
-board-driven selection in a later invocation (if the board still lists the task as
-Ready, the next invocation will pick it up — the typed run rows are the audit trail).
-Cross-invocation suppression is a board/PM decision, not a loop policy.
+killed is never silently re-selected during the same invocation. Cross-invocation,
+the durable task retry state (in `loop.db`) now enforces the task retry budget:
+once a task's total attempts reach `max_task_attempts`, later invocations exclude
+it with a typed skip reason in the decision record and the row reads `stuck` — the
+§9.24.1 needs-human signal, never a silent respawn. A task inside its
+`task_retry_backoff` window is excluded until the window elapses; a completed run
+clears the backoff and the no-progress streak.
 
 ## State
 
@@ -90,9 +105,12 @@ Cross-invocation suppression is a board/PM decision, not a loop policy.
   [orc campaign](orc-campaign.md).
 - Run state: `<config-dir>/loop.db` — one row per supervised worker run (invocation,
   decision link, heartbeat — the persisted liveness record updated as the supervisor
-  observes progress beats —, terminal status, recorded spend, detail). Concurrency
-  counts only workers supervised by the current invocation. Historical rows remain
-  unchanged on startup; restart recovery is deferred to the E8 watch daemon.
+  observes progress beats —, terminal status, recorded spend, detail) plus the
+  durable per-task retry state (`task_retry_state`: total attempts, last failure
+  class, no-progress streak, backoff window). Row statuses include `stuck` (the
+  cross-invocation budget exhausted). Concurrency counts only workers supervised by
+  the current invocation. Historical rows remain unchanged on startup; restart
+  recovery is deferred to the E8 watch daemon.
 - Cost ledger: `<config-dir>/cost.db` — one cost entry per worker model call (spec
   §9.19.4), attributed to the board task (agent), the routed orchestration role, and
   the loop invocation + task session. A ledger-open failure degrades to unattributed

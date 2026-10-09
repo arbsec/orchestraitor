@@ -31,6 +31,10 @@ pub struct WorkerConfig {
     /// turns. `None` (the default) disables emission entirely; the payload
     /// is an opaque sequence number, not a turn count.
     pub progress: Option<tokio::sync::watch::Sender<u64>>,
+    /// Anti-stuck guardrail thresholds (churn window, no-progress
+    /// fingerprint streak, CI-poll budget). Defaults are active; the loop
+    /// layer feeds the `[loop.guardrails]` config block through.
+    pub guardrails: crate::guardrails::GuardrailsConfig,
     /// Cost attribution context for this run: which agent (task), role,
     /// session (run), project, and repository the model calls belong to.
     /// `None` (the default) means no per-call cost entries are recorded.
@@ -82,6 +86,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("budgets", &self.budgets)
             .field("prior_daily_spend_usd", &self.prior_daily_spend_usd)
             .field("progress", &self.progress)
+            .field("guardrails", &self.guardrails)
             .field("attribution", &self.attribution)
             .field("cost_sink", &self.cost_sink.is_some())
             .field(
@@ -123,6 +128,7 @@ impl WorkerConfig {
             budgets,
             prior_daily_spend_usd: 0.0,
             progress: None,
+            guardrails: crate::guardrails::GuardrailsConfig::bootstrap_defaults(),
             attribution: None,
             cost_sink: None,
             model_call_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -234,6 +240,16 @@ pub enum FailureClass {
     TurnBudgetExhausted,
     /// Consecutive malformed responses exhausted their bound.
     FormatErrorsExhausted,
+    /// The same normalized tool-call shape repeated K times within the last
+    /// W turns (anti-stuck churn guard, spec `10-orchestrator.md` §9.36 detection).
+    ToolLoopChurn,
+    /// N consecutive turns produced an identical worktree progress
+    /// fingerprint (anti-stuck no-progress guard).
+    NoProgress,
+    /// Cumulative poll-shaped bash wall-clock (sleep + CI wait fingerprints)
+    /// exceeded the per-attempt CI-poll budget; the task parks
+    /// blocked-on-external instead of burning the session.
+    PollBudgetExhausted,
     /// Provider call failed after bounded retries, or streamed invalid events.
     ProviderError,
     /// The mediation boundary refused or failed a bash call (fail closed).

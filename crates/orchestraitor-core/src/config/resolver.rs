@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::LoopGuardrailsConfig;
 use crate::config::parse::flatten_config;
 use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
@@ -182,6 +183,7 @@ impl OrchestraitorConfig {
             RoutingDecisionProviderConfig::merge,
         );
         merge_scalar(&mut self.service_identities, next.service_identities);
+        merge_option(&mut self.r#loop, next.r#loop, LoopGuardrailsConfig::merge);
     }
 }
 
@@ -390,3 +392,17 @@ fn reject_ambiguous_conflicts(key: &str, inputs: &[ConfigInput]) -> ConfigResult
 
 #[cfg(test)]
 mod tests;
+
+impl LoopGuardrailsConfig {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.no_progress_turns, next.no_progress_turns);
+        merge_scalar(&mut self.tool_repeat_count, next.tool_repeat_count);
+        merge_scalar(&mut self.tool_repeat_window, next.tool_repeat_window);
+        merge_scalar(&mut self.ci_poll_budget_secs, next.ci_poll_budget_secs);
+        merge_scalar(&mut self.max_task_attempts, next.max_task_attempts);
+        merge_scalar(
+            &mut self.task_retry_backoff_secs,
+            next.task_retry_backoff_secs,
+        );
+    }
+}

@@ -1842,3 +1842,354 @@ async fn a_slow_failing_poll_paces_from_the_failure_time() {
         summary.elapsed_secs
     );
 }
+
+/// Runs a fixture invocation with PRE-SEEDED stores and returns its summary
+/// and the stores for assertions.
+async fn run_loop_with_stores(
+    config: LoopConfig,
+    snapshot: BoardSnapshot,
+    starter: FakeStarter,
+    invocation: &str,
+    decisions: CampaignDecisionStore,
+    runs: LoopRunStore,
+) -> (
+    orchestraitor_campaign::LoopSummary,
+    CampaignDecisionStore,
+    LoopRunStore,
+) {
+    let runner = LoopRunner::new(
+        config,
+        FakePoller { snapshot },
+        starter,
+        &decisions,
+        &runs,
+        routing(),
+        invocation.to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+    (summary, decisions, runs)
+}
+
+/// A task that exhausted its cross-invocation attempt budget is excluded
+/// with a typed skip reason and its row marked `stuck` — never silently
+/// re-selected (spec §9.24.1, §9.36). The final failure (the one that
+/// pushes `attempts_total` to the budget) lands as a terminal `stuck`
+/// row and `tasks_stuck` counts it; a failure below the limit stays
+/// `failed`.
+#[tokio::test(start_paused = true)]
+async fn task_retry_budget_excludes_with_typed_skip_and_stuck_row() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    // Pre-seed the durable retry state: the task already burned two of its
+    // three attempts in previous invocations, so the FIRST failure of this
+    // invocation exhausts the budget.
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "attempt-budget-exhausted",
+        false,
+        None,
+    )
+    .unwrap();
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "attempt-budget-exhausted",
+        false,
+        None,
+    )
+    .unwrap();
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .expect("state exists");
+    assert_eq!(state.attempts_total, 2);
+
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    // The worker panics: a genuine per-task failure that must push the
+    // durable `attempts_total` to the limit and mark the row `stuck`.
+    let starter = FakeStarter::new(Behavior::Panic);
+    let (summary, decisions, runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+
+    // Pass 1: the task is selected, the worker fails, attempts_total
+    // reaches the budget of 3 → terminal `stuck` row, `tasks_stuck == 1`.
+    // Pass 2: the task is excluded (this invocation's terminal rows are
+    // exclusion inputs; the typed budget skip fires on the cross-invocation
+    // durable state, not on same-invocation rows).
+    assert_eq!(summary.stop_reason, StopReason::CycleBudget);
+    assert_eq!(summary.spawns, 1);
+    assert_eq!(summary.tasks_stuck, 1, "the exhausting failure is stuck");
+    assert_eq!(summary.failed, 0, "the exhausting failure is not failed");
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows.len(), 1, "pass 2 never re-selected the stuck task");
+    assert_eq!(
+        rows[0].status,
+        orchestraitor_campaign::RunRowStatus::Stuck,
+        "the exhausting failure's row is `stuck`"
+    );
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .expect("state exists");
+    assert_eq!(state.attempts_total, 3, "the retry state still advanced");
+    assert!(
+        state.backoff_until_secs.is_some(),
+        "the re-selection backoff is still armed"
+    );
+    let records = decisions.list().unwrap();
+    assert_eq!(records.len(), 2, "both passes planned a decision");
+}
+
+/// A task failing BELOW the attempt budget produces an ordinary `failed`
+/// row — `stuck` is reserved for the failure that exhausts the budget.
+#[tokio::test(start_paused = true)]
+async fn a_failure_below_the_budget_stays_failed_not_stuck() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Panic);
+    let (summary, _decisions, runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+
+    // One failure against a budget of 3: failed, never stuck.
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.tasks_stuck, 0);
+    let rows = runs.runs_for_invocation("inv").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, orchestraitor_campaign::RunRowStatus::Failed);
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .expect("state exists");
+    assert_eq!(state.attempts_total, 1);
+}
+
+/// A task whose backoff window is in the future is excluded until it
+/// elapses; after the window it becomes selectable again.
+#[tokio::test(start_paused = true)]
+async fn task_backoff_excludes_until_the_window_elapses() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    // One failure with a backoff window ending well in the future
+    // (START_UNIX + 1h > START_UNIX + backoff(15m)).
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "provider-error",
+        false,
+        Some(START_UNIX + 3600),
+    )
+    .unwrap();
+
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary, _decisions, _runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    assert_eq!(summary.spawns, 0, "backoff must exclude the task");
+    assert_eq!(summary.task_budget_skips, 1);
+
+    // A fresh invocation after the window re-selects normally.
+    let decisions2 = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs2 = LoopRunStore::open_in_memory().unwrap();
+    runs2
+        .record_task_failure(
+            "board-arbsec_orchestraitor-1",
+            "provider-error",
+            false,
+            Some(START_UNIX - 10),
+        )
+        .unwrap();
+    let config2 = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let runner = LoopRunner::new(
+        config2,
+        FakePoller {
+            snapshot: snapshot_with(&[1]),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        &decisions2,
+        &runs2,
+        routing(),
+        "inv2".to_string(),
+        START_UNIX,
+    )
+    .unwrap();
+    let summary = runner.run(never()).await.unwrap();
+    assert_eq!(summary.spawns, 1, "elapsed backoff re-selects");
+}
+
+/// A completed task clears its failure streak: consecutive no-progress
+/// bookkeeping resets on success (the retry state never punishes recovery).
+#[tokio::test(start_paused = true)]
+async fn task_success_clears_the_failure_streak() {
+    let _decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    runs.record_task_failure("board-arbsec_orchestraitor-1", "no-progress", true, None)
+        .unwrap();
+    runs.record_task_failure("board-arbsec_orchestraitor-1", "no-progress", true, None)
+        .unwrap();
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.consecutive_no_progress, 2);
+    assert_eq!(state.attempts_total, 2);
+
+    runs.record_task_success("board-arbsec_orchestraitor-1")
+        .unwrap();
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.consecutive_no_progress, 0);
+    assert_eq!(state.backoff_until_secs, None, "success clears the backoff");
+}
+
+/// A run that completes clears the task's backoff: the next invocation can
+/// re-select it (loop-level bookkeeping end-to-end).
+#[tokio::test(start_paused = true)]
+async fn completed_run_clears_the_task_backoff_via_the_runner() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    // The task failed once (backoff armed) but the backoff has elapsed;
+    // the runner then spawns, the worker completes, and the streak clears.
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "provider-error",
+        false,
+        Some(START_UNIX - 10),
+    )
+    .unwrap();
+
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (_summary, _decisions, runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    let state = runs
+        .task_retry_state("board-arbsec_orchestraitor-1")
+        .unwrap()
+        .expect("state exists after a completed run");
+    assert_eq!(state.consecutive_no_progress, 0);
+    assert_eq!(state.backoff_until_secs, None);
+}
+
+/// Zeroed guardrails are a loud, typed opt-out: the budget exclusion never
+/// fires and the task re-selects every pass.
+#[tokio::test(start_paused = true)]
+async fn zeroed_task_budget_reselects_every_pass() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    for _ in 0..5 {
+        runs.record_task_failure(
+            "board-arbsec_orchestraitor-1",
+            "provider-error",
+            false,
+            None,
+        )
+        .unwrap();
+    }
+    let guardrails = GuardrailsSettings {
+        max_task_attempts: 0,
+        ..GuardrailsSettings::default()
+    };
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+        guardrails,
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary, _decisions, _runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    assert_eq!(summary.spawns, 1, "disabled budget re-selects");
+    assert_eq!(summary.task_budget_skips, 0);
+}
+
+/// A disabled backoff (`task_retry_backoff = 0`) honors its opt-out even
+/// when a previous invocation stored a backoff window: the live config is
+/// the authority, not stale durable state.
+#[tokio::test(start_paused = true)]
+async fn zeroed_backoff_overrides_a_stored_window() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "provider-error",
+        false,
+        Some(START_UNIX + 3600),
+    )
+    .unwrap();
+    let guardrails = GuardrailsSettings {
+        task_retry_backoff: Duration::ZERO,
+        ..GuardrailsSettings::default()
+    };
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        guardrails,
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary, _decisions, _runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    assert_eq!(summary.spawns, 1, "disabled backoff re-selects");
+    assert_eq!(summary.task_budget_skips, 0);
+}

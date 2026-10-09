@@ -38,6 +38,49 @@ use crate::commands::config::layers::load_layers;
 
 use super::{WORKER_ROLE, require_bootstrap_provider};
 
+/// Resolves the anti-stuck guardrail settings from the layered config
+/// `[loop]` (spec `10-orchestrator.md` §9.27.1): an absent block leaves
+/// the bootstrap defaults active; an explicit `0` disables a guard
+/// deliberately (warned loudly, never silent). On config resolution
+/// failure a warning is emitted and the defaults are used — the guard set
+/// stays functional over a partially broken config layer.
+fn resolve_guardrails(
+    resolver: &orchestraitor_core::ConfigResolver,
+) -> orchestraitor_campaign::GuardrailsSettings {
+    match resolver.resolve_config() {
+        Ok(effective) => {
+            let guard_values = effective.r#loop.as_ref().map(config_values);
+            let (settings, warnings) =
+                orchestraitor_campaign::GuardrailsSettings::from_config(guard_values.as_ref());
+            for warning in &warnings {
+                report_loop_warning(warning);
+            }
+            settings
+        }
+        Err(error) => {
+            report_loop_warning(&format!(
+                "config resolution failed ({error}); anti-stuck guardrails fall back to defaults"
+            ));
+            orchestraitor_campaign::GuardrailsSettings::default()
+        }
+    }
+}
+
+/// Converts the core config block into the campaign settings input shape
+/// (identical field names; a `None` block maps to all-`None` keys).
+fn config_values(
+    block: &orchestraitor_core::config::LoopGuardrailsConfig,
+) -> orchestraitor_campaign::GuardrailsConfigValues {
+    orchestraitor_campaign::GuardrailsConfigValues {
+        no_progress_turns: block.no_progress_turns,
+        tool_repeat_count: block.tool_repeat_count,
+        tool_repeat_window: block.tool_repeat_window,
+        ci_poll_budget_secs: block.ci_poll_budget_secs,
+        max_task_attempts: block.max_task_attempts,
+        task_retry_backoff_secs: block.task_retry_backoff_secs,
+    }
+}
+
 /// Production poll side: the same reconciled read `orc campaign run` does
 /// (open items + ready queue + blocked candidates + warnings).
 struct BoardSnapshotPoller {
@@ -84,6 +127,9 @@ struct DirectLoopStarter {
     tasks_dir: Option<PathBuf>,
     provider_endpoint: Option<String>,
     budgets: WorkerBudgets,
+    /// The worker-side anti-stuck guardrail thresholds resolved from
+    /// `[loop]` — the same settings the runner validates and enforces.
+    guardrails: orchestraitor_worker::GuardrailsConfig,
     /// Shared process-lifetime cost ledger for per-call attribution
     /// (spec §9.19.4); `None` when the ledger could not be opened and the
     /// run degrades to unattributed. `CostLedger` wraps a `rusqlite`
@@ -364,6 +410,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
             ModelId::from_string(routing.model.clone()),
             self.budgets.clone(),
         );
+        config.guardrails = self.guardrails.clone();
         config.prior_daily_spend_usd = prior_daily_spend_usd;
         let config = super::attach_declared_surface(
             config,
@@ -608,10 +655,12 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     let runs = orchestraitor_campaign::LoopRunStore::open(&paths.config_dir.join("loop.db"))
         .into_diagnostic()?;
 
-    let loop_config = LoopConfig::new(
+    let guardrails = resolve_guardrails(&layers.resolver);
+    let loop_config = LoopConfig::with_guardrails(
         WorkerBudgets::bootstrap_defaults(),
         std::time::Duration::from_secs(5),
         args.max_cycles,
+        guardrails,
     )
     .map_err(|error| miette!("{error}"))?;
 
@@ -665,6 +714,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             // the worker layer reads these pinned values, so the two
             // enforcement layers cannot drift.
             budgets: loop_config.budgets.clone(),
+            guardrails: loop_config.guardrails.worker_guardrails(),
             cost_ledger: cost_ledger.clone(),
             invocation_id: invocation_id.clone(),
             // Gated once, above: never re-validated per spawn.

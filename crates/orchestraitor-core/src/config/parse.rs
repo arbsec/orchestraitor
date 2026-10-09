@@ -117,6 +117,15 @@ fn is_known_key(key: &str) -> bool {
             "routing.provider" | "routing.base_url" | "routing.model" | "routing.api_key"
         )
         || key == "service_identities"
+        || matches!(
+            key,
+            "loop.no_progress_turns"
+                | "loop.tool_repeat_count"
+                | "loop.tool_repeat_window"
+                | "loop.ci_poll_budget_secs"
+                | "loop.max_task_attempts"
+                | "loop.task_retry_backoff_secs"
+        )
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {

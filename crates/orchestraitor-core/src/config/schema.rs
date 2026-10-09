@@ -46,6 +46,37 @@ pub struct OrchestraitorConfig {
     /// items assigned to a service identity stay schedulable while items
     /// assigned to a human are excluded (spec `10-orchestrator.md` §9.41).
     pub service_identities: Option<Vec<String>>,
+    /// Anti-stuck guardrails for `orc loop` (spec `10-orchestrator.md`
+    /// §9.27.1, §9.36 detection). Default-on; an explicit `0` disables a
+    /// guard deliberately.
+    pub r#loop: Option<LoopGuardrailsConfig>,
+}
+
+/// Anti-stuck guardrail thresholds for `orc loop`
+/// (`[loop.guardrails]`; spec `10-orchestrator.md` §9.27.1). Absent keys
+/// inherit the bootstrap defaults; an explicit `0` disables the
+/// corresponding guard (a deliberate opt-out the loop warns about).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LoopGuardrailsConfig {
+    /// Consecutive identical worktree progress fingerprints that fail an
+    /// attempt as `no-progress` (default 5; `0` disables).
+    pub no_progress_turns: Option<u32>,
+    /// Repetitions of one normalized tool-call shape within
+    /// `tool_repeat_window` turns that kill an attempt as
+    /// `tool-loop-churn` (default 4; `0` disables).
+    pub tool_repeat_count: Option<u32>,
+    /// Churn sliding-window length in tool turns (default 8; `0` disables).
+    pub tool_repeat_window: Option<u32>,
+    /// Cumulative poll-shaped bash wall-clock per attempt, in whole
+    /// seconds (default 1800 = 30m; `0` disables).
+    pub ci_poll_budget_secs: Option<u64>,
+    /// Cross-invocation attempts per task before the task is marked
+    /// `stuck` (default 3, matching the worker attempt bound; `0`
+    /// disables the task budget).
+    pub max_task_attempts: Option<u32>,
+    /// Re-selection backoff after a failed task attempt, in whole seconds
+    /// (default 900 = 15m; `0` disables).
+    pub task_retry_backoff_secs: Option<u64>,
 }
 
 /// Decision-provider selection for model routing (spec

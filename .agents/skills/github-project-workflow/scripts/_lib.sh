@@ -389,11 +389,19 @@ orc_lib_resolve_repo() {
 #   - mergeable=UNKNOWN (recomputing)    -> one bounded retry, then typed
 #                                           refusal (fail closed: an UNKNOWN
 #                                           state must never pass the gate).
-#   - PR read failure                    -> typed error, exit 1 (fail closed).
+#   - mergeable=UNKNOWN (recomputing)    -> one bounded retry, then typed
+#                                           refusal (fail closed: an UNKNOWN
+#                                           state must never pass the gate).
+#   - PR read failure (gh command fails) -> typed error, exit 1
+#     (ORC_ERR_UNRECOVERABLE, fail closed — distinct from a readable PR
+#     whose state is unparseable, which takes the blocked path, exit 5).
 orc_lib_require_mergeable() {
   local pr="$1" repo="$2" state attempts=0
   while :; do
-    state="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable --jq '.mergeable // "UNKNOWN"' 2>/dev/null)" || true
+    if ! state="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable --jq '.mergeable // "UNKNOWN"' 2>/dev/null)"; then
+      echo "error: could not read PR #$pr (gh pr view failed against $repo): refusing to proceed fail-closed" >&2
+      exit "$ORC_ERR_UNRECOVERABLE"
+    fi
     case "$state" in
       MERGEABLE) return 0 ;;
       CONFLICTING)
