@@ -26,6 +26,10 @@ pub struct ChatCompletionRequest {
     /// Sampling temperature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Requested reasoning-effort level (the OpenAI-protocol
+    /// `reasoning_effort` field). Absent when the request carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
     /// Tool definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Value>,
@@ -257,6 +261,17 @@ pub(crate) fn build_request_body(
         stream: stream.then_some(true),
         max_tokens: request.max_output_tokens,
         temperature: request.temperature,
+        // The requested reasoning effort rides the OpenAI-protocol
+        // `reasoning_effort` field — never a silent drop of a
+        // tool-declared setting (issue #535 §9.45).
+        reasoning_effort: request
+            .reasoning
+            .as_ref()
+            .map(|reasoning| match reasoning.effort {
+                orchestraitor_provider_api::transport::ReasoningEffort::Low => "low",
+                orchestraitor_provider_api::transport::ReasoningEffort::Medium => "medium",
+                orchestraitor_provider_api::transport::ReasoningEffort::High => "high",
+            }),
         tools,
         tool_choice,
     }
@@ -291,7 +306,10 @@ mod tests {
 
     use super::*;
     use orchestraitor_model::ProviderId;
-    use orchestraitor_provider_api::{MessageRole, ModelMessage, ModelRequest};
+    use orchestraitor_provider_api::{
+        MessageRole, ModelMessage, ModelRequest,
+        transport::{ReasoningConfig, ReasoningEffort},
+    };
 
     #[test]
     fn build_request_body_maps_fields() {
@@ -322,6 +340,34 @@ mod tests {
         assert_eq!(body.messages[1].role, "user");
         assert_eq!(body.stream, Some(true));
         assert_eq!(body.max_tokens, Some(1024));
+    }
+
+    #[test]
+    fn build_request_body_maps_reasoning_effort_and_omits_when_absent() {
+        let build = |reasoning: Option<ReasoningConfig>| -> ChatCompletionRequest {
+            build_request_body(
+                "glm-5.2",
+                &ModelRequest {
+                    provider_id: ProviderId::from_string("neuralwatt".to_string()),
+                    model_id: orchestraitor_model::ModelId::from_string("glm-5.2".to_string()),
+                    messages: vec![],
+                    max_output_tokens: None,
+                    temperature: None,
+                    reasoning,
+                    structured_output: None,
+                    tool_choice: None,
+                    extensions: serde_json::Map::new(),
+                },
+                false,
+            )
+        };
+        let with_effort = build(Some(ReasoningConfig {
+            effort: ReasoningEffort::Low,
+            budget_tokens: None,
+        }));
+        assert_eq!(with_effort.reasoning_effort, Some("low"));
+        let without_effort = build(None);
+        assert_eq!(without_effort.reasoning_effort, None);
     }
 
     #[test]

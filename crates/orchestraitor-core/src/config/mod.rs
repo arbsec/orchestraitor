@@ -6,11 +6,13 @@ mod schema;
 
 pub use parse::{ConfigParseReport, parse_toml_config};
 pub use resolver::ConfigResolver;
+pub use schema::LoopGuardrailsConfig;
 pub use schema::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigSource, DataClassificationConfig,
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     RoutingDecisionProviderConfig, ServiceIdentityEnforcement, SubscriptionConfig,
+    ToolBudgetConfig, ToolConfig,
 };
 
 use crate::error::OrchestraitorError;

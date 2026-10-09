@@ -46,6 +46,11 @@ pub enum RunRowStatus {
     /// run-budget stop (the abort intent distinguishes the reason in
     /// `detail`; the row status is shared).
     AbortedShutdown,
+    /// The task hit its cross-invocation retry budget or its backoff window
+    /// (anti-stuck guard, spec §9.24.1): never silently re-selected — the
+    /// typed rows and the skip reason in the decision record are the
+    /// needs-human signal.
+    Stuck,
 }
 
 impl RunRowStatus {
@@ -65,6 +70,7 @@ impl RunRowStatus {
             Self::Stalled => "stalled",
             Self::TimedOut => "timed-out",
             Self::AbortedShutdown => "aborted-shutdown",
+            Self::Stuck => "stuck",
         }
     }
 
@@ -77,6 +83,7 @@ impl RunRowStatus {
             "stalled" => Some(Self::Stalled),
             "timed-out" => Some(Self::TimedOut),
             "aborted-shutdown" => Some(Self::AbortedShutdown),
+            "stuck" => Some(Self::Stuck),
             _ => None,
         }
     }
@@ -115,6 +122,24 @@ pub struct RunRow {
     /// Terminal detail (typed status is in `status`; the free-form reason is
     /// store-assigned, log-safe, and never contains task or board content).
     pub detail: String,
+}
+
+/// Durable per-task retry state (the cross-invocation anti-stuck record).
+/// One row per task id, mutated as attempts fail and re-selected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskRetryState {
+    /// Deterministic worker task id.
+    pub task_id: String,
+    /// Total attempts across every invocation.
+    pub attempts_total: u64,
+    /// The last typed failure class recorded for the task (kebab-case
+    /// spelling of the worker `FailureClass`, or a loop-side code).
+    pub last_failure_class: Option<String>,
+    /// Consecutive no-progress attempts (reset on any progress or success).
+    pub consecutive_no_progress: u64,
+    /// Unix seconds until which the task must not be re-selected
+    /// (`None` = selectable now).
+    pub backoff_until_secs: Option<u64>,
 }
 
 /// The inputs to [`LoopRunStore::start`].
@@ -348,6 +373,143 @@ impl LoopRunStore {
             .map_err(|source| self.err(source))
     }
 
+    /// Reads the durable retry state for one task; `None` when the task has
+    /// never been attempted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the query fails.
+    pub fn task_retry_state(&self, task_id: &str) -> Result<Option<TaskRetryState>, CampaignError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT task_id, attempts_total, last_failure_class, \
+                 consecutive_no_progress, backoff_until_secs \
+                 FROM task_retry_state WHERE task_id = ?1",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement
+            .query(rusqlite::params![task_id])
+            .map_err(|source| self.err(source))?;
+        let Some(row) = rows.next().map_err(|source| self.err(source))? else {
+            return Ok(None);
+        };
+        let backoff_until_secs = row
+            .get::<_, Option<i64>>(4)
+            .map_err(|source| self.err(source))?
+            .map(|secs| row_u64(secs, 4).map_err(|source| self.err(source)))
+            .transpose()?;
+        Ok(Some(TaskRetryState {
+            task_id: row.get(0).map_err(|source| self.err(source))?,
+            attempts_total: row_u64(row.get::<_, i64>(1).map_err(|source| self.err(source))?, 1)
+                .map_err(|source| self.err(source))?,
+            last_failure_class: row.get(2).map_err(|source| self.err(source))?,
+            consecutive_no_progress: row_u64(
+                row.get::<_, i64>(3).map_err(|source| self.err(source))?,
+                3,
+            )
+            .map_err(|source| self.err(source))?,
+            backoff_until_secs,
+        }))
+    }
+
+    /// Upserts one task's durable retry state (the failure bookkeeping the
+    /// cross-invocation budget reads).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the write fails.
+    pub fn record_task_failure(
+        &self,
+        task_id: &str,
+        failure_class: &str,
+        no_progress: bool,
+        backoff_until_secs: Option<u64>,
+    ) -> Result<(), CampaignError> {
+        self.conn
+            .execute(
+                "INSERT INTO task_retry_state
+                 (task_id, attempts_total, last_failure_class,
+                  consecutive_no_progress, backoff_until_secs)
+                 VALUES (?1, 1, ?2, ?3, ?4)
+                 ON CONFLICT(task_id) DO UPDATE SET
+                   attempts_total = attempts_total + 1,
+                   last_failure_class = excluded.last_failure_class,
+                   consecutive_no_progress = CASE WHEN excluded.consecutive_no_progress > 0
+                       THEN consecutive_no_progress + 1 ELSE 0 END,
+                   backoff_until_secs = excluded.backoff_until_secs",
+                rusqlite::params![
+                    task_id,
+                    failure_class,
+                    i64::from(no_progress),
+                    match backoff_until_secs {
+                        Some(secs) => Some(secs_i64(secs, &self.path_label)?),
+                        None => None,
+                    }
+                ],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(())
+    }
+
+    /// Clears a task's failure streak (called on a completed run).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the write fails.
+    pub fn record_task_success(&self, task_id: &str) -> Result<(), CampaignError> {
+        self.conn
+            .execute(
+                "UPDATE task_retry_state SET consecutive_no_progress = 0,
+                 backoff_until_secs = NULL WHERE task_id = ?1",
+                rusqlite::params![task_id],
+            )
+            .map_err(|source| self.err(source))?;
+        Ok(())
+    }
+
+    /// Reads every task's durable retry state (the exclusion scan input).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the query fails.
+    pub fn all_task_retry_states(&self) -> Result<Vec<TaskRetryState>, CampaignError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT task_id, attempts_total, last_failure_class, \
+                 consecutive_no_progress, backoff_until_secs \
+                 FROM task_retry_state ORDER BY task_id",
+            )
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            })
+            .map_err(|source| self.err(source))?;
+        let mut states = Vec::new();
+        for row in rows {
+            let (task_id, attempts, class, streak, backoff) =
+                row.map_err(|source| self.err(source))?;
+            states.push(TaskRetryState {
+                task_id,
+                attempts_total: row_u64(attempts, 1).map_err(|source| self.err(source))?,
+                last_failure_class: class,
+                consecutive_no_progress: row_u64(streak, 3).map_err(|source| self.err(source))?,
+                backoff_until_secs: backoff
+                    .map(|secs| row_u64(secs, 4).map_err(|source| self.err(source)))
+                    .transpose()?,
+            });
+        }
+        Ok(states)
+    }
+
     /// Reads run rows with bound parameters and propagates decoding failures.
     fn query_rows(
         &self,
@@ -468,8 +630,17 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
          );
          CREATE INDEX IF NOT EXISTS idx_loop_runs_task ON loop_worker_runs (task_id);
          CREATE INDEX IF NOT EXISTS idx_loop_runs_status ON loop_worker_runs (status);
+         CREATE TABLE IF NOT EXISTS task_retry_state (
+             task_id                 TEXT PRIMARY KEY,
+             attempts_total          INTEGER NOT NULL DEFAULT 0,
+             last_failure_class      TEXT,
+             consecutive_no_progress INTEGER NOT NULL DEFAULT 0,
+             backoff_until_secs      INTEGER
+         );
          INSERT OR IGNORE INTO schema_migrations (version, name)
-         VALUES (1, 'loop_worker_runs_v1');",
+         VALUES (1, 'loop_worker_runs_v1');
+         INSERT OR IGNORE INTO schema_migrations (version, name)
+         VALUES (2, 'task_retry_state_v1');",
     )
 }
 

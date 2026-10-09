@@ -100,7 +100,14 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   This skill does NOT perform the review itself; it tracks generations.
                   Every generation uses the canonical prompt + report shape in
                   references/review-message-template.md (parameters, fixed report
-                  sections, tone rules).
+                  sections, tone rules). An adversarial review by a FRESH agent
+                  session (new spawn, zero implementer context; implementers may
+                  not review their own changes — spec §21.1, §9.33.3) is REQUIRED
+                  for every PR: `pr-review-agent <pr>` emits the review contract
+                  + scope, and `pr-review-agent <pr> --record <file>` posts
+                  in-thread findings and stores the verdict record
+                  (references/agent-review.md). Convergence still requires the
+                  recorded generation to be CLEAN against the current head.
 
 4. FINDINGS       Fetch review threads with `review-threads` (GraphQL; `gh pr view
                   --json reviewThreads` DOES NOT EXIST — see gh-capabilities.md).

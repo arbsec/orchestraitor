@@ -23,6 +23,10 @@ rusqlite = { workspace = true }
 # (progress beats), task spawn/abort (the kill primitive), time (tick
 # cadence and virtual-clock tests), and select (shutdown racing).
 tokio = { workspace = true }
+# provider-api (MIT OR Apache-2.0): the §9.45 DecisionProvider trait — the
+# campaign consults a configured decision provider for task selection via a
+# blanket adapter; the deterministic selector stays the fallback.
+orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-board = { path = "../orchestraitor-board" }
 orchestraitor-worker = { path = "../orchestraitor-worker" }

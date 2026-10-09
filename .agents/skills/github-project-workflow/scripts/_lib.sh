@@ -389,7 +389,12 @@ orc_lib_resolve_repo() {
 #   - mergeable=UNKNOWN (recomputing)    -> one bounded retry, then typed
 #                                           refusal (fail closed: an UNKNOWN
 #                                           state must never pass the gate).
-#   - PR read failure                    -> typed error, exit 1 (fail closed).
+#   - mergeable=UNKNOWN (recomputing)    -> one bounded retry, then typed
+#                                           refusal (fail closed: an UNKNOWN
+#                                           state must never pass the gate).
+#   - PR read failure (gh command fails) -> typed error, exit 1
+#     (ORC_ERR_UNRECOVERABLE, fail closed — distinct from a readable PR
+#     whose state is unparseable, which takes the blocked path, exit 5).
 orc_lib_require_mergeable() {
   local pr="$1" repo="$2" state attempts=0
   while :; do

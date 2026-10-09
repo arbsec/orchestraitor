@@ -93,6 +93,7 @@ fn is_known_key(key: &str) -> bool {
         )
         || matches_agent_domain_routing_key(key)
         || matches_role_routing_key(key)
+        || matches_tool_key(key)
         || matches_dynamic_key(key, "agents.domains", &["description", "roles"])
         || matches_dynamic_key(key, "subscriptions", &["provider", "budget"])
         || matches_dynamic_key(key, "budgets", &["token_cap", "cost_cap"])
@@ -111,8 +112,20 @@ fn is_known_key(key: &str) -> bool {
                 | "github_app.installation_id"
                 | "github_app.private_key_uri"
         )
-        || matches!(key, "routing.provider")
+        || matches!(
+            key,
+            "routing.provider" | "routing.base_url" | "routing.model" | "routing.api_key"
+        )
         || key == "service_identities"
+        || matches!(
+            key,
+            "loop.no_progress_turns"
+                | "loop.tool_repeat_count"
+                | "loop.tool_repeat_window"
+                | "loop.ci_poll_budget_secs"
+                | "loop.max_task_attempts"
+                | "loop.task_retry_backoff_secs"
+        )
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {
@@ -135,6 +148,34 @@ fn matches_role_routing_key(key: &str) -> bool {
         parts.as_slice(),
         [_role, "routing", "provider" | "model" | "profile"]
     )
+}
+
+/// Known keys under `[tools.<id>]` (issue #535): the tool's own fields plus
+/// its nested budget block.
+fn matches_tool_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("tools.") else {
+        return false;
+    };
+    let parts = rest.split('.').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [_tool] => true,
+        [_tool, field] => matches!(
+            *field,
+            "kind"
+                | "command"
+                | "subagent_role"
+                | "internal_tools"
+                | "instructions"
+                | "visible_to"
+                | "effort"
+                | "max_summary_bytes"
+                | "structured_summary"
+        ),
+        [_tool, "budget", field] => {
+            matches!(*field, "max_turns" | "wall_clock_secs" | "max_result_bytes")
+        }
+        _ => false,
+    }
 }
 
 fn matches_dynamic_key(key: &str, prefix: &str, fields: &[&str]) -> bool {

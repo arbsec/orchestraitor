@@ -87,6 +87,7 @@ fn fake_run(task_id: &str, status: RunStatus) -> WorkerRun {
         spend_soft_cap_exceeded: false,
         untrusted_writes: Vec::new(),
         receipts: Vec::new(),
+        subsession_events: Vec::new(),
         budgets: WorkerBudgets::bootstrap_defaults().echo(),
     }
 }

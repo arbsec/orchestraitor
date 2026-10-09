@@ -35,10 +35,10 @@ const PROVIDER_ID: &str = "neuralwatt";
 const PROVIDER_DISPLAY_NAME: &str = "Neuralwatt GLM-5.2";
 
 /// HTTP connect timeout.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// HTTP total request timeout.
-const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Maximum redirect hops.
 const MAX_REDIRECTS: usize = 5;
@@ -88,6 +88,7 @@ impl NeuralwattTransport {
             capabilities: ProviderCapabilities {
                 tool_choice: CapabilitySupport::Supported,
                 structured_outputs: CapabilitySupport::Supported,
+                reasoning_effort: CapabilitySupport::Supported,
                 ..ProviderCapabilities::default()
             },
         };

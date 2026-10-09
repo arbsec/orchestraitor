@@ -11,10 +11,13 @@ use std::io::Write;
 use std::sync::Arc;
 
 use miette::{IntoDiagnostic, Result, miette};
-use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecision};
+use orchestraitor_agent_catalog::{
+    RoleRouter, RoleRoutingDecision, resolve_decision_provider_with,
+};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth};
 use orchestraitor_campaign::{
-    BoardSnapshot, CampaignDecisionStore, CampaignError, CampaignOutcome, WorkerSpawner, run_once,
+    BoardSnapshot, CampaignDecisionStore, CampaignError, CampaignOutcome, WorkerSpawner,
+    run_once_with_selector,
 };
 use orchestraitor_worker::bootstrap::build_bootstrap_transport;
 use orchestraitor_worker::{
@@ -34,6 +37,11 @@ struct DirectSpawner<'a> {
     paths: &'a ConfigPaths,
     tasks_dir: Option<std::path::PathBuf>,
     provider_endpoint: Option<String>,
+    /// Declared-tool surface built ONCE at startup (the layer-trust gate,
+    /// role routing, and sub-role provider gate run before any spawn); a
+    /// broken tool definition is a typed startup error, never a per-spawn
+    /// failure.
+    declared_surface: super::DeclaredToolSurface,
 }
 
 impl WorkerSpawner for DirectSpawner<'_> {
@@ -74,6 +82,7 @@ impl WorkerSpawner for DirectSpawner<'_> {
             ModelId::from_string(routing.model.clone()),
             WorkerBudgets::bootstrap_defaults(),
         );
+        let config = super::attach_declared_surface(config, &self.declared_surface);
         runtime
             .block_on(run_worker(
                 &task,
@@ -143,14 +152,30 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
         .resolve(WORKER_ROLE)
         .map_err(|error| miette!("{error}"))?;
 
+    // Decision-provider consultation (spec `30-model-routing.md` §9.45, default off): when the
+    // `routing.provider` flag names an implementation, it is consulted for
+    // task selection first; any error falls back to the deterministic
+    // selector inside the campaign session and is recorded in the decision.
+    let decision_provider =
+        resolve_decision_provider_with(&layers.resolver, &super::build_named_decision_provider)
+            .map_err(|error| miette!("{error}"))?;
+    let task_selector: Option<&dyn orchestraitor_provider_api::DecisionProvider> =
+        decision_provider.as_deref();
+
     let store =
         CampaignDecisionStore::open(&paths.config_dir.join("campaign.db")).into_diagnostic()?;
+    // The declared-tool surface is gated ONCE at startup: a broken tool
+    // definition fails the invocation here, never per spawn.
+    let declared_surface = super::build_declared_tools(&layers.resolver, &routing.role)
+        .map_err(|error| miette!("{error}"))?;
     let spawner = DirectSpawner {
         paths,
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
+        declared_surface,
     };
-    let outcome = run_once(&snapshot, &routing, &store, &spawner).into_diagnostic()?;
+    let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
+        .into_diagnostic()?;
 
     if args.json {
         render_json(writer, &outcome)?;
@@ -268,6 +293,10 @@ mod tests {
             paths: &paths,
             tasks_dir: None,
             provider_endpoint: None,
+            declared_surface: crate::commands::DeclaredToolSurface {
+                tools: Vec::new(),
+                subsession_routing: std::collections::BTreeMap::new(),
+            },
         };
         let routing = RoleRoutingDecision {
             role: "implement".to_string(),

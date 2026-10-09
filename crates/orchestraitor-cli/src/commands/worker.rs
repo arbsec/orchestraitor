@@ -59,6 +59,8 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
         ModelId::from_string(decision.model),
         budgets,
     );
+    let surface = super::build_declared_tools(&layers.resolver, WORKER_ROLE)?;
+    let config = super::attach_declared_surface(config, &surface);
 
     let runtime = tokio::runtime::Runtime::new().into_diagnostic()?;
     let run = runtime

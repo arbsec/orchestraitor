@@ -717,6 +717,8 @@ Every feature MUST define:
 
 Security-sensitive implementation MUST NOT be approved only by the same agent or context that produced it. Require an independent human or agent review context. Changes to privileged brokers, sandboxing, policy enforcement, capability issuance, filesystem projection, network controls, secret handling or unsafe code require human review before release.
 
+Declared tools (issue #535) carry these §21.1 obligations per tool: the trust boundary is the config layer-trust gate; the mandatory negative tests are untrusted-layer tool-definition rejection, unknown effort value, unknown config sub-key, sub-session depth-limit enforcement, sub-session budget exhaustion, reserved-name collision, and argv-quoting injection safety (property + real-shell round-trip). Every declared-tool call is receipted; sub-session output is untrusted data.
+
 All security primitives and enforcement remain exclusively owned by Arbitraitor. Missing capabilities MUST be implemented and tested in `arbsec/arbitraitor`, not duplicated in Orchestraitor.
 
 ### 21.2 Test layers
@@ -973,6 +975,8 @@ generated-file freshness checks     # cargo run -p xtask -- docs-check
 ```
 
 Use `cargo-nextest` for the main test suite, while running documentation tests separately where necessary. Retries MAY identify flaky tests but MUST NOT convert flaky behavior into a passing quality gate.
+
+Loop-side counterpart (§9.36 budget enforcement): flaky or red CI is a BOUNDED wait — the orchestrator charges cumulative poll-shaped executions against a per-attempt CI-poll wait budget, and on exhaustion fails the attempt with a typed `poll-budget-exhausted` failure class (preserved on the run row and the durable task retry state) that then follows the ordinary cross-invocation retry accounting and re-selection backoff. It never runs an unbounded poll loop, never re-spawns a burning session against a slow external system in the same invocation, and never forces a green result.
 
 Scheduled or manual CI:
 

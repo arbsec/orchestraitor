@@ -23,6 +23,7 @@
 
 mod decision;
 mod error;
+mod guardrails;
 mod loop_run;
 mod run_state;
 mod session;
@@ -32,12 +33,18 @@ pub use decision::{
     SkipRecord, StoredCampaignDecision,
 };
 pub use error::CampaignError;
+pub use guardrails::{
+    DEFAULT_CI_POLL_BUDGET_SECS, DEFAULT_MAX_TASK_ATTEMPTS, DEFAULT_NO_PROGRESS_TURNS,
+    DEFAULT_TASK_RETRY_BACKOFF_SECS, DEFAULT_TOOL_REPEAT_COUNT, DEFAULT_TOOL_REPEAT_WINDOW,
+    GuardrailsConfigValues, GuardrailsSettings,
+};
 pub use loop_run::{
     BoardPoller, LoopConfig, LoopEvent, LoopRunner, LoopSummary, LoopWorkerStarter, StopReason,
     WorkerProcess,
 };
 pub use run_state::{LoopRunStore, RunRow, RunRowStatus, StartRun};
 pub use session::{
-    BoardSnapshot, CampaignOutcome, WorkerSpawner, compute_selection, plan_pass, run_once,
+    BoardSnapshot, CampaignOutcome, SelectorDecision, WorkerSpawner, compute_selection, plan_pass,
+    plan_pass_with_selector, plan_pass_with_selector_async, run_once, run_once_with_selector,
     task_id_for,
 };

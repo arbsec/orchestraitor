@@ -26,6 +26,16 @@ backoff_ms = 250
 slug = "arbsec-agent"
 enforcement = "recommended"
 
+# Anti-stuck guardrails for `orc loop` (spec §9.27.1/§9.36): defaults are
+# active; an explicit `0` disables a guard deliberately (warned).
+[loop]
+no_progress_turns = 5
+tool_repeat_count = 4
+tool_repeat_window = 8
+ci_poll_budget_secs = 1800
+max_task_attempts = 3
+task_retry_backoff_secs = 900
+
 # Static heuristic role routing table for the bootstrap (spec
 # 30-model-routing.md §9.45): every built-in orchestration role routes to the
 # single-provider default from spec §10.3 unless a higher layer overrides
@@ -53,6 +63,36 @@ model = "glm-5.3-flash"
 [roles.verify.routing]
 provider = "neuralwatt"
 model = "glm-5.3-flash"
+
+# Built-in declared tools (issue #535, T4): read-only sub-agent surfaces
+# over the shared sub-session runtime. Trusted built-in-defaults layer by
+# construction; both are visible to the implement role only.
+[tools.explore]
+kind = "subagent"
+subagent_role = "explore"
+instructions = "You are a read-only codebase explorer. Answer the parent's question using read_file and search only. Report file paths and line evidence."
+effort = "low"
+structured_summary = true
+max_summary_bytes = 4096
+visible_to = ["implement"]
+
+[tools.explore.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
+
+[tools.review]
+kind = "subagent"
+subagent_role = "review"
+instructions = "You are a read-only reviewer. Critique the code or diff the parent names. Report concrete defects with file paths; do not propose unrelated changes."
+effort = "low"
+max_summary_bytes = 8192
+visible_to = ["implement"]
+
+[tools.review.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
 "#;
 
 #[derive(Debug, Clone)]

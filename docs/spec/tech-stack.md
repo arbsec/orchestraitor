@@ -460,7 +460,7 @@ Matches spec §16.6 layout. Reproduced here for completeness:
 
 ```text
 arbsec/orchestraitor
-├── crates/orchestraitor-core              # domain types, layered config, error/slog infra
+├── crates/orchestraitor-core              # domain types, layered config (incl. the [tools] registry with the layer-trust gate, issue #535), error/slog infra
 ├── crates/orchestraitor-daemon            # orcd: durable supervisor, scheduler, config resolver, event owner, mcp-gateway supervisor
 ├── crates/orchestraitor-model             # serializable domain types; no I/O
 ├── crates/orchestraitor-arb-client # typed client over arbitraitor crates (NOT a security authority)
@@ -473,7 +473,7 @@ arbsec/orchestraitor
 ├── crates/orchestraitor-provider-proxy   # OpenAI/Anthropic-compatible local proxy
 ├── crates/orchestraitor-mcp               # rmcp-based MCP gateway: project-scoped server resolution, tool namespacing, lifetime management
 ├── crates/orchestraitor-tui               # Ratatui+crossterm reference client
-├── crates/orchestraitor-cli               # orc / orchestraitor / orcd binaries
+├── crates/orchestraitor-cli               # orc / orchestraitor / orcd binaries (declared-tool mapping: ToolRegistry → WorkerConfig, issue #535)
 ├── crates/orchestraitor-agent-catalog     # domain+role catalog, detection heuristics, routing
 ├── crates/orchestraitor-cost-ledger       # per-call cost/usage ledger, subscription tracker
 ├── crates/orchestraitor-delivery           # spec-driven autonomous delivery: task DAG, review loop, backlog runner
@@ -537,7 +537,7 @@ Scheduled CI includes: full cross-platform matrix (Linux + macOS MVP), extended 
 - **`lsp-types` is in slow release cadence.** The wire spec is stable, but a fork may eventually be needed if upstream stops responding to PRs.
 - **TUI startup budget ≤ 150 ms warm.** Achievable with Ratatui's double-buffered render and event-driven subscriptions, but the cost ledger and live routing panels may push it. Profile in CI per spec Appendix F.
 - **Domain detection false-positives at `orc init`.** Conservative thresholds + the always-enabled `general` fallback limit blast radius; user confirmation is the backstop.
-- **TypeSafe/jev decision-model provider (System One).** Early access, no Rust SDK; license status: not yet allowlisted — the adapter behind the `DecisionProvider` trait ([`30-model-routing.md` §9.45](30-model-routing.md#945-role-based-model-routing)) stays default-off until the license is allowlisted per the §18 dependency policy.
+- **Clef Flash decision-model provider (System One).** Neuralwatt-hosted preview capacity for the open-source (Apache-2.0) Cloudflare Clef Flash decision model; the adapter behind the `DecisionProvider` trait ([`30-model-routing.md` §9.45](30-model-routing.md#945-role-based-model-routing)) is default-off behind the `routing.provider` config flag. Preview models may change or disappear without notice — the deterministic fixture and the heuristic table stay the always-available fallback chain, so no loop behavior gates on the model being reachable.
 
 ---
 
