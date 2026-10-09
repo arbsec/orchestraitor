@@ -88,6 +88,7 @@ impl NeuralwattTransport {
             capabilities: ProviderCapabilities {
                 tool_choice: CapabilitySupport::Supported,
                 structured_outputs: CapabilitySupport::Supported,
+                reasoning_effort: CapabilitySupport::Supported,
                 ..ProviderCapabilities::default()
             },
         };

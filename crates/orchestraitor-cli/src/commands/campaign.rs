@@ -37,6 +37,11 @@ struct DirectSpawner<'a> {
     paths: &'a ConfigPaths,
     tasks_dir: Option<std::path::PathBuf>,
     provider_endpoint: Option<String>,
+    /// Declared-tool surface built ONCE at startup (the layer-trust gate,
+    /// role routing, and sub-role provider gate run before any spawn); a
+    /// broken tool definition is a typed startup error, never a per-spawn
+    /// failure.
+    declared_surface: super::DeclaredToolSurface,
 }
 
 impl WorkerSpawner for DirectSpawner<'_> {
@@ -77,6 +82,7 @@ impl WorkerSpawner for DirectSpawner<'_> {
             ModelId::from_string(routing.model.clone()),
             WorkerBudgets::bootstrap_defaults(),
         );
+        let config = super::attach_declared_surface(config, &self.declared_surface);
         runtime
             .block_on(run_worker(
                 &task,
@@ -158,10 +164,15 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
 
     let store =
         CampaignDecisionStore::open(&paths.config_dir.join("campaign.db")).into_diagnostic()?;
+    // The declared-tool surface is gated ONCE at startup: a broken tool
+    // definition fails the invocation here, never per spawn.
+    let declared_surface = super::build_declared_tools(&layers.resolver, &routing.role)
+        .map_err(|error| miette!("{error}"))?;
     let spawner = DirectSpawner {
         paths,
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
+        declared_surface,
     };
     let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
         .into_diagnostic()?;
@@ -282,6 +293,10 @@ mod tests {
             paths: &paths,
             tasks_dir: None,
             provider_endpoint: None,
+            declared_surface: crate::commands::DeclaredToolSurface {
+                tools: Vec::new(),
+                subsession_routing: std::collections::BTreeMap::new(),
+            },
         };
         let routing = RoleRoutingDecision {
             role: "implement".to_string(),

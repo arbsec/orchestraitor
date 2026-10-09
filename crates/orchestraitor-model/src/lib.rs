@@ -14,6 +14,7 @@ pub mod ids;
 pub mod promotion;
 pub mod repository;
 pub mod session;
+pub mod tool_id;
 pub mod workspace;
 
 pub use context::ContextReceipt;
@@ -23,4 +24,5 @@ pub use ids::*;
 pub use promotion::PromotionReceipt;
 pub use repository::Repository;
 pub use session::Session;
+pub use tool_id::{MAX_TOOL_ID_CHARS, is_reserved_tool_id, is_valid_tool_id};
 pub use workspace::Workspace;

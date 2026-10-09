@@ -1,11 +1,12 @@
 //! The worker's model-action protocol (mini-swe-agent pattern).
 //!
 //! The loop speaks a text protocol: every model response must contain exactly
-//! one fenced ` ```json ` block selecting one of the four tools, or the
-//! `finish` terminator. Parsing is total — anything else is an
-//! [`ActionRejection`]: malformed responses consume the attempt's format-error
-//! budget, and requests for a capability outside the four-tool set are typed
-//! refusals that are recorded and fed back to the model.
+//! one fenced ` ```json ` block selecting one of the four built-in tools, a
+//! declared tool from the run's tool policy, or the `finish` terminator.
+//! Parsing is total — anything else is an [`ActionRejection`]: malformed
+//! responses consume the attempt's format-error budget, and requests for a
+//! capability outside the available set are typed refusals that are recorded
+//! and fed back to the model.
 
 /// Maximum accepted length for a requested tool name recorded in a refusal.
 const MAX_TOOL_NAME_CHARS: usize = 64;
@@ -16,7 +17,8 @@ const MAX_WRITE_CONTENT_BYTES: usize = 1024 * 1024;
 /// Maximum accepted search pattern length (chars).
 const MAX_PATTERN_CHARS: usize = 512;
 
-/// One parsed model action: the four mediated tools plus the terminator.
+/// One parsed model action: the four mediated tools, declared tools from
+/// the run's tool policy, plus the terminator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WorkerAction {
     /// Read a worktree-relative file.
@@ -42,6 +44,17 @@ pub(crate) enum WorkerAction {
     Bash {
         /// Bash script bytes (streamed to the interpreter over stdin).
         script: String,
+    },
+    /// A config-declared tool (issue #535, T1). The id is untrusted model
+    /// output routed through the tool registry; admission (existence,
+    /// visibility, depth) happens at dispatch. v1 carries no per-call
+    /// arguments: the only field is the question string (sub-agent tools;
+    /// `None` for command tools), capped like every other string field.
+    DeclaredTool {
+        /// Requested declared-tool id.
+        tool_id: String,
+        /// The question for sub-agent tools; `None` for command tools.
+        question: Option<String>,
     },
     /// Terminator: the model declares the task done (or not completable).
     Finish {
@@ -81,6 +94,10 @@ pub(crate) enum ActionRejection {
 /// Only the first block is ever executed, so protocol-wise this stays
 /// exactly as strict as before about what runs — it just recovers instead
 /// of burning the attempt budget.
+#[expect(
+    clippy::too_many_lines,
+    reason = "per-tool literal arms are the audited admission surface; the declared-tool fallthrough reads best in place"
+)]
 pub(crate) fn parse_action(text: &str) -> Result<WorkerAction, ActionRejection> {
     let blocks = fenced_json_blocks(text);
     // First block IS the action; extras are model verbosity, not protocol
@@ -161,9 +178,43 @@ pub(crate) fn parse_action(text: &str) -> Result<WorkerAction, ActionRejection> 
                 })?;
             Ok(WorkerAction::Finish { summary, success })
         }
-        other => Err(ActionRejection::UnknownTool {
-            name: sanitize_tool_name(other),
-        }),
+        // Anything else is a declared-tool request: the id is validated for
+        // shape here and routed through the executor's tool policy for
+        // admission (existence, visibility, depth) at dispatch time.
+        other => {
+            if !crate::tooldef::is_valid_tool_id(other)
+                || crate::tooldef::is_reserved_tool_id(other)
+            {
+                return Err(ActionRejection::UnknownTool {
+                    name: sanitize_tool_name(other),
+                });
+            }
+            let question = match value.get("question") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(text)) => {
+                    if text.chars().count() > crate::tooldef::MAX_QUESTION_CHARS {
+                        return Err(ActionRejection::Malformed {
+                            reason: "field-too-large",
+                        });
+                    }
+                    if text.is_empty() {
+                        return Err(ActionRejection::Malformed {
+                            reason: "empty-field",
+                        });
+                    }
+                    Some(text.clone())
+                }
+                Some(_) => {
+                    return Err(ActionRejection::Malformed {
+                        reason: "wrong-field-type",
+                    });
+                }
+            };
+            Ok(WorkerAction::DeclaredTool {
+                tool_id: other.to_string(),
+                question,
+            })
+        }
     }
 }
 
@@ -265,11 +316,103 @@ mod tests {
 
     #[test]
     fn unknown_tool_is_a_typed_refusal_with_sanitized_name() {
-        let text = "```json\n{\"tool\": \"delete_everything\", \"path\": \"/\"}\n```";
+        // Ids violating the declared-tool shape (space here) stay typed
+        // refusals; a well-shaped id parses as a DeclaredTool and is
+        // admitted-or-refused by the executor's tool policy (T1 refuses
+        // unwired execution; the config-free default refuses everything).
+        let text = "```json\n{\"tool\": \"delete everything\", \"path\": \"/\"}\n```";
         assert_eq!(
             parse_action(text),
             Err(ActionRejection::UnknownTool {
-                name: "delete_everything".to_string()
+                name: "delete everything".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn declared_tool_action_parses_with_optional_question() {
+        let with_question =
+            "```json\n{\"tool\": \"explore-q\", \"question\": \"where is X defined?\"}\n```";
+        assert_eq!(
+            parse_action(with_question),
+            Ok(WorkerAction::DeclaredTool {
+                tool_id: "explore-q".to_string(),
+                question: Some("where is X defined?".to_string()),
+            })
+        );
+        let no_question = "```json\n{\"tool\": \"explain-clippy\"}\n```";
+        assert_eq!(
+            parse_action(no_question),
+            Ok(WorkerAction::DeclaredTool {
+                tool_id: "explain-clippy".to_string(),
+                question: None,
+            })
+        );
+        let null_question = "```json\n{\"tool\": \"explain-clippy\", \"question\": null}\n```";
+        assert_eq!(
+            parse_action(null_question),
+            Ok(WorkerAction::DeclaredTool {
+                tool_id: "explain-clippy".to_string(),
+                question: None,
+            })
+        );
+    }
+
+    #[test]
+    fn declared_tool_rejects_bad_id_shape_and_reserved_names() {
+        // Not a valid tool id shape: typed refusal (not a DeclaredTool).
+        let bad_shape = "```json\n{\"tool\": \"Has.Dot/slash\"}\n```";
+        assert_eq!(
+            parse_action(bad_shape),
+            Err(ActionRejection::UnknownTool {
+                name: "Has.Dot/slash".to_string()
+            })
+        );
+        // Reserved protocol name via the fallthrough is impossible (the
+        // literal arms win), but a reserved id shaped to dodge the match is
+        // still refused: ids are validated before admission.
+        for reserved in ["board.query", "worker.delegate"] {
+            let text = format!("```json\n{{\"tool\": \"{reserved}\"}}\n```");
+            assert_eq!(
+                parse_action(&text),
+                Err(ActionRejection::UnknownTool {
+                    name: reserved.to_string()
+                }),
+                "{reserved} must stay refused"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_tool_question_is_capped() {
+        let big_question = "```json\n{\"tool\": \"explore-q\", \"question\": \"...\"}\n```"
+            .replace("...", &"x".repeat(crate::tooldef::MAX_QUESTION_CHARS + 1));
+        assert_eq!(
+            parse_action(&big_question),
+            Err(ActionRejection::Malformed {
+                reason: "field-too-large"
+            })
+        );
+    }
+
+    #[test]
+    fn declared_tool_empty_question_is_refused() {
+        let text = "```json\n{\"tool\": \"explore-q\", \"question\": \"\"}\n```";
+        assert_eq!(
+            parse_action(text),
+            Err(ActionRejection::Malformed {
+                reason: "empty-field"
+            })
+        );
+    }
+
+    #[test]
+    fn declared_tool_wrong_question_type_is_refused() {
+        let text = "```json\n{\"tool\": \"explore-q\", \"question\": 42}\n```";
+        assert_eq!(
+            parse_action(text),
+            Err(ActionRejection::Malformed {
+                reason: "wrong-field-type"
             })
         );
     }

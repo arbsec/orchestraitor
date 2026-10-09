@@ -415,6 +415,8 @@ Options:
 
 Error codes follow the pattern `ORC-<COMPONENT>-<NNN>` where `<COMPONENT>` is the crate short-name (`WORKSPACE`, `PROVIDER`, `MCP`, `DAEMON`, `CONFIG`, `DELIVERY`, `SANDBOX`, etc.) and `<NNN>` is a zero-padded number. Codes are stable across versions — deprecation replaces a code with a new one but does not reuse the old number. The code registry lives in `orchestraitor-model` as atyped enum with `#[derive(strum::EnumString, strum::Display)]` so it round-trips through serde.
 
+Declared-tool registry failures (issue #535) surface as `ORC-CONFIG-<NNN>` codes naming the offending tool id: an untrusted-layer tool definition, an unknown mechanism kind, an unresolvable subagent role, an unknown internal-tool name, an unknown effort value, or an invalid/reserved tool id. The failure is visible and auditable — never a silent drop of the configuration entry.
+
 Reserve truly generic messages for unexpected internal faults; even those MUST include a correlation ID and a bug-report command (`orc bug-report --correlation-id <id>`).
 
 The error taxonomy is implemented in `orchestraitor-core` and consumed by the CLI (via `miette`'s `Diagnostic` trait), the TUI (rendered in the error panel), and the daemon (serialized as JSON-RPC error objects). Errors never contain secrets, headers, cookies, signed URLs, or approval tokens (per Arbitraitor `conventions.md:92-98` + §9.23.4 trace redaction rule).

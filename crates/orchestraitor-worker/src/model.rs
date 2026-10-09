@@ -7,14 +7,15 @@ use orchestraitor_provider_api::ProviderTransportError;
 use orchestraitor_provider_api::transport::{
     ModelEvent, ModelEventStream, ModelMessage, ModelRequest, ProviderTransport, TokenCount,
 };
+use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tracing::debug;
 
 use crate::budget::backoff_delay;
-use crate::result::{FailureClass, TypedFailure, UsageTotals, WorkerConfig};
+use crate::result::{FailureClass, RunStatus, TypedFailure, UsageTotals, WorkerConfig};
 
 /// Mutable run state threaded through model calls (shared with the loop).
-pub(super) struct RunState {
+pub(super) struct RunState<'a> {
     /// Model-call turns consumed across all attempts.
     pub(super) turns: u32,
     /// Model calls issued (including retried calls).
@@ -26,19 +27,91 @@ pub(super) struct RunState {
     /// Monotonic progress-beat counter sent on the optional supervisor
     /// channel (issue #314); opaque sequence number, one increment per emit.
     pub(super) progress_beat: u64,
+    /// Sub-session decision events (issue #535, T3): one per subagent tool
+    /// invocation, carried on the run result for decision records and cost
+    /// attribution.
+    pub(super) subsession_events: Vec<SubsessionEvent>,
+    /// When THIS run started: the parent's remaining wall clock for the
+    /// sub-session deadline carve is `run_deadline − elapsed`, measured from
+    /// here (CR finding #1: a counter that never increments cannot bound the
+    /// total run).
+    pub(super) started: std::time::Instant,
+    /// Run-context labels the sub-session parent context needs.
+    pub(super) worktree_root: std::path::PathBuf,
+    pub(super) project: String,
+    pub(super) repository: String,
+    pub(super) session_id: String,
+    /// The transport the sub-session runs on (the same provider transport
+    /// the parent loop holds; the child's model comes from the routing
+    /// map).
+    pub(super) transport: &'a dyn ProviderTransport,
+    /// The parent's beat channel, forwarded so child-window beats land on
+    /// the same supervisor stream.
+    pub(super) progress: Option<tokio::sync::watch::Sender<u64>>,
 }
 
-/// One model call with bounded provider retries (`10s·2^n` capped, issue #310).
-pub(super) async fn call_model(
-    transport: &dyn ProviderTransport,
-    config: &WorkerConfig,
-    messages: &[ModelMessage],
-    state: &mut RunState,
-) -> Result<String, TypedFailure> {
-    let budgets = &config.budgets;
+/// One sub-session outcome event (decision-record shape, issue #535 T3).
+/// Carried on the run state AND the run result: the parent's decision
+/// records carry the routing and effort evidence, and the outcome events
+/// surface on the `WorkerRun` JSON.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsessionEvent {
+    /// A spawn completed (or failed as a typed child run).
+    Outcome(Box<SubsessionEventOutcome>),
+    /// A spawn was refused before any run existed.
+    Refusal(SubsessionEventRefusal),
+}
+
+#[allow(dead_code, reason = "consumed by the T4 decision-record wiring")]
+impl SubsessionEvent {
+    /// The tool id the event belongs to (the decision-record key).
+    pub(crate) fn tool_id(&self) -> &str {
+        match self {
+            Self::Outcome(outcome) => &outcome.tool_id,
+            Self::Refusal(refusal) => &refusal.tool_id,
+        }
+    }
+
+    /// Whether the spawn completed a run (`false` = refused pre-run).
+    #[must_use]
+    pub(crate) const fn ran(&self) -> bool {
+        matches!(self, Self::Outcome(_))
+    }
+}
+
+/// A completed/failed sub-session's decision-record payload.
+#[derive(Clone, Debug, Serialize)]
+pub struct SubsessionEventOutcome {
+    pub tool_id: String,
+    pub role: String,
+    pub provider: String,
+    pub model: String,
+    pub status: RunStatus,
+    pub usage: UsageTotals,
+    pub routing: crate::subsession::RoleRoutingEvidence,
+    /// The reasoning-effort tier the spawn ran with (`None` = routing
+    /// default; issue #535 §9.45).
+    pub effort: Option<crate::tooldef::ReasoningEffort>,
+    /// The summary cap the spawn ran with (`None` = budget default).
+    pub max_summary_bytes: Option<u64>,
+    /// Whether the spawn demanded a structured-only finish.
+    pub structured_summary: Option<bool>,
+}
+
+/// A refused sub-session spawn's decision-record payload.
+#[derive(Clone, Debug, Serialize)]
+pub struct SubsessionEventRefusal {
+    pub tool_id: String,
+    pub reason: &'static str,
+}
+
+/// Builds the per-call request: bounded output, no streaming, and the
+/// tool-declared reasoning-effort tier (issue #535 §9.45) on the wire.
+fn build_request(config: &WorkerConfig, messages: &[ModelMessage]) -> ModelRequest {
     let mut extensions = serde_json::Map::new();
     extensions.insert("stream".to_string(), serde_json::Value::Bool(false));
-    let request = ModelRequest {
+    ModelRequest {
         provider_id: config.provider_id.clone(),
         model_id: config.model_id.clone(),
         messages: messages.to_vec(),
@@ -46,11 +119,29 @@ pub(super) async fn call_model(
         // wall-clock burn (see a44af33); cost tracking must not change it.
         max_output_tokens: Some(8_192),
         temperature: None,
-        reasoning: None,
+        // The tool-declared effort tier rides the wire — never a silent
+        // drop back to the routing default.
+        reasoning: config.effort.map(|effort| {
+            orchestraitor_provider_api::transport::ReasoningConfig {
+                effort,
+                budget_tokens: None,
+            }
+        }),
         structured_output: None,
         tool_choice: None,
         extensions,
-    };
+    }
+}
+
+/// One model call with bounded provider retries (`10s·2^n` capped, issue #310).
+pub(super) async fn call_model(
+    transport: &dyn ProviderTransport,
+    config: &WorkerConfig,
+    messages: &[ModelMessage],
+    state: &mut RunState<'_>,
+) -> Result<String, TypedFailure> {
+    let budgets = &config.budgets;
+    let request = build_request(config, messages);
     let mut retries = 0_u32;
     loop {
         state.model_calls += 1;
@@ -257,11 +348,17 @@ mod tests {
 
 /// Accumulates usage and evaluates the daily spend soft cap (soft: recorded,
 /// never a hard stop; the hard bounds are the worker timeout and run budget).
-fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<TokenCount>) {
-    if let Some(usage) = usage {
-        state.usage.input_tokens += usage.input_tokens;
-        state.usage.output_tokens += usage.output_tokens;
-    }
+/// One soft-cap evaluation, shared by the parent model-call path and the
+/// child-usage aggregation (one comparison — the two spend checks cannot
+/// diverge when the estimate or cap changes).
+pub(super) fn accrue_usage_and_check_cap(
+    state: &mut RunState<'_>,
+    config: &WorkerConfig,
+    input_tokens: u64,
+    output_tokens: u64,
+) {
+    state.usage.input_tokens += input_tokens;
+    state.usage.output_tokens += output_tokens;
     let total = state.usage.input_tokens + state.usage.output_tokens;
     #[expect(
         clippy::cast_precision_loss,
@@ -272,6 +369,11 @@ fn accumulate_usage(state: &mut RunState, config: &WorkerConfig, usage: Option<T
     if spent > config.budgets.daily_spend_soft_cap_usd {
         state.spend_soft_cap_exceeded = true;
     }
+}
+
+fn accumulate_usage(state: &mut RunState<'_>, config: &WorkerConfig, usage: Option<TokenCount>) {
+    let (input, output) = usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
+    accrue_usage_and_check_cap(state, config, input, output);
 }
 
 /// Whether a model call completed or failed. Failed calls still record a

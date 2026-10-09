@@ -17,6 +17,7 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 ## What "noteworthy" means
 
 CRITICAL, HIGH, and MEDIUM findings are noteworthy. Every review generation reports them in the fixed shape of [review-message-template.md](review-message-template.md), whose `VERDICT` footer reflects this convergence rule. They MUST be resolved before merge. A finding is "resolved" when:
+
 - the code is fixed AND the reviewer confirms the fix, OR
 - the finding is formally accepted with recorded reasoning in the review thread (e.g. "This is a known limitation; tracking in #N; accepted because X").
 
@@ -25,6 +26,7 @@ LOW findings are not blocking but MUST be tracked. A PR with 50 unacknowledged L
 ## Fresh contexts (spec `10-orchestrator.md` §9.33.3)
 
 Each review generation runs in a **fresh agent context** — never the implementer's session. The implementer may not approve their own security-sensitive changes (spec `50-contracts-data.md` §21.1). Fresh context prevents:
+
 - accumulated authority leakage (the reviewer inherits the implementer's tool grants);
 - context poisoning from prior review loops;
 - confirmation bias from reviewing one's own reasoning.
@@ -45,6 +47,7 @@ review generation N (fresh context, current HEAD)
 ## Limits are safety valves, not convergence
 
 Reaching `max_review_loops` (default 3), a cost budget, or an elapsed-time limit produces a **`blocked`** or **`needs-human`** state (spec `10-orchestrator.md` §9.24, §9.33.4). It NEVER counts as successful convergence. The implementer:
+
 1. Adds a human reviewer (`pr-mutate edit <num> --add-reviewer <human>`)
 2. Posts a comment summarizing remaining findings and what was tried
 3. Moves to the next task in the queue
@@ -63,9 +66,10 @@ The PR stays open, unmerged, in `blocked` state until a human resolves the remai
 ## How `convergence-status` computes the verdict
 
 The script combines:
+
 - `pr-checks` — all required + non-optional checks pass at current HEAD;
 - `review-threads` — all actionable threads resolved (`isResolved = true`);
 - `reconcile-checklist` — all `<!-- orc:* -->` markers checked based on evidence;
-- the review-generation state (has a generation run against the current HEAD? did it find new noteworthy findings?) — a PROXY only: the script reads `reviewDecision` and cannot inspect persisted review-generation findings (its own header documents this); a human or the skill's session context must confirm the generation evidence before merging.
+- the review-generation state — a `CLEAN` agent-review record in `.orchestraitor/reviews/` whose full head SHA exactly matches the current PR head, plus the GitHub review decision and draft state. A missing, stale, or non-clean record blocks convergence.
 
-The script exits `0` only when all four are true. Exit `5` (`ORC_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.
+The script exits `0` only when all four are true. Exit `5` (`ORC_ERR_BLOCKED`) means convergence has not been reached — `blocked`/`needs-human`, not mergeable.

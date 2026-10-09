@@ -66,6 +66,9 @@ pub struct CapturedRequest {
     pub response_format: Option<String>,
     /// Number of messages in the request.
     pub message_count: usize,
+    /// The full parsed JSON body, so tests can assert exact client behavior
+    /// (e.g. which tool observations appear in the conversation history).
+    pub body: Value,
 }
 
 /// Shared state behind every connection.
@@ -227,6 +230,7 @@ async fn handle(
             .get("messages")
             .and_then(Value::as_array)
             .map_or(0, Vec::len),
+        body: parsed,
     };
     let plan = {
         let mut guard = match state.lock() {

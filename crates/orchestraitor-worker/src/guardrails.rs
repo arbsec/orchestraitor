@@ -153,6 +153,9 @@ pub(crate) fn tool_call_shape(
         crate::action::WorkerAction::Search { pattern, .. } => {
             format!("pattern:{}", pattern_bucket(pattern.chars().count()))
         }
+        crate::action::WorkerAction::DeclaredTool { tool_id, .. } => {
+            format!("declared:{tool_id}")
+        }
         crate::action::WorkerAction::Finish { .. } => "finish".to_string(),
     };
     ToolCallShape {

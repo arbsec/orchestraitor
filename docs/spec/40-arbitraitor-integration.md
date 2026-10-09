@@ -494,7 +494,7 @@ Raw secrets should only be mounted into a worker when a provider or tool cannot 
 
 This is a defining subsystem. Security-sensitive classification, policy, and promotion authorization are owned by Arbitraitor; Orchestraitor owns the developer workflow and presentation.
 
-All worker output begins untrusted.
+All worker output begins untrusted. This includes the output of declared-tool sub-sessions (issue #535): a sub-session's summary, whatever role ran it (including `review`), is worker output carried as untrusted data — marker-wrapped, size-capped, and never promotion-authorizing on its own. There is no "trusted-role" exception.
 
 Output classes include:
 
