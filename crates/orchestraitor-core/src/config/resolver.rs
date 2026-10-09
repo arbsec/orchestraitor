@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::LoopGuardrailsConfig;
 use crate::config::parse::flatten_config;
 use crate::config::{
     AgentsConfig, BudgetConfig, ConfigLayer, ConfigResult, ConfigSource, DataClassificationConfig,
-    DataGovernanceConfig, DomainConfig, GitHubAppConfig, LoopGuardrailsConfig, NormalizationConfig,
-    OrchestraitorConfig, ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig,
-    RoleConfig, RoutingConfig, RoutingDecisionProviderConfig, SubscriptionConfig, ToolBudgetConfig,
-    ToolConfig, parse_toml_config,
+    DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
+    RoutingDecisionProviderConfig, SubscriptionConfig, ToolBudgetConfig, ToolConfig,
+    parse_toml_config,
 };
 use crate::error::ConfigError;
 
