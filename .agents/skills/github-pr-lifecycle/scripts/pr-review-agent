@@ -106,7 +106,7 @@ if [ -n "$RECORD_FILE" ]; then
     echo "error: verdict file not found: $RECORD_FILE" >&2
     exit "$ORC_ERR_CONFIG"
   fi
-  if ! jq -e . "$RECORD_FILE" >/dev/null 2>&1; then
+  if ! jq -se 'length == 1 and (.[0] | type == "object")' "$RECORD_FILE" >/dev/null 2>&1; then
     echo "error: verdict file is not valid JSON (jq parse failed); nothing posted" >&2
     exit "$ORC_ERR_CONFIG"
   fi
@@ -117,16 +117,24 @@ if [ -n "$RECORD_FILE" ]; then
     exit "$ORC_ERR_CONFIG"
   fi
 
+  REVIEWED_SHA="$(jq -r '.head_sha // empty' "$RECORD_FILE")"
+  if ! [[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$REVIEWED_SHA" != "$HEAD_SHA" ]; then
+    echo "error: .head_sha must be the full reviewed commit SHA and match the current PR head; nothing posted" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+
   # Structural validation of the findings array BEFORE any post: invalid
   # verdict format is a typed error, nothing is posted.
   FINDINGS_OK="$(jq -e '
-    [.findings // [] | .[] |
+    ((.findings // []) | type == "array") and
+    ([.findings // [] | .[] |
       ((.severity | type == "string") and (.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM" or .severity == "LOW")) and
       ((.path | type == "string") and (.path | length > 0)) and
-      ((.description | type == "string") and (.description | length > 0))
-    ] | all' "$RECORD_FILE" 2>/dev/null || true)"
+      ((.description | type == "string") and (.description | length > 0)) and
+      (.line == null or ((.line | type == "number") and .line > 0 and (.line | floor) == .line))
+    ] | all)' "$RECORD_FILE" 2>/dev/null || true)"
   if [ "$FINDINGS_OK" != "true" ]; then
-    echo "error: invalid verdict format: each finding requires severity (CRITICAL/HIGH/MEDIUM/LOW), path, and description; nothing posted" >&2
+    echo "error: invalid verdict format: each finding requires severity (CRITICAL/HIGH/MEDIUM/LOW), path, and description; line must be a positive integer or null; nothing posted" >&2
     exit "$ORC_ERR_CONFIG"
   fi
 
@@ -150,24 +158,28 @@ if [ -n "$RECORD_FILE" ]; then
   trap 'rm -f "$DIFF_OUT" "$SUMMARY_FILE"' EXIT
   : > "$SUMMARY_FILE"
   N=0
-  while IFS=$'\037' read -r SEV FPATH LINE DESC FIX; do
+  while IFS= read -r -d '' FINDING; do
+    SEV="$(jq -r '.severity' <<<"$FINDING")"
+    FPATH="$(jq -r '.path' <<<"$FINDING")"
+    LINE="$(jq -r '.line // empty' <<<"$FINDING")"
+    DESC="$(jq -r '.description' <<<"$FINDING")"
+    FIX="$(jq -r '.["fix-suggestion"] // empty' <<<"$FINDING")"
     N=$((N + 1))
     BODY_TEXT="**${SEV}** — ${DESC}"
     [ -n "$FIX" ] && BODY_TEXT="${BODY_TEXT}
 Suggested fix: ${FIX}"
     if [ -n "$LINE" ] && [ "$LINE" != "null" ]; then
-      # Line ref resolves: post the finding as an inline review reply thread
-      # (same semantics as pr-review-post: service-identity route, --comment
-      # review body; the body names the finding's path/line so it lands
-      # associated with the finding's position in the diff).
-      ARGS=(pr review "$PR" --repo "$REPO" --comment --body "$BODY_TEXT")
+      # Create a diff-positioned review comment, through the service identity.
+      ARGS=(api --method POST "repos/$REPO/pulls/$PR/comments"
+        -f "commit_id=$REVIEWED_SHA" -f "path=$FPATH" -F "line=$LINE"
+        -f side=RIGHT -f "body=$BODY_TEXT")
       orc_lib_run_or_dry_run ARGS gh >/dev/null
       POSTED=$((POSTED + 1))
     else
       # No line ref: collect for the single summary comment.
       printf '%s\n' "$BODY_TEXT" >> "$SUMMARY_FILE"
     fi
-  done < <(jq -r '(.findings // [])[] | [.severity, .path, (.line // "" | tostring), (.description // ""), (.["fix-suggestion"] // "")] | join("\u001f")' "$RECORD_FILE")
+  done < <(jq -jr '(.findings // [])[] | tojson, "\u0000"' "$RECORD_FILE")
 
   if [ -s "$SUMMARY_FILE" ]; then
     SUMMARY_BODY="## Agent review findings (no line refs)
@@ -188,7 +200,7 @@ Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REV
     echo
     echo "- verdict: ${VERDICT}"
     echo "- reviewer-agent: ${REVIEWER_AGENT:-unspecified}"
-    echo "- head SHA: ${HEAD_SHA}"
+    echo "- head SHA: ${REVIEWED_SHA}"
     echo "- findings: ${N_FINDINGS}"
     echo
     if [ "$N_FINDINGS" -gt 0 ]; then
@@ -205,7 +217,7 @@ fi
 
 # --- Contract emission (default): review-scope header + review prompt ---------
 PROMPT_FILE="$(mktemp)"
-trap 'rm -f "$DIFF_OUT" "$PROMPT_FILE"' EXIT
+# The caller owns PROMPT_FILE and removes it after the reviewer consumes it.
 {
   echo "=== AGENT REVIEW CONTRACT (fresh context REQUIRED) ==="
   echo
@@ -230,12 +242,13 @@ trap 'rm -f "$DIFF_OUT" "$PROMPT_FILE"' EXIT
   echo "REQUIRED VERDICT FORMAT"
   echo "Return a single JSON object written to a file, exactly this shape:"
   echo
-  echo '  {"verdict": "CLEAN|FINDINGS", "findings": ['
+  echo "  {\"head_sha\": \"$HEAD_SHA\", \"verdict\": \"CLEAN|FINDINGS\", \"findings\": ["
   echo '    {"severity": "CRITICAL|HIGH|MEDIUM|LOW", "path": "<repo-relative path>",'
   echo '     "line": <number|null>, "description": "<observed fact with file:line evidence>",'
   echo '     "fix-suggestion": "<concrete fix>"}'
   echo '  ]}'
   echo
+  echo "head_sha must name the exact full commit SHA reviewed; a changed PR head is rejected."
   echo "One finding object per issue; omit findings or use [] when CLEAN."
   echo "Finish the report with the final verdict line:"
   echo
