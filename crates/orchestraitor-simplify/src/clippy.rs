@@ -112,14 +112,20 @@ pub fn run(
                     let verify = executor.run(spec, root, TOOL_TIMEOUT);
                     if let ToolOutcome::Ran(verify_output) = &verify {
                         let verified = parse(&verify_output.stdout);
+                        // Identity ignores `line`: an applied fix can shift
+                        // the line numbers of surviving suggestions below
+                        // it, so a line-exact match would misreport those
+                        // survivors as applied. Class + file + rule is the
+                        // stable identity across a fix pass.
                         let resolved: std::collections::HashSet<_> = verified
                             .iter()
                             .filter(|suggestion| suggestion.class == SuggestionClass::SafeFix)
-                            .map(Suggestion::key)
+                            .map(|suggestion| (suggestion.path.clone(), suggestion.rule.clone()))
                             .collect();
                         for suggestion in &mut suggestions {
                             if suggestion.class == SuggestionClass::SafeFix
-                                && !resolved.contains(&suggestion.key())
+                                && !resolved
+                                    .contains(&(suggestion.path.clone(), suggestion.rule.clone()))
                             {
                                 suggestion.applied = true;
                             }

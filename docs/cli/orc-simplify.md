@@ -49,11 +49,14 @@ quality is the push path (the review-loop PR's push-branch gate).
     `rumdl check --fix`) performs the rewrite; suggestions are marked
     applied only when that fixing command succeeded;
   - `safe` additionally runs `cargo clippy --fix --allow-dirty` after the
-    check pass and marks clippy machine-applicable suggestions on `.rs`
-    files applied only when that fix invocation succeeded. Pending the
-    Arbitraitor output-classification gate (review-loop PR), safe-fix
-    auto-apply is limited to exactly this surface — everything above
-    Format is suggest-only otherwise.
+    check pass, then re-runs the check as a verify pass: a clippy
+    machine-applicable suggestion on `.rs` files is marked applied only
+    when the verify check no longer reports it (a zero fix exit alone
+    proves nothing — rustfix can fail to apply and roll back individual
+    suggestions, and fixes that shift lines must not misattribute
+    surviving findings). Pending the Arbitraitor output-classification
+    gate (review-loop PR), safe-fix auto-apply is limited to exactly this
+    surface — everything above Format is suggest-only otherwise.
 - `--pedantic-check` — exit 1 when unaddressed suggestions above Format
   exist (safe-fix + semantic), reported under error code
   `ORC-SIMPLIFY-002`. This is the pre-push hook's fast-feedback signal,

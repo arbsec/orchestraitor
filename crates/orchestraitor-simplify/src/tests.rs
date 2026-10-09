@@ -195,6 +195,56 @@ fn clippy_fix_exit_zero_but_suggestion_surviving_is_not_applied() {
 }
 
 #[test]
+fn clippy_fix_verify_identity_survives_line_shifts() {
+    // An applied fix can shift the line numbers of surviving SafeFix
+    // suggestions below it in the same file. The verify identity must
+    // ignore `line` (class + file + rule), or those survivors would be
+    // misreported as applied — hiding them from `--pedantic-check`.
+    let config = SimplifyConfig::default();
+    // Check: TWO machine-applicable suggestions in src/lib.rs — the
+    // line-2 `clone_on_copy` and a line-10 `manual_map`.
+    let two = format!("{}\n{}", MACHINE_APPLICABLE, shifted_machine_applicable(10));
+    // Verify: the line-2 fix landed (gone), and the line-10 finding
+    // SURVIVED but moved to line 12 (the fix above removed lines).
+    let verify = shifted_machine_applicable(12);
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_sequence(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
+        &[ran_output(&two), ran_output(&verify)],
+    );
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (_statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(suggestions.len(), 2);
+    // Line-2 finding: gone from the verify output → applied.
+    assert!(
+        suggestions[0].applied,
+        "a resolved suggestion is marked applied"
+    );
+    // Line-10 finding: survived, only its LINE changed → NOT applied.
+    assert!(
+        !suggestions[1].applied,
+        "a suggestion that only shifted lines must stay unapplied"
+    );
+}
+
+/// A second machine-applicable diagnostic on `src/lib.rs` with a distinct
+/// rule at the given line, to exercise multi-suggestion verify matching.
+fn shifted_machine_applicable(line: u32) -> String {
+    format!(
+        r#"{{"reason":"compiler-message","message":{{"level":"warning","message":"manual implementation","code":{{"code":"clippy::manual_map"}},"spans":[{{"file_name":"src/lib.rs","is_primary":true,"line_start":{line},"line_end":{line},"column_start":1,"column_end":10}}],"children":[{{"level":"help","message":"try","spans":[{{"file_name":"src/lib.rs","is_primary":true,"line_start":{line},"line_end":{line},"column_start":1,"column_end":10,"suggestion_applicability":"MachineApplicable","suggested_replacement":"x"}}]}}]}}}}"#
+    )
+}
+
+#[test]
 fn clippy_failed_fix_pass_keeps_suggestions_suggest_only() {
     let config = SimplifyConfig::default();
     let executor = ScriptedExecutor::with_available(&["cargo"]);

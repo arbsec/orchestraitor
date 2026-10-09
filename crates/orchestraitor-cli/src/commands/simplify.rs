@@ -91,11 +91,14 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     // reporting; the hook compensates by running the same command without
     // `--staged` when the developer wants fixes.
     let project_dir = project_root(paths);
-    let staged_paths = if args.staged {
-        Some(staged_files(&project_dir).map(|files| strip_toplevel(&project_dir, &files)))
-    } else {
-        None
-    };
+    let staged_paths =
+        if args.staged {
+            Some(staged_files(&project_dir).map(|(toplevel, files)| {
+                strip_toplevel(Path::new(&toplevel), &project_dir, &files)
+            }))
+        } else {
+            None
+        };
 
     let fix = match args.fix {
         // Staged runs never auto-apply: see the STAGED SAFETY RULE above.
@@ -164,20 +167,33 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
         write_human_report(&report, writer)?;
     }
 
-    // Pedantic-check mode is the ONLY non-zero exit: the pre-push hook's
-    // fast-feedback signal. Default behavior never blocks.
-    if args.pedantic_check {
-        let pedantic = report.unaddressed(Some(SuggestionClass::SafeFix))
-            + report.unaddressed(Some(SuggestionClass::Semantic));
-        if pedantic > 0 {
-            writeln!(
-                std::io::stderr(),
-                "warning [{SIMPLIFY_PEDANTIC_CODE}]: {pedantic} unaddressed suggestion(s) \
-                 above Format class (pedantic-check)"
-            )
-            .into_diagnostic()?;
-            std::process::exit(1);
-        }
+    pedantic_check(args.pedantic_check, &report, writer)
+}
+
+/// Pedantic-check mode is the ONLY non-zero exit: the pre-push hook's
+/// fast-feedback signal. Default behavior never blocks. The writer is
+/// flushed before exiting: `process::exit` skips destructors, and a
+/// buffered writer would otherwise drop the report that documents WHY the
+/// check refused.
+fn pedantic_check<W: Write>(
+    enabled: bool,
+    report: &orchestraitor_simplify::SimplifyReport,
+    writer: &mut W,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let pedantic = report.unaddressed(Some(SuggestionClass::SafeFix))
+        + report.unaddressed(Some(SuggestionClass::Semantic));
+    if pedantic > 0 {
+        writeln!(
+            std::io::stderr(),
+            "warning [{SIMPLIFY_PEDANTIC_CODE}]: {pedantic} unaddressed suggestion(s) \
+             above Format class (pedantic-check)"
+        )
+        .into_diagnostic()?;
+        writer.flush().into_diagnostic()?;
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -302,18 +318,18 @@ fn filter_report(
         .count();
 }
 
-/// Staged (index) files, relative to the git toplevel, via
-/// `git diff --cached --name-only -z` run at the toplevel (`--relative` is
-/// deliberately NOT used: it resolves against the current directory, which
-/// would re-base the output). Callers re-base these entries onto the cargo
-/// workspace root via [`strip_toplevel`], because tool-emitted suggestion
-/// paths (clippy JSON, rustfmt diffs) are relative to that root, which can
-/// be a subdirectory of the git worktree. `None` = git could not run or
-/// failed (fail-open: the caller drops the staged filter and reports
-/// everything, rather than silently narrowing to nothing); `Some(list)` =
-/// the index was read (possibly empty — a genuinely empty index is a real
-/// empty scope, not an error).
-fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
+/// Staged (index) files, relative to the git toplevel, plus the toplevel
+/// itself, via `git diff --cached --name-only -z` run at the toplevel
+/// (`--relative` is deliberately NOT used: it resolves against the current
+/// directory, which would re-base the output). Callers re-base these
+/// entries onto the cargo workspace root via [`strip_toplevel`], because
+/// tool-emitted suggestion paths (clippy JSON, rustfmt diffs) are relative
+/// to that root, which can be a subdirectory of the git worktree.
+/// `None` = git could not run or failed (fail-open: the caller drops the
+/// staged filter and reports everything, rather than silently narrowing to
+/// nothing); `Some((toplevel, list))` = the index was read (possibly empty
+/// — a genuinely empty index is a real empty scope, not an error).
+fn staged_files(project_dir: &Path) -> Option<(String, Vec<String>)> {
     let output = std::process::Command::new("git")
         .current_dir(project_dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -340,35 +356,41 @@ fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
     if !output.status.success() {
         return None;
     }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .split('\0')
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
+    let files = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some((toplevel, files))
 }
 
 /// Re-bases staged paths (git-toplevel-relative) onto the cargo workspace
 /// root (`project_dir`), matching the base of tool-emitted suggestion paths
-/// (clippy JSON `file_name`, rustfmt diff paths). Entries outside
+/// (clippy JSON `file_name`, rustfmt diff paths — the executor runs tools
+/// with `current_dir(project_dir)`). The toplevel-relative entry is joined
+/// onto the canonical toplevel and re-expressed relative to the canonical
+/// project dir, which may be the toplevel itself, a subdirectory of it, a
+/// relative ("." from the toplevel) or an absolute path. Entries outside
 /// `project_dir` (e.g. sibling crates in the same worktree) are kept as-is —
 /// they can never match a workspace-relative suggestion, and dropping them
 /// would risk over-matching; absolute path forms are handled by the
 /// canonical comparison in [`filter_report`]'s normalize step.
-fn strip_toplevel(project_dir: &Path, files: &[String]) -> Vec<String> {
+fn strip_toplevel(toplevel: &Path, project_dir: &Path, files: &[String]) -> Vec<String> {
+    // Canonical forms: `canonicalize` resolves relative values against the
+    // process cwd — exactly how `project_dir` is interpreted everywhere
+    // else in this command. Falls back to the raw value when the path does
+    // not exist (a plain string prefix strip of relative forms still
+    // applies).
+    let canonical_toplevel =
+        std::fs::canonicalize(toplevel).unwrap_or_else(|_| toplevel.to_path_buf());
+    let canonical_project =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     files
         .iter()
         .map(|file| {
-            // A staged entry is toplevel-relative (e.g. `crates/foo/src/lib.rs`);
-            // when it lives under the project dir, re-express it relative to
-            // the project dir (the base of tool-emitted suggestion paths).
-            // Entries outside `project_dir` (sibling crates in the same
-            // worktree) are kept as-is — they can never match a
-            // workspace-relative suggestion, and dropping them would risk
-            // over-matching.
-            Path::new(file)
-                .strip_prefix(project_dir)
+            canonical_toplevel
+                .join(file)
+                .strip_prefix(&canonical_project)
                 .map_or_else(|_| file.clone(), |rest| rest.to_string_lossy().into_owned())
         })
         .collect()
@@ -388,4 +410,63 @@ fn resolved_config(paths: &ConfigPaths) -> Result<OrchestraitorConfig> {
             error.structured().cause
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn strip_toplevel_rebases_subdir_project_dir() {
+        // A real temp git repo: toplevel at temp/, cargo workspace root in
+        // the nested `crate` dir. Staged entries are toplevel-relative;
+        // suggestion paths are workspace-relative.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let toplevel = temp.path().to_path_buf();
+        let project_dir = toplevel.join("crate");
+        std::fs::create_dir_all(&project_dir).expect("mkdir");
+        let files = vec![
+            "crate/src/lib.rs".to_string(), // inside the workspace root
+            "sibling/other.rs".to_string(), // outside it
+        ];
+        let rebased = strip_toplevel(&toplevel, &project_dir, &files);
+        assert_eq!(rebased[0], "src/lib.rs", "entry under project dir rebases");
+        assert_eq!(
+            rebased[1], "sibling/other.rs",
+            "entry outside the project dir is kept as-is"
+        );
+    }
+
+    #[test]
+    fn strip_toplevel_identity_when_project_is_toplevel() {
+        // Workspace root == toplevel (the common single-crate layout, and
+        // the hook default `--project-dir .` run from the root): entries
+        // pass through unchanged.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let toplevel = temp.path().to_path_buf();
+        let files = vec!["src/lib.rs".to_string()];
+        let rebased = strip_toplevel(&toplevel, &toplevel, &files);
+        assert_eq!(rebased, files);
+    }
+
+    #[test]
+    fn strip_toplevel_relative_project_dir_matches_cwd_interpretation() {
+        // A relative `--project-dir` is interpreted against the process
+        // cwd everywhere in this command; canonicalize must agree.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let toplevel = temp.path().to_path_buf();
+        let project_dir = toplevel.join("crate");
+        std::fs::create_dir_all(&project_dir).expect("mkdir");
+        let cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&toplevel).expect("chdir to toplevel");
+        let rebased = strip_toplevel(
+            &toplevel,
+            Path::new("crate"),
+            &["crate/src/lib.rs".to_string()],
+        );
+        std::env::set_current_dir(cwd).expect("restore cwd");
+        assert_eq!(rebased, vec!["src/lib.rs"]);
+    }
 }
