@@ -92,11 +92,15 @@ struct DirectLoopStarter {
     /// Loop invocation id, minted once per `orc loop` run; names each
     /// worker run's cost-attribution session.
     invocation_id: String,
-    /// Layered config resolver snapshot for declared-tool resolution
-    /// (issue #535, T2). The layer-trust gate runs at registry build; a
-    /// broken tool definition is a typed spawn failure, never a silent
-    /// reduction.
-    tools_resolver: orchestraitor_core::ConfigResolver,
+    /// Declared-tool surface built ONCE at startup (the layer-trust gate,
+    /// role routing, and sub-role provider gate all run before the loop
+    /// accepts work): a broken tool definition is a typed startup error,
+    /// never a per-spawn failure after worktrees are created.
+    declared_tools: Vec<orchestraitor_worker::ToolDefinition>,
+    /// The sub-session routing resolved with that tool surface (the §9.35
+    /// decision-record evidence).
+    subsession_routing:
+        std::collections::BTreeMap<String, orchestraitor_worker::RoleRoutingEvidence>,
 }
 
 impl DirectLoopStarter {
@@ -361,11 +365,13 @@ impl LoopWorkerStarter for DirectLoopStarter {
             self.budgets.clone(),
         );
         config.prior_daily_spend_usd = prior_daily_spend_usd;
-        let config = super::attach_declared_tools(config, &self.tools_resolver, &routing.role)
-            .map_err(|error| CampaignError::Spawn {
-                task_id: selected.task_id.clone(),
-                message: format!("declared-tool resolution failed: {error:?}"),
-            })?;
+        let config = super::attach_declared_surface(
+            config,
+            &super::DeclaredToolSurface {
+                tools: self.declared_tools.clone(),
+                subsession_routing: self.subsession_routing.clone(),
+            },
+        );
         let config = self.with_cost_tracking(config, selected, routing);
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
@@ -559,6 +565,10 @@ fn report_loop_warning(message: &str) {
 /// Returns a diagnostic when the board client, role resolution, stores,
 /// instance lock, or loop runner fail. Worker failures are recorded run
 /// outcomes, not process errors.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the startup wiring (lock, config, client, routing, decision provider, stores, ledger, starter) is one linear assembly; splitting it would scatter the fail-closed gates the operator must see together"
+)]
 pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Result<()> {
     let _lock = acquire_instance_lock(&paths.config_dir)?;
 
@@ -641,6 +651,11 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             .map(|duration| duration.as_secs())
             .unwrap_or_default();
         let poller = BoardSnapshotPoller { client, config };
+        // Gated ONCE at startup, before the loop accepts work: a broken
+        // tool definition is a typed startup error, never a per-spawn
+        // failure after worktrees are created.
+        let surface = super::build_declared_tools(&layers.resolver, &routing.role)
+            .map_err(|error| miette!("{error}"))?;
         let starter = DirectLoopStarter {
             project_dir: paths.project_dir.clone(),
             config_dir: paths.config_dir.clone(),
@@ -652,7 +667,9 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             budgets: loop_config.budgets.clone(),
             cost_ledger: cost_ledger.clone(),
             invocation_id: invocation_id.clone(),
-            tools_resolver: layers.resolver.clone(),
+            // Gated once, above: never re-validated per spawn.
+            declared_tools: surface.tools,
+            subsession_routing: surface.subsession_routing,
         };
         let runner = LoopRunner::new(
             loop_config,

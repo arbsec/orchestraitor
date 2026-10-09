@@ -519,6 +519,8 @@ fn resolve_command_mechanism(
         || tool.internal_tools.is_some()
         || tool.instructions.is_some()
         || tool.structured_summary.is_some()
+        || tool.effort.is_some()
+        || tool.max_summary_bytes.is_some()
     {
         return Err(ToolRegistryError::MalformedMechanism {
             tool_id: tool_id.to_string(),

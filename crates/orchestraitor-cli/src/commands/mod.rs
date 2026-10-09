@@ -68,29 +68,30 @@ pub(crate) fn build_named_decision_provider(
 /// The role the dispatched workers run as.
 pub(crate) const WORKER_ROLE: &str = "implement";
 
-/// Builds the declared tools visible to the worker role and attaches them
-/// to the run config (issue #535, T2/T4).
-///
-/// T4: the subagent runtime is wired (`subagent_wired = true`) and each
-/// subagent tool's role resolves `(provider, model)` through the §9.45
-/// `RoleRouter` chain (the control plane routes; the parent never chooses).
-/// The resolved map lands on `WorkerConfig.subsession_routing`.
-///
-/// The registry enforces the layer-trust gate (trusted config layers only)
-/// and mechanism validation at build time; an error is fatal to the spawn —
-/// a broken tool definition is a typed startup failure, never a silently
-/// reduced tool surface. Role filtering happens here: only tools whose
-/// `visible_to` contains the worker role are mapped.
+/// Builds the declared tools visible to the worker role (issue #535,
+/// T2/T4). Call ONCE at startup: the layer-trust gate, mechanism
+/// validation, role routing, and the sub-role provider gate all run here,
+/// so a broken tool definition is a typed startup error — never a
+/// per-spawn failure after worktrees exist. Role filtering happens here:
+/// only tools whose `visible_to` contains the worker role are mapped.
 ///
 /// # Errors
 ///
 /// Returns the registry error (untrusted layer, unknown kind, unresolvable
 /// role, invalid id, unknown effort) as a diagnostic.
-pub(crate) fn attach_declared_tools(
-    mut config: orchestraitor_worker::WorkerConfig,
+pub(crate) struct DeclaredToolSurface {
+    /// The resolved definitions visible to the role.
+    pub(crate) tools: Vec<orchestraitor_worker::ToolDefinition>,
+    /// The sub-session routing resolved for each subagent tool's role
+    /// (the §9.35 decision-record evidence).
+    pub(crate) subsession_routing:
+        std::collections::BTreeMap<String, orchestraitor_worker::RoleRoutingEvidence>,
+}
+
+pub(crate) fn build_declared_tools(
     resolver: &orchestraitor_core::ConfigResolver,
     role: &str,
-) -> miette::Result<orchestraitor_worker::WorkerConfig> {
+) -> miette::Result<DeclaredToolSurface> {
     let catalog_roles: Vec<String> =
         orchestraitor_agent_catalog::RoleRegistry::from_resolver(resolver)
             .map_err(|error| miette!("{error}"))?
@@ -108,6 +109,7 @@ pub(crate) fn attach_declared_tools(
         })?;
     let router = orchestraitor_agent_catalog::RoleRouter::new(resolver);
     let mut tools = Vec::new();
+    let mut routing_map = std::collections::BTreeMap::new();
     for id in registry.ids() {
         let Some(tool) = registry.get(id) else {
             continue;
@@ -130,7 +132,7 @@ pub(crate) fn attach_declared_tools(
             // runtime with mis-attributed ledger rows — a startup error,
             // matching the parent-run gate (spec §10.3).
             require_bootstrap_provider_named(&decision.provider, sub_role)?;
-            config.subsession_routing.insert(
+            routing_map.insert(
                 sub_role.clone(),
                 orchestraitor_worker::RoleRoutingEvidence {
                     role: sub_role.clone(),
@@ -198,7 +200,21 @@ pub(crate) fn attach_declared_tools(
             structured_summary: tool.structured_summary,
         });
     }
-    Ok(config.with_tools(tools))
+    Ok(DeclaredToolSurface {
+        tools,
+        subsession_routing: routing_map,
+    })
+}
+
+/// Attaches the prebuilt declared-tool surface to a run config: the
+/// startup-validated definitions and routing, applied per spawn with no
+/// re-validation (the surface was gated once, at startup).
+pub(crate) fn attach_declared_surface(
+    mut config: orchestraitor_worker::WorkerConfig,
+    surface: &DeclaredToolSurface,
+) -> orchestraitor_worker::WorkerConfig {
+    config.subsession_routing = surface.subsession_routing.clone();
+    config.with_tools(surface.tools.clone())
 }
 
 /// Fails closed when the resolved routing does not target the bootstrap
