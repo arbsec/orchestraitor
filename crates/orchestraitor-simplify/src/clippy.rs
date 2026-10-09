@@ -125,7 +125,13 @@ pub fn run(
                 statuses.push(ToolStatus::from_outcome(CLIPPY_FIX_SPEC.label, &fix));
                 if fix_succeeded {
                     let verify = executor.run(spec, root, TOOL_TIMEOUT);
-                    if let ToolOutcome::Ran(verify_output) = &verify {
+                    // Applied is earned only from a SUCCESSFUL verify run:
+                    // a failing verify (e.g. the fix left the crate not
+                    // compiling) parses to nothing usable, and trusting it
+                    // would mark every SafeFix applied on no evidence.
+                    let verify_usable =
+                        matches!(&verify, ToolOutcome::Ran(outcome) if outcome.success());
+                    if verify_usable && let ToolOutcome::Ran(verify_output) = &verify {
                         let verified = parse(&verify_output.stdout);
                         // Identity ignores `line`: an applied fix can shift
                         // the line numbers of surviving suggestions below

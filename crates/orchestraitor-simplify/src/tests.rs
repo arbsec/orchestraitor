@@ -245,6 +245,38 @@ fn shifted_machine_applicable(line: u32) -> String {
 }
 
 #[test]
+fn clippy_failing_verify_pass_keeps_suggestions_suggest_only() {
+    // A verify check that FAILS (e.g. the fix left the crate not compiling)
+    // parses to no usable findings; trusting it would mark every SafeFix
+    // applied on no evidence. Applied must be earned only from a successful
+    // verify run.
+    let config = SimplifyConfig::default();
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    // Sequence: check (finding exists) → fix (exit 0) → verify (exit 1:
+    // compile failure, no warnings parsed).
+    executor.script_sequence(
+        "cargo",
+        CLIPPY_ARGS,
+        &[
+            ran_output(MACHINE_APPLICABLE),
+            ToolOutcome::Ran(ExecOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "error: could not compile\n".to_string(),
+            }),
+        ],
+    );
+    executor.script_argv("cargo", CLIPPY_FIX_ARGS, ran_output(""));
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(statuses.len(), 3, "check + fix + (failed) verify recorded");
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        !suggestions[0].applied,
+        "a failed verify pass must not claim applied"
+    );
+}
+
+#[test]
 fn clippy_failed_fix_pass_keeps_suggestions_suggest_only() {
     let config = SimplifyConfig::default();
     let executor = ScriptedExecutor::with_available(&["cargo"]);

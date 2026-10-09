@@ -198,13 +198,17 @@ impl SimplifyExecutor for ProcessExecutor {
 
     fn available(&self, program: &str) -> bool {
         // Probe via `--version`-free PATH resolution: spawn would run the
-        // tool; instead check each PATH entry for an executable file.
+        // tool; instead check each PATH entry for an executable file. The
+        // platform executable suffix is appended too — on Windows the tools
+        // are `cargo.exe`/`rumdl.exe`/…, and an unsuffixed probe would miss
+        // every one of them.
         let Some(path_var) = std::env::var_os("PATH") else {
             return false;
         };
+        let suffixed = format!("{program}{}", std::env::consts::EXE_SUFFIX);
         std::env::split_paths(&path_var).any(|dir| {
             let candidate = dir.join(program);
-            candidate.is_file()
+            candidate.is_file() || dir.join(&suffixed).is_file()
         })
     }
 }
