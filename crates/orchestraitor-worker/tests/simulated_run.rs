@@ -784,6 +784,7 @@ async fn non_poll_bash_never_charges_the_poll_budget() {
         run.failure
     );
 }
+
 // --- Declared tools (issue #535, T1): protocol shape and refusal surface ---
 
 /// Builds a command-mechanism declared tool visible to the implement role.

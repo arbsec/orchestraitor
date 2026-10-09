@@ -141,6 +141,7 @@ impl<'a> ToolExecutor<'a> {
     pub(crate) fn root_path(&self) -> &'a Path {
         self.root
     }
+
     /// Records one path written INSIDE a sub-session (CR finding #2): the
     /// child executor's writes must reach the parent's untrusted-output
     /// pipeline — dropped writes would hide mutations of the shared worktree
