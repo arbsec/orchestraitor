@@ -192,7 +192,11 @@ Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REV
   fi
 
   # --- Store the compact record ------------------------------------------------
-  RECORDS_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.orchestraitor/reviews"
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "error: pr-review-agent requires running from the target git checkout" >&2
+    exit "$ORC_ERR_CONFIG"
+  }
+  RECORDS_DIR="$REPO_ROOT/.orchestraitor/reviews"
   mkdir -p "$RECORDS_DIR"
   RECORD_PATH="$RECORDS_DIR/${PR}-${HEAD_SHORT}.md"
   {

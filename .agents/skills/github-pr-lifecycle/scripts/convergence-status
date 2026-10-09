@@ -58,7 +58,11 @@ IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
 HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
 
 AGENT_REVIEW_CLEAN=false
-RECORDS_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.orchestraitor/reviews"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "error: convergence-status requires running from the target git checkout" >&2
+  exit "$ORC_ERR_CONFIG"
+}
+RECORDS_DIR="$REPO_ROOT/.orchestraitor/reviews"
 RECORD_PATH="$RECORDS_DIR/${PR}-${HEAD_SHA:0:7}.md"
 if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -f "$RECORD_PATH" ]; then
   if [ "$(sed -n '3p' "$RECORD_PATH")" = "- verdict: CLEAN" ] &&

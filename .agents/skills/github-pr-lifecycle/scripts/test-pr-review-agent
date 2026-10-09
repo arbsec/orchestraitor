@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/scripts" "$TMP/bin" "$TMP/files"
+git -C "$TMP/repo" init -q
 cp -L "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-review-agent" \
   "$SCRIPT_DIR/convergence-status" "$SCRIPT_DIR/merge-gate" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"*
@@ -171,6 +172,15 @@ run pr-review-agent 7 --repo test-org/repo --record "$TMP/findings.json" --dry-r
 assert 'record dry-run succeeds' 0 "$RC"
 assert 'record dry-run posts nothing' 0 "$(mutations)"
 assert 'record dry-run writes no record' no "$([ -f "$RECORD" ] && echo yes || echo no)"
+# Running from outside a git checkout must fail typed, with no fallback.
+: > "$GH_LOG"; : > "$SERVICE_LOG"
+( cd "$TMP/files" && PATH="$PATH" GH_BIN="$GH_BIN" ORC_BIN="$ORC_BIN" \
+  ORC_GITHUB_APP_ENFORCEMENT=required "$TMP/repo/scripts/convergence-status" 7 --repo test-org/repo ) >"$TMP/out" 2>"$TMP/stderr"; RC=$?
+OUT="$(cat "$TMP/out")"
+assert 'non-checkout invocation rejected' 2 "$RC"
+assert 'non-checkout error is typed' 1 "$(grep -cF 'error: convergence-status requires running from the target git checkout' "$TMP/stderr")"
+assert 'non-checkout writes nothing' 0 "$(mutations)"
+
 export TEST_MERGE_STATE=CONFLICTING
 run pr-review-agent 7 --repo test-org/repo
 assert 'conflicting PR rejected' 5 "$RC"
