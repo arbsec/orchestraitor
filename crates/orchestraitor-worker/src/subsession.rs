@@ -175,6 +175,12 @@ pub fn parent_failure_class(child: FailureClass) -> FailureClass {
         | FailureClass::MediationRefused
         | FailureClass::TaskNotCompleted
         | FailureClass::DeliveryFailed => FailureClass::SubsessionFailed,
+        // Anti-stuck guardrail kills are fatal to the child attempt with no
+        // rescue path; the parent sees them as a sub-session failure (the
+        // child's churn/no-progress/poll state never carries over).
+        FailureClass::ToolLoopChurn
+        | FailureClass::NoProgress
+        | FailureClass::PollBudgetExhausted => crate::guardrails::guardrail_child_class(),
     }
 }
 
