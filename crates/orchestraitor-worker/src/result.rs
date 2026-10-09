@@ -240,14 +240,6 @@ pub enum FailureClass {
     TurnBudgetExhausted,
     /// Consecutive malformed responses exhausted their bound.
     FormatErrorsExhausted,
-    /// Provider call failed after bounded retries, or streamed invalid events.
-    ProviderError,
-    /// The mediation boundary refused or failed a bash call (fail closed).
-    MediationRefused,
-    /// The model declared the task not completable on every attempt.
-    TaskNotCompleted,
-    /// The delivery seam rejected a completed task.
-    DeliveryFailed,
     /// The same normalized tool-call shape repeated K times within the last
     /// W turns (anti-stuck churn guard, spec `10-orchestrator.md` §9.36 detection).
     ToolLoopChurn,
@@ -258,6 +250,14 @@ pub enum FailureClass {
     /// exceeded the per-attempt CI-poll budget; the task parks
     /// blocked-on-external instead of burning the session.
     PollBudgetExhausted,
+    /// Provider call failed after bounded retries, or streamed invalid events.
+    ProviderError,
+    /// The mediation boundary refused or failed a bash call (fail closed).
+    MediationRefused,
+    /// The model declared the task not completable on every attempt.
+    TaskNotCompleted,
+    /// The delivery seam rejected a completed task.
+    DeliveryFailed,
     /// A declared-tool sub-session exhausted its carved budget (turns,
     /// wall clock, or deadline) or failed its bounded guardrails. The child
     /// class detail rides the reason code; the parent sees one uniform
