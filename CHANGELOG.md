@@ -39,31 +39,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   spend lands in the same cost ledger under a per-invocation session id,
   and it may dispatch only the internal tools its allowlist names
   (read-only by default).
-- `orc loop` anti-stuck guardrails (default-on; spec `10-orchestrator.md`
-  §9.27.1/§9.36, 50-contracts-data.md §21.10). Worker-side:
-  `FailureClass::ToolLoopChurn` (the same normalized tool-call shape
-  repeating 4 times within an 8-turn window kills the attempt — the
-  mktemp-loop failure mode), `FailureClass::NoProgress` (5 consecutive
-  identical worktree progress fingerprints fail the attempt), and
-  `FailureClass::PollBudgetExhausted` (cumulative poll-shaped bash —
-  `sleep` + `gh pr checks`/`gh run watch` fingerprints — exceeding 30m per
-  attempt; the task parks blocked-on-external instead of burning the
-  session). Churn and no-progress kills are re-plan-fatal: a fresh re-plan
-  note cannot fix a loop the model is mechanistically stuck in. The
-  wall-clock stall detection is unchanged. Loop-side: a durable per-task
-  retry budget in `loop.db` (`task_retry_state`: total attempts, last
-  failure class, no-progress streak, backoff window) — a task that exceeds
-  `max_task_attempts` (3) is excluded from selection with a typed skip
-  reason on the pass decision record and never silently re-selected, and a
-  failed task is excluded for its `task_retry_backoff` (15m) window;
-  completed runs clear the backoff and streak. The `orc loop` summary
-  carries `tasks_stuck` and `task_budget_skips` counters. All thresholds
-  are configurable via the layered config keys
-  `loop.no_progress_turns`, `loop.tool_repeat_count`,
-  `loop.tool_repeat_window`, `loop.ci_poll_budget_secs`,
-  `loop.max_task_attempts`, `loop.task_retry_backoff_secs` (absent block =
-  defaults active; an explicit `0` disables a guard deliberately, reported
-  as a stderr warning — never silent).
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a
@@ -91,6 +66,31 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   follow-up slices — task splitting (`propose_task_split`) and tool selection
   (`propose_tool_selection`) — implemented as default methods returning a
   typed `Unsupported` error, so adding them breaks no existing implementation.
+- `orc loop` anti-stuck guardrails (default-on; spec `10-orchestrator.md`
+  §9.27.1/§9.36, 50-contracts-data.md §21.10). Worker-side:
+  `FailureClass::ToolLoopChurn` (the same normalized tool-call shape
+  repeating 4 times within an 8-turn window kills the attempt — the
+  mktemp-loop failure mode), `FailureClass::NoProgress` (5 consecutive
+  identical worktree progress fingerprints fail the attempt), and
+  `FailureClass::PollBudgetExhausted` (cumulative poll-shaped bash —
+  `sleep` + `gh pr checks`/`gh run watch` fingerprints — exceeding 30m per
+  attempt; the task parks blocked-on-external instead of burning the
+  session). Churn and no-progress kills are re-plan-fatal: a fresh re-plan
+  note cannot fix a loop the model is mechanistically stuck in. The
+  wall-clock stall detection is unchanged. Loop-side: a durable per-task
+  retry budget in `loop.db` (`task_retry_state`: total attempts, last
+  failure class, no-progress streak, backoff window) — a task that exceeds
+  `max_task_attempts` (3) is excluded from selection with a typed skip
+  reason on the pass decision record and never silently re-selected, and a
+  failed task is excluded for its `task_retry_backoff` (15m) window;
+  completed runs clear the backoff and streak. The `orc loop` summary
+  carries `tasks_stuck` and `task_budget_skips` counters. All thresholds
+  are configurable via the layered config keys
+  `loop.no_progress_turns`, `loop.tool_repeat_count`,
+  `loop.tool_repeat_window`, `loop.ci_poll_budget_secs`,
+  `loop.max_task_attempts`, `loop.task_retry_backoff_secs` (absent block =
+  defaults active; an explicit `0` disables a guard deliberately, reported
+  as a stderr warning — never silent).
 - SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
   durable §9.17 audit persistence. The store performs hash-chain validation
   that detects inconsistencies between envelope bytes, hashes, and metadata —
