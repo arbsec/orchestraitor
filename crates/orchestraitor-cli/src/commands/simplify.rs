@@ -293,14 +293,18 @@ fn filter_report(
             return true;
         };
         let normalized = normalize(path);
+        // Every ACTIVE filter must pass (intersection): `--staged --path X`
+        // reports only staged findings under X — each flag narrows the
+        // scope, per the `--path` doc ("restrict the report").
         if let Some(staged) = staged
-            && staged.contains(&normalized)
+            && !staged.contains(&normalized)
         {
-            return true;
+            return false;
         }
-        paths
-            .iter()
-            .any(|candidate| normalize(candidate) == normalized)
+        paths.is_empty()
+            || paths
+                .iter()
+                .any(|candidate| normalize(candidate) == normalized)
     };
     report
         .suggestions
@@ -518,7 +522,7 @@ mod tests {
             assert_eq!(filtered.suggestions.len(), 3);
             assert_eq!(filtered.auto_applied_count, 2);
         }
-        // A real staged scope intersects with `--paths`.
+        // A real staged scope narrows the report to staged files.
         let staged = Some(vec!["src/a.rs".to_string()]);
         let mut filtered = report.clone();
         filter_report(&mut filtered, staged.as_ref(), &[], Path::new("/project"));
@@ -533,6 +537,22 @@ mod tests {
         filter_report(
             &mut filtered,
             empty.as_ref(),
+            &["src/a.rs".to_string()],
+            Path::new("/project"),
+        );
+        assert_eq!(filtered.suggestions.len(), 2);
+        assert_eq!(filtered.suggestions[0].path.as_deref(), Some("src/a.rs"));
+        assert!(filtered.suggestions[1].path.is_none());
+        assert_eq!(filtered.auto_applied_count, 1);
+
+        // Both filters active: INTERSECTION — `--staged --path src/a.rs`
+        // narrows to staged findings under src/a.rs only; a staged
+        // `src/b.rs` is excluded because --path narrows further.
+        let staged = Some(vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        let mut filtered = report.clone();
+        filter_report(
+            &mut filtered,
+            staged.as_ref(),
             &["src/a.rs".to_string()],
             Path::new("/project"),
         );

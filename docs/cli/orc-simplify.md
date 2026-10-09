@@ -42,6 +42,8 @@ quality is the push path (the review-loop PR's push-branch gate).
   rewrite whole files and would touch unstaged (or partially staged) hunks
   the user never asked to modify.
 - `--path <PATH>` — restrict the report to specific paths (repeatable).
+  When combined with `--staged`, both filters apply (intersection): only
+  staged findings under the given paths are reported.
 - `--fix none|format|safe` — fix policy (default `none`):
   - `format` auto-applies Format-class fixes when
     `simplify.auto_apply_format` is true (the default): the check runs
