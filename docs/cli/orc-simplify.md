@@ -33,14 +33,14 @@ quality is the push path (the review-loop PR's push-branch gate).
 
 - `--staged` — scope the report to files staged for commit (what the
   pre-commit hook passes). Workspace-level findings without a file path are
-  always reported. Scope resolution distinguishes two cases: git itself
-  failing (or git absent) drops the staged filter entirely — the report is
-  unscoped rather than silently narrowed to nothing; a readable index with
-  NOTHING staged is a real empty scope — only findings without a file path
-  are reported. `--staged` also implies check-only: format fixes never
-  auto-apply over a staged scope, because rustfmt/rumdl rewrite whole
-  files and would touch unstaged (or partially staged) hunks the user
-  never asked to modify.
+  always reported. Scope resolution is fail-open: git itself failing (or
+  git absent) drops the staged filter entirely, and a readable index with
+  NOTHING staged also drops the staged filter (a committed index must not
+  blind the check to file-scoped findings) — the report is unscoped rather
+  than silently narrowed to nothing. `--staged` also implies check-only:
+  format fixes never auto-apply over a staged scope, because rustfmt/rumdl
+  rewrite whole files and would touch unstaged (or partially staged) hunks
+  the user never asked to modify.
 - `--path <PATH>` — restrict the report to specific paths (repeatable).
 - `--fix none|format|safe` — fix policy (default `none`):
   - `format` auto-applies Format-class fixes when
@@ -59,10 +59,20 @@ quality is the push path (the review-loop PR's push-branch gate).
     surface — everything above Format is suggest-only otherwise.
 - `--pedantic-check` — exit 1 when unaddressed suggestions above Format
   exist (safe-fix + semantic), reported under error code
-  `ORC-SIMPLIFY-002`. This is the pre-push hook's fast-feedback signal,
-  not a gate.
+  `ORC-SIMPLIFY-002`. This includes rustc `warning`-level lints (e.g.
+  `unused_variables`) the default clippy run reports anywhere in the
+  workspace — fix or `#[allow]` them, or bypass the local hook with
+  `--no-verify`. This is the pre-push hook's fast feedback, not the
+  authoritative gate. Library callers receive a typed `PedanticCheckFailed`
+  error through `run_with_writer` after the report is flushed.
 - `--json` — emit the typed report: `ran`, `ran_rules_only`,
   `unaddressed`, `auto_applied_count`, `suggestions[]`, `tools[]`.
+
+Clippy checks and fixes both use `--all-targets`, including test and example
+code. With `pedantic = true`, both invocations enable `clippy::pedantic`.
+Applied suggestion counts exclude duplicates. Timed-out tools have their
+process group (or Windows process tree) terminated and output readers joined
+before the pass continues.
 
 ## Configuration
 
@@ -103,7 +113,9 @@ deliberately check-only: `--staged` never auto-applies format fixes
 (whole-file rewrites would clobber unstaged hunks), so the hook passes no
 `--fix` flag. The pre-push check is deliberately unscoped: at pre-push time
 the branch is fully committed and a `--staged` scope would be empty. Both
-hooks are fast-feedback only — the real pre-landing gate is the push path.
+hooks are fast feedback, not the authoritative pre-landing gate (the push
+path) — but note a non-zero pre-push exit DOES reject a local `git push`;
+developers override with `--no-verify` when the finding is noise.
 
 ## Error codes
 

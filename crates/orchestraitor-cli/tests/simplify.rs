@@ -160,8 +160,8 @@ fn simplify_run_with_fix_format_exits_zero() {
 
 #[test]
 fn simplify_run_staged_scope_exits_zero_without_staging() {
-    // --staged with an empty index is not an error: the scope filter keeps
-    // workspace-level findings and the pass still succeeds.
+    // --staged with an empty index is not an error: the staged filter is
+    // dropped (fail-open) and the pass still succeeds.
     let temp = fixture_workspace();
     let project = temp.path().join("project");
     let output = run_orc(
@@ -284,4 +284,46 @@ fn simplify_config_failure_fails_open_with_warning_and_skip() {
         !stdout.contains("simplify: ran ="),
         "the pass must be skipped; stdout: {stdout}"
     );
+}
+
+#[test]
+fn pedantic_failure_returns_to_caller_flushes_json_and_exits_one() {
+    use clap::Parser;
+    use orchestraitor_cli::commands::simplify::PedanticCheckFailed;
+
+    let temp = fixture_workspace();
+    let project = temp.path().join("project");
+    fs::create_dir(project.join("tests")).unwrap();
+    fs::write(
+        project.join("tests/clone.rs"),
+        "#[test]\nfn clone_on_copy() {\n    let n = 1_u32;\n    let copied = n.clone();\n    assert_eq!(copied, 1);\n}\n",
+    )
+    .unwrap();
+    let args = [
+        "--project-dir",
+        project.to_str().unwrap(),
+        "simplify",
+        "run",
+        "--staged",
+        "--pedantic-check",
+        "--json",
+    ];
+    let cli = orchestraitor_cli::Cli::parse_from(std::iter::once("orc").chain(args));
+    let mut writer = std::io::BufWriter::with_capacity(1_000_000, Vec::new());
+    let error = orchestraitor_cli::run_with_writer(cli, &mut writer).unwrap_err();
+    assert!(error.downcast_ref::<PedanticCheckFailed>().unwrap().count > 0);
+    // Inspect the underlying writer before dropping or flushing BufWriter.
+    let report: serde_json::Value = serde_json::from_slice(writer.get_ref()).unwrap();
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["rule"] == "clippy::clone_on_copy"
+                && finding["path"] == "tests/clone.rs")
+    );
+    let output = run_orc(&args, &project);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ORC-SIMPLIFY-002"));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
 }

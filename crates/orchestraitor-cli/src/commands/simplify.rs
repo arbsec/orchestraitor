@@ -24,10 +24,20 @@ pub(crate) const SIMPLIFY_UNAVAILABLE_CODE: &str = "ORC-SIMPLIFY-001";
 /// suggestions above Format, not tool unavailability).
 pub(crate) const SIMPLIFY_PEDANTIC_CODE: &str = "ORC-SIMPLIFY-002";
 
+/// `--pedantic-check` found unaddressed suggestions above Format.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("{count} unaddressed suggestion(s) above Format class (pedantic-check)")]
+#[diagnostic(code("ORC-SIMPLIFY-002"))]
+pub struct PedanticCheckFailed {
+    /// Number of unaddressed safe-fix and semantic suggestions.
+    pub count: usize,
+}
+
 /// Runs an `orc simplify` subcommand.
 ///
 /// # Errors
-/// Returns a diagnostic only when writing the report fails; the pass itself
+/// Returns a diagnostic when writing fails or [`PedanticCheckFailed`] when
+/// the requested pedantic check finds unaddressed suggestions. The pass itself
 /// is fail-open (tool unavailability AND configuration-resolution failure
 /// are typed `ORC-SIMPLIFY-001` warnings followed by a skip, never fatal).
 pub fn run<W: Write>(paths: &ConfigPaths, command: SimplifyCommand, writer: &mut W) -> Result<()> {
@@ -79,10 +89,6 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
 
     // Scope: the pass always runs over the project directory; `--staged` and
     // `--paths` filter the REPORTED suggestions (presentation scoping).
-    // `staged = Some(None)` = git failed (fail-open: no staged filter);
-    // `staged = Some(Some(list))` = the index was readable (an empty list
-    // means genuinely nothing is staged, so file-scoped findings are out of
-    // scope — pathless workspace-level findings always remain).
     //
     // STAGED SAFETY RULE: with `--staged`, format fixes never auto-apply.
     // rustfmt/rumdl rewrite whole files; applying them over a staged scope
@@ -91,21 +97,16 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     // reporting; the hook compensates by running the same command without
     // `--staged` when the developer wants fixes.
     let project_dir = project_root(paths);
-    let staged_paths =
-        if args.staged {
-            Some(staged_files(&project_dir).map(|(toplevel, files)| {
-                strip_toplevel(Path::new(&toplevel), &project_dir, &files)
-            }))
-        } else {
-            None
-        };
-
-    let fix = match args.fix {
+    let staged_paths = staged_scope(&project_dir, args.staged);
+    let fix = if args.staged {
         // Staged runs never auto-apply: see the STAGED SAFETY RULE above.
-        _ if args.staged => FixPolicy::None,
-        SimplifyFixMode::None => FixPolicy::None,
-        SimplifyFixMode::Format => FixPolicy::Format,
-        SimplifyFixMode::Safe => FixPolicy::Safe,
+        FixPolicy::None
+    } else {
+        match args.fix {
+            SimplifyFixMode::None => FixPolicy::None,
+            SimplifyFixMode::Format => FixPolicy::Format,
+            SimplifyFixMode::Safe => FixPolicy::Safe,
+        }
     };
     let (pass_config, auto_apply_format, auto_apply_safe_fixes) = pass_settings(&config);
     let executor = ProcessExecutor;
@@ -167,33 +168,25 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
         write_human_report(&report, writer)?;
     }
 
-    pedantic_check(args.pedantic_check, &report, writer)
-}
-
-/// Pedantic-check mode is the ONLY non-zero exit: the pre-push hook's
-/// fast-feedback signal. Default behavior never blocks. The writer is
-/// flushed before exiting: `process::exit` skips destructors, and a
-/// buffered writer would otherwise drop the report that documents WHY the
-/// check refused.
-fn pedantic_check<W: Write>(
-    enabled: bool,
-    report: &orchestraitor_simplify::SimplifyReport,
-    writer: &mut W,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let pedantic = report.unaddressed(Some(SuggestionClass::SafeFix))
-        + report.unaddressed(Some(SuggestionClass::Semantic));
-    if pedantic > 0 {
-        writeln!(
-            std::io::stderr(),
-            "warning [{SIMPLIFY_PEDANTIC_CODE}]: {pedantic} unaddressed suggestion(s) \
-             above Format class (pedantic-check)"
-        )
-        .into_diagnostic()?;
-        writer.flush().into_diagnostic()?;
-        std::process::exit(1);
+    // Pedantic-check mode is the ONLY non-zero exit: the pre-push hook's
+    // fast-feedback signal. Default behavior never blocks. The report is
+    // returned as a typed error (mapped to exit code 1 by the binary entry
+    // point) AFTER the writer is flushed — `process::exit` would skip
+    // destructors and could drop a buffered report, and a typed error lets
+    // library callers observe the refusal.
+    if args.pedantic_check {
+        let pedantic = report.unaddressed(Some(SuggestionClass::SafeFix))
+            + report.unaddressed(Some(SuggestionClass::Semantic));
+        if pedantic > 0 {
+            writeln!(
+                std::io::stderr(),
+                "warning [{SIMPLIFY_PEDANTIC_CODE}]: {pedantic} unaddressed suggestion(s) \
+                 above Format class (pedantic-check)"
+            )
+            .into_diagnostic()?;
+            writer.flush().into_diagnostic()?;
+            return Err(PedanticCheckFailed { count: pedantic }.into());
+        }
     }
     Ok(())
 }
@@ -259,18 +252,19 @@ fn pass_settings(config: &OrchestraitorConfig) -> (PassConfig, bool, bool) {
 }
 
 /// Filters reported suggestions by staged/`--paths` scope. Staged paths are
-/// repo-root-relative (matching normalized suggestion paths); a suggestion
-/// with no path survives (workspace-level findings are always reported).
-/// `staged` is `Some(None)` when git failed
-/// (no staged filter — fail-open) and `Some(Some(list))` when the index was
-/// read (an empty list is a real empty scope).
+/// re-based onto the cargo workspace root (matching normalized suggestion
+/// paths); a suggestion with no path survives (workspace-level findings are
+/// always reported). `staged` is `None` when the filter is dropped (no
+/// `--staged`, git failure, or empty index — fail-open: the report is
+/// unscoped rather than silently narrowed to nothing) and `Some(list)` when
+/// the index produced a real scope.
 fn filter_report(
     report: &mut orchestraitor_simplify::SimplifyReport,
-    staged: Option<&Option<Vec<String>>>,
+    staged: Option<&Vec<String>>,
     paths: &[String],
     project_dir: &Path,
 ) {
-    let staged = staged.and_then(|inner| inner.as_ref());
+    let staged = staged.filter(|list| !list.is_empty());
     if staged.is_none() && paths.is_empty() {
         return;
     }
@@ -327,8 +321,9 @@ fn filter_report(
 /// to that root, which can be a subdirectory of the git worktree.
 /// `None` = git could not run or failed (fail-open: the caller drops the
 /// staged filter and reports everything, rather than silently narrowing to
-/// nothing); `Some((toplevel, list))` = the index was read (possibly empty
-/// — a genuinely empty index is a real empty scope, not an error).
+/// nothing); `Some((toplevel, list))` = the index was read (an empty list
+/// also drops the staged filter downstream — a committed index must not
+/// blind the check).
 fn staged_files(project_dir: &Path) -> Option<(String, Vec<String>)> {
     let output = std::process::Command::new("git")
         .current_dir(project_dir)
@@ -396,6 +391,19 @@ fn strip_toplevel(toplevel: &Path, project_dir: &Path, files: &[String]) -> Vec<
         .collect()
 }
 
+/// Resolves the staged scope: `None` when `--staged` was not passed, when
+/// git failed, or when the index was empty — in every one of those cases
+/// the staged filter is dropped (fail-open) and the report is unscoped.
+/// `Some(list)` scopes the report to those (re-based) paths.
+fn staged_scope(project_dir: &Path, staged: bool) -> Option<Vec<String>> {
+    if !staged {
+        return None;
+    }
+    staged_files(project_dir)
+        .map(|(toplevel, files)| strip_toplevel(Path::new(&toplevel), project_dir, &files))
+        .filter(|files| !files.is_empty())
+}
+
 /// The directory the pass runs over: the project dir (never a colonized cwd —
 /// fixture-chdir bug #529 lesson; hooks invoke with the repo root resolved).
 fn project_root(paths: &ConfigPaths) -> PathBuf {
@@ -417,6 +425,17 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::*;
+    use orchestraitor_simplify::{SimplifyReport, Suggestion};
+
+    /// RAII guard restoring the process cwd on drop — the chdir window in
+    /// [`strip_toplevel_relative_project_dir_matches_cwd_interpretation`]
+    /// must not leak into sibling tests even when an assertion panics.
+    struct RestoreCwd(std::path::PathBuf);
+    impl Drop for RestoreCwd {
+        fn drop(&mut self) {
+            let _restored = std::env::set_current_dir(&self.0);
+        }
+    }
 
     #[test]
     fn strip_toplevel_rebases_subdir_project_dir() {
@@ -454,19 +473,72 @@ mod tests {
     #[test]
     fn strip_toplevel_relative_project_dir_matches_cwd_interpretation() {
         // A relative `--project-dir` is interpreted against the process
-        // cwd everywhere in this command; canonicalize must agree.
+        // cwd everywhere in this command; canonicalize must agree. The
+        // process-global cwd is shared with every other unit test in this
+        // harness (github.rs has its own chdir tests), so this test
+        // serializes on the same pattern: a static mutex around the chdir
+        // window, with a guard that RESTORES the cwd even when an
+        // assertion panics.
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreCwd(std::env::current_dir().expect("cwd"));
         let temp = tempfile::TempDir::new().expect("temp dir");
         let toplevel = temp.path().to_path_buf();
         let project_dir = toplevel.join("crate");
         std::fs::create_dir_all(&project_dir).expect("mkdir");
-        let cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(&toplevel).expect("chdir to toplevel");
         let rebased = strip_toplevel(
             &toplevel,
             Path::new("crate"),
             &["crate/src/lib.rs".to_string()],
         );
-        std::env::set_current_dir(cwd).expect("restore cwd");
         assert_eq!(rebased, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn staged_scope_falls_back_only_when_empty_or_unavailable() {
+        let mut report = SimplifyReport::new(true);
+        for path in [Some("src/a.rs"), Some("src/b.rs"), None] {
+            report.push(Suggestion {
+                class: SuggestionClass::SafeFix,
+                path: path.map(str::to_string),
+                line: None,
+                rule: "test".into(),
+                message: "test".into(),
+                applied: path.is_some(),
+            });
+        }
+        // `None` (no --staged / git failure) and `Some(empty)` (empty index)
+        // both drop the staged filter: the report stays unscoped.
+        for staged in [None, Some(Vec::new())] {
+            let mut filtered = report.clone();
+            filter_report(&mut filtered, staged.as_ref(), &[], Path::new("/project"));
+            assert_eq!(filtered.suggestions.len(), 3);
+            assert_eq!(filtered.auto_applied_count, 2);
+        }
+        // A real staged scope intersects with `--paths`.
+        let staged = Some(vec!["src/a.rs".to_string()]);
+        let mut filtered = report.clone();
+        filter_report(&mut filtered, staged.as_ref(), &[], Path::new("/project"));
+        assert_eq!(filtered.suggestions.len(), 2);
+        assert_eq!(filtered.suggestions[0].path.as_deref(), Some("src/a.rs"));
+        assert!(filtered.suggestions[1].path.is_none());
+        assert_eq!(filtered.auto_applied_count, 1);
+
+        // An empty staged list with explicit `--paths` filters by the paths.
+        let empty = Some(Vec::new());
+        let mut filtered = report.clone();
+        filter_report(
+            &mut filtered,
+            empty.as_ref(),
+            &["src/a.rs".to_string()],
+            Path::new("/project"),
+        );
+        assert_eq!(filtered.suggestions.len(), 2);
+        assert_eq!(filtered.suggestions[0].path.as_deref(), Some("src/a.rs"));
+        assert!(filtered.suggestions[1].path.is_none());
+        assert_eq!(filtered.auto_applied_count, 1);
     }
 }

@@ -6,9 +6,17 @@ use crate::report::{Suggestion, SuggestionClass, ToolStatus};
 use crate::{SimplifyConfig, TOOL_TIMEOUT};
 
 /// clippy invocation (base form; the pedantic variant appends one arg).
-pub(crate) const CLIPPY_ARGS: &[&str] = &["clippy", "--message-format", "json", "--quiet", "--"];
+pub(crate) const CLIPPY_ARGS: &[&str] = &[
+    "clippy",
+    "--all-targets",
+    "--message-format",
+    "json",
+    "--quiet",
+    "--",
+];
 pub(crate) const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
     "clippy",
+    "--all-targets",
     "--message-format",
     "json",
     "--quiet",
@@ -24,9 +32,16 @@ pub(crate) const CLIPPY_PEDANTIC_ARGS: &[&str] = &[
 /// level), so the fix scope covers every suggestion the check reported —
 /// a pedantic `SafeFix` can never be marked applied by a fix run that never
 /// saw the pedantic lints.
-pub(crate) const CLIPPY_FIX_ARGS: &[&str] = &["clippy", "--fix", "--allow-dirty", "--quiet"];
+pub(crate) const CLIPPY_FIX_ARGS: &[&str] = &[
+    "clippy",
+    "--all-targets",
+    "--fix",
+    "--allow-dirty",
+    "--quiet",
+];
 pub(crate) const CLIPPY_FIX_PEDANTIC_ARGS: &[&str] = &[
     "clippy",
+    "--all-targets",
     "--fix",
     "--allow-dirty",
     "--quiet",
@@ -116,7 +131,13 @@ pub fn run(
                         // the line numbers of surviving suggestions below
                         // it, so a line-exact match would misreport those
                         // survivors as applied. Class + file + rule is the
-                        // stable identity across a fix pass.
+                        // stable identity across a fix pass. The known
+                        // limitation: TWO instances of the same rule in one
+                        // file where only one was fixed collapse to one
+                        // identity — the survivor keeps BOTH unapplied
+                        // (under-reporting; pedantic-check still sees the
+                        // real state, and the report never claims a fix
+                        // that did not happen).
                         let resolved: std::collections::HashSet<_> = verified
                             .iter()
                             .filter(|suggestion| suggestion.class == SuggestionClass::SafeFix)

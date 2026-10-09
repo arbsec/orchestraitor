@@ -107,6 +107,15 @@ fn read_all<R: std::io::Read + Send + 'static>(mut pipe: R) -> Vec<u8> {
 }
 
 /// Default executor: spawns real processes with the given wall-clock cap.
+///
+/// On unix, each child leads its own process group
+/// ([`std::os::unix::process::CommandExt::process_group`]) and a timeout
+/// kills that WHOLE group: `cargo` descendants (`rustc`, `clippy-driver`)
+/// would otherwise survive a bare child kill, keep the pipes open, and
+/// leave the drain threads blocked past the deadline. Non-unix platforms
+/// fall back to the child-only kill (their toolchains rarely fork past
+/// `cargo` in this repository's usage, and the wall-clock cap still
+/// returns a typed status).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessExecutor;
 
@@ -117,6 +126,16 @@ impl SimplifyExecutor for ProcessExecutor {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+        }
         let Ok(mut child) = command.spawn() else {
             return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
                 tool: spec.label,
@@ -155,8 +174,12 @@ impl SimplifyExecutor for ProcessExecutor {
             }
         };
         let Some(status) = status else {
-            let _ignore = child.kill();
+            terminate_tree(&mut child);
             let _ignore = child.wait();
+            // Join the drain threads: group death closes every pipe end, so
+            // the readers finish promptly and their buffers are reclaimed.
+            let _stdout = read_pipe(stdout_handle);
+            let _stderr = read_pipe(stderr_handle);
             return ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
                 tool: spec.label,
                 reason: "timeout",
@@ -216,4 +239,24 @@ impl ToolStatus {
             }
         }
     }
+}
+
+/// Stops the tool and its descendants before joining their inherited pipes.
+fn terminate_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id().cast_signed()) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(windows)]
+    {
+        // taskkill /T includes descendants; /F also handles console tools.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    // Also reap the direct child if group cleanup found it already exiting.
+    let _ = child.kill();
 }

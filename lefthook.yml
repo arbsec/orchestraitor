@@ -41,10 +41,11 @@ pre-push:
     # unaddressed safe-fix/semantic suggestions exist. Deliberately NOT
     # `--staged`: at pre-push time the branch is fully committed, the index
     # matches HEAD, and a staged scope would be empty — the check would see
-    # only pathless findings. Unscoped, it reviews the whole tree. This is
-    # NOT the enforcement point (hooks are bypassable and
-    # untrusted-adjacent); the pre-landing gate is the review-loop PR's
-    # push-branch gate.
+    # only pathless findings. Unscoped, it reviews the whole tree. A non-
+    # zero exit DOES reject a local `git push` — hooks are bypassable and
+    # untrusted-adjacent, so this is fast feedback, never the AUTHORITATIVE
+    # pre-landing gate (that is the review-loop PR's push-branch gate, and
+    # developers can override with --no-verify).
     simplify-push:
       run: orc simplify run --pedantic-check
       glob:

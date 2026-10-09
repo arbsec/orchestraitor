@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::*;
-use crate::clippy::{CLIPPY_FIX_ARGS, CLIPPY_FIX_PEDANTIC_ARGS, CLIPPY_PEDANTIC_ARGS};
+use crate::clippy::{CLIPPY_ARGS, CLIPPY_FIX_ARGS, CLIPPY_FIX_PEDANTIC_ARGS, CLIPPY_PEDANTIC_ARGS};
 use crate::executor::{ExecOutput, SimplifyError, SimplifyExecutor, ToolOutcome, ToolSpec};
 use crate::report::{SimplifyReport, Suggestion, SuggestionClass, ToolStatus};
 
@@ -140,12 +140,12 @@ fn clippy_fix_pass_marks_rs_safe_fixes_applied_only_on_success() {
     // entry.
     executor.script_sequence(
         "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
+        CLIPPY_ARGS,
         &[ran_output(MACHINE_APPLICABLE), ran_output("")],
     );
     executor.script_argv(
         "cargo",
-        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        CLIPPY_FIX_ARGS,
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -170,7 +170,7 @@ fn clippy_fix_exit_zero_but_suggestion_surviving_is_not_applied() {
     // STILL reported: it was not fixed).
     executor.script_sequence(
         "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
+        CLIPPY_ARGS,
         &[
             ran_output(MACHINE_APPLICABLE),
             ran_output(MACHINE_APPLICABLE),
@@ -178,7 +178,7 @@ fn clippy_fix_exit_zero_but_suggestion_surviving_is_not_applied() {
     );
     executor.script_argv(
         "cargo",
-        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        CLIPPY_FIX_ARGS,
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -210,12 +210,12 @@ fn clippy_fix_verify_identity_survives_line_shifts() {
     let executor = ScriptedExecutor::with_available(&["cargo"]);
     executor.script_sequence(
         "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
+        CLIPPY_ARGS,
         &[ran_output(&two), ran_output(&verify)],
     );
     executor.script_argv(
         "cargo",
-        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        CLIPPY_FIX_ARGS,
         ToolOutcome::Ran(ExecOutput {
             code: Some(0),
             stdout: String::new(),
@@ -248,14 +248,10 @@ fn shifted_machine_applicable(line: u32) -> String {
 fn clippy_failed_fix_pass_keeps_suggestions_suggest_only() {
     let config = SimplifyConfig::default();
     let executor = ScriptedExecutor::with_available(&["cargo"]);
+    executor.script_argv("cargo", CLIPPY_ARGS, ran_output(MACHINE_APPLICABLE));
     executor.script_argv(
         "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
-        ran_output(MACHINE_APPLICABLE),
-    );
-    executor.script_argv(
-        "cargo",
-        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        CLIPPY_FIX_ARGS,
         ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
             tool: "clippy",
             reason: "timeout",
@@ -275,11 +271,7 @@ fn clippy_failed_fix_pass_keeps_suggestions_suggest_only() {
 fn clippy_without_safe_policy_never_runs_the_fix_pass() {
     let config = SimplifyConfig::default();
     let executor = ScriptedExecutor::with_available(&["cargo"]);
-    executor.script_argv(
-        "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
-        ran_output(MACHINE_APPLICABLE),
-    );
+    executor.script_argv("cargo", CLIPPY_ARGS, ran_output(MACHINE_APPLICABLE));
     let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, false);
     assert_eq!(suggestions.len(), 1);
     assert!(
@@ -640,6 +632,82 @@ fn deadcode_machete_multiple_crates_and_deps_expand() {
 }
 
 #[test]
+fn executor_timeout_stops_descendants_and_reclaims_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = ToolSpec {
+        program: "sh",
+        args: &[
+            "-c",
+            "(sleep 1; echo survived > escaped) & echo ready; echo ready >&2; wait",
+        ],
+        label: "fixture",
+    };
+    let started = std::time::Instant::now();
+    let outcome = ProcessExecutor.run(&spec, dir.path(), Duration::from_millis(200));
+    assert_eq!(
+        outcome,
+        ToolOutcome::Unavailable(SimplifyError::ToolUnavailable {
+            tool: "fixture",
+            reason: "timeout",
+        })
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(
+        !dir.path().join("escaped").exists(),
+        "descendant survived timeout"
+    );
+}
+
+#[test]
+fn executor_drains_both_pipes_before_returning_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = ToolSpec {
+        program: "sh",
+        args: &["-c", "printf stdout; printf stderr >&2"],
+        label: "fixture",
+    };
+    assert_eq!(
+        ProcessExecutor.run(&spec, dir.path(), Duration::from_secs(5)),
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: "stdout".into(),
+            stderr: "stderr".into(),
+        })
+    );
+}
+
+#[test]
+fn report_dedup_counts_only_retained_applied_suggestions() {
+    let mut report = SimplifyReport::new(true);
+    let suggestion = Suggestion {
+        class: SuggestionClass::SafeFix,
+        path: Some("src/lib.rs".into()),
+        line: Some(1),
+        rule: "test".into(),
+        message: "test".into(),
+        applied: true,
+    };
+    report.push(suggestion.clone());
+    report.push(suggestion.clone());
+    report.push(Suggestion {
+        applied: false,
+        line: Some(2),
+        ..suggestion.clone()
+    });
+    report.push(Suggestion {
+        line: Some(2),
+        ..suggestion
+    });
+    report.dedup();
+    assert_eq!(report.suggestions.len(), 2);
+    assert_eq!(report.auto_applied_count, 1);
+    assert_eq!(report.unaddressed(None), 1);
+    report.dedup();
+    assert_eq!(report.auto_applied_count, 1);
+}
+
+#[test]
 fn report_dedup_collapses_identical_findings() {
     let mut report = SimplifyReport::new(true);
     let suggestion = Suggestion {
@@ -725,7 +793,7 @@ fn pass_report_is_deterministic_and_sorted() {
     executor.script_argv("rumdl", &["check"], ran_output(""));
     executor.script_argv(
         "cargo",
-        &["clippy", "--message-format", "json", "--quiet", "--"],
+        CLIPPY_ARGS,
         ran_output(concat!(
             "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"a\",\"code\":{\"code\":\"clippy::aa\"},\"spans\":[{\"file_name\":\"src/z.rs\",\"is_primary\":true,\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":1}],\"children\":[]}}\n",
             "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"b\",\"code\":{\"code\":\"clippy::bb\"},\"spans\":[{\"file_name\":\"src/a.rs\",\"is_primary\":true,\"line_start\":2,\"line_end\":2,\"column_start\":1,\"column_end\":1}],\"children\":[]}}\n",

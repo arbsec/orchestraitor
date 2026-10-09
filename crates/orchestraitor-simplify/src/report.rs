@@ -154,6 +154,10 @@ impl SimplifyReport {
         let mut seen = std::collections::BTreeSet::new();
         self.suggestions
             .retain(|suggestion| seen.insert(suggestion.key()));
+        // Retained duplicates could shift the applied tally: recount after
+        // the retain so `auto_applied_count` always matches the reported
+        // suggestion list.
+        self.auto_applied_count = self.suggestions.iter().filter(|s| s.applied).count();
     }
 
     /// Sets the pass duration.

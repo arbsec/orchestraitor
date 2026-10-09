@@ -16,5 +16,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Safe process-group termination for tool timeouts; already workspace-pinned
+# (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT).
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
