@@ -25,6 +25,6 @@ pub use github_app::{
 pub use secret::{DEFAULT_KEYRING_SERVICE, SecretStore, SecretUri};
 pub use tool::{
     ResolvedEffort, ResolvedInternalTool, ResolvedTool, ResolvedToolMechanism, ToolRegistry,
-    ToolRegistryError,
+    ToolRegistryError, is_reserved_tool_id, is_valid_tool_id,
 };
 pub use trace::{TracingFormat, TracingInit, TracingOptions, is_redacted_field};

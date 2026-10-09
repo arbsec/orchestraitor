@@ -674,6 +674,9 @@ mod tests {
             },
             budget: crate::tooldef::ToolBudget::bootstrap_defaults(),
             visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+            effort: None,
+            max_summary_bytes: None,
+            structured_summary: None,
         }
     }
 

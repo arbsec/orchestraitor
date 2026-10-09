@@ -7,6 +7,7 @@ use orchestraitor_provider_api::ProviderTransportError;
 use orchestraitor_provider_api::transport::{
     ModelEvent, ModelEventStream, ModelMessage, ModelRequest, ProviderTransport, TokenCount,
 };
+use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tracing::debug;
 
@@ -50,15 +51,12 @@ pub(super) struct RunState<'a> {
 }
 
 /// One sub-session outcome event (decision-record shape, issue #535 T3).
-/// Carried on the run state for the decision-record/cost-attribution
-/// consumers (T4 wiring); read back via [`SubsessionEvent::tool_id`] and
-/// [`SubsessionEvent::ran`].
-#[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "payload fields are the decision-record content consumed by the T4 wiring"
-)]
-pub(crate) enum SubsessionEvent {
+/// Carried on the run state AND the run result: the parent's decision
+/// records carry the routing and effort evidence, and the outcome events
+/// surface on the `WorkerRun` JSON.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsessionEvent {
     /// A spawn completed (or failed as a typed child run).
     Outcome(SubsessionEventOutcome),
     /// A spawn was refused before any run existed.
@@ -83,30 +81,49 @@ impl SubsessionEvent {
 }
 
 /// A completed/failed sub-session's decision-record payload.
-#[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "carried on the run result for the decision-record/cost-attribution consumers (T4 wiring)"
-)]
-pub(crate) struct SubsessionEventOutcome {
-    pub(crate) tool_id: String,
-    pub(crate) role: String,
-    pub(crate) provider: String,
-    pub(crate) model: String,
-    pub(crate) status: RunStatus,
-    pub(crate) usage: UsageTotals,
-    pub(crate) routing: crate::subsession::RoleRoutingEvidence,
+#[derive(Clone, Debug, Serialize)]
+pub struct SubsessionEventOutcome {
+    pub tool_id: String,
+    pub role: String,
+    pub provider: String,
+    pub model: String,
+    pub status: RunStatus,
+    pub usage: UsageTotals,
+    pub routing: crate::subsession::RoleRoutingEvidence,
 }
 
 /// A refused sub-session spawn's decision-record payload.
-#[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "carried on the run result for the decision-record consumers (T4 wiring)"
-)]
-pub(crate) struct SubsessionEventRefusal {
-    pub(crate) tool_id: String,
-    pub(crate) reason: &'static str,
+#[derive(Clone, Debug, Serialize)]
+pub struct SubsessionEventRefusal {
+    pub tool_id: String,
+    pub reason: &'static str,
+}
+
+/// Builds the per-call request: bounded output, no streaming, and the
+/// tool-declared reasoning-effort tier (issue #535 §9.45) on the wire.
+fn build_request(config: &WorkerConfig, messages: &[ModelMessage]) -> ModelRequest {
+    let mut extensions = serde_json::Map::new();
+    extensions.insert("stream".to_string(), serde_json::Value::Bool(false));
+    ModelRequest {
+        provider_id: config.provider_id.clone(),
+        model_id: config.model_id.clone(),
+        messages: messages.to_vec(),
+        // Bounded per-call output: the cap guards context and
+        // wall-clock burn (see a44af33); cost tracking must not change it.
+        max_output_tokens: Some(8_192),
+        temperature: None,
+        // The tool-declared effort tier rides the wire — never a silent
+        // drop back to the routing default.
+        reasoning: config.effort.map(|effort| {
+            orchestraitor_provider_api::transport::ReasoningConfig {
+                effort,
+                budget_tokens: None,
+            }
+        }),
+        structured_output: None,
+        tool_choice: None,
+        extensions,
+    }
 }
 
 /// One model call with bounded provider retries (`10s·2^n` capped, issue #310).
@@ -117,21 +134,7 @@ pub(super) async fn call_model(
     state: &mut RunState<'_>,
 ) -> Result<String, TypedFailure> {
     let budgets = &config.budgets;
-    let mut extensions = serde_json::Map::new();
-    extensions.insert("stream".to_string(), serde_json::Value::Bool(false));
-    let request = ModelRequest {
-        provider_id: config.provider_id.clone(),
-        model_id: config.model_id.clone(),
-        messages: messages.to_vec(),
-        // Bounded per-call output: the cap guards context and
-        // wall-clock burn (see a44af33); cost tracking must not change it.
-        max_output_tokens: Some(8_192),
-        temperature: None,
-        reasoning: None,
-        structured_output: None,
-        tool_choice: None,
-        extensions,
-    };
+    let request = build_request(config, messages);
     let mut retries = 0_u32;
     loop {
         state.model_calls += 1;

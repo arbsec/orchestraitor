@@ -63,6 +63,12 @@ pub struct SubsessionParent {
     /// The session id stem for cost attribution (child sessions suffix the
     /// tool id and sequence).
     pub session_id: String,
+    /// Per-invocation ordinal set by the parent's dispatch (the parent's
+    /// subsession event count): makes the child's cost-attribution session
+    /// id unique for each invocation of the same tool, so every child model
+    /// call gets a distinct ledger `request_id` (the ledger primary key —
+    /// duplicate keys are dropped, losing spend attribution).
+    pub spawn_seq: u64,
     /// The parent run's cost attribution context; the child's model calls
     /// inherit it with the sub-session role and a tool-suffixed session
     /// stem (CR finding #3: child spend must land in the ledger).
@@ -85,6 +91,7 @@ impl std::fmt::Debug for SubsessionParent {
             .field("project", &self.project)
             .field("repository", &self.repository)
             .field("session_id", &self.session_id)
+            .field("spawn_seq", &self.spawn_seq)
             .field("attribution", &self.attribution)
             .field("cost_sink", &self.cost_sink.is_some())
             .finish()
@@ -206,16 +213,26 @@ fn child_worker_config(
     )
     .with_subsession_depth(parent.depth.saturating_add(1))
     .with_subsession_allowed_internal(allowed_internal)
-    .with_prior_daily_spend(parent.prior_daily_spend_usd);
+    .with_prior_daily_spend(parent.prior_daily_spend_usd)
+    // Structured-only finish (issue #535 §9.45): the child's system prompt
+    // demands a fielded summary payload instead of prose when the tool
+    // declares it.
+    .with_structured_summary(
+        def.budget.structured_summary || def.structured_summary.unwrap_or(false),
+    )
+    // Reasoning-effort tier (issue #535 §9.45): the child's model calls
+    // send it — never a silent drop back to the routing default.
+    .with_effort(def.effort);
     if let (Some(attribution), Some(sink)) = (&parent.attribution, &parent.cost_sink) {
         let child_attribution = orchestraitor_provider_neuralwatt::cost::CostAttribution {
             agent_domain_id: attribution.agent_domain_id.clone(),
             role: role.to_string(),
             project: parent.project.clone(),
             session: orchestraitor_model::SessionId::from_string(format!(
-                "{}/tool-{}",
+                "{}/tool-{}-{}",
                 attribution.session.as_str(),
-                def.id
+                def.id,
+                parent.spawn_seq
             )),
             repository: orchestraitor_model::RepositoryId::from_string(parent.repository.clone()),
         };
@@ -354,7 +371,10 @@ pub async fn run_subsession(
         def.id.clone(),
         role.clone(),
         routed,
-        def.budget.max_result_bytes,
+        // The summary cap is `max_summary_bytes` when set (issue #535 §9.45),
+        // falling back to the budget's result cap — the tool-level override
+        // MUST take effect, never a silent drop back to the default cap.
+        def.max_summary_bytes.unwrap_or(def.budget.max_result_bytes),
         run,
     ))
 }

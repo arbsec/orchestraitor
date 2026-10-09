@@ -12,6 +12,7 @@ use super::{
 };
 use crate::config::{ToolBudgetConfig, ToolConfig};
 use crate::{ConfigSource, OrchestraitorConfig};
+use orchestraitor_model::error_codes::ErrorComponent;
 
 fn source(layer: ConfigLayer, name: &str) -> ConfigSource {
     ConfigSource {
@@ -433,4 +434,32 @@ fn id_validation_rules() {
     assert!(is_reserved_tool_id("bash"));
     assert!(is_reserved_tool_id("worker.delegate"));
     assert!(!is_reserved_tool_id("explain-clippy"));
+}
+
+#[test]
+fn registry_errors_carry_stable_orc_config_codes() {
+    // Spec §9.34 declared-tool contract: every registry failure carries a
+    // stable ORC-CONFIG-<NNN> code naming the offending tool id.
+    let untrusted = ToolRegistryError::UntrustedLayer {
+        tool_id: "explain".to_string(),
+        layer: "project",
+    };
+    let structured = untrusted.structured();
+    assert_eq!(structured.code, "ORC-CONFIG-002");
+    assert_eq!(structured.relevant_config.as_deref(), Some("tools.explain"));
+    assert_eq!(structured.component, ErrorComponent::Config);
+
+    let invalid = ToolRegistryError::InvalidToolId {
+        tool_id: "has.dot".to_string(),
+    };
+    assert_eq!(invalid.structured().code, "ORC-CONFIG-008");
+
+    let effort = ToolRegistryError::UnknownEffort {
+        tool_id: "explain".to_string(),
+        effort: "extreme".to_string(),
+    };
+    assert_eq!(effort.structured().code, "ORC-CONFIG-007");
+
+    // Codes are distinct across variants.
+    assert_ne!(structured.code, invalid.structured().code);
 }

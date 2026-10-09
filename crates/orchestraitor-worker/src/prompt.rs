@@ -52,6 +52,12 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
              or success=false when the task cannot be completed. Any tool not listed\n\
              above is refused and recorded.",
         );
+        if config.structured_summary {
+            prompt.push_str(
+                "\n\nThe summary MUST be a compact fielded payload (machine-readable\n\
+                 key: value lines, one fact per line) — never prose narrative.",
+            );
+        }
         return prompt;
     }
     let mut prompt = SYSTEM_PROMPT.to_string();

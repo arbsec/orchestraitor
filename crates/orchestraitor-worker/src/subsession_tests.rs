@@ -24,6 +24,7 @@ fn parent(depth: u8) -> SubsessionParent {
         project: "test".to_string(),
         repository: "test".to_string(),
         session_id: "test-session".to_string(),
+        spawn_seq: 1,
         attribution: None,
         cost_sink: None,
     }
@@ -41,8 +42,12 @@ fn _unused_explore_tool() -> ToolDefinition {
             max_turns: 4,
             wall_clock_secs: Some(60),
             max_result_bytes: 8 * 1024,
+            structured_summary: false,
         },
         visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
     }
 }
 
@@ -54,6 +59,9 @@ fn command_tool_def() -> ToolDefinition {
         },
         budget: ToolBudget::bootstrap_defaults(),
         visible_to: std::collections::BTreeSet::new(),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
     }
 }
 
@@ -158,8 +166,12 @@ fn explore_tool() -> ToolDefinition {
             max_turns: 4,
             wall_clock_secs: Some(60),
             max_result_bytes: 8 * 1024,
+            structured_summary: false,
         },
         visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
     }
 }
 

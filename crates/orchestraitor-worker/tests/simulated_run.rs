@@ -502,6 +502,9 @@ fn declared_command_tool(id: &str) -> orchestraitor_worker::ToolDefinition {
         },
         budget: orchestraitor_worker::ToolBudget::bootstrap_defaults(),
         visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
     }
 }
 
@@ -590,8 +593,12 @@ fn explore_tool_def() -> orchestraitor_worker::ToolDefinition {
             max_turns: 4,
             wall_clock_secs: Some(60),
             max_result_bytes: 8 * 1024,
+            structured_summary: false,
         },
         visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
     }
 }
 
@@ -605,6 +612,7 @@ fn subsession_parent(depth: u8) -> SubsessionParent {
         project: "test".to_string(),
         repository: "test".to_string(),
         session_id: "test-session".to_string(),
+        spawn_seq: 1,
         attribution: None,
         cost_sink: None,
     }

@@ -55,6 +55,7 @@ pub use delivery::{
 };
 pub use error::WorkerError;
 pub use mediator::{BashMediator, MediatedBashMediator};
+pub use model::SubsessionEvent;
 pub use orchestraitor_arbitraitor_client::mediation::{MediatedRun, MediationError};
 pub use orchestraitor_model::{ModelId, ProviderId};
 pub use result::{FailureClass, RunStatus, TypedFailure, UsageTotals, WorkerConfig, WorkerRun};
@@ -65,7 +66,7 @@ pub use subsession::{
 };
 pub use task::{FixtureTaskSource, TaskLoadError, TaskSource, WorkerTask};
 pub use tooldef::{
-    InternalTool, MAX_QUESTION_CHARS, MAX_TOOL_ID_CHARS, ToolBudget, ToolDefinition, ToolMechanism,
-    is_reserved_tool_id, is_valid_tool_id,
+    InternalTool, MAX_QUESTION_CHARS, MAX_TOOL_ID_CHARS, ReasoningEffort, ToolBudget,
+    ToolDefinition, ToolMechanism, is_reserved_tool_id, is_valid_tool_id,
 };
 pub use tools::ToolReceipt;

@@ -62,6 +62,13 @@ pub struct WorkerConfig {
     /// model. Keyed by orchestration role id. A subagent tool whose role is
     /// missing here fails typed at dispatch (`subsession-role-unrouted`).
     pub subsession_routing: std::collections::BTreeMap<String, (String, String)>,
+    /// Reasoning-effort tier for this run's model calls (issue #535 §9.45):
+    /// carried from the spawning tool definition. `None` = the routing
+    /// default (no explicit effort on the wire).
+    pub effort: Option<crate::tooldef::ReasoningEffort>,
+    /// Structured-only finish (issue #535 §9.45): the system prompt demands
+    /// a compact fielded summary payload instead of prose narrative.
+    pub structured_summary: bool,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -97,6 +104,8 @@ impl std::fmt::Debug for WorkerConfig {
                 "subsession_routing",
                 &self.subsession_routing.keys().collect::<Vec<_>>(),
             )
+            .field("effort", &self.effort)
+            .field("structured_summary", &self.structured_summary)
             .finish()
     }
 }
@@ -118,6 +127,8 @@ impl WorkerConfig {
             subsession_depth: 0,
             subsession_allowed_internal: std::collections::BTreeSet::new(),
             subsession_routing: std::collections::BTreeMap::new(),
+            effort: None,
+            structured_summary: false,
         }
     }
 
@@ -135,6 +146,21 @@ impl WorkerConfig {
     #[must_use]
     pub const fn with_subsession_depth(mut self, depth: u8) -> Self {
         self.subsession_depth = depth;
+        self
+    }
+
+    /// Sets the reasoning-effort tier for this run's model calls (issue
+    /// #535 §9.45).
+    #[must_use]
+    pub fn with_effort(mut self, effort: Option<crate::tooldef::ReasoningEffort>) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// Sets the structured-only finish requirement (issue #535 §9.45).
+    #[must_use]
+    pub const fn with_structured_summary(mut self, structured_summary: bool) -> Self {
+        self.structured_summary = structured_summary;
         self
     }
 
@@ -277,6 +303,10 @@ pub struct WorkerRun {
     pub untrusted_writes: Vec<String>,
     /// Per-tool-call receipts.
     pub receipts: Vec<ToolReceipt>,
+    /// Sub-session decision events (issue #535): one per subagent-tool
+    /// invocation (outcome or pre-run refusal), carrying the routing and
+    /// effort evidence the §9.35 decision records consume.
+    pub subsession_events: Vec<crate::model::SubsessionEvent>,
     /// Effective budgets (evidence echo).
     pub budgets: crate::budget::BudgetEcho,
 }

@@ -34,10 +34,12 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use orchestraitor_model::error_codes::ErrorComponent;
 use thiserror::Error;
 
 use crate::OrchestraitorError;
 use crate::config::{ConfigLayer, ConfigResolver, OrchestraitorConfig, ToolConfig};
+use crate::error::{Retryability, StructuredError};
 
 /// The typed failure vocabulary of the tool registry. Every variant names
 /// the offending tool id or key: config errors are visible and auditable.
@@ -130,6 +132,57 @@ pub enum ToolRegistryError {
     /// Layered configuration resolution itself failed.
     #[error("tool registry configuration resolution failed: {0}")]
     Config(#[from] OrchestraitorError),
+}
+
+impl ToolRegistryError {
+    /// Returns stable structured metadata for this registry failure (spec
+    /// §9.34): a stable `ORC-CONFIG-<NNN>` code per variant, the offending
+    /// tool id as the cause, and the relevant `tools.<id>` config key. The
+    /// codes are part of the declared-tool contract — visible and auditable,
+    /// never a message-only error.
+    #[must_use]
+    pub fn structured(&self) -> StructuredError {
+        let relevant_tool: Option<String> = match self {
+            Self::UntrustedLayer { tool_id, .. }
+            | Self::UnknownKind { tool_id, .. }
+            | Self::MalformedMechanism { tool_id, .. }
+            | Self::UnknownSubagentRole { tool_id, .. }
+            | Self::UnknownVisibleRole { tool_id, .. }
+            | Self::UnknownInternalTool { tool_id, .. }
+            | Self::UnknownEffort { tool_id, .. }
+            | Self::InvalidToolId { tool_id } => Some(tool_id.clone()),
+            Self::Config(_) => None,
+        };
+        let code = match self {
+            Self::UntrustedLayer { .. } => ErrorComponent::Config.code(2),
+            Self::UnknownKind { .. } => ErrorComponent::Config.code(3),
+            Self::MalformedMechanism { .. } => ErrorComponent::Config.code(4),
+            Self::UnknownSubagentRole { .. } | Self::UnknownVisibleRole { .. } => {
+                ErrorComponent::Config.code(5)
+            }
+            Self::UnknownInternalTool { .. } => ErrorComponent::Config.code(6),
+            Self::UnknownEffort { .. } => ErrorComponent::Config.code(7),
+            Self::InvalidToolId { .. } => ErrorComponent::Config.code(8),
+            Self::Config(_) => ErrorComponent::Config.code(1),
+        };
+        let mut structured = StructuredError {
+            code,
+            cause: self.to_string(),
+            source_chain: Vec::new(),
+            component: ErrorComponent::Config,
+            retryability: Retryability::NeedsUserAction,
+            suggested_action:
+                "Fix the reported `[tools.<id>]` entry in its config layer and re-run".to_string(),
+            relevant_config: relevant_tool.map(|tool_id| format!("tools.{tool_id}")),
+            trace_reference: None,
+        };
+        let mut current: Option<&dyn std::error::Error> = std::error::Error::source(self);
+        while let Some(source) = current {
+            structured.source_chain.push(source.to_string());
+            current = source.source();
+        }
+        structured
+    }
 }
 
 /// The worker-facing resolved definition of one declared tool. Mirrors the
@@ -577,41 +630,11 @@ fn validate_budget(tool_id: &str, tool: &ToolConfig) -> Result<(), ToolRegistryE
     Ok(())
 }
 
-/// Tool-id validation shared by the registry and the worker parser: 1..=64
-/// chars, ASCII lowercase letters, digits, `-` or `_`, starting with a
-/// letter or digit.
-#[must_use]
-pub fn is_valid_tool_id(tool_id: &str) -> bool {
-    let len = tool_id.chars().count();
-    if len == 0 || len > 64 {
-        return false;
-    }
-    let mut chars = tool_id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// The reserved tool-id set: built-in tool names plus the §9.39 coordinator
-/// decision-tool names. A declared tool can never shadow a protocol name.
-#[must_use]
-pub fn is_reserved_tool_id(tool_id: &str) -> bool {
-    matches!(
-        tool_id,
-        "read_file" | "write_file" | "search" | "bash" | "finish"
-    ) || matches!(
-        tool_id,
-        "board.query"
-            | "board.move"
-            | "decision.record"
-            | "router.consult"
-            | "worker.delegate"
-            | "budget.check"
-            | "capability.check"
-    )
-}
+/// Shared tool-id rules: the registry and the worker parser MUST apply the
+/// same shape and reservation rules, so the implementation lives once in
+/// `orchestraitor-model` (the common dependency of both crates) and both
+/// surfaces re-export it.
+pub use orchestraitor_model::{MAX_TOOL_ID_CHARS, is_reserved_tool_id, is_valid_tool_id};
 
 #[cfg(test)]
 #[path = "tool_tests.rs"]

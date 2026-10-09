@@ -136,6 +136,7 @@ pub async fn run_worker(
     };
 
     let (receipts, untrusted_writes) = executor.into_records();
+    let subsession_events = std::mem::take(&mut state.subsession_events);
     let run = match outcome {
         AttemptOutcome::Completed { summary, delivery } => WorkerRun {
             task_id: task.id.clone(),
@@ -152,6 +153,7 @@ pub async fn run_worker(
             spend_soft_cap_exceeded: state.spend_soft_cap_exceeded,
             untrusted_writes,
             receipts,
+            subsession_events,
             budgets: budgets.echo(),
         },
         AttemptOutcome::Failed(failure) => {
@@ -171,6 +173,7 @@ pub async fn run_worker(
                 spend_soft_cap_exceeded: state.spend_soft_cap_exceeded,
                 untrusted_writes,
                 receipts,
+                subsession_events,
                 budgets: budgets.echo(),
             }
         }
@@ -344,6 +347,23 @@ async fn dispatch_subagent(
     tool_id: &str,
     question: Option<&str>,
 ) -> String {
+    // Sub-session depth gate (CWE-863): declared-tool dispatch is refused
+    // at depth >= 1 — the same rule `ToolExecutor::dispatch_declared`
+    // enforces on its own path. This branch bypasses the executor for
+    // subagent mechanisms, so the gate must be enforced HERE too, before
+    // the tool lookup: `WorkerConfig.tools` and `subsession_depth` are
+    // public, and a caller that sets both would otherwise get nested
+    // sub-sessions (spec §9.38: no config path raises the depth limit).
+    if config.subsession_depth > 0 {
+        state
+            .subsession_events
+            .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
+                tool_id: tool_id.to_string(),
+                reason: "subsession-depth-exceeded",
+            }));
+        executor.record_subagent_refusal(tool_id, "subsession-depth-exceeded");
+        return "tool call refused: subsession-depth-exceeded".to_string();
+    }
     let Some(tool) = config.tools.iter().find(|tool| tool.id == tool_id) else {
         state
             .subsession_events
@@ -392,6 +412,11 @@ async fn dispatch_subagent(
         project: state.project.clone(),
         repository: state.repository.clone(),
         session_id: state.session_id.clone(),
+        // The invocation ordinal: the parent's subsession event count is
+        // strictly increasing within the run, so every spawn of the same
+        // tool gets a distinct cost-attribution session id (CR: duplicate
+        // ledger request_ids drop spend rows).
+        spawn_seq: state.subsession_events.len() as u64,
         attribution: config.attribution.clone(),
         cost_sink: config.cost_sink.clone(),
     };

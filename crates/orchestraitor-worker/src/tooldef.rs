@@ -19,10 +19,6 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-/// Maximum accepted length for a declared tool id (chars). The id becomes
-/// part of receipt records and task ids; the same bound as worker task ids.
-pub const MAX_TOOL_ID_CHARS: usize = 64;
-
 /// Maximum accepted length for the sub-session question (chars). The
 /// question is untrusted model output (spec `40-arbitraitor-integration.md`
 /// §6.1) carried as data; the cap keeps one tool call from flooding the
@@ -93,6 +89,10 @@ pub struct ToolBudget {
     /// Cap on the bytes of the result fed back to the parent (summary for
     /// subagent tools, captured output for command tools).
     pub max_result_bytes: u64,
+    /// Structured-only finish for `subagent` tools: the child's finish
+    /// summary must be a compact fielded payload, not prose narrative.
+    /// `false` (the default) leaves the summary form to the child model.
+    pub structured_summary: bool,
 }
 
 impl ToolBudget {
@@ -104,6 +104,7 @@ impl ToolBudget {
             max_turns: 12,
             wall_clock_secs: None,
             max_result_bytes: 8 * 1024,
+            structured_summary: false,
         }
     }
 }
@@ -122,6 +123,15 @@ pub struct ToolDefinition {
     /// undeclared visibility is a refusal (`tool-not-visible`), never an
     /// implicit grant.
     pub visible_to: BTreeSet<String>,
+    /// Resolved reasoning-effort tier for the sub-session's model calls
+    /// (`None` = the routing default). A `command` tool never carries one.
+    pub effort: Option<ReasoningEffort>,
+    /// Cap on the sub-session finish summary returned to the parent (bytes);
+    /// `None` = the budget's `max_result_bytes` cap applies.
+    pub max_summary_bytes: Option<u64>,
+    /// Structured-only finish for the sub-session: the finish summary MUST
+    /// be a compact fielded payload, not prose narrative.
+    pub structured_summary: Option<bool>,
 }
 
 impl ToolDefinition {
@@ -213,41 +223,14 @@ impl ToolPolicy {
     }
 }
 
-/// Validates a declared tool id: 1..=64 chars, ASCII lowercase letters,
-/// digits, `-` or `_`, starting with a letter or digit — the same shape
-/// rules as role ids, so a tool id can never carry a path or key separator.
-#[must_use]
-pub fn is_valid_tool_id(tool_id: &str) -> bool {
-    let len = tool_id.chars().count();
-    if len == 0 || len > MAX_TOOL_ID_CHARS {
-        return false;
-    }
-    let mut chars = tool_id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// Reserves the built-in tool names and the §9.39 coordinator tool names: a
-/// declared tool can never shadow a protocol name.
-#[must_use]
-pub fn is_reserved_tool_id(tool_id: &str) -> bool {
-    matches!(
-        tool_id,
-        "read_file" | "write_file" | "search" | "bash" | "finish"
-    ) || matches!(
-        tool_id,
-        "board.query"
-            | "board.move"
-            | "decision.record"
-            | "router.consult"
-            | "worker.delegate"
-            | "budget.check"
-            | "capability.check"
-    )
-}
+/// Shared tool-id rules: the worker parser and the core registry MUST
+/// apply the same shape and reservation rules, so the implementation lives
+/// once in `orchestraitor-model` (the common dependency of both crates)
+/// and both surfaces re-export it.
+pub use orchestraitor_model::{MAX_TOOL_ID_CHARS, is_reserved_tool_id, is_valid_tool_id};
+/// Reasoning-effort tier re-export: [`ToolDefinition`] carries the resolved
+/// tier and [`WorkerConfig`](crate::result::WorkerConfig) consumes it.
+pub use orchestraitor_provider_api::transport::ReasoningEffort;
 
 #[cfg(test)]
 mod tests {
@@ -286,6 +269,9 @@ mod tests {
             mechanism: ToolMechanism::Command { argv: vec![] },
             budget: ToolBudget::bootstrap_defaults(),
             visible_to: BTreeSet::new(),
+            effort: None,
+            max_summary_bytes: None,
+            structured_summary: None,
         };
         assert!(!tool.visible_to("implement"));
         assert!(!tool.visible_to("review"));
@@ -302,6 +288,9 @@ mod tests {
             },
             budget: ToolBudget::bootstrap_defaults(),
             visible_to: BTreeSet::from(["implement".to_string()]),
+            effort: None,
+            max_summary_bytes: None,
+            structured_summary: None,
         };
         let line = tool.prompt_line();
         assert!(line.contains("explore-q"));
@@ -336,6 +325,9 @@ mod tests {
             },
             budget: ToolBudget::bootstrap_defaults(),
             visible_to: BTreeSet::from(["implement".to_string()]),
+            effort: None,
+            max_summary_bytes: None,
+            structured_summary: None,
         }
     }
 }

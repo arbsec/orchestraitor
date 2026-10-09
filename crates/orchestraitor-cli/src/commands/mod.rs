@@ -99,7 +99,13 @@ pub(crate) fn attach_declared_tools(
             .map(|entry| entry.id)
             .collect();
     let registry = orchestraitor_core::ToolRegistry::from_resolver(resolver, &catalog_roles, true)
-        .map_err(|error| miette!("{error}"))?;
+        .map_err(|error| {
+            // The stable ORC-CONFIG-<NNN> code rides the message (spec §9.34
+            // declared-tool contract): visible and auditable, never a
+            // message-only error.
+            let structured = error.structured();
+            miette!("{}: {}", structured.code, structured.cause)
+        })?;
     let router = orchestraitor_agent_catalog::RoleRouter::new(resolver);
     let mut tools = Vec::new();
     for id in registry.ids() {
@@ -155,8 +161,26 @@ pub(crate) fn attach_declared_tools(
                 max_turns: tool.max_turns.unwrap_or(12),
                 wall_clock_secs: tool.wall_clock_secs,
                 max_result_bytes: tool.max_result_bytes.unwrap_or(8 * 1024),
+                structured_summary: tool.structured_summary.unwrap_or(false),
             },
             visible_to: tool.visible_to.clone(),
+            // The §9.45 settings ride the definition into the worker (never
+            // a silent drop): effort feeds the child's model calls,
+            // max_summary_bytes caps the finish summary returned to the
+            // parent, structured_summary shapes the child's finish prompt.
+            effort: tool.effort.map(|effort| match effort {
+                orchestraitor_core::ResolvedEffort::Low => {
+                    orchestraitor_provider_api::transport::ReasoningEffort::Low
+                }
+                orchestraitor_core::ResolvedEffort::Medium => {
+                    orchestraitor_provider_api::transport::ReasoningEffort::Medium
+                }
+                orchestraitor_core::ResolvedEffort::High => {
+                    orchestraitor_provider_api::transport::ReasoningEffort::High
+                }
+            }),
+            max_summary_bytes: tool.max_summary_bytes,
+            structured_summary: tool.structured_summary,
         });
     }
     Ok(config.with_tools(tools))
