@@ -11,6 +11,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::result::FailureClass;
+
 /// Guardrail thresholds for one worker run. Defaults are active; an explicit
 /// `0` disables the corresponding guard deliberately (the loop layer
 /// validates that a zero is deliberate — see the `[loop.guardrails]` docs).
@@ -416,6 +418,15 @@ impl PollBudget {
         }
         Some(self.budget.saturating_sub(self.spent))
     }
+}
+
+/// Parent-visible class for a child attempt killed by an anti-stuck
+/// guardrail: fatal to the child with no rescue path (churn, no progress,
+/// or an unbounded external poll never carries over), so the parent sees
+/// one uniform sub-session failure.
+#[must_use]
+pub(crate) fn guardrail_child_class() -> FailureClass {
+    FailureClass::SubsessionFailed
 }
 
 #[cfg(test)]

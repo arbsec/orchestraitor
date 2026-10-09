@@ -131,18 +131,6 @@ impl<'a> ToolExecutor<'a> {
         &self.untrusted_writes
     }
 
-    /// The most recent receipt, if any dispatch has happened (the
-    /// guardrails' churn window observes it per turn).
-    pub(crate) fn last_receipt(&self) -> Option<&ToolReceipt> {
-        self.receipts.last()
-    }
-
-    /// The canonicalized worktree root the fingerprint reads.
-    pub(crate) fn root_path(&self) -> &'a Path {
-        self.root
-    }
-||||||| f21d7fb
-
     /// Records one path written INSIDE a sub-session (CR finding #2): the
     /// child executor's writes must reach the parent's untrusted-output
     /// pipeline — dropped writes would hide mutations of the shared worktree
@@ -328,6 +316,17 @@ impl<'a> ToolExecutor<'a> {
             observation: format!("tool call refused: {reason}"),
             mediation_failure: None,
         }
+    }
+
+    /// The most recent receipt, if any dispatch has happened (the
+    /// guardrails' churn window observes it per turn).
+    pub(crate) fn last_receipt(&self) -> Option<&ToolReceipt> {
+        self.receipts.last()
+    }
+
+    /// The canonicalized worktree root the fingerprint reads.
+    pub(crate) fn root_path(&self) -> &'a Path {
+        self.root
     }
 
     /// Records an allowlist refusal with a computed (non-static) tool name:

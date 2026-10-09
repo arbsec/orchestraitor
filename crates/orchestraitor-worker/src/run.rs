@@ -114,6 +114,7 @@ pub async fn run_worker(
                 if failure.class == FailureClass::MediationRefused {
                     break AttemptOutcome::Failed(failure);
                 }
+
                 // Anti-stuck guard kills are re-plan-fatal: a fresh re-plan
                 // note cannot fix a loop the model is mechanistically stuck
                 // in (churn, no progress, or an unbounded external poll).
@@ -204,8 +205,7 @@ pub async fn run_worker(
 )]
 #[expect(
     clippy::too_many_lines,
-    reason = "the turn body is the guard state machine (stall, turn bound, format errors, poll budget, churn window, no-progress fingerprint) plus the declared-tool budget branches, read top-to-bottom in dispatch order; extracting arms would scatter the exhaustion semantics the reviewer must see together"
-||||||| f21d7fb
+    reason = "the attempt loop's budget + declared-tool branches are the audited surface; splitting them would scatter the exhaustion semantics the reviewer must see together"
 )]
 async fn run_attempt(
     task: &WorkerTask,
@@ -244,6 +244,9 @@ async fn run_attempt(
     let no_progress_enabled = guardrails.no_progress_enabled();
 
     loop {
+        // Per-iteration timestamp for the CI-poll wall-clock charge (the
+        // post-dispatch guard below only fires for poll-shaped bash).
+        let dispatch_started = Instant::now();
         if started.elapsed() > budgets.run_deadline() {
             return attempt_failure(FailureClass::WorkerTimeout, "worker-timeout");
         }
@@ -337,52 +340,9 @@ async fn run_attempt(
                     }
                     continue;
                 }
-                // Poll-shaped bash (sleep + CI wait) is charged and bounded
-                // BEFORE the dispatch it requested: the wait's wall-clock
-                // burns inside the dispatch, so exceeding the budget stops
-                // the attempt at the turn that asked for it (spec §21.10:
-                // a bounded wait budget + parked task, never an unbounded
-                // poll loop).
-                let is_poll = match &action {
-                    WorkerAction::Bash { script } => poll_shaped(script),
-                    _ => false,
-                };
-                let dispatch_started = Instant::now();
-                // The budget BOUNDS the dispatch, not just the accounting:
-                // a poll-shaped Bash call is cancelled at the remaining
-                // budget (the mediated path's kill-on-drop guard reaps the
-                // process group), so the wait's wall-clock can never
-                // overrun the budget — the charge below then observes the
-                // elapse and fails the attempt typed (spec §21.10).
-                let turn = if is_poll {
-                    match poll_budget.remaining() {
-                        Some(remaining) => {
-                            match tokio::time::timeout(remaining, executor.dispatch(&action)).await
-                            {
-                                Ok(turn) => turn,
-                                Err(_elapsed) => {
-                                    // The dispatch consumed the remaining
-                                    // budget: record the elapse and fail the
-                                    // attempt typed. `charge` can report
-                                    // false on the exact-boundary case (spent
-                                    // == budget, not >), but the timeout
-                                    // proves the budget is gone either way —
-                                    // report the exhaustion unconditionally.
-                                    let _fired = poll_budget.charge(remaining);
-                                    return attempt_failure(
-                                        FailureClass::PollBudgetExhausted,
-                                        "ci-poll-budget-exhausted",
-                                    );
-                                }
-                            }
-                        }
-                        None => executor.dispatch(&action).await,
-                    }
-                } else {
-                    executor.dispatch(&action).await
-                };
+                let turn = executor.dispatch(&action).await;
                 if guardrails.poll_budget_enabled()
-                    && is_poll
+                    && matches!(&action, WorkerAction::Bash { script } if poll_shaped(script))
                     && poll_budget.charge(dispatch_started.elapsed())
                 {
                     return attempt_failure(
@@ -390,8 +350,6 @@ async fn run_attempt(
                         "ci-poll-budget-exhausted",
                     );
                 }
-||||||| f21d7fb
-                let turn = executor.dispatch(&action).await;
                 let mediation_failure = turn.mediation_failure;
                 messages.push(ModelMessage {
                     role: MessageRole::User,
@@ -402,6 +360,7 @@ async fn run_attempt(
                 if let Some(reason) = mediation_failure {
                     return attempt_failure(FailureClass::MediationRefused, reason);
                 }
+
                 // Post-dispatch churn + no-progress guards: the newest
                 // receipt drives the churn window; the worktree fingerprint
                 // drives no-progress. Both run before the next model call so
