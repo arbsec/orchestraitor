@@ -398,63 +398,10 @@ orc_lib_resolve_repo() {
 orc_lib_require_mergeable() {
   local pr="$1" repo="$2" state attempts=0
   while :; do
-    # Read the raw JSON then apply the filter locally: a gh that ignores
-    # --jq (or a test stub that does not implement it) still yields parseable
-    # state instead of a misread. The read is a PRECONDITION to the mutating
-    # call, and the enforcement decision for that call happens later inside
-    # orc_lib_gh_service — so this read must use the ROUTED gh (service route
-    # when the App config resolves), never bypass it: in required mode the
-    # ambient gh is exactly the path the gate exists to keep unused, and the
-    # read must never be the ambient call that precedes a refused write.
-    local raw
-    # Pure jq read over gh — NO side effects beyond the read itself, and no
-    # routing decision of its own: the enforcement decision for the MUTATING
-    # call happens later inside orc_lib_gh_service, which still fails closed
-    # (typed config error, gh never invoked) in required mode with missing
-    # config. This gate only inspects state; it never authenticates a write.
-    # IMPORTANT ordering contract: callers invoke this gate only AFTER their
-    # enforcement refusal point would already have fired (the gate sits
-    # immediately before the mutating call), so in required+missing-config
-    # the typed config refusal wins and this read never runs.
-    local probe_status=0
-    orc_lib_has_github_app_config || probe_status=$?
-    local read_failed=0
-    if [ "$probe_status" -eq 2 ]; then
-      # Config PRESENT but unresolved (orc available, layered config broken):
-      # fail closed here — the ambient route below would authenticate the
-      # precondition read with personal credentials the enforcement gate
-      # refuses for the mutation.
-      echo "error: github_app configuration is present but could not be resolved;" >&2
-      echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
-      exit "$ORC_ERR_CONFIG"
-    elif [ "$probe_status" -eq 1 ] && orc_lib_enforcement_required; then
-      # Ambient route is forbidden in required mode: the read must not become
-      # the personal-auth call the enforcement gate exists to refuse. Same
-      # typed error, same exit class (2) as the mutating-call refusal. (An
-      # invalid enforcement pin already failed closed inside the probe with
-      # its own typed error and exit 2.)
-      echo "error: service-identity enforcement is \`required\` (github_app.enforcement);" >&2
-      echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
-      echo "       resolve the github_app config (client_id, installation_id, private_key_uri)" >&2
-      echo "       or set github_app.enforcement = \"recommended\"; see docs/cli/orc-github.md" >&2
-      exit "$ORC_ERR_CONFIG"
-    elif [ "$probe_status" -eq 1 ]; then
-      # Config absent, recommended/unset enforcement: labelled ambient read.
-      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
-    else
-      # probe_status 0: service route — the read rides the App installation
-      # token via gh-env, the same route the subsequent mutating call takes.
-      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
+    if ! state="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable --jq '.mergeable // "UNKNOWN"' 2>/dev/null)"; then
+      echo "error: could not read PR #$pr (gh pr view failed against $repo): refusing to proceed fail-closed" >&2
+      exit "$ORC_ERR_UNRECOVERABLE"
     fi
-    if [ "$read_failed" -eq 1 ]; then
-      # A FAILED read is not the same as an UNKNOWN mergeable state: GitHub
-      # reporting "still computing" is retryable, a read failure is not —
-      # retrying cannot make a broken route answer. Fail closed immediately
-      # with a distinct typed message.
-      echo "error: failed to read PR #$pr mergeable state (the pr view read itself failed): refusing to proceed fail-closed — check auth/route and retry once the read succeeds" >&2
-      exit "$ORC_ERR_BLOCKED"
-    fi
-    state="$(printf '%s' "$raw" | jq -r '.mergeable // "UNKNOWN"' 2>/dev/null)" || state=""
     case "$state" in
       MERGEABLE) return 0 ;;
       CONFLICTING)
