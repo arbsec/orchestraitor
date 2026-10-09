@@ -258,6 +258,7 @@ pub enum FailureClass {
     /// exceeded the per-attempt CI-poll budget; the task parks
     /// blocked-on-external instead of burning the session.
     PollBudgetExhausted,
+||||||| f21d7fb
     /// A declared-tool sub-session exhausted its carved budget (turns,
     /// wall clock, or deadline) or failed its bounded guardrails. The child
     /// class detail rides the reason code; the parent sees one uniform

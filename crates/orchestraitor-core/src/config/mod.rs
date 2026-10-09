@@ -12,6 +12,10 @@ pub use schema::{
     OrchestraitorConfig, ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig,
     RoleConfig, RoutingConfig, RoutingDecisionProviderConfig, ServiceIdentityEnforcement,
     SubscriptionConfig, ToolBudgetConfig, ToolConfig,
+||||||| f21d7fb
+    DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
+    ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
+    RoutingDecisionProviderConfig, ServiceIdentityEnforcement, SubscriptionConfig,
 };
 
 use crate::error::OrchestraitorError;

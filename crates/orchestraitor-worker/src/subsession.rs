@@ -181,6 +181,7 @@ pub fn parent_failure_class(child: FailureClass) -> FailureClass {
         | FailureClass::ToolLoopChurn
         | FailureClass::NoProgress
         | FailureClass::PollBudgetExhausted => FailureClass::SubsessionFailed,
+||||||| f21d7fb
     }
 }
 

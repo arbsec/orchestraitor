@@ -205,6 +205,7 @@ pub async fn run_worker(
 #[expect(
     clippy::too_many_lines,
     reason = "the turn body is the guard state machine (stall, turn bound, format errors, poll budget, churn window, no-progress fingerprint) plus the declared-tool budget branches, read top-to-bottom in dispatch order; extracting arms would scatter the exhaustion semantics the reviewer must see together"
+||||||| f21d7fb
 )]
 async fn run_attempt(
     task: &WorkerTask,
@@ -389,6 +390,8 @@ async fn run_attempt(
                         "ci-poll-budget-exhausted",
                     );
                 }
+||||||| f21d7fb
+                let turn = executor.dispatch(&action).await;
                 let mediation_failure = turn.mediation_failure;
                 messages.push(ModelMessage {
                     role: MessageRole::User,
