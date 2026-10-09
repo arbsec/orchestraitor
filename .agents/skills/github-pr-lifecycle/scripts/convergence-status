@@ -46,20 +46,9 @@ CHECKLIST_JSON="$("$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 
 ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
 UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 
-# 4. Review generation: has a generation run against the current HEAD?
-#    This script is a FIRST-PASS PROXY. It checks reviewDecision from gh pr view,
-#    but real convergence requires session-persisted evidence: which review generation
-#    ran, against which HEAD SHA, what findings it produced, and whether all blocking
-#    findings are resolved. That tracking cannot be automated by a stateless script
-#    alone — it requires the pr-lifecycle skill to persist generation state across
-#    invocations (e.g. in .orchestraitor/review-state/ or the daemon event store).
-#
-#    Until that persistence exists, this script CANNOT prove convergence on its own.
-#    It checks the AVAILABLE signals (checks, threads, checklist, reviewDecision) and
-#    reports them honestly. A human or the skill's session context must confirm the
-#    review-generation evidence before merging.
-#
-#    See references/pr-convergence.md for the full convergence rule.
+# 4. Require persisted CLEAN review evidence for the exact current HEAD.
+# The record's fixed metadata header is authoritative; finding text below it
+# must never be interpreted as verdict or SHA metadata.
 PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,headRefOid,isDraft)" || {
   echo "error: failed to read PR state" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
@@ -68,8 +57,23 @@ REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
 IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
 HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
 
+AGENT_REVIEW_CLEAN=false
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "error: convergence-status requires running from the target git checkout" >&2
+  exit "$ORC_ERR_CONFIG"
+}
+RECORDS_DIR="$REPO_ROOT/.orchestraitor/reviews"
+RECORD_PATH="$RECORDS_DIR/${PR}-${HEAD_SHA:0:7}.md"
+if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -f "$RECORD_PATH" ]; then
+  if [ "$(sed -n '3p' "$RECORD_PATH")" = "- verdict: CLEAN" ] &&
+     [ "$(sed -n '5p' "$RECORD_PATH")" = "- head SHA: $HEAD_SHA" ]; then
+    AGENT_REVIEW_CLEAN=true
+  fi
+fi
+
 # Compute verdict.
 REASONS=""
+[ "$AGENT_REVIEW_CLEAN" != "true" ] && REASONS="${REASONS}agent_review_not_clean_at_head, "
 [ "$ALL_CHECKS_PASS" != "true" ] && REASONS="${REASONS}checks_not_passing, "
 [ "$CHECKS_PENDING" = "true" ] && REASONS="${REASONS}checks_pending, "
 [ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
