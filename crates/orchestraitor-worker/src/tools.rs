@@ -27,6 +27,8 @@ const MAX_READ_BYTES: u64 = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 /// Observation cap per captured stream / file body fed back to the model.
 const MAX_OBSERVATION_CHARS: usize = 8 * 1024;
+/// Appended when an observation is cut to a byte cap.
+const TRUNCATION_MARKER: &str = "\n[truncated]";
 
 /// Per-tool-call record embedded in the run result.
 ///
@@ -241,7 +243,13 @@ impl<'a> ToolExecutor<'a> {
             usize::try_from(tool.budget.max_result_bytes).unwrap_or(usize::MAX)
         });
         if turn.observation.len() > cap {
-            turn.observation = crate::search::truncate_bytes(&turn.observation, cap);
+            // Reserve marker headroom: the WHOLE observation (cut body plus
+            // marker) stays within the cap, mirroring
+            // `render_subsession_summary`.
+            turn.observation = crate::search::truncate_bytes(
+                &turn.observation,
+                cap.saturating_sub(TRUNCATION_MARKER.len()),
+            );
         }
         turn
     }

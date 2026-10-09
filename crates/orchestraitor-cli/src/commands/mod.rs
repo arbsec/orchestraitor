@@ -124,6 +124,12 @@ pub(crate) fn attach_declared_tools(
             let decision = router
                 .resolve(sub_role)
                 .map_err(|error| miette!("{error}"))?;
+            // The child runs on the parent's (bootstrap) transport: a
+            // sub-role routed to any other provider would send the
+            // sub-role's model id to the bootstrap endpoint and fail at
+            // runtime with mis-attributed ledger rows — a startup error,
+            // matching the parent-run gate (spec §10.3).
+            require_bootstrap_provider_named(&decision.provider, sub_role)?;
             config.subsession_routing.insert(
                 sub_role.clone(),
                 orchestraitor_worker::RoleRoutingEvidence {
@@ -211,12 +217,22 @@ pub(crate) fn attach_declared_tools(
 pub(crate) fn require_bootstrap_provider(
     provider: &str,
 ) -> std::result::Result<(), miette::Report> {
+    require_bootstrap_provider_named(provider, WORKER_ROLE)
+}
+
+/// The bootstrap-provider gate, parameterized by the role whose routing
+/// resolved to a non-bootstrap provider (the parent role, or a sub-session
+/// role inside a declared subagent tool).
+fn require_bootstrap_provider_named(
+    provider: &str,
+    role: &str,
+) -> std::result::Result<(), miette::Report> {
     use orchestraitor_agent_catalog::BOOTSTRAP_PROVIDER;
 
     if provider != BOOTSTRAP_PROVIDER {
         return Err(miette::miette!(
             "bootstrap worker supports only the `{BOOTSTRAP_PROVIDER}` provider (spec §10.3); \
-             roles.{WORKER_ROLE}.routing.provider resolved to `{provider}`"
+             roles.{role}.routing.provider resolved to `{provider}`"
         ));
     }
     Ok(())

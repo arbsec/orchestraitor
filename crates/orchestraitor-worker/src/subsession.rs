@@ -37,9 +37,6 @@ use crate::run::run_worker;
 use crate::task::WorkerTask;
 use crate::tooldef::{InternalTool, ToolDefinition, ToolMechanism};
 
-/// Default carve when the tool budget does not pin `max_turns`.
-const DEFAULT_SUBSESSION_MAX_TURNS: u32 = 12;
-
 /// The parent context a sub-session is carved from.
 #[derive(Clone)]
 pub struct SubsessionParent {
@@ -282,7 +279,10 @@ pub async fn run_subsession(
 
     // Carve the child budgets from the tool definition.
     let mut budgets = crate::budget::WorkerBudgets::bootstrap_defaults();
-    budgets.max_turns_per_attempt = def.budget.max_turns.clamp(1, DEFAULT_SUBSESSION_MAX_TURNS);
+    // `validate_budget` rejects 0 and the registry defaults an absent value
+    // to 12; the configured bound is the enforced bound — a clamp would be
+    // a silent drop of a trusted-layer setting (never a silent drop).
+    budgets.max_turns_per_attempt = def.budget.max_turns.max(1);
     // One invocation = one attempt: `max_turns` bounds the WHOLE child run
     // ("maximum conversation turns for one sub-session invocation"), never
     // `max_attempts × max_turns` through re-plans — the carved budget is

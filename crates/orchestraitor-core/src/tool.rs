@@ -613,6 +613,14 @@ fn resolve_visible_to(
 
 /// Rejects zeroed budget values: a zero would silently disable the tool.
 fn validate_budget(tool_id: &str, tool: &ToolConfig) -> Result<(), ToolRegistryError> {
+    // `max_summary_bytes` is a top-level field, so it is checked before the
+    // optional-budget early return.
+    if tool.max_summary_bytes == Some(0) {
+        return Err(ToolRegistryError::MalformedMechanism {
+            tool_id: tool_id.to_string(),
+            reason: "max_summary_bytes of 0 would disable the tool".to_string(),
+        });
+    }
     let Some(budget) = &tool.budget else {
         return Ok(());
     };
@@ -626,6 +634,12 @@ fn validate_budget(tool_id: &str, tool: &ToolConfig) -> Result<(), ToolRegistryE
         return Err(ToolRegistryError::MalformedMechanism {
             tool_id: tool_id.to_string(),
             reason: "budget.max_result_bytes of 0 would disable the tool".to_string(),
+        });
+    }
+    if budget.wall_clock_secs == Some(0) {
+        return Err(ToolRegistryError::MalformedMechanism {
+            tool_id: tool_id.to_string(),
+            reason: "budget.wall_clock_secs of 0 would disable the tool".to_string(),
         });
     }
     Ok(())
