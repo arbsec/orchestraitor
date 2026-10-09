@@ -4,14 +4,12 @@
 # config loading, gh invocation, jq parsing, and stable exit codes.
 #
 # Conventions enforced (see SKILL.md "Safety conditions"):
-#   - no eval; no embedding credentials; sourcing never alters shell options.
+#   - set -euo pipefail; no eval; no embedding credentials.
 #   - never guess identity: repo/org/project come from config or --repo flag, never defaults.
 #   - validate-before-mutate; --dry-run for remote-changing ops; idempotent where practical.
 #   - stable exit codes: 0 ok | 1 unrecoverable | 2 config/state | 3 policy | 4 concurrent | 5 blocked.
 
-# NOTE: no `set -euo pipefail` here — sourcing this library must not alter
-# the caller's shell options. Callers declare their own strict mode (the
-# skill scripts each open with `set -euo pipefail`).
+set -euo pipefail
 
 # --- Exit codes (mirrored from both SKILL.md files) ----------------------------
 ORC_OK=0
