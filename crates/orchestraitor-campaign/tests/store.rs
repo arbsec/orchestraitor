@@ -39,6 +39,7 @@ impl WorkerSpawner for NoopSpawner {
             spend_soft_cap_exceeded: false,
             untrusted_writes: Vec::new(),
             receipts: Vec::new(),
+            subsession_events: Vec::new(),
             budgets: WorkerBudgets::bootstrap_defaults().echo(),
         })
     }

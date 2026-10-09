@@ -42,6 +42,36 @@ pub struct WorkerConfig {
     /// (`request_id` is the ledger primary key). Shared mutable state on
     /// the config because `call_model` takes `&WorkerConfig`.
     pub(crate) model_call_sequence: std::sync::atomic::AtomicU64,
+    /// Declared tools available to this run (issue #535, T2): the resolved
+    /// `[tools.<id>]` definitions visible to the run's role. Empty = the
+    /// bootstrap default (no declared tools).
+    pub tools: Vec<crate::tooldef::ToolDefinition>,
+    /// Sub-session depth of this run: 0 for a top-level worker, 1 inside a
+    /// sub-session. Declared-tool dispatch is refused at depth >= 1; there
+    /// is no config path to raise it (plan C.1/S5).
+    pub subsession_depth: u8,
+    /// The internal tools a sub-session run may dispatch (the allowlist
+    /// carved from the spawning tool definition). Empty = no internal tool
+    /// is admissible inside a sub-session; top-level runs ignore this field
+    /// (their bootstrap four-tool surface is not re-admitted here — the
+    /// depth-0 path bypasses the internal admission gate). The executor
+    /// ENFORCES this set on every internal dispatch (CR finding #2).
+    pub subsession_allowed_internal: std::collections::BTreeSet<crate::tooldef::InternalTool>,
+    /// The routing the control plane resolved for each sub-session role
+    /// (issue #535, T3): the parent never chooses a child model. Keyed by
+    /// orchestration role id; the value carries the §9.35 decision-record
+    /// evidence (precedence path, fallback reason) so the spawn decision
+    /// record is replayable. A subagent tool whose role is missing here
+    /// fails typed at dispatch (`subsession-role-unrouted`).
+    pub subsession_routing:
+        std::collections::BTreeMap<String, crate::subsession::RoleRoutingEvidence>,
+    /// Reasoning-effort tier for this run's model calls (issue #535 §9.45):
+    /// carried from the spawning tool definition. `None` = the routing
+    /// default (no explicit effort on the wire).
+    pub effort: Option<crate::tooldef::ReasoningEffort>,
+    /// Structured-only finish (issue #535 §9.45): the system prompt demands
+    /// a compact fielded summary payload instead of prose narrative.
+    pub structured_summary: bool,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -60,6 +90,25 @@ impl std::fmt::Debug for WorkerConfig {
                     .model_call_sequence
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            )
+            .field("subsession_depth", &self.subsession_depth)
+            .field(
+                "subsession_allowed_internal",
+                &self
+                    .subsession_allowed_internal
+                    .iter()
+                    .map(|tool| tool.tool_name())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "subsession_routing",
+                &self.subsession_routing.keys().collect::<Vec<_>>(),
+            )
+            .field("effort", &self.effort)
+            .field("structured_summary", &self.structured_summary)
             .finish()
     }
 }
@@ -77,13 +126,70 @@ impl WorkerConfig {
             attribution: None,
             cost_sink: None,
             model_call_sequence: std::sync::atomic::AtomicU64::new(0),
+            tools: Vec::new(),
+            subsession_depth: 0,
+            subsession_allowed_internal: std::collections::BTreeSet::new(),
+            subsession_routing: std::collections::BTreeMap::new(),
+            effort: None,
+            structured_summary: false,
         }
+    }
+
+    /// Sets the declared tools visible to this run and the sub-session
+    /// depth (issue #535, T2). Callers map the core `ToolRegistry` (already
+    /// layer-gated and role-filtered) into definitions here.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<crate::tooldef::ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Sets the sub-session depth (1 inside a sub-session; never raised by
+    /// configuration).
+    #[must_use]
+    pub const fn with_subsession_depth(mut self, depth: u8) -> Self {
+        self.subsession_depth = depth;
+        self
+    }
+
+    /// Sets the reasoning-effort tier for this run's model calls (issue
+    /// #535 §9.45).
+    #[must_use]
+    pub fn with_effort(mut self, effort: Option<crate::tooldef::ReasoningEffort>) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// Sets the structured-only finish requirement (issue #535 §9.45).
+    #[must_use]
+    pub const fn with_structured_summary(mut self, structured_summary: bool) -> Self {
+        self.structured_summary = structured_summary;
+        self
+    }
+
+    /// Sets the internal-tool allowlist for a sub-session run (CR finding
+    /// #2): the executor refuses every internal dispatch outside this set.
+    #[must_use]
+    pub fn with_subsession_allowed_internal(
+        mut self,
+        allowed: std::collections::BTreeSet<crate::tooldef::InternalTool>,
+    ) -> Self {
+        self.subsession_allowed_internal = allowed;
+        self
     }
 
     /// Attaches a progress-beat channel (see [`WorkerConfig::progress`]).
     #[must_use]
     pub fn with_progress(mut self, progress: tokio::sync::watch::Sender<u64>) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// Sets the daily spend already accrued before this run (fed into the
+    /// soft-cap check; sub-session configs inherit the parent's value).
+    #[must_use]
+    pub fn with_prior_daily_spend(mut self, prior_daily_spend_usd: f64) -> Self {
+        self.prior_daily_spend_usd = prior_daily_spend_usd;
         self
     }
 
@@ -136,6 +242,18 @@ pub enum FailureClass {
     TaskNotCompleted,
     /// The delivery seam rejected a completed task.
     DeliveryFailed,
+    /// A declared-tool sub-session exhausted its carved budget (turns,
+    /// wall clock, or deadline) or failed its bounded guardrails. The child
+    /// class detail rides the reason code; the parent sees one uniform
+    /// budget-exhaustion class (issue #535, T3).
+    SubsessionBudgetExhausted,
+    /// A declared-tool dispatch was refused at the sub-session depth limit
+    /// (sub-sessions cannot spawn sub-sessions; issue #535, T3).
+    SubsessionDepthExceeded,
+    /// A declared-tool sub-session run failed for a non-budget reason
+    /// (provider error, mediation refusal, task-not-completed). The child
+    /// class detail rides the reason code (issue #535, T3).
+    SubsessionFailed,
 }
 
 /// A typed run failure: class plus static reason code.
@@ -188,6 +306,10 @@ pub struct WorkerRun {
     pub untrusted_writes: Vec<String>,
     /// Per-tool-call receipts.
     pub receipts: Vec<ToolReceipt>,
+    /// Sub-session decision events (issue #535): one per subagent-tool
+    /// invocation (outcome or pre-run refusal), carrying the routing and
+    /// effort evidence the §9.35 decision records consume.
+    pub subsession_events: Vec<crate::model::SubsessionEvent>,
     /// Effective budgets (evidence echo).
     pub budgets: crate::budget::BudgetEcho,
 }

@@ -53,6 +53,36 @@ model = "glm-5.3-flash"
 [roles.verify.routing]
 provider = "neuralwatt"
 model = "glm-5.3-flash"
+
+# Built-in declared tools (issue #535, T4): read-only sub-agent surfaces
+# over the shared sub-session runtime. Trusted built-in-defaults layer by
+# construction; both are visible to the implement role only.
+[tools.explore]
+kind = "subagent"
+subagent_role = "explore"
+instructions = "You are a read-only codebase explorer. Answer the parent's question using read_file and search only. Report file paths and line evidence."
+effort = "low"
+structured_summary = true
+max_summary_bytes = 4096
+visible_to = ["implement"]
+
+[tools.explore.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
+
+[tools.review]
+kind = "subagent"
+subagent_role = "review"
+instructions = "You are a read-only reviewer. Critique the code or diff the parent names. Report concrete defects with file paths; do not propose unrelated changes."
+effort = "low"
+max_summary_bytes = 8192
+visible_to = ["implement"]
+
+[tools.review.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
 "#;
 
 #[derive(Debug, Clone)]

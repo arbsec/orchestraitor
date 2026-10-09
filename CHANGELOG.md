@@ -13,6 +13,32 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Declared tools**: tools are now configuration. Each
+  `[tools.<id>]` entry in the layered config declares a tool as either a
+  `command` (a fixed argv dispatched through the same Arbitraitor-mediated
+  bash seam as the built-in `bash` tool — argv is quoted by Orchestraitor,
+  never interpreted from config text) or a `subagent` (a cheap-model
+  sub-session with a typed internal-tool allowlist, operator-authored
+  instructions, and per-tool budgets). Sub-sessions cannot spawn
+  sub-sessions and cannot deliver. Tool definitions are honored from
+  trusted config layers only (built-in defaults, plugin defaults, user,
+  org); a definition in the project layer is a typed startup error naming
+  the tool — never a silent drop. Every declared-tool call is receipted
+  with static reason codes; sub-session output is size-capped,
+  marker-wrapped untrusted data. Per-tool settings: `effort =
+  low|medium|high` (the sub-session's model calls request that reasoning
+  tier), `max_summary_bytes` (the byte cap on the finish summary returned
+  to the parent, falling back to `budget.max_result_bytes`), and
+  `structured_summary` (the finish summary must be a compact fielded
+  payload, not prose). An unknown effort value, or a zero `max_turns`,
+  `max_result_bytes`, `wall_clock_secs`, or `max_summary_bytes`, is a
+  typed startup error. Built-in declarations ship for `explore` (read-only
+  explorer, structured summaries) and `review` (the declarative surface
+  the pre-landing review loop consumes), both visible to the `implement`
+  role. A sub-session runs inside the parent's remaining wall clock, its
+  spend lands in the same cost ledger under a per-invocation session id,
+  and it may dispatch only the internal tools its allowlist names
+  (read-only by default).
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a

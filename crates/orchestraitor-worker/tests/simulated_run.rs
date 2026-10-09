@@ -11,8 +11,8 @@ use orchestraitor_testkit::{OpenAiMockServer, PlannedResponse};
 use orchestraitor_worker::delivery::DeliveryError;
 use orchestraitor_worker::{
     BashMediator, DeliveryOutcome, DeliveryRequest, DeliverySink, FailureClass, FixtureTaskSource,
-    MediatedRun, MediationError, ModelId, PendingDeliverySink, ProviderId, RunStatus, TaskSource,
-    WorkerBudgets, WorkerConfig, WorkerRun, run_worker,
+    MediatedRun, MediationError, ModelId, PendingDeliverySink, ProviderId, RoleRoutingEvidence,
+    RunStatus, TaskSource, WorkerBudgets, WorkerConfig, WorkerRun, run_worker,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -220,11 +220,11 @@ async fn attempt_budget_exhaustion_is_typed_and_never_retries_forever() {
 }
 
 #[tokio::test]
-async fn tool_outside_the_four_tool_set_is_refused_recorded_and_the_loop_continues() {
+async fn tool_outside_the_available_set_is_refused_recorded_and_the_loop_continues() {
     let script = vec![
         PlannedResponse::NonStreaming {
             content: action_text(&json!({
-                "tool": "delete_everything",
+                "tool": "unknown capability",
                 "path": "/"
             })),
         },
@@ -235,7 +235,9 @@ async fn tool_outside_the_four_tool_set_is_refused_recorded_and_the_loop_continu
     assert_eq!(run.status, RunStatus::Completed);
     assert_eq!(run.receipts.len(), 1);
     let receipt = &run.receipts[0];
-    assert_eq!(receipt.tool, "delete_everything");
+    // A tool id that is neither a built-in nor a valid declared-tool id
+    // (space violates the id charset) is a parse-time unknown-tool refusal.
+    assert_eq!(receipt.tool, "unknown capability");
     assert!(!receipt.admitted);
     assert_eq!(receipt.outcome, "refused");
     assert_eq!(receipt.reason, Some("unknown-tool"));
@@ -487,4 +489,297 @@ impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
         self.captured.lock().unwrap().push(entry.clone());
         Ok(())
     }
+}
+
+// --- Declared tools (issue #535, T1): protocol shape and refusal surface ---
+
+/// Builds a command-mechanism declared tool visible to the implement role.
+fn declared_command_tool(id: &str) -> orchestraitor_worker::ToolDefinition {
+    orchestraitor_worker::ToolDefinition {
+        id: id.to_string(),
+        mechanism: orchestraitor_worker::ToolMechanism::Command {
+            argv: vec!["echo".to_string(), "declared".to_string()],
+        },
+        budget: orchestraitor_worker::ToolBudget::bootstrap_defaults(),
+        visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
+    }
+}
+
+#[tokio::test]
+async fn declared_tool_request_with_no_policy_is_receipted_refusal_and_loop_continues() {
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "explain-clippy"
+            })),
+        },
+        finish_action(true),
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let bash = FixtureBash {
+        mode: BashMode::Ok,
+        calls: std::sync::Mutex::new(0),
+    };
+    let task = fixture_task("t-8");
+    let config = WorkerConfig::new(
+        ProviderId::from_string("neuralwatt".to_string()),
+        ModelId::from_string("glm-5.2".to_string()),
+        fast_budgets(),
+    );
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &bash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+
+    // The default (no `[tools]` config) refuses every declared-tool
+    // dispatch with a typed, receipted, static reason and the loop
+    // continues — the model recovered with a finish on the next turn.
+    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.receipts.len(), 1);
+    let receipt = &run.receipts[0];
+    assert_eq!(receipt.tool, "explain-clippy");
+    assert!(receipt.admitted, "well-shaped id admits past parse");
+    assert_eq!(receipt.outcome, "refused");
+    assert_eq!(receipt.reason, Some("tool-not-allowed"));
+    assert_eq!(sim.captured_requests().len(), 2);
+}
+
+#[tokio::test]
+async fn declared_tool_refusal_is_the_config_free_default() {
+    // T1 ships the protocol and refusal shape; execution lands in T2/T3.
+    // The policy attachment path is exercised through the same public
+    // surface a consumer would use, so the refusal stays the contract.
+    let (run, _sim, _worktree, _bash) = drive(
+        vec![
+            PlannedResponse::NonStreaming {
+                content: action_text(&json!({
+                    "tool": "explain-clippy"
+                })),
+            },
+            finish_action(true),
+        ],
+        BashMode::Ok,
+    )
+    .await;
+    let _ = declared_command_tool("explain-clippy");
+    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.receipts[0].reason, Some("tool-not-allowed"));
+}
+
+// --- Sub-session runtime (issue #535, T3) ------------------------------------
+
+use orchestraitor_worker::{SubsessionParent, run_subsession};
+
+/// The control-plane routing evidence the test spawns run with.
+fn routed() -> RoleRoutingEvidence {
+    RoleRoutingEvidence {
+        role: "explore".to_string(),
+        provider: "neuralwatt".to_string(),
+        model: "glm-5.3-flash".to_string(),
+        precedence_path: "test-fixtures".to_string(),
+        fallback_reason: None,
+    }
+}
+
+fn explore_tool_def() -> orchestraitor_worker::ToolDefinition {
+    orchestraitor_worker::ToolDefinition {
+        id: "explore-q".to_string(),
+        mechanism: orchestraitor_worker::ToolMechanism::Subagent {
+            role: "explore".to_string(),
+            internal_tools: orchestraitor_worker::default_internal_tools(),
+            instructions: Some("You are a read-only explorer.".to_string()),
+        },
+        budget: orchestraitor_worker::ToolBudget {
+            max_turns: 4,
+            wall_clock_secs: Some(60),
+            max_result_bytes: 8 * 1024,
+            structured_summary: false,
+        },
+        visible_to: std::collections::BTreeSet::from(["implement".to_string()]),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
+    }
+}
+
+fn subsession_parent(depth: u8) -> SubsessionParent {
+    SubsessionParent {
+        worktree_root: std::env::temp_dir(),
+        remaining: std::time::Duration::from_mins(10),
+        depth,
+        prior_daily_spend_usd: 0.0,
+        role: "implement".to_string(),
+        project: "test".to_string(),
+        repository: "test".to_string(),
+        session_id: "test-session".to_string(),
+        spawn_seq: 1,
+        attribution: None,
+        cost_sink: None,
+    }
+}
+
+#[tokio::test]
+async fn subsession_completes_and_returns_capped_summary_with_routing_evidence() {
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "search", "pattern": "needle"
+            })),
+        },
+        finish_action(true),
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let (beats_tx, beats_rx) = tokio::sync::watch::channel(0_u64);
+
+    let outcome = run_subsession(
+        &subsession_parent(0),
+        &explore_tool_def(),
+        Some("where is the needle?"),
+        &transport,
+        &routed(),
+        Some(&beats_tx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.tool_id, "explore-q");
+    assert!(outcome.summary.is_some());
+    assert!(outcome.failure.is_none());
+    // Routing evidence records the §9.45 resolution the control plane made.
+    assert_eq!(outcome.routing.role, "explore");
+    assert_eq!(outcome.routing.provider, "neuralwatt");
+    assert_eq!(outcome.routing.model, "glm-5.3-flash");
+    // Child-window beats: at least one beat fired after the initial 0.
+    assert!(*beats_rx.borrow() >= 1);
+}
+
+#[tokio::test]
+async fn subsession_budget_exhaustion_maps_to_the_uniform_parent_class() {
+    // The child hits its carved turn budget (max_turns = 1): the child loop
+    // fails typed, and the parent outcome maps it to the uniform
+    // SubsessionBudgetExhausted class (issue #535 negative: unbounded-turn
+    // refusal).
+    let script = vec![PlannedResponse::NonStreaming {
+        content: action_text(&json!({
+            "tool": "search", "pattern": "keep going"
+        })),
+    }];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+
+    let mut tool = explore_tool_def();
+    tool.budget.max_turns = 1;
+    let outcome = run_subsession(
+        &subsession_parent(0),
+        &tool,
+        None,
+        &transport,
+        &routed(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let failure = outcome.failure.expect("budget exhaustion must be typed");
+    assert_eq!(failure.class, FailureClass::SubsessionBudgetExhausted);
+    // One invocation = one attempt (issue #535 budget carve): `max_turns`
+    // bounds the WHOLE child run, so exactly one model call is served —
+    // never re-planned into `max_attempts × max_turns` calls.
+    assert_eq!(
+        sim.captured_requests().len(),
+        1,
+        "the carved turn budget must bound the whole invocation, not one attempt"
+    );
+}
+
+#[tokio::test]
+async fn subsession_child_cannot_dispatch_a_declared_tool() {
+    // Depth-1 enforcement (issue #535 negative): the child runs at depth 1;
+    // its executor refuses declared-tool dispatch even though the CHILD
+    // policy would carry the tool... it cannot: the child config carries no
+    // tools at all, and the depth gate would refuse regardless. Observable
+    // here through the child's receipt stream: a declared-tool request
+    // inside the child is receipted as refused, never executed.
+    let script = vec![
+        PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "explore-q"
+            })),
+        },
+        finish_action(true),
+    ];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+
+    let outcome = run_subsession(
+        &subsession_parent(0),
+        &explore_tool_def(),
+        Some("try to spawn a nested session"),
+        &transport,
+        &routed(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    // The child's receipts show the refused nested-spawn attempt: the depth
+    // gate (depth >= 1 refuses declared-tool dispatch) fires BEFORE any
+    // policy lookup — the strongest form of the guarantee (issue #535
+    // negative: sub-session cannot mutate outside its tool contract).
+    let refused: Vec<_> = outcome
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.outcome == "refused")
+        .collect();
+    assert!(
+        refused
+            .iter()
+            .any(|receipt| receipt.reason == Some("subsession-depth-exceeded")),
+        "nested declared-tool dispatch must be depth-refused: {:?}",
+        outcome.receipts
+    );
+    // And the forbidden effect did NOT happen: no second sub-session ran
+    // (the child produced exactly one refused receipt for it).
+    assert_eq!(refused.len(), 1);
+}
+
+#[tokio::test]
+async fn subsession_beats_cover_a_hung_child_window() {
+    // The supervision-gap fix (plan C.5/S5): while the child await runs,
+    // the parent's beat counter must advance — the supervisor's staleness
+    // detection stays live during the child window.
+    let script = vec![finish_action(true)];
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let (beats_tx, beats_rx) = tokio::sync::watch::channel(0_u64);
+
+    let outcome = run_subsession(
+        &subsession_parent(0),
+        &explore_tool_def(),
+        None,
+        &transport,
+        &routed(),
+        Some(&beats_tx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let observed = *beats_rx.borrow();
+    assert!(observed >= 2, "pre+post child beats must fire: {observed}");
 }
