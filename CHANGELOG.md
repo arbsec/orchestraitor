@@ -261,7 +261,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   warning; delivery continues). A summary-query failure keeps recorded
   attribution intact but omits cost rows from the end-of-run summary.
   Cost bookkeeping never blocks delivery either way.
-
 - `orc loop` anti-stuck guardrails (default-on; spec `10-orchestrator.md`
   §9.27.1/§9.36, 50-contracts-data.md §21.10). Worker-side:
   `FailureClass::ToolLoopChurn` (the same normalized tool-call shape
@@ -287,6 +286,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `loop.max_task_attempts`, `loop.task_retry_backoff_secs` (absent block =
   defaults active; an explicit `0` disables a guard deliberately, reported
   as a stderr warning — never silent).
+
 ### Changed
 
   A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
