@@ -57,11 +57,14 @@ pub struct WorkerConfig {
     /// depth-0 path bypasses the internal admission gate). The executor
     /// ENFORCES this set on every internal dispatch (CR finding #2).
     pub subsession_allowed_internal: std::collections::BTreeSet<crate::tooldef::InternalTool>,
-    /// The `(provider, model)` the control plane resolved for each
-    /// sub-session role (issue #535, T3): the parent never chooses a child
-    /// model. Keyed by orchestration role id. A subagent tool whose role is
-    /// missing here fails typed at dispatch (`subsession-role-unrouted`).
-    pub subsession_routing: std::collections::BTreeMap<String, (String, String)>,
+    /// The routing the control plane resolved for each sub-session role
+    /// (issue #535, T3): the parent never chooses a child model. Keyed by
+    /// orchestration role id; the value carries the §9.35 decision-record
+    /// evidence (precedence path, fallback reason) so the spawn decision
+    /// record is replayable. A subagent tool whose role is missing here
+    /// fails typed at dispatch (`subsession-role-unrouted`).
+    pub subsession_routing:
+        std::collections::BTreeMap<String, crate::subsession::RoleRoutingEvidence>,
     /// Reasoning-effort tier for this run's model calls (issue #535 §9.45):
     /// carried from the spawning tool definition. `None` = the routing
     /// default (no explicit effort on the wire).

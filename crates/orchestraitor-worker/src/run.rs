@@ -340,6 +340,10 @@ fn attempt_failure(class: FailureClass, reason: &'static str) -> AttemptOutcome 
 /// into the observation. A parent-side receipt records the dispatch so the
 /// run's receipt stream is complete (the child's own receipts ride the
 /// outcome/decision record).
+#[expect(
+    clippy::too_many_lines,
+    reason = "the depth gate, refusals, parent-context build, and outcome record are one audited dispatch surface; splitting them would scatter the refusal semantics the reviewer must see together"
+)]
 async fn dispatch_subagent(
     config: &WorkerConfig,
     state: &mut RunState<'_>,
@@ -384,7 +388,7 @@ async fn dispatch_subagent(
         executor.record_subagent_refusal(tool_id, "not-a-subagent-tool");
         return "tool call refused: not-a-subagent-tool".to_string();
     };
-    let Some((provider, model)) = config.subsession_routing.get(role) else {
+    let Some(evidence) = config.subsession_routing.get(role) else {
         state
             .subsession_events
             .push(SubsessionEvent::Refusal(SubsessionEventRefusal {
@@ -394,6 +398,7 @@ async fn dispatch_subagent(
         executor.record_subagent_refusal(tool_id, "subsession-role-unrouted");
         return format!("tool call refused: subsession-role-unrouted ({role})");
     };
+    let (provider, model) = (evidence.provider.as_str(), evidence.model.as_str());
     // The parent context: the run's ACTUAL remaining wall clock (deadline
     // minus elapsed; the never-incremented `subsession_wall_secs` counter
     // cannot see the time burned inside the child await — CR finding #1),
@@ -425,7 +430,7 @@ async fn dispatch_subagent(
         tool,
         question,
         state.transport,
-        (provider.as_str(), model.as_str()),
+        evidence,
         state.progress.as_ref(),
     ))
     .await
@@ -434,15 +439,21 @@ async fn dispatch_subagent(
             executor.record_subagent_completion(tool_id, outcome.status == RunStatus::Completed);
             state
                 .subsession_events
-                .push(SubsessionEvent::Outcome(SubsessionEventOutcome {
+                .push(SubsessionEvent::Outcome(Box::new(SubsessionEventOutcome {
                     tool_id: tool_id.to_string(),
                     role: role.clone(),
-                    provider: provider.clone(),
-                    model: model.clone(),
+                    provider: provider.to_string(),
+                    model: model.to_string(),
                     status: outcome.status,
                     usage: outcome.usage,
                     routing: outcome.routing.clone(),
-                }));
+                    // The §9.45 settings ride the decision record (never a
+                    // silent drop): the resolved tier and the summary
+                    // knobs the spawn ran with.
+                    effort: tool.effort,
+                    max_summary_bytes: tool.max_summary_bytes,
+                    structured_summary: tool.structured_summary,
+                })));
             // The child's spend belongs to the parent's day (CR finding #3):
             // usage aggregates into the run totals and re-evaluates the soft
             // cap, so a sub-session can push the parent over the cap.
@@ -554,9 +565,17 @@ pub(crate) fn render_subsession_summary(
 /// dropped — the supervisor stopped watching (shutdown/abort) — and is never
 /// a reason for the worker to stop.
 fn emit_beat(config: &WorkerConfig, state: &mut RunState) {
-    state.progress_beat = state.progress_beat.wrapping_add(1);
     if let Some(sender) = &config.progress {
+        // The beat payload is the SHARED channel's counter (an opaque
+        // sequence number): derive the next value from the channel's
+        // current value so a sub-session child sharing the parent's channel
+        // never regresses it — `heartbeat_turn` is the highest observed
+        // beat, and the child's local counter restarts at 0.
+        state.progress_beat = sender.borrow().wrapping_add(1);
         let _ = sender.send(state.progress_beat);
+    } else {
+        // No supervisor channel: the counter is the run's own turn marker.
+        state.progress_beat = state.progress_beat.wrapping_add(1);
     }
 }
 

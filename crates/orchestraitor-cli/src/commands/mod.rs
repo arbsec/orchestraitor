@@ -124,9 +124,18 @@ pub(crate) fn attach_declared_tools(
             let decision = router
                 .resolve(sub_role)
                 .map_err(|error| miette!("{error}"))?;
-            config
-                .subsession_routing
-                .insert(sub_role.clone(), (decision.provider, decision.model));
+            config.subsession_routing.insert(
+                sub_role.clone(),
+                orchestraitor_worker::RoleRoutingEvidence {
+                    role: sub_role.clone(),
+                    provider: decision.provider,
+                    model: decision.model,
+                    // The §9.35 decision-record evidence rides through: the
+                    // spawn record is replayable, not provider/model-only.
+                    precedence_path: decision.precedence_path,
+                    fallback_reason: decision.fallback_reason,
+                },
+            );
         }
         tools.push(orchestraitor_worker::ToolDefinition {
             id: tool.id.clone(),

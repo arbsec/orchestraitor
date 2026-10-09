@@ -58,7 +58,7 @@ pub(super) struct RunState<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum SubsessionEvent {
     /// A spawn completed (or failed as a typed child run).
-    Outcome(SubsessionEventOutcome),
+    Outcome(Box<SubsessionEventOutcome>),
     /// A spawn was refused before any run existed.
     Refusal(SubsessionEventRefusal),
 }
@@ -90,6 +90,13 @@ pub struct SubsessionEventOutcome {
     pub status: RunStatus,
     pub usage: UsageTotals,
     pub routing: crate::subsession::RoleRoutingEvidence,
+    /// The reasoning-effort tier the spawn ran with (`None` = routing
+    /// default; issue #535 §9.45).
+    pub effort: Option<crate::tooldef::ReasoningEffort>,
+    /// The summary cap the spawn ran with (`None` = budget default).
+    pub max_summary_bytes: Option<u64>,
+    /// Whether the spawn demanded a structured-only finish.
+    pub structured_summary: Option<bool>,
 }
 
 /// A refused sub-session spawn's decision-record payload.

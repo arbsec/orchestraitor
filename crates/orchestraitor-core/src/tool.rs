@@ -17,10 +17,10 @@
 //! the §9.22.9 visible/auditable rule).
 //!
 //! Provenance: the merged config map flattens layers, so the gate reads
-//! each tool id through [`ConfigResolver::resolve_value`], which carries the
-//! supplying layer. This is the ONE deliberate config-read divergence from
-//! the standard merged-map read; everything else merges through the
-//! standard path.
+//! each tool id through [`ConfigResolver::supplying_layer_for_entry`]: the
+//! highest-precedence layer that carries `tools.<id>` at all (any field).
+//! This is the ONE deliberate config-read divergence from the standard
+//! merged-map read; everything else merges through the standard path.
 //!
 //! ## Validation
 //!
@@ -337,9 +337,10 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// Builds the registry from a layered configuration resolver.
     ///
-    /// The gate reads per-tool provenance through `resolve_value` (the one
-    /// deliberate divergence from the merged-map read — see the module doc)
-    /// and fails on the FIRST untrusted definition, naming the tool id.
+    /// The gate reads per-tool provenance through `supplying_layer_for_entry`
+    /// (the one deliberate divergence from the merged-map read — see the
+    /// module doc) and fails on the FIRST untrusted definition, naming the
+    /// tool id.
     ///
     /// `role_ids` is the known-role vocabulary for validating
     /// `subagent_role` and `visible_to` entries (the built-in six plus any

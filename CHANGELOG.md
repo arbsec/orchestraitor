@@ -43,7 +43,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   attribution, prior daily spend, and progress-beat channel (each
   invocation's spend lands in the ledger under a per-invocation session id,
   and the parent's soft-cap check sees child spend), and the finish summary
-  is truncated by BYTES against the tool's `max_result_bytes`.
+  is truncated by BYTES against the tool's `max_summary_bytes` (falling back
+  to `budget.max_result_bytes`); the parent-visible observation is capped at
+  `budget.max_result_bytes`.
 - Decision-provider support for the **System One decision protocol** (spec
   §9.45) — an open protocol (single-shot typed questions, calibrated
   probabilities, zero generated text) served by multiple endpoints, not a

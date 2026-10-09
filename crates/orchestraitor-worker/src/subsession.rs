@@ -201,14 +201,14 @@ fn child_worker_config(
     parent: &SubsessionParent,
     def: &ToolDefinition,
     role: &str,
-    routed: (&str, &str),
+    routed: &RoleRoutingEvidence,
     budgets: crate::budget::WorkerBudgets,
     allowed_internal: std::collections::BTreeSet<InternalTool>,
     progress: Option<&tokio::sync::watch::Sender<u64>>,
 ) -> WorkerConfig {
     let mut config = WorkerConfig::new(
-        ProviderId::from_string(routed.0.to_string()),
-        ModelId::from_string(routed.1.to_string()),
+        ProviderId::from_string(routed.provider.clone()),
+        ModelId::from_string(routed.model.clone()),
         budgets,
     )
     .with_subsession_depth(parent.depth.saturating_add(1))
@@ -249,9 +249,9 @@ fn child_worker_config(
 /// `question` is the parent model's question (untrusted data, carried as
 /// data); `instructions` come from the tool definition (trusted layer). The
 /// child run inherits the guardrail posture through `run_worker` reuse.
-/// `routed` is the `(provider, model)` the CONTROL PLANE resolved for the
-/// sub-session role (the parent never chooses the model — spec §9.19.2);
-/// the routing evidence rides the outcome for the decision record.
+/// `routed` is the CONTROL PLANE's resolution for the sub-session role (the
+/// parent never chooses the model — spec §9.19.2), carrying the §9.35
+/// decision-record evidence; it rides the outcome for the decision record.
 ///
 /// The beats around the child await close the supervision gap: the parent's
 /// supervisor watches beat STALENESS, and the internal stall check cannot
@@ -268,7 +268,7 @@ pub async fn run_subsession(
     def: &ToolDefinition,
     question: Option<&str>,
     transport: &dyn ProviderTransport,
-    routed: (&str, &str),
+    routed: &RoleRoutingEvidence,
     progress: Option<&tokio::sync::watch::Sender<u64>>,
 ) -> Result<SubsessionOutcome, SubsessionError> {
     let ToolMechanism::Subagent {
@@ -283,6 +283,12 @@ pub async fn run_subsession(
     // Carve the child budgets from the tool definition.
     let mut budgets = crate::budget::WorkerBudgets::bootstrap_defaults();
     budgets.max_turns_per_attempt = def.budget.max_turns.clamp(1, DEFAULT_SUBSESSION_MAX_TURNS);
+    // One invocation = one attempt: `max_turns` bounds the WHOLE child run
+    // ("maximum conversation turns for one sub-session invocation"), never
+    // `max_attempts × max_turns` through re-plans — the carved budget is
+    // the enforced budget, not a per-attempt ceiling.
+    budgets.max_attempts = 1;
+    budgets.max_replans = 0;
     let wall_clock = def
         .budget
         .wall_clock_secs
@@ -369,7 +375,6 @@ pub async fn run_subsession(
 
     Ok(outcome_from_run(
         def.id.clone(),
-        role.clone(),
         routed,
         // The summary cap is `max_summary_bytes` when set (issue #535 §9.45),
         // falling back to the budget's result cap — the tool-level override
@@ -391,8 +396,7 @@ fn child_beat(sender: &tokio::sync::watch::Sender<u64>) -> u64 {
 /// failure class, receipts, routing evidence.
 fn outcome_from_run(
     tool_id: String,
-    role: String,
-    routed: (&str, &str),
+    routed: &RoleRoutingEvidence,
     max_result_bytes: u64,
     run: WorkerRun,
 ) -> SubsessionOutcome {
@@ -414,12 +418,15 @@ fn outcome_from_run(
         usage: run.usage,
         receipts: run.receipts,
         untrusted_writes: run.untrusted_writes,
+        // The control plane's own evidence (precedence path, fallback
+        // reason) rides the record verbatim — the decision record is
+        // replayable as §9.35 requires, not a hardcoded path.
         routing: RoleRoutingEvidence {
-            role,
-            provider: routed.0.to_string(),
-            model: routed.1.to_string(),
-            precedence_path: "subsession-spawn".to_string(),
-            fallback_reason: None,
+            role: routed.role.clone(),
+            provider: routed.provider.clone(),
+            model: routed.model.clone(),
+            precedence_path: routed.precedence_path.clone(),
+            fallback_reason: routed.fallback_reason.clone(),
         },
     }
 }

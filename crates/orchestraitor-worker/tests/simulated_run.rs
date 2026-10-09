@@ -11,8 +11,8 @@ use orchestraitor_testkit::{OpenAiMockServer, PlannedResponse};
 use orchestraitor_worker::delivery::DeliveryError;
 use orchestraitor_worker::{
     BashMediator, DeliveryOutcome, DeliveryRequest, DeliverySink, FailureClass, FixtureTaskSource,
-    MediatedRun, MediationError, ModelId, PendingDeliverySink, ProviderId, RunStatus, TaskSource,
-    WorkerBudgets, WorkerConfig, WorkerRun, run_worker,
+    MediatedRun, MediationError, ModelId, PendingDeliverySink, ProviderId, RoleRoutingEvidence,
+    RunStatus, TaskSource, WorkerBudgets, WorkerConfig, WorkerRun, run_worker,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -581,6 +581,17 @@ async fn declared_tool_refusal_is_the_config_free_default() {
 
 use orchestraitor_worker::{SubsessionParent, run_subsession};
 
+/// The control-plane routing evidence the test spawns run with.
+fn routed() -> RoleRoutingEvidence {
+    RoleRoutingEvidence {
+        role: "explore".to_string(),
+        provider: "neuralwatt".to_string(),
+        model: "glm-5.3-flash".to_string(),
+        precedence_path: "test-fixtures".to_string(),
+        fallback_reason: None,
+    }
+}
+
 fn explore_tool_def() -> orchestraitor_worker::ToolDefinition {
     orchestraitor_worker::ToolDefinition {
         id: "explore-q".to_string(),
@@ -637,7 +648,7 @@ async fn subsession_completes_and_returns_capped_summary_with_routing_evidence()
         &explore_tool_def(),
         Some("where is the needle?"),
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         Some(&beats_tx),
     )
     .await
@@ -676,7 +687,7 @@ async fn subsession_budget_exhaustion_maps_to_the_uniform_parent_class() {
         &tool,
         None,
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         None,
     )
     .await
@@ -685,6 +696,14 @@ async fn subsession_budget_exhaustion_maps_to_the_uniform_parent_class() {
     assert_eq!(outcome.status, RunStatus::Failed);
     let failure = outcome.failure.expect("budget exhaustion must be typed");
     assert_eq!(failure.class, FailureClass::SubsessionBudgetExhausted);
+    // One invocation = one attempt (issue #535 budget carve): `max_turns`
+    // bounds the WHOLE child run, so exactly one model call is served —
+    // never re-planned into `max_attempts × max_turns` calls.
+    assert_eq!(
+        sim.captured_requests().len(),
+        1,
+        "the carved turn budget must bound the whole invocation, not one attempt"
+    );
 }
 
 #[tokio::test]
@@ -711,7 +730,7 @@ async fn subsession_child_cannot_dispatch_a_declared_tool() {
         &explore_tool_def(),
         Some("try to spawn a nested session"),
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         None,
     )
     .await
@@ -754,7 +773,7 @@ async fn subsession_beats_cover_a_hung_child_window() {
         &explore_tool_def(),
         None,
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         Some(&beats_tx),
     )
     .await

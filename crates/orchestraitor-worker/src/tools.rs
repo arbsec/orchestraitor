@@ -223,16 +223,25 @@ impl<'a> ToolExecutor<'a> {
     /// Dispatches a declared `command` tool: shell-quotes the fixed argv
     /// (quoting is Orchestraitor's code, never config interpolation) and
     /// runs it through the SAME mediated bash seam as the built-in `bash`
-    /// tool — one mediation path, no second executor (plan A.1).
+    /// tool — one mediation path, no second executor (plan A.1). The
+    /// observation is byte-capped at the tool's `budget.max_result_bytes`
+    /// (the cap the budget documents for "captured output for command
+    /// tools"), so an operator-set bound actually bounds the context feed.
     async fn declared_command(&mut self, tool_id: &str, argv: &[String]) -> ToolTurn {
         let script = quote_argv(argv);
-        let turn = self.bash(&script).await;
+        let mut turn = self.bash(&script).await;
         // Re-label the receipt: the mediated bash receipt names `bash`; the
         // caller must see the declared tool id.
         if let Some(receipt) = self.receipts.last_mut()
             && receipt.tool == "bash"
         {
             receipt.tool = tool_id.to_string();
+        }
+        let cap = self.policy.find(tool_id).map_or(usize::MAX, |tool| {
+            usize::try_from(tool.budget.max_result_bytes).unwrap_or(usize::MAX)
+        });
+        if turn.observation.len() > cap {
+            turn.observation = crate::search::truncate_bytes(&turn.observation, cap);
         }
         turn
     }

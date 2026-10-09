@@ -14,6 +14,17 @@ use crate::run::render_subsession_summary;
 use crate::tooldef::{ToolBudget, ToolDefinition, ToolMechanism};
 use orchestraitor_testkit::{OpenAiMockServer, PlannedResponse};
 
+/// The control-plane routing evidence the test spawns run with.
+fn routed() -> crate::subsession::RoleRoutingEvidence {
+    crate::subsession::RoleRoutingEvidence {
+        role: "explore".to_string(),
+        provider: "neuralwatt".to_string(),
+        model: "glm-5.3-flash".to_string(),
+        precedence_path: "test-fixtures".to_string(),
+        fallback_reason: None,
+    }
+}
+
 fn parent(depth: u8) -> SubsessionParent {
     SubsessionParent {
         worktree_root: std::env::temp_dir(),
@@ -129,7 +140,7 @@ fn not_a_subagent_tool_is_a_typed_error() {
             &def,
             None,
             &transport,
-            ("neuralwatt", "glm-5.3-flash"),
+            &routed(),
             None,
         ))
         .unwrap_err();
@@ -202,7 +213,7 @@ async fn child_write_file_attempt_under_read_only_allowlist_is_refused_and_effec
         &explore_tool(),
         Some("try to write a file"),
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         None,
     )
     .await
@@ -259,7 +270,7 @@ async fn child_bash_is_refused_unless_allowlisted() {
         &explore_tool(),
         Some("try to run bash"),
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         None,
     )
     .await
@@ -304,7 +315,7 @@ async fn child_usage_aggregates_into_the_parent_view_via_the_outcome() {
         &explore_tool(),
         Some("find the needle"),
         &transport,
-        ("neuralwatt", "glm-5.3-flash"),
+        &routed(),
         None,
     )
     .await
@@ -343,16 +354,9 @@ async fn child_summary_is_truncated_by_bytes_not_chars() {
 
     let mut tool = explore_tool();
     tool.budget.max_result_bytes = 2_048;
-    let outcome = run_subsession(
-        &parent(0),
-        &tool,
-        None,
-        &transport,
-        ("neuralwatt", "glm-5.3-flash"),
-        None,
-    )
-    .await
-    .unwrap();
+    let outcome = run_subsession(&parent(0), &tool, None, &transport, &routed(), None)
+        .await
+        .unwrap();
 
     let summary = outcome.summary.expect("completed run must carry a summary");
     let marker = "\n[truncated]";
@@ -393,16 +397,9 @@ async fn parent_observation_wrapper_is_capped_in_bytes() {
 
     let mut tool = explore_tool();
     tool.budget.max_result_bytes = 4 * 1024;
-    let outcome = run_subsession(
-        &parent(0),
-        &tool,
-        None,
-        &transport,
-        ("neuralwatt", "glm-5.3-flash"),
-        None,
-    )
-    .await
-    .unwrap();
+    let outcome = run_subsession(&parent(0), &tool, None, &transport, &routed(), None)
+        .await
+        .unwrap();
 
     let summary = outcome
         .summary
