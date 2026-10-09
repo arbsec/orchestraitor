@@ -66,9 +66,9 @@ pub(crate) struct ToolTurn {
 /// Dispatches the four tools against a canonicalized worktree root and
 /// records receipts and untrusted writes.
 pub(crate) struct ToolExecutor<'a> {
-    root: &'a Path,
+    pub(crate) root: &'a Path,
     bash: &'a dyn BashMediator,
-    receipts: Vec<ToolReceipt>,
+    pub(crate) receipts: Vec<ToolReceipt>,
     untrusted_writes: Vec<String>,
     /// Declared-tool admission policy (issue #535, T1). `built_ins_only()`
     /// for the bootstrap config; populated from the run's tool definitions
@@ -316,17 +316,6 @@ impl<'a> ToolExecutor<'a> {
             observation: format!("tool call refused: {reason}"),
             mediation_failure: None,
         }
-    }
-
-    /// The most recent receipt, if any dispatch has happened (the
-    /// guardrails' churn window observes it per turn).
-    pub(crate) fn last_receipt(&self) -> Option<&ToolReceipt> {
-        self.receipts.last()
-    }
-
-    /// The canonicalized worktree root the fingerprint reads.
-    pub(crate) fn root_path(&self) -> &'a Path {
-        self.root
     }
 
     /// Records an allowlist refusal with a computed (non-static) tool name:

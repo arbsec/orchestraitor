@@ -365,13 +365,13 @@ async fn run_attempt(
                 // receipt drives the churn window; the worktree fingerprint
                 // drives no-progress. Both run before the next model call so
                 // a stuck loop stops instead of burning the turn budget.
-                if let Some(receipt) = executor.last_receipt() {
+                if let Some(receipt) = executor.receipts.last() {
                     if churn_enabled && churn.observe(tool_call_shape(&action, receipt)) {
                         return attempt_failure(FailureClass::ToolLoopChurn, "tool-loop-churn");
                     }
                     if no_progress_enabled
                         && no_progress.observe(progress_fingerprint(
-                            executor.root_path(),
+                            executor.root,
                             executor.untrusted_writes(),
                         ))
                     {

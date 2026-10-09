@@ -478,19 +478,6 @@ async fn cost_entries_recorded_per_model_call_with_attribution() {
     assert!(entries.iter().all(|e| e.request_count == 1));
 }
 
-/// Shared in-memory sink for attribution assertions: records entries and
-/// hands them back through the same Arc the config holds.
-struct SharedLedgerSink {
-    captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>>,
-}
-
-impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
-    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
-        self.captured.lock().unwrap().push(entry.clone());
-        Ok(())
-    }
-}
-
 fn guardrail_config(
     budgets: WorkerBudgets,
     guardrails: orchestraitor_worker::GuardrailsConfig,
@@ -1076,4 +1063,17 @@ async fn subsession_beats_cover_a_hung_child_window() {
     assert_eq!(outcome.status, RunStatus::Completed);
     let observed = *beats_rx.borrow();
     assert!(observed >= 2, "pre+post child beats must fire: {observed}");
+}
+
+/// Shared in-memory sink for attribution assertions: records entries and
+/// hands them back through the same Arc the config holds.
+struct SharedLedgerSink {
+    captured: std::sync::Arc<std::sync::Mutex<Vec<orchestraitor_cost_ledger::CostEntry>>>,
+}
+
+impl orchestraitor_provider_neuralwatt::CostSink for SharedLedgerSink {
+    fn record(&self, entry: &orchestraitor_cost_ledger::CostEntry) -> Result<(), String> {
+        self.captured.lock().unwrap().push(entry.clone());
+        Ok(())
+    }
 }
