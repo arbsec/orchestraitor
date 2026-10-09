@@ -246,6 +246,12 @@ async fn run_attempt(
         if started.elapsed() > budgets.run_deadline() {
             return attempt_failure(FailureClass::WorkerTimeout, "worker-timeout");
         }
+        // Poll-shaped bash (sleep + CI wait) charges the CI-poll wall-clock
+        // budget; exceeding it fails the attempt typed (spec §21.10: a
+        // bounded wait budget + parked task, never an unbounded poll loop).
+        // Captured per iteration before the model's action is known; the
+        // charge below only fires for poll-shaped bash dispatches.
+        let dispatch_started = Instant::now();
         if last_progress.elapsed() > budgets.stall_timeout {
             return attempt_failure(FailureClass::Stalled, "stall-timeout");
         }
@@ -336,11 +342,6 @@ async fn run_attempt(
                     }
                     continue;
                 }
-                // Poll-shaped bash (sleep + CI wait) charges the CI-poll
-                // wall-clock budget; exceeding it fails the attempt typed
-                // (spec §21.10: a bounded wait budget + parked task, never
-                // an unbounded poll loop).
-                let dispatch_started = Instant::now();
                 let turn = executor.dispatch(&action).await;
                 if guardrails.poll_budget_enabled()
                     && matches!(&action, WorkerAction::Bash { script } if poll_shaped(script))
