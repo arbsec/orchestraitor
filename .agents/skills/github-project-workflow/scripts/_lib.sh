@@ -457,6 +457,7 @@ orc_lib_require_mergeable() {
       # unparseable (which takes the blocked path above).
       exit "$ORC_ERR_BLOCKED"
     fi
+    state="$(printf '%s' "$raw" | jq -r '.mergeable // "UNKNOWN"' 2>/dev/null)" || state=""
 
     case "$state" in
       MERGEABLE) return 0 ;;
