@@ -427,6 +427,13 @@ orc_lib_require_mergeable() {
       echo "error: github_app configuration is present but could not be resolved;" >&2
       echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
       exit "$ORC_ERR_CONFIG"
+    elif [ "$probe_status" -eq 1 ] && [ "$(orc_lib_enforcement_probe_status)" -eq 2 ]; then
+      # Invalid enforcement pin (the probe recorded status 2): fail closed
+      # BEFORE any read — an unrecognized pin must never widen into the
+      # ambient fallback (the fail-open outcome the pin prevents).
+      echo "error: invalid github_app.enforcement pin;" >&2
+      echo "       refusing the ambient read — set the pin to required or recommended." >&2
+      exit "$ORC_ERR_CONFIG"
     elif [ "$probe_status" -eq 1 ] && orc_lib_enforcement_required; then
       # Ambient route is forbidden in required mode: the read must not become
       # the personal-auth call the enforcement gate exists to refuse. Same
@@ -440,11 +447,11 @@ orc_lib_require_mergeable() {
       exit "$ORC_ERR_CONFIG"
     elif [ "$probe_status" -eq 1 ]; then
       # Config absent, recommended/unset enforcement: labelled ambient read.
-      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
+      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)" || { raw=""; read_failed=1; }
     else
       # probe_status 0: service route — the read rides the App installation
       # token via gh-env, the same route the subsequent mutating call takes.
-      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable 2>/dev/null)" || { raw=""; read_failed=1; }
+      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)" || { raw=""; read_failed=1; }
     fi
     if [ "$read_failed" -eq 1 ]; then
       # A FAILED read is not the same as an UNKNOWN mergeable state: GitHub
@@ -457,10 +464,17 @@ orc_lib_require_mergeable() {
       # unparseable (which takes the blocked path above).
       exit "$ORC_ERR_BLOCKED"
     fi
-    state="$(printf '%s' "$raw" | jq -r '.mergeable // "UNKNOWN"' 2>/dev/null)" || state=""
+    state="$(printf '%s' "$raw" | jq -r '"\(.mergeable // "UNKNOWN")|\(.mergeStateStatus // "UNKNOWN")"' 2>/dev/null)" || state=""
+    local mergeable="${state%%|*}" merge_state="${state#*|}"
+    [ "$mergeable" = "$state" ] && mergeable="$state" merge_state=""
 
-    case "$state" in
-      MERGEABLE) return 0 ;;
+    case "$mergeable" in
+      MERGEABLE)
+        if [ "$merge_state" = "DIRTY" ]; then
+          echo "error: PR #$pr is unmergeable (mergeStateStatus=DIRTY): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
+          exit "$ORC_ERR_BLOCKED"
+        fi
+        return 0 ;;
       CONFLICTING)
         echo "error: PR #$pr conflicts with its base branch (mergeable=CONFLICTING): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
         exit "$ORC_ERR_BLOCKED" ;;
@@ -496,9 +510,17 @@ orc_lib_require_gh_scope() {
     echo "error: gh CLI not found. Install from https://cli.github.com/" >&2
     exit "$ORC_ERR_CONFIG"
   fi
-  if orc_lib_has_github_app_config; then
-    return 0 # service route: the installation token minted by orc gh-env carries the App permissions
-  fi
+  local probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  case "$probe_status" in
+    0) return 0 ;; # service route: the installation token minted by orc gh-env carries the App permissions
+    2)
+      echo "error: the layered github_app config could not be resolved;" >&2
+      echo "       refusing the ambient personal-auth check on a broken configuration." >&2
+      exit "$ORC_ERR_CONFIG"
+      ;;
+    # 1 = config absent: the ambient gh auth state is the real auth.
+  esac
   if ! gh auth status >/dev/null 2>&1; then
     echo "error: not authenticated to gh and no github_app service config is set." >&2
     echo "       Either resolve the github_app config (service route) or run 'gh auth login'" >&2
