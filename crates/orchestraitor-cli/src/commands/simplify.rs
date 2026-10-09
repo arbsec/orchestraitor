@@ -243,8 +243,9 @@ fn pass_settings(config: &OrchestraitorConfig) -> (PassConfig, bool, bool) {
 }
 
 /// Filters reported suggestions by staged/`--paths` scope. Staged paths are
-/// worktree-relative; a suggestion with no path survives (workspace-level
-/// findings are always reported). `staged` is `Some(None)` when git failed
+/// repo-root-relative (matching normalized suggestion paths); a suggestion
+/// with no path survives (workspace-level findings are always reported).
+/// `staged` is `Some(None)` when git failed
 /// (no staged filter — fail-open) and `Some(Some(list))` when the index was
 /// read (an empty list is a real empty scope).
 fn filter_report(
@@ -257,14 +258,23 @@ fn filter_report(
     if staged.is_none() && paths.is_empty() {
         return;
     }
+    // The pass runs under `project_dir`, but that may be a non-canonical
+    // form (relative like ".", symlinked, or containing `..`) while tool
+    // output (e.g. `cargo fmt --check`'s `Diff in <abs path>`) is absolute
+    // and real. Compare both sides canonically: canonicalize the project
+    // dir once, falling back to it as-is when canonicalization fails.
+    let project_dir_canonical =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     let normalize = |path: &str| -> String {
         let path = path.trim_start_matches("./");
         let absolute = Path::new(path).is_absolute();
         if absolute {
-            return Path::new(path).strip_prefix(project_dir).map_or_else(
-                |_| path.to_string(),
-                |rest| rest.to_string_lossy().into_owned(),
-            );
+            return Path::new(path)
+                .strip_prefix(&project_dir_canonical)
+                .map_or_else(
+                    |_| path.to_string(),
+                    |rest| rest.to_string_lossy().into_owned(),
+                );
         }
         path.to_string()
     };
@@ -292,15 +302,33 @@ fn filter_report(
         .count();
 }
 
-/// Staged (index) files, worktree-relative, via `git diff --cached --name-only`.
-/// `None` = git could not run or failed (fail-open: the caller drops the
-/// staged filter and reports everything, rather than silently narrowing to
-/// nothing); `Some(list)` = the index was read (possibly empty — a genuinely
-/// empty index is a real empty scope, not an error).
+/// Staged (index) files, repo-root-relative, via
+/// `git diff --cached --name-only -z --relative`: git is asked for the
+/// toplevel so the entries share a base with the normalized suggestion
+/// paths regardless of the invoking directory. `None` = git could not run
+/// or failed (fail-open: the caller drops the staged filter and reports
+/// everything, rather than silently narrowing to nothing); `Some(list)` =
+/// the index was read (possibly empty — a genuinely empty index is a real
+/// empty scope, not an error).
 fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
         .current_dir(project_dir)
-        .args(["diff", "--cached", "--name-only", "-z"])
+        .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if toplevel.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .current_dir(&toplevel)
+        .args(["diff", "--cached", "--name-only", "-z", "--relative"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

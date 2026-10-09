@@ -84,19 +84,23 @@ model_pass = false           # model-driven tier: parsed but NOT wired yet —
 pre-commit:
   commands:
     simplify:
-      run: orc simplify run --staged --fix=format
+      run: orc simplify run --staged
       glob: "*.rs"
       stage_fixed: false     # simplify proposes; it does not rewrite the index
 pre-push:
   commands:
     simplify-push:
-      run: orc simplify run --staged --pedantic-check
+      run: orc simplify run --pedantic-check
       glob: ["*.rs", "**/*.rs"]
 ```
 
 `stage_fixed: false` matches every existing hook: the pass proposes and
-reports; the developer reviews and stages. The pre-push check is
-fast-feedback only — the real pre-landing gate is the push path.
+reports; the developer reviews and stages. The pre-commit run is
+deliberately check-only: `--staged` never auto-applies format fixes
+(whole-file rewrites would clobber unstaged hunks), so the hook passes no
+`--fix` flag. The pre-push check is deliberately unscoped: at pre-push time
+the branch is fully committed and a `--staged` scope would be empty. Both
+hooks are fast-feedback only — the real pre-landing gate is the push path.
 
 ## Error codes
 

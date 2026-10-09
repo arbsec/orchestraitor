@@ -16,9 +16,12 @@ pre-commit:
     # Pre-landing simplify pass (fail-open quality tooling; spec §9.5): a
     # fast-feedback affordance only — hooks are bypassable, and the real
     # gate is the push path (the review-loop PR's pre-push gate). The pass
-    # never blocks: it exits 0 unless a tool fails to resolve config.
+    # never blocks: it exits 0 (config-resolution failures included; they
+    # surface as an ORC-SIMPLIFY-001 warning and skip). No `--fix` here:
+    # `--staged` runs are check-only by design — format fixes would rewrite
+    # whole files and clobber unstaged hunks.
     simplify:
-      run: orc simplify run --staged --fix=format
+      run: orc simplify run --staged
       glob: "*.rs"
       stage_fixed: false
 
@@ -35,11 +38,15 @@ pre-push:
         - "*.rs"
         - "**/*.rs"
     # Fast-feedback simplify check above Format class: exits 1 only when
-    # unaddressed safe-fix/semantic suggestions exist. This is NOT the
-    # enforcement point (hooks are bypassable and untrusted-adjacent);
-    # the pre-landing gate is the review-loop PR's push-branch gate.
+    # unaddressed safe-fix/semantic suggestions exist. Deliberately NOT
+    # `--staged`: at pre-push time the branch is fully committed, the index
+    # matches HEAD, and a staged scope would be empty — the check would see
+    # only pathless findings. Unscoped, it reviews the whole tree. This is
+    # NOT the enforcement point (hooks are bypassable and
+    # untrusted-adjacent); the pre-landing gate is the review-loop PR's
+    # push-branch gate.
     simplify-push:
-      run: orc simplify run --staged --pedantic-check
+      run: orc simplify run --pedantic-check
       glob:
         - "*.rs"
         - "**/*.rs"
