@@ -60,6 +60,7 @@ model = "glm-5.3-flash"
 [tools.explore]
 kind = "subagent"
 subagent_role = "explore"
+instructions = "You are a read-only codebase explorer. Answer the parent's question using read_file and search only. Report file paths and line evidence."
 effort = "low"
 structured_summary = true
 max_summary_bytes = 4096
@@ -73,6 +74,7 @@ max_result_bytes = 8192
 [tools.review]
 kind = "subagent"
 subagent_role = "review"
+instructions = "You are a read-only reviewer. Critique the code or diff the parent names. Report concrete defects with file paths; do not propose unrelated changes."
 effort = "low"
 max_summary_bytes = 8192
 visible_to = ["implement"]

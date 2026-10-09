@@ -484,19 +484,15 @@ async fn dispatch_subagent(
 /// re-evaluates the daily spend soft cap (CR finding #3): a sub-session's
 /// spend is the parent's spend — it must be able to push the parent over
 /// the cap.
-fn aggregate_child_usage(config: &WorkerConfig, state: &mut RunState, child: UsageTotals) {
-    state.usage.input_tokens += child.input_tokens;
-    state.usage.output_tokens += child.output_tokens;
-    let total = state.usage.input_tokens + state.usage.output_tokens;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "token counts are far below 2^53; the estimate only feeds a soft-cap comparison"
-    )]
-    let estimated = total as f64 * config.budgets.usd_per_token_estimate;
-    let spent = config.prior_daily_spend_usd + estimated;
-    if spent > config.budgets.daily_spend_soft_cap_usd {
-        state.spend_soft_cap_exceeded = true;
-    }
+fn aggregate_child_usage(config: &WorkerConfig, state: &mut RunState<'_>, child: UsageTotals) {
+    // The SAME soft-cap evaluation the parent's own model calls use: the
+    // two spend checks cannot diverge when the estimate or cap changes.
+    crate::model::accrue_usage_and_check_cap(
+        state,
+        config,
+        child.input_tokens,
+        child.output_tokens,
+    );
 }
 
 /// Renders the model-facing observation for a completed sub-session spawn.

@@ -348,11 +348,17 @@ mod tests {
 
 /// Accumulates usage and evaluates the daily spend soft cap (soft: recorded,
 /// never a hard stop; the hard bounds are the worker timeout and run budget).
-fn accumulate_usage(state: &mut RunState<'_>, config: &WorkerConfig, usage: Option<TokenCount>) {
-    if let Some(usage) = usage {
-        state.usage.input_tokens += usage.input_tokens;
-        state.usage.output_tokens += usage.output_tokens;
-    }
+/// One soft-cap evaluation, shared by the parent model-call path and the
+/// child-usage aggregation (one comparison — the two spend checks cannot
+/// diverge when the estimate or cap changes).
+pub(super) fn accrue_usage_and_check_cap(
+    state: &mut RunState<'_>,
+    config: &WorkerConfig,
+    input_tokens: u64,
+    output_tokens: u64,
+) {
+    state.usage.input_tokens += input_tokens;
+    state.usage.output_tokens += output_tokens;
     let total = state.usage.input_tokens + state.usage.output_tokens;
     #[expect(
         clippy::cast_precision_loss,
@@ -363,6 +369,11 @@ fn accumulate_usage(state: &mut RunState<'_>, config: &WorkerConfig, usage: Opti
     if spent > config.budgets.daily_spend_soft_cap_usd {
         state.spend_soft_cap_exceeded = true;
     }
+}
+
+fn accumulate_usage(state: &mut RunState<'_>, config: &WorkerConfig, usage: Option<TokenCount>) {
+    let (input, output) = usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
+    accrue_usage_and_check_cap(state, config, input, output);
 }
 
 /// Whether a model call completed or failed. Failed calls still record a
