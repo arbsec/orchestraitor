@@ -231,7 +231,23 @@ impl<'a> ToolExecutor<'a> {
     /// tools"), so an operator-set bound actually bounds the context feed.
     async fn declared_command(&mut self, tool_id: &str, argv: &[String]) -> ToolTurn {
         let script = quote_argv(argv);
-        let mut turn = self.bash(&script).await;
+        // The configured wall-clock bound is the enforced bound (never a
+        // silent drop): a command that runs past it is a typed refusal, the
+        // same static-reason shape as every other declared-tool refusal.
+        let bound = self
+            .policy
+            .find(tool_id)
+            .and_then(|tool| tool.budget.wall_clock_secs)
+            .map(std::time::Duration::from_secs);
+        let mut turn = match bound {
+            Some(bound) => match tokio::time::timeout(bound, self.bash(&script)).await {
+                Ok(turn) => turn,
+                Err(_elapsed) => {
+                    return self.declared_refusal(tool_id, "declared-tool-timeout");
+                }
+            },
+            None => self.bash(&script).await,
+        };
         // Re-label the receipt: the mediated bash receipt names `bash`; the
         // caller must see the declared tool id.
         if let Some(receipt) = self.receipts.last_mut()

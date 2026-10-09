@@ -68,6 +68,17 @@ pub(crate) fn build_named_decision_provider(
 /// The role the dispatched workers run as.
 pub(crate) const WORKER_ROLE: &str = "implement";
 
+/// The startup-built declared-tool surface for one role: the resolved
+/// definitions and their sub-session routing evidence.
+pub(crate) struct DeclaredToolSurface {
+    /// The resolved definitions visible to the role.
+    pub(crate) tools: Vec<orchestraitor_worker::ToolDefinition>,
+    /// The sub-session routing resolved for each subagent tool's role
+    /// (the §9.35 decision-record evidence).
+    pub(crate) subsession_routing:
+        std::collections::BTreeMap<String, orchestraitor_worker::RoleRoutingEvidence>,
+}
+
 /// Builds the declared tools visible to the worker role (issue #535,
 /// T2/T4). Call ONCE at startup: the layer-trust gate, mechanism
 /// validation, role routing, and the sub-role provider gate all run here,
@@ -79,15 +90,6 @@ pub(crate) const WORKER_ROLE: &str = "implement";
 ///
 /// Returns the registry error (untrusted layer, unknown kind, unresolvable
 /// role, invalid id, unknown effort) as a diagnostic.
-pub(crate) struct DeclaredToolSurface {
-    /// The resolved definitions visible to the role.
-    pub(crate) tools: Vec<orchestraitor_worker::ToolDefinition>,
-    /// The sub-session routing resolved for each subagent tool's role
-    /// (the §9.35 decision-record evidence).
-    pub(crate) subsession_routing:
-        std::collections::BTreeMap<String, orchestraitor_worker::RoleRoutingEvidence>,
-}
-
 pub(crate) fn build_declared_tools(
     resolver: &orchestraitor_core::ConfigResolver,
     role: &str,
