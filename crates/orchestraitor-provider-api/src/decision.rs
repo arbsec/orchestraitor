@@ -27,7 +27,7 @@ pub type DecisionResult<T> = Result<T, DecisionProviderError>;
 ///
 /// The proposal names a `(provider, model)` resolution for one role plus the
 /// alternatives the decision model considered with per-alternative skip
-/// reasons (spec §9.45 "Routing decision records"). `confidence` is the
+/// reasons (spec `30-model-routing.md` §9.45 "Routing decision records"). `confidence` is the
 /// provider's calibrated probability for the primary proposal, validated to
 /// `0.0..=1.0` at construction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +72,7 @@ impl TryFrom<DecisionProposalRaw> for DecisionProposal {
     }
 }
 
-/// One alternative a [`DecisionProvider`] considered and skipped (spec §9.45
+/// One alternative a [`DecisionProvider`] considered and skipped (spec `30-model-routing.md` §9.45
 /// "Routing decision records": per-alternative skip reasons).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionAlternative {
@@ -81,7 +81,7 @@ pub struct DecisionAlternative {
     /// Alternative model id.
     pub model: String,
     /// Machine-readable skip reason (for example `skipped-because-quota`,
-    /// spec §9.46).
+    /// spec `30-model-routing.md` §9.46).
     pub skip_reason: String,
 }
 
@@ -160,6 +160,174 @@ impl TaskSelection {
     }
 }
 
+/// A typed structured-output task-split proposal (spec `30-model-routing.md` §9.45 decision
+/// surface "task splitting"): whether the decision model would decompose one
+/// ready task and, when yes, the ordered subtasks it proposes. The proposal
+/// grants no authority — the campaign applies it only through the
+/// deterministic downstream acceptance path (code lands in a follow-up
+/// slice; the typed surface and records land here).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "TaskSplitProposalRaw")]
+pub struct TaskSplitProposal {
+    /// The deterministic worker task id the split proposal is about.
+    pub task_id: String,
+    /// Whether the decision model proposes a split at all.
+    pub split: bool,
+    /// Ordered subtasks when `split` is `true`; empty otherwise.
+    pub subtasks: Vec<TaskSplitSubtask>,
+    /// Calibrated confidence for the split decision, `0.0..=1.0` (validated).
+    pub confidence: f64,
+    /// Why the decision model split (or declined to split) the task.
+    pub reason: String,
+}
+
+/// Raw deserialization shape for [`TaskSplitProposal`]: identical fields,
+/// funneled through the same validation as [`TaskSplitProposal::new`].
+#[derive(Debug, Deserialize)]
+struct TaskSplitProposalRaw {
+    task_id: String,
+    split: bool,
+    #[serde(default)]
+    subtasks: Vec<TaskSplitSubtask>,
+    confidence: f64,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl TryFrom<TaskSplitProposalRaw> for TaskSplitProposal {
+    type Error = DecisionProviderError;
+
+    fn try_from(raw: TaskSplitProposalRaw) -> DecisionResult<Self> {
+        Self::new(
+            raw.task_id,
+            raw.split,
+            raw.subtasks,
+            raw.confidence,
+            raw.reason,
+        )
+    }
+}
+
+/// One proposed subtask of a [`TaskSplitProposal`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSplitSubtask {
+    /// Human-readable subtask title (inert data, never executed).
+    pub title: String,
+    /// Why this subtask is a separate unit of work.
+    pub rationale: String,
+}
+
+impl TaskSplitProposal {
+    /// Validates and constructs a split proposal, rejecting confidence
+    /// outside `0.0..=1.0` (including NaN) and subtasks on a no-split
+    /// proposal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecisionProviderError::InvalidConfidence`] when `confidence`
+    /// is NaN, negative, or greater than `1.0`, and
+    /// [`DecisionProviderError::MalformedOutput`] when `split` is `false`
+    /// but subtasks are present (or `true` with none).
+    pub fn new(
+        task_id: impl Into<String>,
+        split: bool,
+        subtasks: Vec<TaskSplitSubtask>,
+        confidence: f64,
+        reason: Option<String>,
+    ) -> DecisionResult<Self> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(DecisionProviderError::InvalidConfidence { value: confidence });
+        }
+        if !split && !subtasks.is_empty() {
+            return Err(DecisionProviderError::MalformedOutput(
+                "task-split proposal with `split: false` must not carry subtasks".to_string(),
+            ));
+        }
+        if split && subtasks.is_empty() {
+            return Err(DecisionProviderError::MalformedOutput(
+                "task-split proposal with `split: true` must carry at least one subtask"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            task_id: task_id.into(),
+            split,
+            subtasks,
+            confidence,
+            reason: reason.unwrap_or_default(),
+        })
+    }
+}
+
+/// The query context for a tool-selection decision (spec `30-model-routing.md` §9.45 decision
+/// surface "tool discovery"): the state a decision model evaluates. Titles
+/// and descriptions are inert data carried to the decision model, never
+/// executed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolQueryContext {
+    /// The task or query the tool is selected for.
+    pub query: String,
+    /// Available tool names with inert descriptions.
+    pub available_tools: Vec<ToolDescriptor>,
+}
+
+/// One tool a [`ToolQueryContext`] exposes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    /// Tool name (for example an MCP tool id).
+    pub name: String,
+    /// Inert description of what the tool does.
+    pub description: String,
+}
+
+/// A typed structured-output tool-selection decision (spec `30-model-routing.md` §9.45 decision
+/// surface "tool discovery"). `selected_tools` name tools from the query
+/// context; the caller validates them against the actual tool registry
+/// before any use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ToolSelectionRaw")]
+pub struct ToolSelection {
+    /// Names of the selected tools, in the order the model ranked them.
+    pub selected_tools: Vec<String>,
+    /// Calibrated confidence for the selection, `0.0..=1.0` (validated).
+    pub confidence: f64,
+}
+
+/// Raw deserialization shape for [`ToolSelection`]: identical fields,
+/// funneled through the same confidence validation as [`ToolSelection::new`].
+#[derive(Debug, Deserialize)]
+struct ToolSelectionRaw {
+    selected_tools: Vec<String>,
+    confidence: f64,
+}
+
+impl TryFrom<ToolSelectionRaw> for ToolSelection {
+    type Error = DecisionProviderError;
+
+    fn try_from(raw: ToolSelectionRaw) -> DecisionResult<Self> {
+        Self::new(raw.selected_tools, raw.confidence)
+    }
+}
+
+impl ToolSelection {
+    /// Validates and constructs a tool selection, rejecting confidence
+    /// outside `0.0..=1.0` (including NaN).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecisionProviderError::InvalidConfidence`] when `confidence`
+    /// is NaN, negative, or greater than `1.0`.
+    pub fn new(selected_tools: Vec<String>, confidence: f64) -> DecisionResult<Self> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(DecisionProviderError::InvalidConfidence { value: confidence });
+        }
+        Ok(Self {
+            selected_tools,
+            confidence,
+        })
+    }
+}
+
 /// Project-owned decision-provider abstraction for decision-model-backed
 /// selection (spec `30-model-routing.md` §9.45).
 ///
@@ -168,6 +336,14 @@ impl TaskSelection {
 /// message streams, no chat surface. Implementations return typed outputs with
 /// calibrated confidence; the heuristic table stays the default and the
 /// fallback chain when a provider errors or is unavailable.
+///
+/// The trait covers three decision surfaces: role resolution, campaign
+/// task selection, and — as typed surfaces with code landing in follow-up
+/// slices — task splitting and tool discovery/selection. Implementors
+/// SHOULD support the split/selection surfaces; the defaults below return
+/// [`DecisionProviderError::Unsupported`] so adding a method never breaks
+/// an existing implementation, and callers treat that error exactly like
+/// any other unavailability (deterministic fallback, no loop error).
 #[async_trait]
 pub trait DecisionProvider: Send + Sync {
     /// Stable provider id used in decision records.
@@ -193,6 +369,57 @@ pub trait DecisionProvider: Send + Sync {
         &self,
         ready_task_ids: &[String],
     ) -> DecisionResult<TaskSelection>;
+
+    /// Proposes whether one ready task should be split into subtasks (spec
+    /// §9.45 decision surface "task splitting").
+    ///
+    /// The default returns [`DecisionProviderError::Unsupported`] so
+    /// adding this surface never breaks an existing implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DecisionProviderError`] when the provider cannot produce
+    /// a typed proposal. Callers keep the unsplit task.
+    async fn propose_task_split(&self, task: &TaskSummary) -> DecisionResult<TaskSplitProposal> {
+        let _ = task;
+        Err(DecisionProviderError::Unsupported {
+            provider_id: self.id().clone(),
+            capability: "task-splitting",
+        })
+    }
+
+    /// Proposes which tools apply to a query (spec `30-model-routing.md` §9.45 decision surface
+    /// "tool discovery").
+    ///
+    /// The default returns [`DecisionProviderError::Unsupported`] so
+    /// adding this surface never breaks an existing implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DecisionProviderError`] when the provider cannot produce
+    /// a typed selection. Callers use the static tool set.
+    async fn propose_tool_selection(
+        &self,
+        query: &ToolQueryContext,
+    ) -> DecisionResult<ToolSelection> {
+        let _ = query;
+        Err(DecisionProviderError::Unsupported {
+            provider_id: self.id().clone(),
+            capability: "tool-selection",
+        })
+    }
+}
+
+/// A minimal summary of one ready task handed to a decision provider for
+/// task-splitting (spec `30-model-routing.md` §9.45). Titles are inert data, never executed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    /// The deterministic worker task id.
+    pub task_id: String,
+    /// Human-readable task title.
+    pub title: String,
+    /// Inert description of the task's goal.
+    pub description: String,
 }
 
 #[cfg(test)]
@@ -200,6 +427,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::float_cmp)]
 
     use super::*;
+    use crate::decision_fixture::FixtureDecisionProvider;
 
     fn provider_id(name: &str) -> ProviderId {
         ProviderId::from_string(name.to_string())
@@ -354,5 +582,86 @@ mod tests {
         let parsed: TaskSelection =
             serde_json::from_str(r#"{"task_id":"task-a","confidence":0.0}"#).unwrap();
         assert!((parsed.confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn default_split_and_tool_methods_are_unsupported() {
+        let fixture = FixtureDecisionProvider::new();
+        let task = TaskSummary {
+            task_id: "task-a".to_string(),
+            title: "write the file".to_string(),
+            description: "inert description".to_string(),
+        };
+        let error = fixture.propose_task_split(&task).await.unwrap_err();
+        assert!(matches!(
+            error,
+            DecisionProviderError::Unsupported {
+                capability: "task-splitting",
+                ..
+            }
+        ));
+        let query = ToolQueryContext {
+            query: "find tests".to_string(),
+            available_tools: vec![ToolDescriptor {
+                name: "board.query".to_string(),
+                description: "inert".to_string(),
+            }],
+        };
+        let error = fixture.propose_tool_selection(&query).await.unwrap_err();
+        assert!(matches!(
+            error,
+            DecisionProviderError::Unsupported {
+                capability: "tool-selection",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn task_split_proposal_validates_shape_and_confidence() {
+        let subtask = TaskSplitSubtask {
+            title: "part one".to_string(),
+            rationale: "independent module".to_string(),
+        };
+        assert!(TaskSplitProposal::new("task-a", true, vec![subtask.clone()], 0.9, None).is_ok());
+        // `split: false` with subtasks is malformed.
+        let error =
+            TaskSplitProposal::new("task-a", false, vec![subtask.clone()], 0.9, None).unwrap_err();
+        assert!(matches!(error, DecisionProviderError::MalformedOutput(_)));
+        // `split: true` without subtasks is malformed.
+        let error = TaskSplitProposal::new("task-a", true, Vec::new(), 0.9, None).unwrap_err();
+        assert!(matches!(error, DecisionProviderError::MalformedOutput(_)));
+        // Confidence still validated at the boundary.
+        assert!(TaskSplitProposal::new("task-a", false, Vec::new(), 1.5, None).is_err());
+    }
+
+    #[test]
+    fn split_and_tool_selection_round_trip_through_json() {
+        let proposal = TaskSplitProposal::new(
+            "task-a",
+            true,
+            vec![TaskSplitSubtask {
+                title: "part one".to_string(),
+                rationale: "independent module".to_string(),
+            }],
+            0.8,
+            Some("two independent modules".to_string()),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&proposal).unwrap();
+        let parsed: TaskSplitProposal = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, proposal);
+
+        let selection = ToolSelection::new(vec!["board.query".to_string()], 0.7).unwrap();
+        let json = serde_json::to_string(&selection).unwrap();
+        let parsed: ToolSelection = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, selection);
+    }
+
+    #[test]
+    fn tool_selection_rejects_out_of_range_confidence() {
+        assert!(ToolSelection::new(Vec::new(), 1.01).is_err());
+        assert!(ToolSelection::new(Vec::new(), f64::NAN).is_err());
+        assert!(ToolSelection::new(vec!["t".to_string()], 0.0).is_ok());
     }
 }

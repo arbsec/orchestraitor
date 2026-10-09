@@ -1,9 +1,9 @@
 //! Deterministic table-driven [`DecisionProvider`] fixture (spec §21.3): a
-//! conformance target for the `DecisionProvider` trait and the only shipped
-//! implementation until the TypeSafe/jev adapter is allowlisted (tech-stack
-//! §17, §18). CI never depends on a live decision model (spec
-//! `50-contracts-data.md` §21.3); this fixture is fully offline and
-//! deterministic.
+//! conformance target for the `DecisionProvider` trait and a fully offline
+//! alternative to the Neuralwatt-hosted Clef Flash decision model (spec §9.45,
+//! see `orchestraitor-provider-neuralwatt`). CI never depends on a live
+//! decision model (spec `50-contracts-data.md` §21.3); this fixture is fully
+//! offline and deterministic.
 //!
 //! The fixture maps role ids to proposals from a static table. Unknown roles
 //! are a typed [`DecisionProviderError::Unavailable`] — the router treats

@@ -46,7 +46,7 @@ use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 use crate::decision::{NoOpReason, SelectedTask};
 use crate::error::CampaignError;
 use crate::run_state::{LoopRunStore, RunRowStatus, StartRun};
-use crate::session::{BoardSnapshot, plan_pass, task_id_for};
+use crate::session::{BoardSnapshot, plan_pass_with_selector_async, task_id_for};
 
 /// The supervisor-visible handle of one in-flight worker run.
 pub struct WorkerProcess {
@@ -442,6 +442,9 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     runs: &'a LoopRunStore,
     invocation_id: String,
     routing: RoleRoutingDecision,
+    /// The configured decision provider for task selection (spec `30-model-routing.md` §9.45,
+    /// default-off): `None` keeps the deterministic selector exclusively.
+    task_selector: Option<&'a dyn orchestraitor_provider_api::DecisionProvider>,
     start_unix_secs: u64,
     /// Loop-start origin on the TOKIO clock: under a paused runtime
     /// (virtual-clock tests) `std::time::Instant` would never advance, so
@@ -520,6 +523,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             runs,
             invocation_id,
             routing,
+            task_selector: None,
             start_unix_secs,
             started: tokio::time::Instant::now(),
             backoff_index: 0,
@@ -527,6 +531,19 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             slots: Vec::new(),
             shutdown: None,
         })
+    }
+
+    /// Attaches the configured decision provider for task selection (spec
+    /// `30-model-routing.md` §9.45, default-off): each pass consults the
+    /// provider first and falls back to the deterministic selector on any
+    /// provider error. Unset (the default) keeps byte-identical behavior.
+    #[must_use]
+    pub fn with_task_selector(
+        mut self,
+        selector: &'a dyn orchestraitor_provider_api::DecisionProvider,
+    ) -> Self {
+        self.task_selector = Some(selector);
+        self
     }
 
     /// Unix seconds under the runner's clock: loop-start wall time plus the
@@ -1085,7 +1102,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         snapshot
             .ready
             .retain(|item| !excluded.contains(&task_id_for(&item.repo, item.number)));
-        let stored = plan_pass(&snapshot, &self.routing, self.decisions)?;
+        let stored = plan_pass_with_selector_async(
+            &snapshot,
+            &self.routing,
+            self.decisions,
+            self.task_selector,
+        )
+        .await?;
         let selected = stored.decision.selected.as_ref();
         events.push(LoopEvent::PassPlanned {
             decision_id: stored.id,

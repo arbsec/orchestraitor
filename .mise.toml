@@ -1,6 +1,6 @@
 [tools]
 rust = "1.96.0"
-lefthook = "2.1.17"
+lefthook = "2.2.1"
 cocogitto = "7.0.0"
 rumdl = "latest"
 

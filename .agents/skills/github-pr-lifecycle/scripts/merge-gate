@@ -24,10 +24,7 @@ orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
 # Run convergence-status first (once; stderr captured for diagnostics).
-# NOTE: convergence-status is a first-pass proxy — it checks available GitHub
-# signals but cannot prove review-generation evidence on its own. The caller
-# (the pr-lifecycle skill's session) must confirm a full review generation ran
-# against the current HEAD and found no new noteworthy findings.
+# This includes the persisted CLEAN agent-review record at the current HEAD.
 CONV_ERR_FILE="$(mktemp)"
 CONVERGENCE=""
 CONV_EXIT=0
@@ -52,6 +49,10 @@ fi
 
 # Read the head SHA for --match-head-commit.
 HEAD_SHA="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')"
+if [ "$HEAD_SHA" != "$(jq -r '.head_sha' <<<"$CONVERGENCE")" ]; then
+  echo "error: PR head changed after convergence; rerun review and the merge gate" >&2
+  exit "$ORC_ERR_CONCURRENT"
+fi
 
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh pr merge $PR --repo $REPO --squash --delete-branch --match-head-commit $HEAD_SHA" >&2

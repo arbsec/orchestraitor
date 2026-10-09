@@ -13,6 +13,33 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- Decision-provider support for the **System One decision protocol** (spec
+  §9.45) — an open protocol (single-shot typed questions, calibrated
+  probabilities, zero generated text) served by multiple endpoints, not a
+  vendor feature: a new protocol-level `SystemOneDecisionProvider` in
+  `orchestraitor-provider-api` implements the `DecisionProvider` trait
+  against any System One-compatible endpoint through the shared transport
+  stack (no new dependency). The reference model is Clef Flash (Cloudflare,
+  open source, Apache-2.0), the default on the Neuralwatt cloud deployment.
+  Configure it with the layered config key `routing.provider = "systemone"`
+  plus the REQUIRED `routing.base_url` (the Neuralwatt cloud
+  `https://api.neuralwatt.com/v1` or any self-hosted decision engine) —
+  still **default off**; a project without a `[routing]` block keeps the
+  heuristic table as the router and no network calls are made. The
+  configuration is per-project: each project picks its own endpoint, model
+  (`routing.model`, default `clef-flash`), and credential
+  (`routing.api_key`, absent or `none` = no auth) — or none.
+  When configured, `orc routing resolve` consults it for role resolution and
+  `orc campaign run` / `orc loop` consult it for campaign task selection
+  before the deterministic P0-first selector; any provider error, a proposal
+  outside the eligible set, or an unresolvable `routing.api_key` credential
+  engages the documented fallback (a key failure is a typed startup error, not a silent
+  degrade) and the cause is recorded in the decision record
+  (`precedence_path` / `rationale`). The credential never enters an
+  error or log line. The trait also gains two typed decision surfaces for
+  follow-up slices — task splitting (`propose_task_split`) and tool selection
+  (`propose_tool_selection`) — implemented as default methods returning a
+  typed `Unsupported` error, so adding them breaks no existing implementation.
 - SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
   durable §9.17 audit persistence. The store performs hash-chain validation
   that detects inconsistencies between envelope bytes, hashes, and metadata —
@@ -268,10 +295,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   plus the alternatives they considered with per-alternative skip reasons.
   The trait lives in `orchestraitor-provider-api` as a new single-shot
   structured-output provider class — no message streams, no chat surface.
-  The deterministic table-driven `FixtureDecisionProvider` ships as the only
-  implementation and conformance target; the TypeSafe/jev adapter stays
-  default-off until its license is allowlisted (tech-stack §17, §18) and no
-  network calls are made anywhere. Router integration is **default off**
+  The deterministic table-driven `FixtureDecisionProvider` ships as the
+  offline conformance target. Router integration is **default off**
   behind the new `routing.provider` config key: unset keeps the heuristic
   table as the router (byte-identical behavior), `routing.provider =
   "fixture"` consults the provider first, and any other value is a typed
@@ -718,10 +743,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   plus the alternatives they considered with per-alternative skip reasons.
   The trait lives in `orchestraitor-provider-api` as a new single-shot
   structured-output provider class — no message streams, no chat surface.
-  The deterministic table-driven `FixtureDecisionProvider` ships as the only
-  implementation and conformance target; the TypeSafe/jev adapter stays
-  default-off until its license is allowlisted (tech-stack §17, §18) and no
-  network calls are made anywhere. Router integration is **default off**
+  The deterministic table-driven `FixtureDecisionProvider` ships as the
+  offline conformance target. Router integration is **default off**
   behind the new `routing.provider` config key: unset keeps the heuristic
   table as the router (byte-identical behavior), `routing.provider =
   "fixture"` consults the provider first, and any other value is a typed

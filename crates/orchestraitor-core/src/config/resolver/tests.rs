@@ -1,3 +1,7 @@
+// Test-only allowances mirror the workspace test harness convention: a
+// failed expectation must fail the test loudly.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::BTreeMap;
 
 use super::*;
@@ -316,4 +320,76 @@ fn role_routing_entries_merge_across_layers() -> Result<(), OrchestraitorError> 
         Some(ConfigLayer::BuiltInDefaults)
     );
     Ok(())
+}
+
+#[test]
+fn decision_provider_routing_keys_are_project_scoped_and_layer_merged()
+-> Result<(), OrchestraitorError> {
+    // The decision-provider block is per-project configuration: a built-in
+    // (or user/org) layer can default it, and the project layer wins field
+    // by field — a different project (or no `[routing]` at all) keeps
+    // heuristic routing.
+    let defaults = OrchestraitorConfig {
+        routing: Some(RoutingDecisionProviderConfig {
+            provider: Some("systemone".to_string()),
+            base_url: Some("https://api.neuralwatt.com/v1".to_string()),
+            model: Some("clef-flash".to_string()),
+            api_key: Some("secret://env/NEURALWATT_API_KEY".to_string()),
+        }),
+        ..OrchestraitorConfig::default()
+    };
+    let project = OrchestraitorConfig {
+        routing: Some(RoutingDecisionProviderConfig {
+            provider: Some("systemone".to_string()),
+            base_url: Some("http://mekbook.tail1e276.ts.net:8080/v1".to_string()),
+            model: None, // inherits the lower layer's model field-wise.
+            api_key: None,
+        }),
+        ..OrchestraitorConfig::default()
+    };
+    let resolver = ConfigResolver::new()
+        .with_config(source(ConfigLayer::BuiltInDefaults, "built-in"), defaults)
+        .with_config(source(ConfigLayer::Project, "orchestraitor.toml"), project);
+    let config = resolver.resolve_config().unwrap();
+    let routing = config.routing.as_ref().expect("project layer set routing");
+    assert_eq!(routing.provider.as_deref(), Some("systemone"));
+    assert_eq!(
+        routing.base_url.as_deref(),
+        Some("http://mekbook.tail1e276.ts.net:8080/v1"),
+        "the project layer wins over the built-in default"
+    );
+    assert_eq!(
+        routing.model.as_deref(),
+        Some("clef-flash"),
+        "unset project fields inherit lower layers field-wise"
+    );
+    // Field-wise merge semantics: `merge_scalar` only overwrites with
+    // `Some`, so a project that leaves `api_key` unset INHERITS the lower
+    // layer's key (an explicit opt-out is `routing.api_key = "none"` at
+    // resolution time, per the `resolve_endpoint` mapping).
+    assert!(
+        routing.api_key.is_some(),
+        "unset project fields inherit lower layers field-wise (opt-out is the \"none\" value)"
+    );
+    // Provenance: the winning base_url is attributed to the project layer.
+    let base_url = resolver.resolve_value("routing.base_url", |config| {
+        config.routing.as_ref()?.base_url.clone()
+    })?;
+    assert_eq!(
+        base_url.map(|value| value.source.layer),
+        Some(ConfigLayer::Project)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_project_without_routing_keeps_heuristic_routing() {
+    // Default off: no [routing] block in any layer -> no decision provider,
+    // byte-identical heuristic behavior.
+    let resolver = ConfigResolver::new();
+    let config = resolver.resolve_config().unwrap();
+    assert!(
+        config.routing.is_none(),
+        "no [routing] anywhere means no decision provider is configured"
+    );
 }

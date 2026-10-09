@@ -11,10 +11,13 @@ use std::io::Write;
 use std::sync::Arc;
 
 use miette::{IntoDiagnostic, Result, miette};
-use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecision};
+use orchestraitor_agent_catalog::{
+    RoleRouter, RoleRoutingDecision, resolve_decision_provider_with,
+};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth};
 use orchestraitor_campaign::{
-    BoardSnapshot, CampaignDecisionStore, CampaignError, CampaignOutcome, WorkerSpawner, run_once,
+    BoardSnapshot, CampaignDecisionStore, CampaignError, CampaignOutcome, WorkerSpawner,
+    run_once_with_selector,
 };
 use orchestraitor_worker::bootstrap::build_bootstrap_transport;
 use orchestraitor_worker::{
@@ -143,6 +146,16 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
         .resolve(WORKER_ROLE)
         .map_err(|error| miette!("{error}"))?;
 
+    // Decision-provider consultation (spec `30-model-routing.md` §9.45, default off): when the
+    // `routing.provider` flag names an implementation, it is consulted for
+    // task selection first; any error falls back to the deterministic
+    // selector inside the campaign session and is recorded in the decision.
+    let decision_provider =
+        resolve_decision_provider_with(&layers.resolver, &super::build_named_decision_provider)
+            .map_err(|error| miette!("{error}"))?;
+    let task_selector: Option<&dyn orchestraitor_provider_api::DecisionProvider> =
+        decision_provider.as_deref();
+
     let store =
         CampaignDecisionStore::open(&paths.config_dir.join("campaign.db")).into_diagnostic()?;
     let spawner = DirectSpawner {
@@ -150,7 +163,8 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
     };
-    let outcome = run_once(&snapshot, &routing, &store, &spawner).into_diagnostic()?;
+    let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
+        .into_diagnostic()?;
 
     if args.json {
         render_json(writer, &outcome)?;

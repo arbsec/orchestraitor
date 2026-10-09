@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use miette::{Diagnostic, IntoDiagnostic, Result, miette};
-use orchestraitor_agent_catalog::{RoleRouter, RoleRoutingDecision};
+use orchestraitor_agent_catalog::{
+    RoleRouter, RoleRoutingDecision, resolve_decision_provider_with,
+};
 use orchestraitor_board::{BoardClient, BoardProjectConfig, SecretUriAuth};
 use orchestraitor_campaign::{
     BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunner,
@@ -572,6 +574,15 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
         .resolve(WORKER_ROLE)
         .map_err(|error| miette!("{error}"))?;
 
+    // Decision-provider consultation (spec `30-model-routing.md` §9.45, default off): when the
+    // `routing.provider` flag names an implementation, each pass consults it
+    // for task selection first; any error falls back to the deterministic
+    // selector inside the campaign session and is recorded in the decision.
+    // The provider lives in the outer scope so its lifetime covers `run`.
+    let decision_provider =
+        resolve_decision_provider_with(&layers.resolver, &super::build_named_decision_provider)
+            .map_err(|error| miette!("{error}"))?;
+
     let decisions =
         CampaignDecisionStore::open(&paths.config_dir.join("campaign.db")).into_diagnostic()?;
     let runs = orchestraitor_campaign::LoopRunStore::open(&paths.config_dir.join("loop.db"))
@@ -641,7 +652,11 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             routing,
             invocation_id,
             start_unix_secs,
-        );
+        )
+        .map(|runner| match decision_provider.as_deref() {
+            Some(provider) => runner.with_task_selector(provider),
+            None => runner,
+        });
         let summary = match runner {
             Ok(runner) => runner.run(signal_rx).await,
             Err(error) => Err(error),

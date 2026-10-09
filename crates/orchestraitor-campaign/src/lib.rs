@@ -38,6 +38,6 @@ pub use loop_run::{
 };
 pub use run_state::{LoopRunStore, RunRow, RunRowStatus, StartRun};
 pub use session::{
-    BoardSnapshot, CampaignOutcome, WorkerSpawner, compute_selection, plan_pass, run_once,
-    task_id_for,
+    BoardSnapshot, CampaignOutcome, SelectorDecision, WorkerSpawner, compute_selection, plan_pass,
+    plan_pass_with_selector, run_once, run_once_with_selector, task_id_for,
 };
