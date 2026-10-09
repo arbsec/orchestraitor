@@ -33,6 +33,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/verified-commit-path.md`](references/verified-commit-path.md) — why unsigned local bot-identity commits never verify, and the App-API replay path for unsigned chains (documented procedure; replay script not yet implemented).
   - [`references/commit-hygiene-remediation.md`](references/commit-hygiene-remediation.md) — failure-class → detection → remediation map for commit-hygiene violations (identity, verification, message format, mode/permission and ghost-commit anomalies); what `audit-pr-commits` flags and how to fix it.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
+  - `scripts/pr-review-local` — per-commit LOCAL CodeRabbit feedback (`coderabbit review --agent`; read-only, never posts to GitHub). Exit codes: `0` review completed (findings or clean), `1` GitHub lookup/read failure, `2` config/state error (no PR for branch, jq missing for `--json`), `3` coderabbit CLI failure (missing binary included), `4` local HEAD or worktree mismatch, `5` mergeable-gate refusal (PR conflicts with base). Invoke as `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local ...` — skill scripts are intentionally non-executable (mode `100644`) because the App-signed landing path (`createCommitOnBranch` fileChanges) cannot create mode `100755`.
 
 ## Core procedure
 
@@ -101,7 +102,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   Deduplicate across loops — see review-findings.md.
                   Fix all CRITICAL/HIGH; MEDIUM unless explicitly justified+recorded;
                   LOW may be deferred with recorded reasoning.
-                  Bot-generated review comments (coderabbitai and similar) enter
+                  `@coderabbitai review` comments are never posted (owner
+                  directive: the review mechanism is the LOCAL CLI, step 6).
+                  Bot-generated review comments that already exist on the PR
+                  (coderabbitai and similar) enter
                   the same findings pipeline — deduplicated and severity-verified
                   against code before remediation; never applied verbatim.
 
@@ -118,6 +122,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                    NEVER reuse the PR's feature headline for a remediation
                    landing: identical duplicate commit titles destroy the
                    history's meaning and make review of the fix impossible.
+                   Per-commit review feedback runs LOCALLY via
+                   `pr-review-local` (wraps `coderabbit review --agent --base
+                   <base>`; read-only, never posts to GitHub). Do NOT post
+                   `@coderabbitai review` comments — the review mechanism is
+                   the local CLI; iterate locally to zero actionable findings.
 
 5b. HUMAN GATE    For PRs carrying `needs-human-review` (§21.1
                   security-sensitive classes): after checks turn GREEN and
@@ -133,12 +142,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 6. CONVERGE       Stop when ONE full review generation against the current HEAD finds
                   NO new noteworthy findings AND all earlier blocking findings are
                   resolved. See pr-convergence.md.
-                  The remediation loop MAY use
-                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local` for
-                  fast per-commit CodeRabbit feedback; the GitHub-side CodeRabbit
-                  review generation clean against the final head REMAINS the
-                  recorded convergence evidence before merge (the local run
-                  accelerates iteration, it does not replace the recorded gate).
+                  The review mechanism is the LOCAL CodeRabbit CLI via
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local`
+                  (wraps `coderabbit review --agent --base <base>`; read-only,
+                  never posts to GitHub). Iterate locally (remediate → rerun) to
+                  ZERO actionable findings at the final HEAD. Do NOT post
+                  `@coderabbitai review` comments. Convergence evidence = a local
+                  CLI review generation with zero actionable findings at the final
+                  HEAD, recorded by the session — cite the run + SHA in the PR
+                  description.
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
