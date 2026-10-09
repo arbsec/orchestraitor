@@ -11,8 +11,7 @@ pub use schema::{
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, LoopGuardrailsConfig, NormalizationConfig,
     OrchestraitorConfig, ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig,
     RoleConfig, RoutingConfig, RoutingDecisionProviderConfig, ServiceIdentityEnforcement,
-    SubscriptionConfig,
-    ToolBudgetConfig, ToolConfig,
+    SubscriptionConfig, ToolBudgetConfig, ToolConfig,
 };
 
 use crate::error::OrchestraitorError;
