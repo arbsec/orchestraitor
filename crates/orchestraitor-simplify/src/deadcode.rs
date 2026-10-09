@@ -10,10 +10,12 @@ use crate::report::{Suggestion, SuggestionClass, ToolStatus};
 use crate::{SimplifyConfig, TOOL_TIMEOUT};
 
 /// `cargo-machete`: finds unused dependencies. Optional tool — absent
-/// installations are recorded, never fatal.
+/// installations are recorded, never fatal. `--json` selects the stable
+/// machine-readable output contract (the default text format is
+/// human-oriented headings and is not parsed).
 const MACHETE_SPEC: ToolSpec = ToolSpec {
     program: "cargo-machete",
-    args: &[],
+    args: &["--json"],
     label: "cargo-machete",
 };
 
@@ -50,27 +52,43 @@ pub fn run(
     }
 }
 
-/// Parses cargo-machete output lines of the form
-/// `crate_name package_name path` (its summary format) into unused-dependency
-/// suggestions. Unparseable output yields no suggestions (fail-open).
+/// Parses `cargo-machete --json` output (the documented machine-readable
+/// contract): `{"crates":[{"package_name":…,"manifest_path":…,"unused":[…],
+/// "ignored_used":[…]}]}`. Each unused dependency of a crate becomes one
+/// semantic suggestion carrying the manifest path. Unparseable output yields
+/// no suggestions (fail-open).
 #[must_use]
 pub fn parse(stdout: &str) -> Vec<Suggestion> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return Vec::new();
+    };
+    let Some(crates) = value.get("crates").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
     let mut suggestions = Vec::new();
-    for line in stdout.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(crate_name), Some(_package), Some(path)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        suggestions.push(Suggestion {
-            class: SuggestionClass::Semantic,
-            path: Some(path.to_string()),
-            line: None,
-            rule: clippy::UNUSED_DEPENDENCY_RULE.to_string(),
-            message: format!("unused dependency `{crate_name}` (cargo-machete)"),
-            applied: false,
-        });
+    for analyzed in crates {
+        let path = analyzed
+            .get("manifest_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        for dependency in analyzed
+            .get("unused")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(dependency) = dependency.as_str() else {
+                continue;
+            };
+            suggestions.push(Suggestion {
+                class: SuggestionClass::Semantic,
+                path: (!path.is_empty()).then(|| path.to_string()),
+                line: None,
+                rule: clippy::UNUSED_DEPENDENCY_RULE.to_string(),
+                message: format!("unused dependency `{dependency}` (cargo-machete)"),
+                applied: false,
+            });
+        }
     }
     suggestions
 }

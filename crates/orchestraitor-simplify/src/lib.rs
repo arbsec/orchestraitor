@@ -8,20 +8,22 @@
 //! - **Format** — semantics-preserving (rustfmt, rumdl fixes); auto-applied
 //!   when the configuration allows it.
 //! - **Safe fix** — clippy machine-applicable suggestions; suggest-only by
-//!   default, auto-applied only when the configuration explicitly allows it.
-//!   (The Arbitraitor output-classification gate that will additionally
-//!   scope safe-fix auto-apply is PR-2 scope; in this slice every non-Format
-//!   suggestion is suggest-only regardless of the flag.)
+//!   default, auto-applied only when the configuration explicitly allows it
+//!   AND the CLI fix policy is `safe`; each suggestion is marked applied
+//!   only when a verify check no longer reports it. (The Arbitraitor
+//!   output-classification gate that will additionally scope safe-fix
+//!   auto-apply is PR-2 scope.)
 //! - **Semantic** — dead-code hints and pedantic findings; suggest-only,
 //!   never auto-rewritten.
 //!
-//! Fail semantics are **fail-open, loudly** (design §1.4): an absent tool, a
-//! non-zero tool exit, or a timeout yields a report with `ran = false` and a
-//! typed warning; the pass never blocks a commit, a worker, or a push.
+//! Fail semantics are **fail-open, loudly** (design §1.4): an absent tool or
+//! a timeout yields a typed warning and the pass continues; a non-zero tool
+//! exit is normal (it is how tools report findings) and still parses. The
+//! pass never blocks a commit, a worker, or a push.
 //!
 //! The crate is synchronous and I/O-injectable like the delivery modules:
-//! every process spawn goes through the [`executor::ToolExecutor`] trait, so
-//! tests script tool output instead of spawning real toolchains.
+//! every process spawn goes through the [`executor::SimplifyExecutor`]
+//! trait, so tests script tool output instead of spawning real toolchains.
 
 #![forbid(unsafe_code)]
 

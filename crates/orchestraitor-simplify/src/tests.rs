@@ -20,6 +20,12 @@ use crate::report::{SimplifyReport, Suggestion, SuggestionClass, ToolStatus};
 struct ScriptedExecutor {
     available_programs: Vec<&'static str>,
     outcomes: std::sync::Mutex<std::collections::BTreeMap<String, ToolOutcome>>,
+    /// FIFO queues keyed by argv: when non-empty, a `run` of that exact
+    /// program+args drains its queue instead of consulting the map. Lets a
+    /// test script consecutive invocations of the SAME argv (e.g. the clippy
+    /// check that runs before and again as the verify pass after a fix)
+    /// while other invocations (the fix) keep their map entries.
+    queues: std::sync::Mutex<std::collections::BTreeMap<String, Vec<ToolOutcome>>>,
 }
 
 impl ScriptedExecutor {
@@ -27,6 +33,7 @@ impl ScriptedExecutor {
         Self {
             available_programs: programs.to_vec(),
             outcomes: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            queues: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -44,6 +51,18 @@ impl ScriptedExecutor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(argv_key(program, args), outcome);
     }
+
+    /// Scripts consecutive outcomes for one exact argv, consumed in order
+    /// by the matching `run` invocations; the argv map applies once the
+    /// queue for that argv is exhausted.
+    fn script_sequence(&self, program: &str, args: &[&str], outcomes: &[ToolOutcome]) {
+        self.queues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(argv_key(program, args))
+            .or_default()
+            .extend(outcomes.iter().cloned());
+    }
 }
 
 /// Outcome key for a program + argument list (used by `script_argv`).
@@ -54,6 +73,16 @@ fn argv_key(program: &str, args: &[&str]) -> String {
 impl SimplifyExecutor for ScriptedExecutor {
     fn run(&self, spec: &ToolSpec, _dir: &Path, _timeout: Duration) -> ToolOutcome {
         let key = argv_key(spec.program, spec.args);
+        let mut queues = self
+            .queues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = queues.get_mut(&key)
+            && !queue.is_empty()
+        {
+            return queue.remove(0);
+        }
+        drop(queues);
         let outcomes = self
             .outcomes
             .lock()
@@ -99,15 +128,20 @@ fn clippy_parse_extracts_machine_applicable_suggestion() {
 
 #[test]
 fn clippy_fix_pass_marks_rs_safe_fixes_applied_only_on_success() {
-    // The check runs first; the explicit `cargo clippy --fix` pass earns
-    // `applied = true` for machine-applicable suggestions on `.rs` files
-    // ONLY when it succeeds.
+    // The check runs first; the explicit `cargo clippy --fix` pass runs
+    // under the safe policy, then a verify check decides `applied`: a
+    // suggestion is applied only when the verify output no longer reports
+    // it (a zero fix exit alone proves nothing — rustfix can fail and roll
+    // back individual suggestions).
     let config = SimplifyConfig::default();
     let executor = ScriptedExecutor::with_available(&["cargo"]);
-    executor.script_argv(
+    // Sequence: check (finding exists) → fix (exit 0) → verify (clean). The
+    // check argv queue carries both check outcomes; the fix argv has its map
+    // entry.
+    executor.script_sequence(
         "cargo",
         &["clippy", "--message-format", "json", "--quiet", "--"],
-        ran_output(MACHINE_APPLICABLE),
+        &[ran_output(MACHINE_APPLICABLE), ran_output("")],
     );
     executor.script_argv(
         "cargo",
@@ -118,9 +152,46 @@ fn clippy_fix_pass_marks_rs_safe_fixes_applied_only_on_success() {
             stderr: String::new(),
         }),
     );
-    let (_statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
     assert_eq!(suggestions.len(), 1);
     assert!(suggestions[0].applied, "successful fix pass earns applied");
+    assert_eq!(statuses.len(), 3, "check + fix + verify recorded");
+}
+
+#[test]
+fn clippy_fix_exit_zero_but_suggestion_surviving_is_not_applied() {
+    // `cargo clippy --fix` exits 0 even when rustfix fails to apply (or
+    // rolls back) a suggestion. The verify check must keep such a
+    // suggestion suggest-only — the report must not claim unmade fixes,
+    // and pedantic-check must still see it.
+    let config = SimplifyConfig::default();
+    let executor = ScriptedExecutor::with_available(&["cargo"]);
+    // Sequence: check (finding exists) → fix (exit 0) → verify (finding
+    // STILL reported: it was not fixed).
+    executor.script_sequence(
+        "cargo",
+        &["clippy", "--message-format", "json", "--quiet", "--"],
+        &[
+            ran_output(MACHINE_APPLICABLE),
+            ran_output(MACHINE_APPLICABLE),
+        ],
+    );
+    executor.script_argv(
+        "cargo",
+        &["clippy", "--fix", "--allow-dirty", "--quiet"],
+        ToolOutcome::Ran(ExecOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    );
+    let (statuses, suggestions) = crate::clippy::run(&executor, Path::new("/tmp"), &config, true);
+    assert_eq!(statuses.len(), 3, "check + fix + verify recorded");
+    assert_eq!(suggestions.len(), 1);
+    assert!(
+        !suggestions[0].applied,
+        "a suggestion still present after the fix must stay unapplied"
+    );
 }
 
 #[test]
@@ -174,21 +245,28 @@ fn clippy_fix_pass_scope_matches_check_scope() {
     // Regression (CodeRabbit PR-536): the fix invocation must cover exactly
     // the check's lint scope — the same lint level (clippy::pedantic
     // included when the check enables it) — or a successful fix run could
-    // mark a pedantic SafeFix applied that the fix scope never saw.
+    // never resolve a pedantic SafeFix in the verify pass, leaving a real
+    // fix unreported as applied.
     //
-    // The ScriptedExecutor keys outcomes by exact argv, so scripting the fix
-    // outcome ONLY under the pedantic fix argv makes the pass's fix spawn
-    // observable: the pedantic run below only earns `applied` if the fix
-    // invocation actually carried `-W clippy::pedantic`.
+    // The ScriptedExecutor keys outcomes by exact argv, so scripting the
+    // fix outcome ONLY under the pedantic fix argv makes the pass's fix
+    // spawn observable: the pedantic run below only earns `applied` if the
+    // fix invocation actually carried `-W clippy::pedantic` — otherwise the
+    // verify check (scripted clean via the sequence queue) would still see
+    // the suggestion and keep it unapplied.
     let config = SimplifyConfig {
         pedantic: true,
         ..SimplifyConfig::default()
     };
     let executor = ScriptedExecutor::with_available(&["cargo"]);
-    executor.script_argv(
+    // The check-argv queue carries BOTH check invocations (initial + verify):
+    // first the finding exists, then (after the fix) it is gone. The fix
+    // invocation in between resolves through the argv map — which only
+    // carries the PEDANTIC fix argv.
+    executor.script_sequence(
         "cargo",
         CLIPPY_PEDANTIC_ARGS,
-        ran_output(MACHINE_APPLICABLE),
+        &[ran_output(MACHINE_APPLICABLE), ran_output("")],
     );
     executor.script_argv(
         "cargo",
@@ -207,9 +285,10 @@ fn clippy_fix_pass_scope_matches_check_scope() {
     );
 
     // Symmetric negative: with the same pedantic config, a fix outcome
-    // scripted ONLY under the non-pedantic fix argv is never selected, so
-    // `applied` stays false — proving the pedantic run never falls back to
-    // the base fix scope.
+    // scripted ONLY under the non-pedantic fix argv is never selected — the
+    // fix invocation is missing, so no fix ran, no verify check ran, and
+    // `applied` stays false (proving the pedantic run never falls back to
+    // the base fix scope).
     let mismatched = ScriptedExecutor::with_available(&["cargo"]);
     mismatched.script_argv(
         "cargo",
@@ -225,8 +304,8 @@ fn clippy_fix_pass_scope_matches_check_scope() {
             stderr: String::new(),
         }),
     );
-    let (_statuses, suggestions) =
-        crate::clippy::run(&mismatched, Path::new("/tmp"), &config, true);
+    let (statuses, suggestions) = crate::clippy::run(&mismatched, Path::new("/tmp"), &config, true);
+    assert_eq!(statuses.len(), 2, "check + (missing) fix; no verify");
     assert_eq!(suggestions.len(), 1);
     assert!(
         !suggestions[0].applied,
@@ -438,17 +517,76 @@ fn deadcode_machete_absent_is_suggest_only_noop() {
 #[test]
 fn deadcode_machete_findings_are_never_applied() {
     let executor = ScriptedExecutor::with_available(&["cargo-machete"]);
+    // Real `cargo-machete --json` shape (documented in its README).
     executor.script_argv(
         "cargo-machete",
-        &[],
-        ran_output("serde serde /tmp/probe/Cargo.toml\n"),
+        &["--json"],
+        ran_output(
+            r#"{"crates":[{"package_name":"probe","manifest_path":"/tmp/probe/Cargo.toml","unused":["serde"],"ignored_used":[]}]}"#,
+        ),
     );
     let config = SimplifyConfig::default();
     let (status, suggestions) = crate::deadcode::run(&executor, Path::new("/tmp"), &config);
     assert!(matches!(status, ToolStatus::Ran { .. }));
     assert_eq!(suggestions.len(), 1);
     assert_eq!(suggestions[0].class, SuggestionClass::Semantic);
+    assert_eq!(
+        suggestions[0].path.as_deref(),
+        Some("/tmp/probe/Cargo.toml")
+    );
     assert!(!suggestions[0].applied, "dead-code is suggest-only");
+}
+
+#[test]
+fn deadcode_machete_default_text_output_yields_nothing() {
+    // The default (non-JSON) output is human-oriented headings; the parser
+    // must not fabricate suggestions from it.
+    let executor = ScriptedExecutor::with_available(&["cargo-machete"]);
+    executor.script_argv(
+        "cargo-machete",
+        &["--json"],
+        ran_output(
+            "cargo-machete found the following unused dependencies in this directory:\n\
+             sample -- ./Cargo.toml:\n\tanyhow\n\tserde\nDone!\n",
+        ),
+    );
+    let config = SimplifyConfig::default();
+    let (_status, suggestions) = crate::deadcode::run(&executor, Path::new("/tmp"), &config);
+    assert!(suggestions.is_empty(), "text output parses to nothing");
+}
+
+#[test]
+fn deadcode_machete_unparseable_output_is_fail_open() {
+    let executor = ScriptedExecutor::with_available(&["cargo-machete"]);
+    executor.script_argv(
+        "cargo-machete",
+        &["--json"],
+        ran_output("not json at all\n"),
+    );
+    let config = SimplifyConfig::default();
+    let (_status, suggestions) = crate::deadcode::run(&executor, Path::new("/tmp"), &config);
+    assert!(suggestions.is_empty());
+}
+
+#[test]
+fn deadcode_machete_multiple_crates_and_deps_expand() {
+    let executor = ScriptedExecutor::with_available(&["cargo-machete"]);
+    executor.script_argv(
+        "cargo-machete",
+        &["--json"],
+        ran_output(
+            r#"{"crates":[
+                {"package_name":"a","manifest_path":"a/Cargo.toml","unused":["log","anyhow"],"ignored_used":[]},
+                {"package_name":"b","manifest_path":"b/Cargo.toml","unused":[],"ignored_used":[]}
+            ]}"#,
+        ),
+    );
+    let config = SimplifyConfig::default();
+    let (_status, suggestions) = crate::deadcode::run(&executor, Path::new("/tmp"), &config);
+    assert_eq!(suggestions.len(), 2);
+    assert_eq!(suggestions[0].path.as_deref(), Some("a/Cargo.toml"));
+    assert!(suggestions[0].message.contains("`log`"));
+    assert!(suggestions[1].message.contains("`anyhow`"));
 }
 
 #[test]

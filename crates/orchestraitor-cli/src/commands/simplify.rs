@@ -92,7 +92,7 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &SimplifyRunArgs, writer: &mut 
     // `--staged` when the developer wants fixes.
     let project_dir = project_root(paths);
     let staged_paths = if args.staged {
-        Some(staged_files(&project_dir))
+        Some(staged_files(&project_dir).map(|files| strip_toplevel(&project_dir, &files)))
     } else {
         None
     };
@@ -302,11 +302,14 @@ fn filter_report(
         .count();
 }
 
-/// Staged (index) files, repo-root-relative, via
-/// `git diff --cached --name-only -z --relative`: git is asked for the
-/// toplevel so the entries share a base with the normalized suggestion
-/// paths regardless of the invoking directory. `None` = git could not run
-/// or failed (fail-open: the caller drops the staged filter and reports
+/// Staged (index) files, relative to the git toplevel, via
+/// `git diff --cached --name-only -z` run at the toplevel (`--relative` is
+/// deliberately NOT used: it resolves against the current directory, which
+/// would re-base the output). Callers re-base these entries onto the cargo
+/// workspace root via [`strip_toplevel`], because tool-emitted suggestion
+/// paths (clippy JSON, rustfmt diffs) are relative to that root, which can
+/// be a subdirectory of the git worktree. `None` = git could not run or
+/// failed (fail-open: the caller drops the staged filter and reports
 /// everything, rather than silently narrowing to nothing); `Some(list)` =
 /// the index was read (possibly empty — a genuinely empty index is a real
 /// empty scope, not an error).
@@ -328,7 +331,7 @@ fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
     }
     let output = std::process::Command::new("git")
         .current_dir(&toplevel)
-        .args(["diff", "--cached", "--name-only", "-z", "--relative"])
+        .args(["diff", "--cached", "--name-only", "-z"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -344,6 +347,31 @@ fn staged_files(project_dir: &Path) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect(),
     )
+}
+
+/// Re-bases staged paths (git-toplevel-relative) onto the cargo workspace
+/// root (`project_dir`), matching the base of tool-emitted suggestion paths
+/// (clippy JSON `file_name`, rustfmt diff paths). Entries outside
+/// `project_dir` (e.g. sibling crates in the same worktree) are kept as-is —
+/// they can never match a workspace-relative suggestion, and dropping them
+/// would risk over-matching; absolute path forms are handled by the
+/// canonical comparison in [`filter_report`]'s normalize step.
+fn strip_toplevel(project_dir: &Path, files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .map(|file| {
+            // A staged entry is toplevel-relative (e.g. `crates/foo/src/lib.rs`);
+            // when it lives under the project dir, re-express it relative to
+            // the project dir (the base of tool-emitted suggestion paths).
+            // Entries outside `project_dir` (sibling crates in the same
+            // worktree) are kept as-is — they can never match a
+            // workspace-relative suggestion, and dropping them would risk
+            // over-matching.
+            Path::new(file)
+                .strip_prefix(project_dir)
+                .map_or_else(|_| file.clone(), |rest| rest.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 /// The directory the pass runs over: the project dir (never a colonized cwd —

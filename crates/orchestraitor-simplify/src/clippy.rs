@@ -70,11 +70,12 @@ pub(crate) const UNUSED_DEPENDENCY_RULE: &str = "unused-dependency";
 ///
 /// Non-zero clippy exits are normal (findings exist) and still parse: only a
 /// spawn failure or timeout yields `Unavailable`. When `apply_safe` is set,
-/// a second `cargo clippy --fix --allow-dirty` invocation runs AFTER the
-/// check; machine-applicable suggestions on `.rs` files are marked
-/// `applied` only when that fix run succeeded — never from the check output
-/// alone. The safe-fix surface stays conservatively narrow pending the
-/// Arbitraitor classification gate (PR-2).
+/// a `cargo clippy --fix --allow-dirty` invocation runs AFTER the check and
+/// a verify check runs after a successful fix; a suggestion is marked
+/// `applied` only when it is gone from the verify output (a zero fix exit
+/// alone proves nothing — rustfix can fail and roll back individual
+/// suggestions). The safe-fix surface stays conservatively narrow pending
+/// the Arbitraitor classification gate (PR-2).
 pub fn run(
     executor: &dyn SimplifyExecutor,
     root: &std::path::Path,
@@ -101,26 +102,30 @@ pub fn run(
         ToolOutcome::Ran(output) => {
             let mut suggestions = parse(&output.stdout);
             // The fix pass runs only under the policy AND only after a
-            // successful check parse; `applied` is earned by its exit.
-            let fix_succeeded = if apply_safe {
+            // successful check parse; `applied` is earned by disappearance
+            // from a verify check, not by the fix run's exit code.
+            if apply_safe {
                 let fix = executor.run(fix_spec, root, TOOL_TIMEOUT);
-                let succeeded = matches!(&fix, ToolOutcome::Ran(outcome) if outcome.success());
+                let fix_succeeded = matches!(&fix, ToolOutcome::Ran(outcome) if outcome.success());
                 statuses.push(ToolStatus::from_outcome(CLIPPY_FIX_SPEC.label, &fix));
-                succeeded
-            } else {
-                false
-            };
-            if fix_succeeded {
-                for suggestion in &mut suggestions {
-                    if suggestion.class == SuggestionClass::SafeFix
-                        && suggestion.path.as_deref().is_some_and(|file| {
-                            std::path::Path::new(file)
-                                .extension()
-                                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-                        })
-                    {
-                        suggestion.applied = true;
+                if fix_succeeded {
+                    let verify = executor.run(spec, root, TOOL_TIMEOUT);
+                    if let ToolOutcome::Ran(verify_output) = &verify {
+                        let verified = parse(&verify_output.stdout);
+                        let resolved: std::collections::HashSet<_> = verified
+                            .iter()
+                            .filter(|suggestion| suggestion.class == SuggestionClass::SafeFix)
+                            .map(Suggestion::key)
+                            .collect();
+                        for suggestion in &mut suggestions {
+                            if suggestion.class == SuggestionClass::SafeFix
+                                && !resolved.contains(&suggestion.key())
+                            {
+                                suggestion.applied = true;
+                            }
+                        }
                     }
+                    statuses.push(ToolStatus::from_outcome(spec.label, &verify));
                 }
             }
             (statuses, suggestions)
