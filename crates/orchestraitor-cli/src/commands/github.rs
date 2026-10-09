@@ -2543,14 +2543,9 @@ mod tests {
 
     #[test]
     fn build_file_changes_shapes_deletions_as_path_objects() {
-        let changes = vec![
-            ("A".to_string(), std::path::PathBuf::from("new.txt")),
-            ("D".to_string(), std::path::PathBuf::from("base.txt")),
-        ];
-        // The branch is irrelevant for deletions and for cat-file on A/M we
-        // use the fixture repo? No — this test only covers the D branch of
-        // the builder plus the payload shape; an A record would need a real
-        // blob, so only D is exercised here.
+        // This test covers only the D branch of the builder plus the payload
+        // shape; an A record would need a real blob, so only D is exercised
+        // here.
         let result = build_file_changes(
             &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
             "any-branch",
@@ -2561,7 +2556,6 @@ mod tests {
             payload,
             serde_json::json!({"additions": [], "deletions": [{"path": "base.txt"}]})
         );
-        let _ = changes;
     }
 
     // --- push-branch: FileChanges builder (corruption regression) -----------

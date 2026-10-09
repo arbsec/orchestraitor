@@ -66,7 +66,7 @@ jobs:
       # Installs cargo-llvm-cov and cargo-nextest. cargo-llvm-cov auto-installs the
       # `llvm-tools-preview` rustup component for the active toolchain in CI
       # (CI is detected via the `CI` env var, so no interactive prompt).
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad  # v2.87.26
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a  # v2.87.25
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # cargo-llvm-cov nextest: run the workspace test suite under nextest (the same runner

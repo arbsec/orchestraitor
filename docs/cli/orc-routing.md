@@ -37,7 +37,7 @@ block per role:
 ```toml
 [roles.implement.routing]
 provider = "neuralwatt"
-model = "glm-5.2"
+model = "glm-5.3-flash"
 ```
 
 All keys participate in the normal precedence chain, so a project (or any higher
@@ -170,7 +170,7 @@ configuration key (for example `roles.<role>.routing.model`) is produced only
 when the *effective* configuration lacks the sub-key entirely — there is no
 silent default-to-first-model guess anywhere in the chain. When a role has no
 entry in any layer (library callers that resolve without the built-in defaults),
-resolution falls back to the documented bootstrap default `neuralwatt`/`glm-5.2`
+resolution falls back to the documented bootstrap default `neuralwatt`/`glm-5.3-flash`
 and the decision record's `fallback_reason` captures that fact.
 
 ## Custom roles

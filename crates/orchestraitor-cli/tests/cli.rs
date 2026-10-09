@@ -2067,12 +2067,12 @@ fn spawn_push_branch_server(
     Ok((endpoint, auth_rx, body_rx))
 }
 
-/// Builds the scripted `updateRefs` success payload confirming the move of
-/// `ref_name` (the response validator checks the ref list by name).
-fn update_refs_stub(ref_name: &str) -> String {
-    format!(
-        r#"{{"data":{{"updateRefs":{{"clientMutationId":"ok","refs":[{{"id":"REF_node","name":"{ref_name}"}}]}}}}}}"#
-    )
+/// Builds the scripted `updateRefs` success payload. `UpdateRefsPayload`
+/// carries only a nullable `clientMutationId` (no refs list exists on the
+/// payload type), so the command verifies the move by re-reading the branch
+/// ref — this stub satisfies exactly that contract.
+fn update_refs_stub() -> String {
+    r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string()
 }
 
 fn push_branch_cli(
@@ -2137,7 +2137,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         ),
         (
             "updateRefs".to_string(),
-            update_refs_stub("refs/heads/feature/signed"),
+            update_refs_stub(),
         ),
         (
             "ref(qualifiedName".to_string(),
@@ -2409,8 +2409,6 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
     assert!(stderr.contains("nothing to land"), "stderr: {stderr}");
-    // Exactly ONE request (the branch-ref probe) reached the network: the
-    // no-op decision is remote-head-aware, so it cannot be made pre-mint.
     let mut calls = 0;
     while let Ok(_line) = auth_rx.try_recv() {
         calls += 1;
@@ -2556,7 +2554,7 @@ fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Re
         ),
         (
             "updateRefs".to_string(),
-            update_refs_stub("refs/heads/feature/signed"),
+            update_refs_stub(),
         ),
         (
             "ref(qualifiedName".to_string(),
@@ -2675,10 +2673,7 @@ fn github_push_branch_re_land_signs_an_unsigned_head() -> miette::Result<()> {
                 r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"{signed_oid}","tree":{{"oid":"{local_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
             ),
         ),
-        (
-            "updateRefs".to_string(),
-            update_refs_stub("refs/heads/main"),
-        ),
+        ("updateRefs".to_string(), update_refs_stub()),
         (
             "ref(qualifiedName".to_string(),
             format!(
@@ -2723,18 +2718,41 @@ fn github_push_branch_re_land_signs_an_unsigned_head() -> miette::Result<()> {
     );
     // The empty fileChanges payload: the createCommitOnBranch request body
     // carries additions:[] and deletions:[] — nothing else.
-    // Drain the captured request bodies and assert the
-    // createCommitOnBranch payload carries an EMPTY fileChanges set.
+    assert_re_land_empty_file_changes(&bodies)?;
+    Ok(())
+}
+
+/// Drains the captured request bodies, extracts the `createCommitOnBranch`
+/// GraphQL payload (the capture is the raw HTTP request; the JSON body
+/// starts after the blank line), and asserts its `fileChanges` is exactly
+/// the empty set.
+fn assert_re_land_empty_file_changes(
+    bodies: &std::sync::mpsc::Receiver<String>,
+) -> miette::Result<()> {
     let mut commit_body = None;
     while let Ok(body) = bodies.try_recv() {
         if body.contains("createCommitOnBranch") {
             commit_body = Some(body);
         }
     }
-    let commit_body = commit_body.unwrap_or_default();
-    assert!(
-        commit_body.contains(r#""additions":[]"#) && commit_body.contains(r#""deletions":[]"#),
-        "re-land must carry an EMPTY fileChanges payload, got: {commit_body}"
+    let commit_body = commit_body.ok_or_else(|| {
+        miette::miette!("re-land must issue exactly one createCommitOnBranch request")
+    })?;
+    let (_, body) = commit_body
+        .split_once("\r\n\r\n")
+        .unwrap_or(("", commit_body.as_str()));
+    let payload: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        miette::miette!("createCommitOnBranch body must be valid JSON: {error}")
+    })?;
+    let file_changes = payload
+        .get("variables")
+        .and_then(|variables| variables.get("input"))
+        .and_then(|input| input.get("fileChanges"))
+        .ok_or_else(|| miette::miette!("createCommitOnBranch body must carry fileChanges"))?;
+    assert_eq!(
+        file_changes,
+        &serde_json::json!({"additions": [], "deletions": []}),
+        "re-land must carry an EMPTY fileChanges payload, got: {file_changes}"
     );
     Ok(())
 }
@@ -2796,8 +2814,9 @@ fn github_push_branch_re_land_is_a_no_op_on_a_verified_head() -> miette::Result<
 #[test]
 fn github_push_branch_re_land_fails_closed_on_unsigned_landing() -> miette::Result<()> {
     // The mutation returned an unverified commit: refuse (typed error). The
-    // remote head advanced (createCommitOnBranch moved the real branch); the
-    // error text carries the documented restore command for the caller.
+    // real ref never moves (the landing goes to a temporary branch and the
+    // gate fails before the updateRefs swing), so no manual restore is
+    // needed — the typed error reports the untouched remote head.
     let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
     let local_tree = fixture_main_tree(&repo)?;
     let rules = vec![
@@ -3277,7 +3296,7 @@ fn github_push_branch_new_branch_accepts_explicit_sha_base() -> miette::Result<(
         ),
         (
             "updateRefs".to_string(),
-            update_refs_stub("refs/heads/feature/signed"),
+            update_refs_stub(),
         ),
         (
             r#""name":"refs/heads/feature/signed""#.to_string(),

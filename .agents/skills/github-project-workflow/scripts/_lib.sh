@@ -398,12 +398,83 @@ orc_lib_resolve_repo() {
 orc_lib_require_mergeable() {
   local pr="$1" repo="$2" state attempts=0
   while :; do
-    if ! state="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable --jq '.mergeable // "UNKNOWN"' 2>/dev/null)"; then
-      echo "error: could not read PR #$pr (gh pr view failed against $repo): refusing to proceed fail-closed" >&2
-      exit "$ORC_ERR_UNRECOVERABLE"
+    # Read the raw JSON then apply the filter locally: a gh that ignores
+    # --jq (or a test stub that does not implement it) still yields parseable
+    # state instead of a misread. The read is a PRECONDITION to the mutating
+    # call, and the enforcement decision for that call happens later inside
+    # orc_lib_gh_service — so this read must use the ROUTED gh (service route
+    # when the App config resolves), never bypass it: in required mode the
+    # ambient gh is exactly the path the gate exists to keep unused, and the
+    # read must never be the ambient call that precedes a refused write.
+    local raw
+    # Pure jq read over gh — NO side effects beyond the read itself, and no
+    # routing decision of its own: the enforcement decision for the MUTATING
+    # call happens later inside orc_lib_gh_service, which still fails closed
+    # (typed config error, gh never invoked) in required mode with missing
+    # config. This gate only inspects state; it never authenticates a write.
+    # IMPORTANT ordering contract: callers invoke this gate only AFTER their
+    # enforcement refusal point would already have fired (the gate sits
+    # immediately before the mutating call), so in required+missing-config
+    # the typed config refusal wins and this read never runs.
+    local probe_status=0
+    orc_lib_has_github_app_config || probe_status=$?
+    local read_failed=0
+    if [ "$probe_status" -eq 2 ]; then
+      # Config PRESENT but unresolved (orc available, layered config broken):
+      # fail closed here — the ambient route below would authenticate the
+      # precondition read with personal credentials the enforcement gate
+      # refuses for the mutation.
+      echo "error: github_app configuration is present but could not be resolved;" >&2
+      echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+      exit "$ORC_ERR_CONFIG"
+    elif [ "$probe_status" -eq 1 ] && [ "$(orc_lib_enforcement_probe_status)" -eq 2 ]; then
+      # Invalid enforcement pin (the probe recorded status 2): fail closed
+      # BEFORE any read — an unrecognized pin must never widen into the
+      # ambient fallback (the fail-open outcome the pin prevents).
+      echo "error: invalid github_app.enforcement pin;" >&2
+      echo "       refusing the ambient read — set the pin to required or recommended." >&2
+      exit "$ORC_ERR_CONFIG"
+    elif [ "$probe_status" -eq 1 ] && orc_lib_enforcement_required; then
+      # Ambient route is forbidden in required mode: the read must not become
+      # the personal-auth call the enforcement gate exists to refuse. Same
+      # typed error, same exit class (2) as the mutating-call refusal. (An
+      # invalid enforcement pin already failed closed inside the probe with
+      # its own typed error and exit 2.)
+      echo "error: service-identity enforcement is \`required\` (github_app.enforcement);" >&2
+      echo "       refusing to fall back to personal auth for a mutating GitHub call." >&2
+      echo "       resolve the github_app config (client_id, installation_id, private_key_uri)" >&2
+      echo "       or set github_app.enforcement = \"recommended\"; see docs/cli/orc-github.md" >&2
+      exit "$ORC_ERR_CONFIG"
+    elif [ "$probe_status" -eq 1 ]; then
+      # Config absent, recommended/unset enforcement: labelled ambient read.
+      raw="$(orc_lib_gh pr view "$pr" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)" || { raw=""; read_failed=1; }
+    else
+      # probe_status 0: service route — the read rides the App installation
+      # token via gh-env, the same route the subsequent mutating call takes.
+      raw="$(command "${ORC_BIN:-orc}" github gh-env -- "${GH_BIN:-gh}" pr view "$pr" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)" || { raw=""; read_failed=1; }
     fi
-    case "$state" in
-      MERGEABLE) return 0 ;;
+    if [ "$read_failed" -eq 1 ]; then
+      # A FAILED read is not the same as an UNKNOWN mergeable state: GitHub
+      # reporting "still computing" is retryable, a read failure is not —
+      # retrying cannot make a broken route answer. Fail closed immediately
+      # with a distinct typed message.
+      echo "error: failed to read PR #$pr mergeable state (the pr view read itself failed): refusing to proceed fail-closed — check auth/route and retry once the read succeeds" >&2
+      # main's gh-failure refusal folded in: a gh COMMAND failure is a typed
+      # unrecoverable error, distinct from a readable PR whose state is
+      # unparseable (which takes the blocked path above).
+      exit "$ORC_ERR_BLOCKED"
+    fi
+    state="$(printf '%s' "$raw" | jq -r '"\(.mergeable // "UNKNOWN")|\(.mergeStateStatus // "UNKNOWN")"' 2>/dev/null)" || state=""
+    local mergeable="${state%%|*}" merge_state="${state#*|}"
+    [ "$mergeable" = "$state" ] && mergeable="$state" merge_state=""
+
+    case "$mergeable" in
+      MERGEABLE)
+        if [ "$merge_state" = "DIRTY" ]; then
+          echo "error: PR #$pr is unmergeable (mergeStateStatus=DIRTY): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
+          exit "$ORC_ERR_BLOCKED"
+        fi
+        return 0 ;;
       CONFLICTING)
         echo "error: PR #$pr conflicts with its base branch (mergeable=CONFLICTING): resolve conflicts with base first — no review request or review trigger while the PR is unmergeable (owner directive 2026-10-07)" >&2
         exit "$ORC_ERR_BLOCKED" ;;
@@ -439,9 +510,17 @@ orc_lib_require_gh_scope() {
     echo "error: gh CLI not found. Install from https://cli.github.com/" >&2
     exit "$ORC_ERR_CONFIG"
   fi
-  if orc_lib_has_github_app_config; then
-    return 0 # service route: the installation token minted by orc gh-env carries the App permissions
-  fi
+  local probe_status=0
+  orc_lib_has_github_app_config || probe_status=$?
+  case "$probe_status" in
+    0) return 0 ;; # service route: the installation token minted by orc gh-env carries the App permissions
+    2)
+      echo "error: the layered github_app config could not be resolved;" >&2
+      echo "       refusing the ambient personal-auth check on a broken configuration." >&2
+      exit "$ORC_ERR_CONFIG"
+      ;;
+    # 1 = config absent: the ambient gh auth state is the real auth.
+  esac
   if ! gh auth status >/dev/null 2>&1; then
     echo "error: not authenticated to gh and no github_app service config is set." >&2
     echo "       Either resolve the github_app config (service route) or run 'gh auth login'" >&2

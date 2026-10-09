@@ -322,6 +322,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `required` enforcement pin is honored even when the `orc` binary is
   unavailable or the working tree cannot be resolved: the operation fails
   closed with its typed config error instead of the personal fallback.
+- The review-thread reply path is fail-closed before the write: `pr-thread-reply --resolve` verifies the supplied thread belongs to the PR and contains the replied-to comment BEFORE the reply is posted, so a wrong thread ID is a typed refusal with no reply written (a retry cannot double-post).
+- The conflict gate's `pr view` precondition read reports a read FAILURE as its own typed refusal (fail-closed immediately) instead of masquerading as a "GitHub still computing" UNKNOWN that retries twice.
+- `review-thread-reply` reference examples route through the service identity (`orc github gh-env --`); the `addPullRequestReviewThreadReply` example no longer selects the unsupported `thread` field that fails GraphQL validation.
 - README updated to lead with the bounded, self-improving delivery loop as the
   product's first axis (spec `00-overview.md` §1, §2.3, §3.1), with a new
   "The delivery loop" section describing the stage cycle, the guard set, and
@@ -363,8 +366,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   layer registers a custom role that `orc routing resolve --role <id>` and
   `orc config get roles.<id>.routing.*` resolve through the same path as the
   six built-in roles — identical layer precedence, field-wise merge, typed
-  errors for partial entries, and the `neuralwatt`/`glm-5.2` bootstrap
-  fallback. Role ids follow the provider id shape (1–64 lowercase ASCII
+  errors for partial entries, and the `neuralwatt` bootstrap fallback
+  (`glm-5.3-flash`). Role ids follow the provider id shape (1–64 lowercase ASCII
   letters, digits, `-` or `_`); ids that are neither built-in nor configured
   remain a typed `unknown role` error. Same-layer shard conflicts on
   `roles.<id>.routing.*` keys are rejected by `orc config validate` with the
@@ -811,8 +814,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   layer registers a custom role that `orc routing resolve --role <id>` and
   `orc config get roles.<id>.routing.*` resolve through the same path as the
   six built-in roles — identical layer precedence, field-wise merge, typed
-  errors for partial entries, and the `neuralwatt`/`glm-5.2` bootstrap
-  fallback. Role ids follow the provider id shape (1–64 lowercase ASCII
+  errors for partial entries, and the `neuralwatt` bootstrap fallback
+  (`glm-5.3-flash`). Role ids follow the provider id shape (1–64 lowercase ASCII
   letters, digits, `-` or `_`); ids that are neither built-in nor configured
   remain a typed `unknown role` error. Same-layer shard conflicts on
   `roles.<id>.routing.*` keys are rejected by `orc config validate` with the
