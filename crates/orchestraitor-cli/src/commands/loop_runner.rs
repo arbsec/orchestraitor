@@ -140,8 +140,8 @@ struct DirectLoopStarter {
     invocation_id: String,
     /// The §13.5.1 profile label (spec §9.22.5) resolved from
     /// `roles.<role>.routing.profile`; recorded on every cost entry the
-    /// spawned run writes so `orc stats --group-by profile` can compare
-    /// with/without-compaction profiles. `None` = unprofiled.
+    /// spawned run writes so `orc stats efficiency --group-by-profile`
+    /// can compare with/without-compaction profiles. `None` = unprofiled.
     profile: Option<String>,
     /// Declared-tool surface built ONCE at startup (the layer-trust gate,
     /// role routing, and sub-role provider gate all run before the loop

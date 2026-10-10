@@ -13,8 +13,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
-- **Token-efficiency statistics** (`orc stats efficiency`): read-only
-  reporting over the cost ledger showing, per session or per configuration
+- **Token-efficiency statistics** (`orc stats efficiency`): reporting
+  over the cost ledger showing, per session or per configuration
   profile, provider-reported input/output/cache tokens alongside
   context-compiler receipt deltas (candidate vs selected tokens, tool-output
   compaction) and the derived savings ratio. Sessions without receipts

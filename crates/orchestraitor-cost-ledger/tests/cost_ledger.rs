@@ -531,6 +531,19 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
     ledger
         .insert_context_receipt(&receipt("sess-a", "ctx-a", 100_000, 40_000, 0, 0))
         .unwrap();
+    // A second receipt-backed session under the SAME profile label: the
+    // group's receipt totals must SUM across sessions (regression guard
+    // for the bare-column aggregation defect where SQLite returned one
+    // arbitrary session's totals per group).
+    let mut second_profiled = cost_entry_with_session("sess-c", "req-c", 3_000, 30);
+    second_profiled.profile = Some(String::from("aggressive"));
+    ledger
+        .api_spend()
+        .insert_cost_entry(&second_profiled)
+        .unwrap();
+    ledger
+        .insert_context_receipt(&receipt("sess-c", "ctx-c", 50_000, 20_000, 4_000, 1_000))
+        .unwrap();
     // sess-b has no receipt: its savings stay unmeasured even though its
     // cost tokens roll up under the same profile group.
 
@@ -543,16 +556,25 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
         .iter()
         .find(|rollup| rollup.profile.as_deref() == Some("aggressive"))
         .unwrap_or_else(|| panic!("aggressive group must exist"));
-    assert_eq!(aggressive.input_tokens, 1_000);
-    assert_eq!(aggressive.candidate_tokens, Some(100_000));
-    assert_eq!(aggressive.selected_tokens, Some(40_000));
+    assert_eq!(
+        aggressive.input_tokens, 4_000,
+        "cost tokens sum across both sessions in the group"
+    );
+    assert_eq!(
+        aggressive.candidate_tokens,
+        Some(150_000),
+        "receipt totals sum across BOTH sessions in the group"
+    );
+    assert_eq!(aggressive.selected_tokens, Some(60_000));
+    assert_eq!(aggressive.raw_tool_output_tokens, Some(4_000));
+    assert_eq!(aggressive.compacted_tool_output_tokens, Some(1_000));
+    let ratio = aggressive
+        .savings_ratio
+        .unwrap_or_else(|| panic!("measured"));
+    let expected = 1.0 - (61_000_f64 / 154_000_f64);
     assert!(
-        (aggressive
-            .savings_ratio
-            .unwrap_or_else(|| panic!("measured"))
-            - 0.6)
-            .abs()
-            < 1e-12
+        (ratio - expected).abs() < 1e-12,
+        "ratio must derive from the group-summed counters"
     );
     let unprofiled = rollups
         .iter()

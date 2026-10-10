@@ -1,12 +1,16 @@
 # `orc stats` — token-efficiency statistics
 
-Read-only reporting over the cost ledger (`.orchestraitor/cost.db`, spec
+Reporting over the cost ledger (`.orchestraitor/cost.db`, spec
 [§9.19.4](../spec/30-model-routing.md)) implementing the measurement
 methodology of spec [§13.5.1](../spec/50-contracts-data.md).
 
 ```sh
 orc stats efficiency [--group-by-profile] [--json]
 ```
+
+The command requires an existing ledger: it fails with a typed error naming
+the missing path when `orc loop` has not created `.orchestraitor/cost.db`
+yet — it never creates the file or fabricates an empty report.
 
 ## `orc stats efficiency`
 

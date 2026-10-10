@@ -19,15 +19,24 @@ pub fn run(paths: &ConfigPaths, command: StatsCommand, writer: &mut dyn Write) -
     }
 }
 
-/// `orc stats efficiency`: opens the ledger read-only-shaped (an open
-/// failure is a typed error — reporting must never silently fabricate an
-/// empty report) and prints per-session or per-profile rollups.
+/// `orc stats efficiency`: opens the EXISTING ledger and prints
+/// per-session or per-profile rollups. A missing ledger file is a typed
+/// error, never a silently created empty one — a reporting command must
+/// not write to disk (schema creation / migration) or fabricate an empty
+/// report for a mistyped config dir.
 fn efficiency(
     paths: &ConfigPaths,
     args: &StatsEfficiencyArgs,
     writer: &mut dyn Write,
 ) -> Result<()> {
-    let ledger = CostLedger::open(&paths.config_dir.join("cost.db")).into_diagnostic()?;
+    let ledger_path = paths.config_dir.join("cost.db");
+    if !ledger_path.is_file() {
+        return Err(miette::miette!(
+            "no cost ledger at {} — run `orc loop` first (per-call cost tracking creates it)",
+            ledger_path.display()
+        ));
+    }
+    let ledger = CostLedger::open(&ledger_path).into_diagnostic()?;
     let grouping = if args.group_by_profile {
         EfficiencyGrouping::Profile
     } else {
@@ -48,10 +57,6 @@ fn efficiency(
 /// Renders the rollups as a markdown table. Savings shows `—` when no
 /// receipt exists for the group (spec §13.5.1: not measured is not zero).
 fn render_markdown(writer: &mut dyn Write, rollups: &[TokenEfficiencyRollup]) {
-    if rollups.is_empty() {
-        let _ignore = writeln!(writer, "no cost entries recorded");
-        return;
-    }
     let _ignore = writeln!(
         writer,
         "| group | input | output | cached (read) | candidate | selected | savings |"

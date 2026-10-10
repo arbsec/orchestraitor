@@ -152,12 +152,12 @@ impl CostLedger {
         // grouping): add it in place, defaulting to NULL (= no profile
         // label recorded). `CREATE TABLE IF NOT EXISTS` above cannot alter
         // an already-created table.
-        let has_profile = self.conn.query_row(
+        let missing_profile = self.conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
             [],
             |row| row.get::<_, i64>(0),
         )? == 0;
-        if has_profile {
+        if missing_profile {
             self.conn
                 .execute("ALTER TABLE cost_entries ADD COLUMN profile TEXT", [])?;
         }
@@ -221,8 +221,11 @@ impl CostLedger {
         let sql = format!(
             "SELECT {select_session}, {select_agent}, {select_profile}, \
              SUM(c.input_tokens), SUM(c.output_tokens), SUM(c.cache_read_tokens), SUM(c.cache_write_tokens), \
-             r.candidate_tokens, r.selected_tokens, r.raw_tool_output_tokens, r.compacted_tool_output_tokens \
-             FROM cost_entries c \
+             SUM(r.candidate_tokens), SUM(r.selected_tokens), SUM(r.raw_tool_output_tokens), \
+             SUM(r.compacted_tool_output_tokens) \
+             FROM (SELECT session, profile, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, \
+                          SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens \
+                   FROM cost_entries GROUP BY session, COALESCE(profile, '')) c \
              LEFT JOIN (SELECT session, SUM(candidate_tokens) AS candidate_tokens, SUM(selected_tokens) AS selected_tokens, \
                         SUM(raw_tool_output_tokens) AS raw_tool_output_tokens, SUM(compacted_tool_output_tokens) AS compacted_tool_output_tokens \
                         FROM context_receipts GROUP BY session) r ON r.session = c.session \
