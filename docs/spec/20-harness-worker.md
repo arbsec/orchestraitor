@@ -484,7 +484,7 @@ Memory is stored as nodes and typed edges:
 - `memory_node`: `kind`, `scope` (`session` | `project` | `global`), `tier`, `title`, `summary`, `payload_digest`, the provenance fields of §9.15.1 (`origin`, `trust_class`, `sensitivity`, `source_ref`), `created_ts`, `last_access_ts`, `aged_access_count`, `pinned`, `valid_at`, `invalid_at`, `tombstone_reason`, `schema_version`.
 - `memory_edge`: `src`, `dst`, `rel` (`REFERENCES` | `SUMMARIZES` | `SUPERSEDES` | `DERIVED_FROM` | `CONTRADICTS`), `created_ts`, `invalidated_ts`.
 
-`SUPERSEDES` and `CONTRADICTS` edges implement deterministic bi-temporal invalidation without an LLM in the loop (contrasting Zep/Graphiti): when a new fact node contradicts an existing one — detected at write time by FTS overlap plus same-entity heuristics, or declared explicitly by the model — the old node gets `invalid_at` set and a `SUPERSEDES` edge to its successor. Retrieval defaults to live nodes (`invalid_at IS NULL`); temporal queries are first-class because both timestamps exist from day one.
+`SUPERSEDES` and `CONTRADICTS` edges implement deterministic bi-temporal invalidation without an LLM in the invalidation loop (contrasting Zep/Graphiti): when a new fact node supersedes an existing one, the old node gets `invalid_at` set and a `SUPERSEDES` edge to its successor. Invalidation requires evidence, not similarity: the model MUST declare the contradiction/supersession explicitly, or a write-time check MUST confirm a semantic contradiction before the old node is invalidated. FTS overlap plus same-entity heuristics only NOMINATE candidate pairs — shared tokens and a shared entity do not prove contradiction, so a nomination alone MUST never set `invalid_at`; an unconfirmed candidate stays live. (A model-declared contradiction is recorded with its origin and trust_class per §9.15.1 — an untrusted declaration does not gain invalidation authority over trusted nodes; see §9.15.1.) Retrieval defaults to live nodes (`invalid_at IS NULL`); temporal queries are first-class because both timestamps exist from day one.
 
 ##### Deterministic scoring
 
@@ -554,7 +554,7 @@ The subsystem lives in a new crate, `orchestraitor-memory`, depending on `orches
 
 ##### MVP and post-MVP
 
-MVP: schema + CAS pointers, session working-set substitution, `expand_context`, deterministic scoring and tier transitions with hysteresis, provenance envelopes on every emitted item, receipts + telemetry counters, `memory.*` events, explicit `SUPERSEDES` invalidation. Post-MVP (§999): cross-session summarization daemon, embedding index (sqlite-vec, feature- and benchmark-gated), bi-temporal query API over `valid_at`/`invalid_at`, shared memory blocks for multi-agent topologies, and cluster summaries for large graphs.
+MVP: schema + CAS pointers, session working-set substitution, `expand_context`, deterministic scoring and tier transitions with hysteresis, provenance envelopes on every emitted item, receipts + telemetry counters, `memory.*` events, evidence-gated `SUPERSEDES` invalidation (model-declared or semantically confirmed). Post-MVP (§999): cross-session summarization daemon, embedding index (sqlite-vec, feature- and benchmark-gated), bi-temporal query API over `valid_at`/`invalid_at`, shared memory blocks for multi-agent topologies, and cluster summaries for large graphs.
 
 ### 9.16 LSP and semantic intelligence
 
