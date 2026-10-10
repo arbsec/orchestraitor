@@ -25,6 +25,7 @@ members = [
     "crates/orchestraitor-provider-meta",
     "crates/orchestraitor-provider-neuralwatt",
     "crates/orchestraitor-provider-proxy",
+    "crates/orchestraitor-simplify",
     "crates/orchestraitor-tui",
     "crates/orchestraitor-testkit",
     "crates/orchestraitor-worker",

@@ -13,6 +13,17 @@ pre-commit:
       run: rumdl check {staged_files}
       glob: "*.{md,markdown}"
       stage_fixed: false
+    # Pre-landing simplify pass (fail-open quality tooling; spec §9.5): a
+    # fast-feedback affordance only — hooks are bypassable, and the real
+    # gate is the push path (the review-loop PR's pre-push gate). The pass
+    # never blocks: it exits 0 (config-resolution failures included; they
+    # surface as an ORC-SIMPLIFY-001 warning and skip). No `--fix` here:
+    # `--staged` runs are check-only by design — format fixes would rewrite
+    # whole files and clobber unstaged hunks.
+    simplify:
+      run: orc simplify run --staged
+      glob: "*.rs"
+      stage_fixed: false
 
 commit-msg:
   commands:
@@ -23,6 +34,20 @@ pre-push:
   commands:
     test:
       run: cargo nextest run --no-tests=pass
+      glob:
+        - "*.rs"
+        - "**/*.rs"
+    # Fast-feedback simplify check above Format class: exits 1 only when
+    # unaddressed safe-fix/semantic suggestions exist. Deliberately NOT
+    # `--staged`: at pre-push time the branch is fully committed, the index
+    # matches HEAD, and a staged scope would be empty — the check would see
+    # only pathless findings. Unscoped, it reviews the whole tree. A non-
+    # zero exit DOES reject a local `git push` — hooks are bypassable and
+    # untrusted-adjacent, so this is fast feedback, never the AUTHORITATIVE
+    # pre-landing gate (that is the review-loop PR's push-branch gate, and
+    # developers can override with --no-verify).
+    simplify-push:
+      run: orc simplify run --pedantic-check
       glob:
         - "*.rs"
         - "**/*.rs"

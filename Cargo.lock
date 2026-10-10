@@ -4592,6 +4592,7 @@ dependencies = [
  "orchestraitor-provider-api",
  "orchestraitor-provider-meta",
  "orchestraitor-provider-neuralwatt",
+ "orchestraitor-simplify",
  "orchestraitor-testkit",
  "orchestraitor-worker",
  "reqwest",
@@ -4845,6 +4846,17 @@ dependencies = [
  "tokio",
  "tower",
  "uuid",
+]
+
+[[package]]
+name = "orchestraitor-simplify"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

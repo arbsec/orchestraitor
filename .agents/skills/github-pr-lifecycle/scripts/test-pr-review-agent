@@ -25,9 +25,13 @@ case "$1/${2:-}" in
   pr/view)
     if [[ " $* " == *" -q "* ]]; then
       printf '%s\n' "${MERGE_HEAD:-$TEST_HEAD}"
+    elif [[ " $* " == *"--json baseRefOid,headRefOid"* ]]; then
+      # merge-gate's post-convergence anchor check: a moved head must be
+      # visible exactly there (simulates drift between gate and merge).
+      jq -n --arg sha "${MERGE_HEAD:-$TEST_HEAD}" --arg base "${TEST_BASE:-$TEST_BASE_DEFAULT}" '{headRefOid:$sha,baseRefOid:$base}'
     else
-      jq -n --arg sha "$TEST_HEAD" --arg merge "${TEST_MERGE_STATE:-CLEAN}" \
-        '{state:"OPEN",headRefOid:$sha,mergeStateStatus:$merge,reviewDecision:"APPROVED",isDraft:false}'
+      jq -n --arg sha "$TEST_HEAD" --arg base "${TEST_BASE:-$TEST_BASE_DEFAULT}" \
+        '{state:"OPEN",headRefOid:$sha,baseRefOid:$base,mergeStateStatus:"'"${TEST_MERGE_STATE:-CLEAN}"'",reviewDecision:"APPROVED",isDraft:false}'
     fi ;;
   pr/diff) printf 'diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n+new line\n-old line\n context\n' ;;
   api/--method)
@@ -56,6 +60,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export GH_LOG="$TMP/gh.jsonl" SERVICE_LOG="$TMP/service.log" TMPDIR="$TMP/files"
 export TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
+export TEST_BASE_DEFAULT=1111111234567890abcdef1234567890abcdef99
 export ORC_GITHUB_APP_ENFORCEMENT=required
 RECORD="$TMP/repo/.orchestraitor/reviews/7-abcdef1.md"
 PASS=0; FAIL=0
@@ -71,7 +76,8 @@ mutations() {
   jq -s '[.[] | select(.[0] == "api" or (.[0] == "pr" and (.[1] == "comment" or .[1] == "review" or .[1] == "merge")))] | length' "$GH_LOG"
 }
 clean_verdict() {
-  jq -n --arg sha "$TEST_HEAD" '{head_sha:$sha,verdict:"CLEAN",findings:[]}' > "$TMP/verdict.json"
+  jq -n --arg sha "$TEST_HEAD" --arg base "${TEST_BASE:-$TEST_BASE_DEFAULT}" \
+    '{head_sha:$sha,base_oid:$base,verdict:"CLEAN",findings:[]}' > "$TMP/verdict.json"
 }
 run pr-review-agent 7 --repo test-org/repo
 assert 'prompt succeeds' 0 "$RC"
@@ -88,6 +94,7 @@ run pr-review-agent 7 --repo test-org/repo --record "$TMP/verdict.json" --review
 assert 'CLEAN recording succeeds' 0 "$RC"
 assert 'receipt records exact reviewed SHA' "$TEST_HEAD" "$(jq -r .head_sha <<<"$OUT")"
 assert 'record stores reviewed SHA' "- head SHA: $TEST_HEAD" "$(sed -n '5p' "$RECORD")"
+assert 'record stores reviewed base' "- base OID: $TEST_BASE_DEFAULT" "$(sed -n '6p' "$RECORD")"
 assert 'CLEAN has no mutations' 0 "$(mutations)"
 run convergence-status 7 --repo test-org/repo --json
 assert 'CLEAN at exact current head converges' 0 "$RC"
@@ -100,6 +107,25 @@ run merge-gate 7 --repo test-org/repo
 assert 'head movement after convergence rejected' 4 "$RC"
 assert 'head movement cannot merge' 0 "$(mutations)"
 unset MERGE_HEAD
+export TEST_BASE=2222221234567890abcdef1234567890abcdef11
+run convergence-status 7 --repo test-org/repo --json
+assert 'base advance with unchanged head cannot converge' 5 "$RC"
+assert 'base advance gives stale-record reason' true "$(jq '.reasons | index("agent_review_not_clean_at_head") != null' <<<"$OUT")"
+run merge-gate 7 --repo test-org/repo
+assert 'base advance cannot merge' 5 "$RC"
+assert 'base advance merges nothing' 0 "$(mutations)"
+clean_verdict
+run pr-review-agent 7 --repo test-org/repo --record "$TMP/verdict.json"
+assert 'fresh record at new base succeeds' 0 "$RC"
+assert 'record stores new base' "- base OID: $TEST_BASE" "$(sed -n '6p' "$RECORD")"
+run convergence-status 7 --repo test-org/repo --json
+assert 're-reviewed base converges' 0 "$RC"
+unset TEST_BASE
+run convergence-status 7 --repo test-org/repo --json
+assert 'base revert invalidates new-base record' 5 "$RC"
+clean_verdict
+run pr-review-agent 7 --repo test-org/repo --record "$TMP/verdict.json"
+assert 'restored base re-converges' 0 "$RC"
 
 # Rejections must preserve any prior record and produce no remote writes.
 BASE_RECORD="$(cat "$RECORD")"
@@ -108,6 +134,10 @@ for shape in \
   '.head_sha = "abcdef1"' \
   '.head_sha = "abcdef1234567890abcdef1234567890abcdef99"' \
   '.head_sha = "refs/heads/main"' \
+  'del(.base_oid)' \
+  '.base_oid = "abcdef1"' \
+  '.base_oid = "2222221234567890abcdef1234567890abcdef11"' \
+  '.base_oid = "refs/heads/main"' \
   '.findings = {}' \
   '.verdict = "FINDINGS" | .findings = {a:{severity:"HIGH",path:"a",description:"x"}}' \
   '.verdict = "FINDINGS"' \
@@ -147,7 +177,7 @@ for record_kind in missing stale findings spoof; do
   assert "$record_kind has no mutations" 0 "$(mutations)"
 done
 
-jq -n --arg sha "$TEST_HEAD" '{head_sha:$sha,verdict:"FINDINGS",findings:[
+jq -n --arg sha "$TEST_HEAD" --arg base "$TEST_BASE_DEFAULT" '{head_sha:$sha,base_oid:$base,verdict:"FINDINGS",findings:[
   {severity:"HIGH",path:"src/a.rs",line:3,description:"first\nsecond\u001fpart", "fix-suggestion":"fix\nmore"},
   {severity:"LOW",path:"docs/x.md",description:"summary\ncontinued", "fix-suggestion":"edit\nheading"}
 ]}' > "$TMP/findings.json"

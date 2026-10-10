@@ -84,6 +84,16 @@ fn is_known_key(key: &str) -> bool {
     key == "normalization.format_on_write"
         || key == "normalization.max_passes"
         || key == "normalization.safe_fix_classifications"
+        || matches!(
+            key,
+            "simplify.enabled"
+                | "simplify.auto_apply_format"
+                | "simplify.auto_apply_safe_fixes"
+                | "simplify.max_passes"
+                | "simplify.max_files"
+                | "simplify.pedantic"
+                | "simplify.model_pass"
+        )
         || key == "retry.max_attempts"
         || key == "retry.backoff_ms"
         || matches_dynamic_key(
@@ -329,6 +339,47 @@ private_key_uri = "secret://keyring/orchestraitor-app-pem"
         assert_eq!(
             report.unknown_keys,
             vec!["roles.implement.provider".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn simplify_keys_are_known_and_roundtrip() -> Result<(), OrchestraitorError> {
+        let toml = r"
+[simplify]
+enabled = true
+auto_apply_format = true
+auto_apply_safe_fixes = false
+max_passes = 2
+max_files = 200
+pedantic = false
+model_pass = false
+";
+        let report = parse_toml_config(toml)?;
+        assert_eq!(report.unknown_keys, [] as [String; 0]);
+        let simplify = report.config.simplify.as_ref();
+        assert_eq!(simplify.and_then(|config| config.enabled), Some(true));
+        assert_eq!(
+            simplify.and_then(|config| config.auto_apply_format),
+            Some(true)
+        );
+        assert_eq!(
+            simplify.and_then(|config| config.auto_apply_safe_fixes),
+            Some(false)
+        );
+        assert_eq!(simplify.and_then(|config| config.max_passes), Some(2));
+        assert_eq!(simplify.and_then(|config| config.max_files), Some(200));
+        assert_eq!(simplify.and_then(|config| config.pedantic), Some(false));
+        assert_eq!(simplify.and_then(|config| config.model_pass), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn simplify_unknown_key_is_reported() -> Result<(), OrchestraitorError> {
+        let report = parse_toml_config("[simplify]\nunknown_key = 1\n")?;
+        assert_eq!(
+            report.unknown_keys,
+            vec!["simplify.unknown_key".to_string()]
         );
         Ok(())
     }

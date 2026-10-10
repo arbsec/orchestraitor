@@ -63,6 +63,7 @@ before anything is posted):
 ```json
 {
   "head_sha": "<full 40-character commit SHA reviewed>",
+  "base_oid": "<full 40-character base commit SHA the diff was reviewed against>",
   "verdict": "CLEAN|FINDINGS",
   "findings": [
     {
@@ -78,6 +79,10 @@ before anything is posted):
 
 - `head_sha` is the exact full commit SHA from the review scope. Recording
   rejects missing, abbreviated, or stale SHAs before posting or writing a record.
+- `base_oid` is the exact full base commit SHA from the review scope. Recording
+  rejects missing, abbreviated, or stale base OIDs: a review generation is
+  evidence for the (base, head) pair it actually reviewed, and a base advance
+  invalidates it exactly like a head movement (see [pr-convergence.md](pr-convergence.md)).
 - `findings` must be an array; omit it or use `[]` when `CLEAN`.
 - `verdict` is `CLEAN` (empty findings array) or `FINDINGS` (at least one).
 - `line` is `null`/omitted when the finding has no resolvable line ref; such
@@ -93,25 +98,28 @@ Invalid verdict format (bad JSON, unknown verdict, unknown severity, missing
 `path`/`description`, `CLEAN` with findings, `FINDINGS` with none) is a typed
 error: **nothing is posted, no record is written.**
 
-## Records: one per head SHA, invalidated by new commits
+## Records: one per (base, head) pair, invalidated by new commits or base advances
 
 `--record` stores a compact record at
 `.orchestraitor/reviews/<pr>-<head-sha-short>.md` (verdict, findings,
 reviewer-agent id, full head SHA). Records accumulate per head SHA: each new
 commit produces a new head SHA and thus a new record filename.
 
-A record is evidence for the head it names and for that head only. This ties
-directly to [pr-convergence.md](pr-convergence.md): **every new commit
-invalidates earlier convergence** — a review generation run against commit A
-says nothing about commit A+1. Convergence therefore requires the recorded
-generation to be `CLEAN` against the CURRENT head:
+A record is evidence for the (base, head) pair it names and for that pair only.
+This ties directly to [pr-convergence.md](pr-convergence.md): **every new commit
+AND every base advance invalidates earlier convergence** — a review generation
+run against (base A, head H) says nothing about (base A+1, head H). Convergence
+therefore requires the recorded generation to be `CLEAN` against the CURRENT
+head and CURRENT base:
 
 - A `CLEAN` record at head A does not converge the PR after head B lands.
+- A `CLEAN` record at base A does not converge the PR after the base advances
+  to B — even with an unchanged head, the reviewed diff changed.
 - The orchestrator (or a human) re-runs `pr-review-agent <pr>` — the new
-  scope header carries the new head SHA — and records a fresh verdict.
-- `convergence-status` requires a `CLEAN` record whose metadata contains an
-  exact full-SHA match to the current head; a matching short filename alone
-  is insufficient. `merge-gate` uses this check and rejects head movement
+  scope header carries the new head SHA and base OID — and records a fresh verdict.
+- `convergence-status` requires a `CLEAN` record whose metadata contains exact
+  full-SHA matches to the current head AND base; a matching short filename alone
+  is insufficient. `merge-gate` uses this check and rejects head OR base movement
   afterward. The record is one required input, never a merge path by itself.
 - Self-review is structurally excluded: the recorded `reviewer-agent` id is
   set by the orchestrator at invocation, and the contract forbids the

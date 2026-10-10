@@ -174,7 +174,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `@coderabbitai review` comments. Convergence evidence = a local
                   CLI review generation with zero actionable findings at the final
                   HEAD, recorded by the session — cite the run + SHA in the PR
-                  description.
+                  description. Convergence evidence binds to BOTH anchors — the
+                  reviewed HEAD SHA and the base OID the diff was reviewed
+                  against: `convergence-status` and `merge-gate` validate both,
+                  and a base advance with an unchanged head requires a fresh
+                  review generation (a stale clean run on the old base never
+                  converges).
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads

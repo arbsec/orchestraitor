@@ -44,6 +44,9 @@ orchestraitor-campaign = { path = "../orchestraitor-campaign" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-cost-ledger = { path = "../orchestraitor-cost-ledger" }
 orchestraitor-model = { path = "../orchestraitor-model" }
+# orchestraitor-simplify (MIT OR Apache-2.0): the rule-driven pre-landing
+# simplify pass surfaced as `orc simplify run`.
+orchestraitor-simplify = { path = "../orchestraitor-simplify" }
 # orchestraitor-provider-api (MIT OR Apache-2.0): the §9.45 DecisionProvider
 # trait object the `routing.provider` flag builds for task selection.
 orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }

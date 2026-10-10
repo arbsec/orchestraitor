@@ -66,6 +66,29 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   follow-up slices — task splitting (`propose_task_split`) and tool selection
   (`propose_tool_selection`) — implemented as default methods returning a
   typed `Unsupported` error, so adding them breaks no existing implementation.
+- The rule-driven pre-landing simplify pass, surfaced as
+  [`orc simplify run`](docs/cli/orc-simplify.md) and wired into lefthook
+  (`pre-commit` `simplify` + `pre-push` `simplify-push`): runs the tools the
+  repository already uses (cargo clippy, cargo fmt, rumdl, cargo-machete)
+  over a worktree and reports typed suggestions in the three §9.5
+  normalization classes — Format (auto-applies under
+  `--fix format` + `simplify.auto_apply_format`, the default), Safe fix
+  (suggest-only by default; auto-applies only under `--fix safe` +
+  `simplify.auto_apply_safe_fixes = true`, scoped to clippy
+  machine-applicable suggestions on `.rs` files pending the Arbitraitor
+  output-classification gate), and Semantic (suggest-only, never
+  auto-rewritten). Clippy checks and fixes both use `--all-targets`; a
+  safe-fix suggestion is marked applied only when a verify check after the
+  fix no longer reports it. Fail-open by design: an absent tool or a
+  timeout is a typed `ORC-SIMPLIFY-001` warning, never a blocker — the only
+  non-zero exit is `--pedantic-check` (the pre-push hook's fast-feedback
+  signal; the pre-landing enforcement point is the push path, landing with
+  the review-loop PR). New layered config table `[simplify]` with built-in
+  defaults: `enabled = true`, `auto_apply_format = true`,
+  `auto_apply_safe_fixes = false`, `max_passes = 2`, `max_files = 200`,
+  `pedantic = false`, and `model_pass = false` (parsed but not wired yet —
+  it activates with the review-loop PR's shared sub-session runtime).
+||||||| f21d7fb
 - SQLite-backed audit store (`SqliteAuditStore`) in `orchestraitor-events` for
   durable §9.17 audit persistence. The store performs hash-chain validation
   that detects inconsistencies between envelope bytes, hashes, and metadata —
@@ -538,6 +561,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- Simplify: an empty staged index drops the staged filter instead of hiding
+  every file-scoped finding; timed-out tools have their process group (or
+  Windows process tree) terminated and their output readers joined; applied
+  suggestion counts survive deduplication; `--pedantic-check` returns a
+  typed `PedanticCheckFailed` error to library callers after flushing the
+  report (the CLI still exits 1).
 - `orc github commit-author` authenticates `GET /app` with a freshly minted
   App JWT instead of an installation token: `GET /app` is an App-level
   endpoint that GitHub answers with 401 for installation tokens, so the

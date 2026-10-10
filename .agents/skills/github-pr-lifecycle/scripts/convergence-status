@@ -49,13 +49,14 @@ UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
 # must never be interpreted as verdict or SHA metadata.
-PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,headRefOid,isDraft)" || {
+PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,baseRefOid,headRefOid,isDraft)" || {
   echo "error: failed to read PR state" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
 REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
 IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
 HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
+BASE_SHA="$(echo "$PR_STATE_JSON" | jq -r '.baseRefOid')"
 
 AGENT_REVIEW_CLEAN=false
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -64,9 +65,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 RECORDS_DIR="$REPO_ROOT/.orchestraitor/reviews"
 RECORD_PATH="$RECORDS_DIR/${PR}-${HEAD_SHA:0:7}.md"
-if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -f "$RECORD_PATH" ]; then
+if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -f "$RECORD_PATH" ]; then
   if [ "$(sed -n '3p' "$RECORD_PATH")" = "- verdict: CLEAN" ] &&
-     [ "$(sed -n '5p' "$RECORD_PATH")" = "- head SHA: $HEAD_SHA" ]; then
+     [ "$(sed -n '5p' "$RECORD_PATH")" = "- head SHA: $HEAD_SHA" ] &&
+     [ "$(sed -n '6p' "$RECORD_PATH")" = "- base OID: $BASE_SHA" ]; then
     AGENT_REVIEW_CLEAN=true
   fi
 fi
@@ -90,10 +92,12 @@ if [ "$OPT_JSON" = true ]; then
     --arg mergeable "$MERGEABLE" \
     --arg reasons "$REASONS" \
     --arg head_sha "$HEAD_SHA" \
+    --arg base_oid "$BASE_SHA" \
     '{
       mergeable: ($mergeable == "true"),
       reasons: ($reasons | split(", ") | map(select(length > 0))),
       head_sha: $head_sha,
+      base_oid: $base_oid,
       checks_all_passed: ($mergeable == "true" or true),
       unresolved_actionable_threads: 0,
       unchecked_checklist_items: 0,
