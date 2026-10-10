@@ -466,6 +466,7 @@ arbsec/orchestraitor
 ├── crates/orchestraitor-arb-client # typed client over arbitraitor crates (NOT a security authority)
 ├── crates/orchestraitor-workspace         # snapshot mode, gix controller, no .git exposed
 ├── crates/orchestraitor-context           # tree-sitter baseline indexer, context query tools
+├── crates/orchestraitor-memory            # memory graph: content-addressed nodes/edges, tiers, working-set substitution (spec 20-harness-worker.md §9.15.2)
 ├── crates/orchestraitor-events            # normalized event schema, audit store
 ├── crates/orchestraitor-adapter-api       # AgentAdapter trait (spec §10.6)
 ├── crates/orchestraitor-adapter-host      # adapter supervisor, multiplexing
