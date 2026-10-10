@@ -522,7 +522,7 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
     let mut with_compaction = cost_entry_with_session("sess-a", "req-a", 1_000, 10);
     with_compaction.profile = Some(String::from("aggressive"));
     let mut without = cost_entry_with_session("sess-b", "req-b", 2_000, 20);
-    without.profile = None;
+    without.profile = Some(String::from("standard"));
     ledger
         .api_spend()
         .insert_cost_entry(&with_compaction)
@@ -545,7 +545,7 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
         .insert_context_receipt(&receipt("sess-c", "ctx-c", 50_000, 20_000, 4_000, 1_000))
         .unwrap();
     // sess-b has no receipt: its savings stay unmeasured even though its
-    // cost tokens roll up under the same profile group.
+    // cost tokens roll up under its own profile group.
 
     let rollups = ledger
         .token_efficiency_rollups(EfficiencyGrouping::Profile)
@@ -576,12 +576,12 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
         (ratio - expected).abs() < 1e-12,
         "ratio must derive from the group-summed counters"
     );
-    let unprofiled = rollups
+    let standard = rollups
         .iter()
-        .find(|rollup| rollup.profile.is_none())
-        .unwrap_or_else(|| panic!("unprofiled group must exist"));
-    assert_eq!(unprofiled.input_tokens, 2_000);
-    assert_eq!(unprofiled.savings_ratio, None);
+        .find(|rollup| rollup.profile.as_deref() == Some("standard"))
+        .unwrap_or_else(|| panic!("standard group must exist"));
+    assert_eq!(standard.input_tokens, 2_000);
+    assert_eq!(standard.savings_ratio, None);
 }
 
 /// Old receipt JSON (pre-§13.5.1) deserializes with the documented
@@ -666,4 +666,49 @@ fn legacy_ledger_migrates_profile_column_in_place() {
         "profile grouping drops the session key"
     );
     assert_eq!(aggressive.input_tokens, 7);
+}
+
+/// §13.5.1 write-time contract: one session = one profile label. A
+/// session whose entries mix labels (or mix NULL with a label) is refused
+/// with a typed error — otherwise its receipt totals would double-count
+/// across profile groups in the A/B rollup.
+#[test]
+fn mixed_profile_session_is_refused_with_typed_conflict() {
+    let ledger = CostLedger::open_in_memory().unwrap();
+    let mut labeled = cost_entry_with_session("sess-x", "req-x1", 10, 1);
+    labeled.profile = Some(String::from("aggressive"));
+    ledger.api_spend().insert_cost_entry(&labeled).unwrap();
+
+    let mut conflicting = cost_entry_with_session("sess-x", "req-x2", 10, 1);
+    conflicting.profile = Some(String::from("standard"));
+    let error = ledger
+        .api_spend()
+        .insert_cost_entry(&conflicting)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            orchestraitor_cost_ledger::LedgerError::ProfileConflict { .. }
+        ),
+        "mixed labels must be a typed ProfileConflict, got {error:?}"
+    );
+
+    let mut unlabeled = cost_entry_with_session("sess-x", "req-x3", 10, 1);
+    unlabeled.profile = None;
+    let error = ledger
+        .api_spend()
+        .insert_cost_entry(&unlabeled)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            orchestraitor_cost_ledger::LedgerError::ProfileConflict { .. }
+        ),
+        "NULL-vs-label mix must also be refused, got {error:?}"
+    );
+
+    // Same-label entries keep inserting fine.
+    let mut same = cost_entry_with_session("sess-x", "req-x4", 10, 1);
+    same.profile = Some(String::from("aggressive"));
+    ledger.api_spend().insert_cost_entry(&same).unwrap();
 }

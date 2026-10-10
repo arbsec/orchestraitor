@@ -147,6 +147,25 @@ impl CostLedger {
     }
 
     fn init_schema(&self) -> LedgerResult<()> {
+        // Hold one write transaction across schema creation, the column
+        // check, and the alteration: two processes opening a legacy
+        // ledger concurrently would otherwise both observe `profile` as
+        // missing, and the second `ALTER TABLE` would fail (the failure
+        // could disable cost attribution for a loop run). Serialized
+        // here, the loser's check re-reads after the winner commits.
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = self.migrate_schema_locked();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT;")?,
+            Err(error) => {
+                let _ignore = self.conn.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn migrate_schema_locked(&self) -> LedgerResult<()> {
         self.conn.execute_batch(SCHEMA)?;
         // Existing ledgers predate the `profile` column (spec §13.5.1 A/B
         // grouping): add it in place, defaulting to NULL (= no profile
@@ -218,16 +237,24 @@ impl CostLedger {
                 "c.profile AS profile",
             ),
         };
+        // Receipts join on session. One session = one profile label: a
+        // run's id is per-run and the run resolves one profile, and
+        // `insert_cost_entry` enforces this at write time (typed conflict
+        // on a mixed-profile session), so the join cannot duplicate a
+        // session's receipt totals into another profile's row.
         let sql = format!(
             "SELECT {select_session}, {select_agent}, {select_profile}, \
              SUM(c.input_tokens), SUM(c.output_tokens), SUM(c.cache_read_tokens), SUM(c.cache_write_tokens), \
              SUM(r.candidate_tokens), SUM(r.selected_tokens), SUM(r.raw_tool_output_tokens), \
              SUM(r.compacted_tool_output_tokens) \
-             FROM (SELECT session, profile, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, \
+             FROM (SELECT session, profile AS profile, \
+                          SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, \
                           SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens \
                    FROM cost_entries GROUP BY session, COALESCE(profile, '')) c \
-             LEFT JOIN (SELECT session, SUM(candidate_tokens) AS candidate_tokens, SUM(selected_tokens) AS selected_tokens, \
-                        SUM(raw_tool_output_tokens) AS raw_tool_output_tokens, SUM(compacted_tool_output_tokens) AS compacted_tool_output_tokens \
+             LEFT JOIN (SELECT session, \
+                        SUM(candidate_tokens) AS candidate_tokens, SUM(selected_tokens) AS selected_tokens, \
+                        SUM(raw_tool_output_tokens) AS raw_tool_output_tokens, \
+                        SUM(compacted_tool_output_tokens) AS compacted_tool_output_tokens \
                         FROM context_receipts GROUP BY session) r ON r.session = c.session \
              GROUP BY {group_sql} ORDER BY {group_sql}"
         );
@@ -381,6 +408,24 @@ CREATE TABLE IF NOT EXISTS context_receipts (
 const ROLLUP_SQL: &str = "SELECT agent_domain_id, SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(request_count), COALESCE(SUM(monetary_cost_measured), 0), COALESCE(SUM(monetary_cost_estimated), 0) FROM cost_entries WHERE agent_domain_id = ?1 GROUP BY agent_domain_id";
 
 fn insert_entry(conn: &Connection, entry: &CostEntry) -> LedgerResult<()> {
+    // One session = one profile label (spec §13.5.1): a session whose
+    // entries mix labels would double-count its receipts across profile
+    // groups in `token_efficiency_rollups`. The NULL-vs-label mix is also
+    // refused: NULL means "no profile recorded", not a second group.
+    let existing: Option<Option<String>> = conn
+        .query_row(
+            "SELECT profile FROM cost_entries WHERE session = ?1 LIMIT 1",
+            params![entry.session.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing
+        && existing.as_deref() != entry.profile.as_deref()
+    {
+        return Err(LedgerError::ProfileConflict {
+            session: entry.session.as_str().to_owned(),
+        });
+    }
     conn.execute("INSERT INTO cost_entries (request_id, model, provider, agent_domain_id, role, project, session, repository, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, request_count, parent_request_id, started_at, completed_at, wall_ms, monetary_cost_measured, monetary_cost_estimated, monetary_cost_basis, subscription_attribution_id, routing_decision, profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)", params![entry.request_id, entry.model.as_str(), entry.provider.as_str(), entry.agent_domain_id.as_str(), entry.role, entry.project, entry.session.as_str(), entry.repository.as_str(), i64_from_u64(entry.input_tokens)?, i64_from_u64(entry.output_tokens)?, i64_from_u64(entry.reasoning_tokens)?, i64_from_u64(entry.cache_read_tokens)?, i64_from_u64(entry.cache_write_tokens)?, i64_from_u64(entry.request_count)?, entry.parent_request_id, entry.started_at.to_rfc3339(), entry.completed_at.to_rfc3339(), i64_from_u64(entry.wall_ms)?, entry.monetary_cost_measured, entry.monetary_cost_estimated, basis_text(entry.monetary_cost_basis), entry.subscription_attribution_id.as_ref().map(SubscriptionId::as_str), entry.routing_decision, entry.profile])?;
     Ok(())
 }

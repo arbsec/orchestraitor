@@ -301,7 +301,10 @@ post hoc. The measurement surface:
   with receipt deltas without a second store.
 - Each cost entry records the **named profile** (§9.22.5) the run resolved
   through (`roles.<role>.routing.profile`), enabling profile-grouped A/B
-  comparison.
+  comparison. One session = one run = one profile label: the ledger refuses
+  (typed `ProfileConflict`) a cost entry whose profile differs from the
+  session's recorded label, so a session's receipt totals can never
+  double-count across profile groups.
 
 **Per-session savings formula.** For a session with summed receipt counters:
 
