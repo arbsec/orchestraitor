@@ -355,6 +355,14 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                 ready_task_ids: outcome.ready_task_ids,
             };
             self.sink.record(&outcome);
+        }
+        // previous_blocked updates on EVERY successful poll — not only when
+        // events were recorded (a PR #555 review finding): a tick with no
+        // reconcile events is the common case, and its blocked candidates
+        // are exactly what the NEXT tick's promotion detection compares
+        // against. Inside the guard, promotion would fire only when some
+        // unrelated event happened on the earlier tick.
+        {
             let mut previous = self
                 .previous_blocked
                 .lock()

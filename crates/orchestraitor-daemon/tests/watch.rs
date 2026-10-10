@@ -412,3 +412,82 @@ async fn live_slots_of_the_current_invocation_are_not_divergences()
     );
     Ok(())
 }
+
+/// §9.40 promotion fires even when the earlier tick produced NO reconcile
+/// events (the common case). Forbidden effect asserted absent: a promotion
+/// that only ever fires when some unrelated event happened first.
+#[tokio::test(flavor = "current_thread")]
+async fn promotion_fires_without_a_preceding_event() -> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_campaign::{BoardSnapshot, LoopRunStore, ReconcileEvent, StartRun};
+    use orchestraitor_daemon::ReconcilePoller;
+
+    let dir = tempfile::tempdir()?;
+    let runs = LoopRunStore::open(&dir.path().join("loop.db"))?;
+    runs.start(&StartRun {
+        invocation_id: "watch-promo-test".to_string(),
+        decision_id: 1,
+        task_id: "board-arbsec_orchestraitor-99".to_string(),
+        repo: "arbsec/orchestraitor".to_string(),
+        number: 99,
+        started_at_secs: START_UNIX,
+    })?;
+    // Task 99 stays on the board's open set (no divergence ever), while
+    // task 43 goes blocked (tick 1) → ready (tick 2).
+    let facts_99 = orchestraitor_board::ItemFacts {
+        item_node_id: "item-99".to_string(),
+        repo: "arbsec/orchestraitor".to_string(),
+        number: 99,
+        title: "fixture 99".to_string(),
+        url: "https://github.com/arbsec/orchestraitor/issues/99".to_string(),
+        issue_type: Some("Task".to_string()),
+        priority: None,
+        target: None,
+        status: Some("In Progress".to_string()),
+        labels: Vec::new(),
+        open_blockers: 0,
+    };
+    let tick1 = BoardSnapshot {
+        open: vec![facts_99.clone()],
+        ready: Vec::new(),
+        blocked_candidates: vec![ready_item(43)],
+        warnings: Vec::new(),
+    };
+    let tick2 = BoardSnapshot {
+        open: vec![facts_99],
+        ready: vec![ready_item(43)],
+        blocked_candidates: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    let sink = Arc::new(CaptureSink::default());
+    let mut poller = ReconcilePoller::new(
+        ScriptedPoller {
+            snapshots: std::sync::Mutex::new(vec![tick1, tick2]),
+        },
+        Arc::new(std::sync::Mutex::new(runs)),
+        Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::SqliteAuditStore::open(dir.path().join("watch-events.db"))?,
+        )),
+        Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
+    );
+    poller.set_invocation("watch-promo-test");
+
+    poller.poll().await?;
+    poller.poll().await?;
+
+    let recorded = sink.outcomes.lock().expect("sink lock");
+    let promotions: Vec<_> = recorded
+        .iter()
+        .flat_map(|outcome| outcome.events.iter())
+        .filter_map(|event| match event {
+            ReconcileEvent::UnblockedTaskPromoted { task_id, .. } => Some(task_id.clone()),
+            ReconcileEvent::BoardDiverged { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        promotions,
+        vec!["board-arbsec_orchestraitor-43"],
+        "the promotion must fire on the quiet path (no divergence on the earlier tick)"
+    );
+    Ok(())
+}
