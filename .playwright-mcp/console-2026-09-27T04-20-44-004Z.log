@@ -1,0 +1,2 @@
+[     709ms] [LOG] Failed to get subsystem status for purpose {rejected: true, message: Object} @ chrome-extension://cimiefiiaegbelhefglklhhakcgmhkai/content-script.js:103
+[    1622ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://github.com/arbsec/orchestraitor/issues/289/edit_form?textarea_id=issue-5591500175-body&comment_context=:0

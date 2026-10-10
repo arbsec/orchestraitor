@@ -1,0 +1,926 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e9]:
+      - heading "Navigation Menu" [level=2] [ref=e10]
+      - generic [ref=e12]:
+        - button "Toggle navigation" [ref=e14] [cursor=pointer]
+        - link "Homepage" [ref=e18] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e21]:
+          - link "Sign in" [ref=e22] [cursor=pointer]:
+            - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Farbsec%2Forchestraitor%2Fpull%2F289
+          - button "Appearance settings" [ref=e25] [cursor=pointer]
+  - main [ref=e32]:
+    - generic [ref=e33]:
+      - generic [ref=e34]:
+        - generic [ref=e36]:
+          - link "arbsec" [ref=e40] [cursor=pointer]:
+            - /url: /arbsec
+          - generic [ref=e41]: /
+          - strong [ref=e42]:
+            - link "orchestraitor" [ref=e43] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor
+          - generic [ref=e44]: Public
+        - generic [ref=e45]:
+          - list:
+            - listitem [ref=e46]:
+              - link "You must be signed in to change notification settings" [ref=e47] [cursor=pointer]:
+                - /url: /login?return_to=%2Farbsec%2Forchestraitor
+                - text: Notifications
+            - listitem [ref=e50]:
+              - link "Fork 0" [ref=e51] [cursor=pointer]:
+                - /url: /login?return_to=%2Farbsec%2Forchestraitor
+                - text: Fork
+                - generic "0" [ref=e54]
+            - listitem [ref=e55]:
+              - link "You must be signed in to star a repository" [ref=e57] [cursor=pointer]:
+                - /url: /login?return_to=%2Farbsec%2Forchestraitor
+                - text: Star
+                - generic "0 users starred this repository" [ref=e60]: "0"
+      - navigation "Repository" [ref=e61]:
+        - list [ref=e62]:
+          - listitem [ref=e63]:
+            - link "Code" [ref=e64] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor
+          - listitem [ref=e68]:
+            - link "Issues 254" [ref=e69] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/issues
+              - generic [ref=e73]: Issues
+              - generic "254" [ref=e74]
+          - listitem [ref=e75]:
+            - link "Pull requests 15" [ref=e76] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/pulls
+              - generic [ref=e79]: Pull requests
+              - generic "15" [ref=e80]
+          - listitem [ref=e81]:
+            - link "Actions" [ref=e82] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/actions
+          - listitem [ref=e86]:
+            - link "Projects" [ref=e87] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/projects
+          - listitem [ref=e91]
+          - listitem [ref=e92]
+        - button "Additional navigation options" [ref=e96] [cursor=pointer]
+    - generic [ref=e103]:
+      - generic [ref=e107]:
+        - generic [ref=e109]:
+          - 'heading "feat(delivery): wire configurable concurrency into BacklogRunner dispatch per spec §9.33.3 (#286) - #289" [level=1] [ref=e110]':
+            - text: "feat(delivery): wire configurable concurrency into BacklogRunner dispatch per spec §9.33.3 (#286)"
+            - generic [ref=e111]: "- #289"
+          - generic [aria-hidden] [ref=e113]: "#289"
+        - generic [ref=e115]:
+          - generic [ref=e117]:
+            - img "Pull request" [ref=e118]
+            - text: Open
+          - generic [ref=e121]:
+            - link "mekwall" [ref=e122] [cursor=pointer]:
+              - /url: /mekwall
+            - text: wants to merge 2 commits into
+            - generic [ref=e123]:
+              - link "main" [ref=e124] [cursor=pointer]:
+                - /url: /arbsec/orchestraitor/tree/main
+              - generic [ref=e125]: from
+              - generic [ref=e126]:
+                - link "feat/286-runner-concurrency" [ref=e127] [cursor=pointer]:
+                  - /url: /arbsec/orchestraitor/tree/feat/286-runner-concurrency
+                - button "Copy head branch name to clipboard" [ref=e128] [cursor=pointer]
+        - navigation "Pull request navigation" [ref=e134]:
+          - generic [ref=e135]:
+            - link "Conversation" [ref=e136] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/pull/289
+            - link "Commits (2)" [ref=e139] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/pull/289/commits
+              - text: Commits
+              - generic [aria-hidden] [ref=e142]: "2"
+              - generic [ref=e143]: (2)
+            - link "Checks" [ref=e144] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/pull/289/checks
+            - link "Files changed" [ref=e147] [cursor=pointer]:
+              - /url: /arbsec/orchestraitor/pull/289/files
+      - generic [ref=e154]:
+        - generic [ref=e156]:
+          - heading "Conversation" [level=2] [ref=e157]
+          - generic [ref=e158]:
+            - generic [ref=e159]:
+              - generic [ref=e161]:
+                - link [ref=e162] [cursor=pointer]:
+                  - /url: /mekwall
+                  - img "@mekwall" [ref=e163]
+                - generic [ref=e165]:
+                  - generic [ref=e166]:
+                    - heading "mekwall commented Sep 26, 2026yesterday •" [level=3] [ref=e167]:
+                      - generic [ref=e168]:
+                        - strong [ref=e169]:
+                          - link "mekwall" [ref=e170] [cursor=pointer]:
+                            - /url: /mekwall
+                        - text: commented
+                        - link "Sep 26, 2026yesterday" [ref=e171] [cursor=pointer]:
+                          - /url: "#issue-5591500175"
+                        - generic [ref=e172]:
+                          - generic [ref=e173]: •
+                          - group [ref=e174]:
+                            - button "edited" [ref=e175] [cursor=pointer]
+                    - generic [ref=e179]:
+                      - group [ref=e181]:
+                        - button [ref=e182] [cursor=pointer]:
+                          - img "Show options" [ref=e185]
+                      - generic "This user has previously committed to the orchestraitor repository." [ref=e188]: Contributor
+                  - generic [ref=e193]:
+                    - heading "Summary" [level=2] [ref=e194]
+                    - paragraph [ref=e195]:
+                      - text: Wires the existing
+                      - code [ref=e196]: schedule::ParallelScheduler
+                      - text: +
+                      - code [ref=e197]: SchedulerConfig
+                      - text: into
+                      - code [ref=e198]: BacklogRunner
+                      - text: "'s tick dispatch so spec §9.33.3's configurable concurrency holds at dispatch time:"
+                      - code [ref=e199]: RunnerInput
+                      - text: gains a validated
+                      - code [ref=e200]: SchedulerConfig
+                      - text: knob (construction fails closed on a zero cap via
+                      - code [ref=e201]: RunnerError::InvalidSchedulerConfig
+                      - text: ), and every tick intersects its startable set with
+                      - code [ref=e202]: ParallelScheduler::select
+                      - text: ", capping starts by global"
+                      - code [ref=e203]: max_concurrent
+                      - text: ", per-domain"
+                      - code [ref=e204]: max_per_domain
+                      - text: ", expected-file repository-conflict exclusion, and running implementations' share of"
+                      - code [ref=e205]: review_capacity
+                      - text: ". Bootstrap plan todo-31 acceptance (2): \"backlog runner executes tasks in dependency order, respects concurrency limit, stops on budget limit.\""
+                    - heading "Linked issue" [level=2] [ref=e206]
+                    - paragraph [ref=e207]:
+                      - text: Closes
+                      - link "#286" [ref=e208] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/issues/286
+                    - heading "Specification references" [level=2] [ref=e209]
+                    - list [ref=e210]:
+                      - listitem [ref=e211]: docs/spec/spec.md §9.33.3 ("Parallel execution MUST respect configurable concurrency, repository conflicts, resource budgets (§9.27), provider limits, and review capacity")
+                      - listitem [ref=e212]: docs/spec/spec.md §9.33.6 (journal), §9.33.7/§2.2 (security boundary), §9.27/§9.19.5–§9.19.6 (deferred runtime-layer limits)
+                    - heading "Change summary" [level=2] [ref=e213]
+                    - list [ref=e214]:
+                      - listitem [ref=e215]:
+                        - code [ref=e216]: RunnerInput
+                        - text: gains
+                        - code [ref=e217]: "pub scheduler_config: SchedulerConfig"
+                        - text: (owned; cloned into the runner's
+                        - code [ref=e218]: ParallelScheduler
+                        - text: ", matching the owned-"
+                        - code [ref=e219]: EscalationPolicy
+                        - text: pattern).
+                      - listitem [ref=e220]:
+                        - code [ref=e221]: RunnerError
+                        - text: gains
+                        - code [ref=e222]: InvalidSchedulerConfig(#[from] SchedulerConfigError)
+                        - text: with thiserror + missing_docs entries consistent with existing variants;
+                        - code [ref=e223]: BacklogRunner::new
+                        - text: validates the scheduler config (fail-closed on
+                        - code [ref=e224]: max_concurrent = 0
+                        - text: ","
+                        - code [ref=e225]: max_per_domain = Some(0)
+                        - text: ", or"
+                        - code [ref=e226]: review_capacity = 0
+                        - text: ) alongside the existing review-loop config and escalation policy validation.
+                      - listitem [ref=e227]:
+                        - code [ref=e228]: BacklogRunner
+                        - text: stores a
+                        - code [ref=e229]: ParallelScheduler
+                        - text: and exposes
+                        - code [ref=e230]: scheduler_config()
+                        - text: ;
+                        - code [ref=e231]: tick()
+                        - text: dispatch computes
+                        - code [ref=e232]: select(dag, completed, running, under_review = 0)
+                        - text: and starts only tasks in the intersection with the existing startable set (due retries ∪ newly eligible, minus blocked/running/pending), in stable task-ID order. In-flight is precisely the
+                        - code [ref=e233]: running
+                        - text: set (dispatched attempts whose outcomes have not been consumed); a slot is free while
+                        - code [ref=e234]: running.len()
+                        - text: <
+                        - code [ref=e235]: max_concurrent
+                        - text: .
+                      - listitem [ref=e236]:
+                        - text: "Enforced in the runner: global"
+                        - code [ref=e237]: max_concurrent
+                        - text: ", per-domain"
+                        - code [ref=e238]: max_per_domain
+                        - text: (the
+                        - code [ref=e239]: TaskDag
+                        - text: carries
+                        - code [ref=e240]: DomainId
+                        - text: on every task), expected-file repository-conflict exclusion, and the running-implementation share of
+                        - code [ref=e241]: review_capacity
+                        - text: ". Deferred to the runtime layer (documented in runner.rs module docs and at the call site): the under-review change-set count that"
+                        - code [ref=e242]: review_capacity
+                        - text: also bounds (owned by the §9.33.4 change-set review pipeline — the runner passes 0; no domain metadata source was invented), provider limits (§9.19.5–§9.19.6, surfaced via outcomes such as
+                        - code [ref=e243]: FailureClass::RateLimit
+                        - text: ), and resource budgets beyond the attempt budget (§9.27).
+                      - listitem [ref=e244]:
+                        - text: "Cap exhaustion produces no stop reason and no stop-event-stream entry: skipped tasks stay eligible and re-compete next tick; document in module docs. Budget interplay unchanged: one budget unit per"
+                        - code [ref=e245]: Started
+                        - text: ","
+                        - code [ref=e246]: BudgetExhausted
+                        - text: stop unchanged; a schedule-reserved slot for a same-tick-scheduled retry idles one tick (tick-boundary rule outranks utilization — documented).
+                      - listitem [ref=e247]:
+                        - text: "CHANGELOG.md: entry intentionally omitted. Originally one bullet was appended; the rebase onto post-"
+                        - 'link "docs(spec): add §9.47 GitHub event ingress (Tailscale relay) and agent PR attribution #386" [ref=e251] [cursor=pointer]':
+                          - /url: https://github.com/arbsec/orchestraitor/pull/386
+                        - text: main (
+                        - link "c49b899" [ref=e252] [cursor=pointer]:
+                          - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                        - text: ) resolved the collision by adopting the base branch's re-scoped CHANGELOG policy ("keep consumer-visible entries only" — delivery/review-pipeline internals move out of the changelog), so the bullet was dropped. The
+                        - code [ref=e253]: RunnerInput
+                        - text: public API addition and the enforced-vs-deferred concurrency boundary are documented in the
+                        - code [ref=e254]: runner.rs
+                        - text: module docs (§9.33.3 verbatim quote) and field/variant rustdoc.
+                      - listitem [ref=e255]: 9 new tests (details under Test evidence).
+                    - heading "Security impact" [level=2] [ref=e256]
+                    - list [ref=e257]:
+                      - listitem [ref=e258]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e262]
+                        - text: No security impact
+                      - listitem [ref=e263]:
+                        - checkbox "Incomplete task" [disabled] [ref=e267]
+                        - text: Arbitraitor integration boundary touched (requires security-owner review)
+                      - listitem [ref=e268]:
+                        - checkbox "Incomplete task" [disabled] [ref=e272]
+                        - text: Security-sensitive path changed — requires human review before release (spec §21.1)
+                      - listitem [ref=e273]:
+                        - checkbox "Incomplete task" [disabled] [ref=e277]
+                        - text: "Blocked on an Arbitraitor issue/PR:"
+                    - paragraph [ref=e278]: "Justification: dispatch capping only — the runner proposes, schedules, and stops. No policy, sandbox, approval, provenance, or enforcement logic is added (spec §2.2, §9.33.7); the change restricts (never expands) how many attempts a tick may start, and adds no new security decision surface."
+                    - heading "Test evidence" [level=2] [ref=e279]
+                    - list [ref=e280]:
+                      - listitem [ref=e281]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e285]
+                        - text: Unit tests added/updated
+                      - listitem [ref=e286]:
+                        - checkbox "Incomplete task" [disabled] [ref=e290]
+                        - text: Property tests added where applicable
+                      - listitem [ref=e291]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e295]
+                        - text: Negative/adversarial tests for security-sensitive behavior
+                      - listitem [ref=e296]:
+                        - checkbox "Incomplete task" [disabled] [ref=e300]
+                        - text: Regression test added for any defect found during this work
+                    - paragraph [ref=e301]:
+                      - text: 9 new tests in
+                      - code [ref=e302]: crates/orchestraitor-delivery/src/runner.rs
+                      - text: (226 total, all passing at HEAD
+                      - link "2e57d1e" [ref=e303] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                      - text: ; 217 base + 9 new — counts updated after the
+                      - link "#408" [ref=e304] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/pull/408
+                      - text: /
+                      - link "#409" [ref=e305] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/pull/409
+                      - text: "-enriched base and the gen-2 review tests):"
+                    - list [ref=e306]:
+                      - listitem [ref=e307]:
+                        - code [ref=e308]: concurrency_cap_respected_on_wide_dag
+                        - text: "— 5 independent tasks, cap 2: per-tick Started ≤ 2, global start order ["
+                        - code [ref=e309]: a
+                        - text: ","
+                        - code [ref=e310]: b
+                        - text: ","
+                        - code [ref=e311]: c
+                        - text: ","
+                        - code [ref=e312]: d
+                        - text: ","
+                        - code [ref=e313]: e
+                        - text: "]."
+                      - listitem [ref=e314]:
+                        - code [ref=e315]: cap_competition_between_pending_retry_and_newly_eligible_is_deterministic
+                        - text: "— cap 1: a pending retry and a newly eligible task compete for one slot; stable task-ID order decides; neither task dropped or blocked."
+                      - listitem [ref=e316]:
+                        - code [ref=e317]: running_set_drain_releases_dispatch_slots
+                        - text: — full running set yields an empty-but-alive tick; consuming outcomes releases exactly the freed slots.
+                      - listitem [ref=e318]:
+                        - code [ref=e319]: construction_rejects_invalid_scheduler_config
+                        - text: — fail-closed on
+                        - code [ref=e320]: ZeroMaxConcurrent
+                        - text: ","
+                        - code [ref=e321]: ZeroMaxPerDomain
+                        - text: ","
+                        - code [ref=e322]: ZeroReviewCapacity
+                        - text: (negative test).
+                      - listitem [ref=e323]:
+                        - code [ref=e324]: in_flight_tasks_are_never_dropped_or_blocked_by_the_cap
+                        - text: "— cap-waiting tasks stay eligible/unblocked; in-flight attempt outcomes still consumed after repeated no-op ticks (negative/adversarial: no cap-induced drop/block/stop)."
+                      - listitem [ref=e325]:
+                        - code [ref=e326]: budget_and_cap_both_bound_dispatch_and_the_smaller_wins
+                        - text: — cap binds tick 1, budget binds tick 2,
+                        - code [ref=e327]: BudgetExhausted
+                        - text: stop unchanged; cap exhaustion is never a stop reason.
+                      - listitem [ref=e328]:
+                        - code [ref=e329]: capped_run_produces_identical_journals_for_identical_inputs
+                        - text: — determinism re-pin under caps including a failure/retry (§9.33.6 journal equality).
+                      - listitem [ref=e330]:
+                        - code [ref=e331]: review_capacity_binds_dispatch_through_tick
+                        - text: (gen-2 review) —
+                        - code [ref=e332]: "review_capacity: 2 < max_concurrent: 4"
+                        - text: ": exactly one start per freed headroom unit, including the running=1 state that fails if the"
+                        - code [ref=e333]: under_review
+                        - text: argument were ignored at the call site (mutation-verified).
+                      - listitem [ref=e334]:
+                        - code [ref=e335]: max_per_domain_binds_dispatch_through_tick
+                        - text: (gen-2 review) —
+                        - code [ref=e336]: "max_per_domain: Some(1)"
+                        - text: serializes same-domain dispatch through
+                        - code [ref=e337]: tick()
+                        - text: despite
+                        - code [ref=e338]: "max_concurrent: 4"
+                        - text: .
+                    - paragraph [ref=e339]:
+                      - text: Gates at HEAD
+                      - link "2e57d1e" [ref=e340] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                      - text: ":"
+                      - code [ref=e341]: cargo fmt --check
+                      - text: clean;
+                      - code [ref=e342]: cargo clippy --workspace --all-targets --all-features -- -D warnings
+                      - text: clean;
+                      - code [ref=e343]: cargo nextest run --workspace
+                      - text: 582/582 pass (
+                      - code [ref=e344]: "-p orchestraitor-delivery"
+                      - text: 226/226);
+                      - code [ref=e345]: cargo check --workspace --all-targets --all-features --locked
+                      - text: clean; rumdl clean.
+                    - heading "Documentation impact" [level=2] [ref=e346]
+                    - list [ref=e347]:
+                      - listitem [ref=e348]:
+                        - checkbox "Incomplete task" [disabled] [ref=e352]
+                        - text: No public-behavior change
+                      - listitem [ref=e353]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e357]
+                        - text: Public behavior changed — docs updated (README, CLI/config reference, CHANGELOG)
+                      - listitem [ref=e358]:
+                        - checkbox "Incomplete task" [disabled] [ref=e362]
+                        - text: "Not required — justification:"
+                    - paragraph [ref=e363]:
+                      - text: "Not required as a CHANGELOG entry: the base branch's"
+                      - link "#386" [ref=e364] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/pull/386
+                      - text: CHANGELOG re-scope moved delivery-crate internals out of the changelog (consumer-visible entries only), and this change touches no CLI/config/env/protocol surface — the
+                      - code [ref=e365]: RunnerInput
+                      - text: public API addition and the enforced-vs-deferred concurrency boundary are documented in the
+                      - code [ref=e366]: runner.rs
+                      - text: module docs (§9.33.3 verbatim quote) and field/variant rustdoc. The rebase to
+                      - link "c49b899" [ref=e367] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                      - text: dropped the original bullet per that base-branch policy.
+                    - heading "Rollback implications" [level=2] [ref=e368]
+                    - list [ref=e369]:
+                      - listitem [ref=e370]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e374]
+                        - text: Independently revertible
+                      - listitem [ref=e375]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e379]
+                        - text: Rollback/recovery behavior verified where applicable
+                    - paragraph [ref=e380]:
+                      - text: "Single-module revert: the change is confined to"
+                      - code [ref=e381]: runner.rs
+                      - text: (the originally appended CHANGELOG bullet was dropped in the post-
+                      - link "#386" [ref=e382] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/pull/386
+                      - text: rebase, so no changelog revert is needed); reverting restores the pre-cap dispatch loop. No state format, protocol, or persistence change (the §9.33.6 journal/event schema is untouched).
+                    - heading "Newly discovered follow-up work" [level=2] [ref=e383]
+                    - paragraph [ref=e384]:
+                      - text: "None filed from this PR. One known, documented deferral (not hidden work): the under-review change-set count input to"
+                      - code [ref=e385]: review_capacity
+                      - text: is owned by the §9.33.4 change-set review pipeline and is currently passed as 0 by the runner; wiring that signal through belongs to the review-pipeline/runtime issue chain (e.g.
+                      - link "#203" [ref=e386] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/issues/203
+                      - text: /
+                      - link "#204" [ref=e387] [cursor=pointer]:
+                        - /url: https://github.com/arbsec/orchestraitor/issues/204
+                      - text: scope), since the runner has no source of under-review state today. If a tracker issue is desired for that wiring, file it against the change-set review pipeline workstream.
+                    - heading "Merge checklist" [level=2] [ref=e388]
+                    - list [ref=e389]:
+                      - listitem [ref=e390]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e394]
+                        - text: Linked issue and specification requirements are satisfied
+                      - listitem [ref=e395]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e399]
+                        - text: Tests are added or updated
+                      - listitem [ref=e400]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e404]
+                        - text: Security impact is reviewed
+                      - listitem [ref=e405]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e409]
+                        - text: Human-facing documentation is updated, or not required with justification
+                      - listitem [ref=e410]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e414]
+                        - text: Rollback or recovery behavior is verified where applicable
+                      - listitem [ref=e415]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e419]
+                        - text: All required and non-optional checks pass
+                      - listitem [ref=e420]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e424]
+                        - text: All noteworthy findings are resolved
+                      - listitem [ref=e425]:
+                        - checkbox "Completed task" [checked] [disabled] [ref=e429]
+                        - text: All actionable review threads are resolved
+              - generic [ref=e430]:
+                - generic [ref=e436]:
+                  - generic [ref=e437]:
+                    - link [ref=e438] [cursor=pointer]:
+                      - /url: /mekwall
+                      - img "@mekwall" [ref=e439]
+                    - link "mekwall" [ref=e440] [cursor=pointer]:
+                      - /url: /mekwall
+                    - text: mentioned this pull request
+                    - link "Sep 26, 2026yesterday" [ref=e441] [cursor=pointer]:
+                      - /url: "#ref-issue-5591553894"
+                  - generic [ref=e442]:
+                    - 'link "Task: delivery-daemon — wire ReviewPipeline trigger + under_review count into backlog execution (§9.33.3/§9.33.4 runtime) #290" [ref=e444] [cursor=pointer]':
+                      - /url: /arbsec/orchestraitor/issues/290
+                    - 'generic "Status: Open" [ref=e446]': Open
+                - generic [ref=e451]:
+                  - link [ref=e453] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e454]
+                  - generic [ref=e456]:
+                    - generic [ref=e457]:
+                      - heading [level=3] [ref=e458]:
+                        - generic [ref=e459]:
+                          - strong [ref=e460]:
+                            - link "mekwall" [ref=e461] [cursor=pointer]:
+                              - /url: /mekwall
+                          - text: commented
+                          - link "Sep 26, 2026yesterday" [ref=e462] [cursor=pointer]:
+                            - /url: "#issuecomment-5843413761"
+                      - generic [ref=e463]:
+                        - group [ref=e465]:
+                          - button [ref=e466] [cursor=pointer]:
+                            - img "Show options" [ref=e469]
+                        - generic [ref=e471]:
+                          - generic "This user has previously committed to the orchestraitor repository." [ref=e472]: Contributor
+                          - generic "This user is the author of this pull request." [ref=e474]: Author
+                    - table [ref=e478]:
+                      - rowgroup [ref=e479]:
+                        - row [ref=e480]:
+                          - cell [ref=e481]:
+                            - paragraph [ref=e482]:
+                              - strong [ref=e483]: Fresh-context adversarial review, generation 1
+                              - text: (against HEAD
+                              - link "564359d" [ref=e484] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/564359d515908db8ec1e118cf7f0d38a708e02c2
+                              - text: "):"
+                              - strong [ref=e485]: VERDICT CONVERGED
+                              - text: — one full generation, no noteworthy findings.
+                            - paragraph [ref=e486]:
+                              - text: "Reviewer independently re-derived the liveness analysis: blocked ⟹ stopped (all"
+                              - code [ref=e487]: blocked.insert
+                              - text: paths co-occur with terminal
+                              - code [ref=e488]: set_stop
+                              - text: ; only
+                              - code [ref=e489]: Paused
+                              - text: resumable), so blocked tasks can never burn scheduler slots while dispatch is live; pending retries are drained to due each tick (mem::take), so slot burn is ≤1 tick;
+                              - code [ref=e490]: saturating_sub
+                              - text: "prevents negative review headroom (min(max_concurrent, review_capacity) is coherent, not deadlock); escalation ladders are finite ⟹ no retry starvation. Selection computed once from prior running — no intra-tick over-adaptation. Mutation-sensitivity: removing the selection guard fails 5/7 new tests; reversing ID order fails 5. Scratch copy verified workspace-wide check."
+                            - paragraph [ref=e491]: "Deferrals (recorded per spec §9.33.2 / AGENTS.md):"
+                            - list [ref=e492]:
+                              - listitem [ref=e493]:
+                                - strong [ref=e494]: F1 [LOW]
+                                - code [ref=e495]: runner.rs
+                                - code [ref=e496]: select(..., 0)
+                                - text: ": the under-review change-set count has"
+                                - strong [ref=e497]: no injection path
+                                - text: (tick takes only outcomes; scheduler_config immutable post-construction). The enforced running-share is correct; the missing input can only cause over-dispatch once a review pipeline exists. Wires up via API extension tracked in
+                                - 'link "Task: delivery-daemon — wire ReviewPipeline trigger + under_review count into backlog execution (§9.33.3/§9.33.4 runtime) #290" [ref=e502] [cursor=pointer]':
+                                  - /url: https://github.com/arbsec/orchestraitor/issues/290
+                                - text: — resolve there, not here.
+                              - listitem [ref=e503]:
+                                - strong [ref=e504]: F2 [LOW]
+                                - text: "PR body wording: bullet \"directly after the"
+                                - 'link "feat(delivery): add BacklogRunner execution loop per spec §9.33.3 (#202) #285" [ref=e508] [cursor=pointer]':
+                                  - /url: https://github.com/arbsec/orchestraitor/pull/285
+                                - text: runner bullet" — actually after the
+                                - 'link "Task: delivery-runner — BacklogRunner execution loop (continue until backlog empty / no eligible / budget / approval / failures / security block / pause) #202" [ref=e513] [cursor=pointer]':
+                                  - /url: https://github.com/arbsec/orchestraitor/issues/202
+                                - text: runner bullet. Cosmetic, no action.
+                            - paragraph [ref=e514]:
+                              - text: "CI wait-state: CodeQL must complete before the merge gate;"
+                              - code [ref=e515]: orc:checks
+                              - text: re-verified at merge time on current HEAD.
+                - generic [ref=e522]:
+                  - link [ref=e524] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e525]
+                  - generic [ref=e526]:
+                    - link "mekwall" [ref=e527] [cursor=pointer]:
+                      - /url: /mekwall
+                    - link "force-pushed" [ref=e528] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/compare/564359d515908db8ec1e118cf7f0d38a708e02c2..cd4576e167780561c452abd883074a0a40b7f2d2
+                    - text: the
+                    - generic [ref=e529]: feat/286-runner-concurrency
+                    - text: branch from
+                    - link [ref=e531] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/commit/564359d515908db8ec1e118cf7f0d38a708e02c2
+                      - code [ref=e532]: 564359d
+                    - text: to
+                    - link [ref=e533] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/commit/cd4576e167780561c452abd883074a0a40b7f2d2
+                      - code [ref=e534]: cd4576e
+                    - link "Compare" [ref=e535] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/compare/564359d515908db8ec1e118cf7f0d38a708e02c2..cd4576e167780561c452abd883074a0a40b7f2d2
+                    - link "September 26, 2026 05:13yesterday" [ref=e538] [cursor=pointer]:
+                      - /url: "#event-31879904358"
+                - generic [ref=e540]:
+                  - link [ref=e542] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e543]
+                  - generic [ref=e545]:
+                    - generic [ref=e546]:
+                      - heading [level=3] [ref=e547]:
+                        - generic [ref=e548]:
+                          - strong [ref=e549]:
+                            - link "mekwall" [ref=e550] [cursor=pointer]:
+                              - /url: /mekwall
+                          - text: commented
+                          - link "Sep 26, 2026yesterday" [ref=e551] [cursor=pointer]:
+                            - /url: "#issuecomment-5843442394"
+                      - generic [ref=e552]:
+                        - group [ref=e554]:
+                          - button [ref=e555] [cursor=pointer]:
+                            - img "Show options" [ref=e558]
+                        - generic [ref=e560]:
+                          - generic "This user has previously committed to the orchestraitor repository." [ref=e561]: Contributor
+                          - generic "This user is the author of this pull request." [ref=e563]: Author
+                    - table [ref=e567]:
+                      - rowgroup [ref=e568]:
+                        - row [ref=e569]:
+                          - cell [ref=e570]:
+                            - paragraph [ref=e571]:
+                              - strong [ref=e572]:
+                                - text: Rebase onto post-
+                                - link "#288" [ref=e573] [cursor=pointer]:
+                                  - /url: https://github.com/arbsec/orchestraitor/pull/288
+                                - text: main
+                              - link "564359d" [ref=e574] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/564359d515908db8ec1e118cf7f0d38a708e02c2
+                              - text: →
+                              - link "cd4576e" [ref=e575] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/cd4576e167780561c452abd883074a0a40b7f2d2
+                              - text: ": resolved the CHANGELOG anchor collision (both bullets kept —"
+                              - link "#286" [ref=e576] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/issues/286
+                              - text: bullet directly after the
+                              - link "#202" [ref=e577] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/issues/202
+                              - text: runner bullet,
+                              - link "#50" [ref=e578] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/issues/50
+                              - text: "pipeline bullet after it); all gates re-run green at the new HEAD: fmt clean, clippy"
+                              - code [ref=e579]: "-D warnings"
+                              - text: clean, nextest
+                              - strong [ref=e580]: 224/224
+                              - text: (217 from
+                              - link "#288" [ref=e581] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/pull/288
+                              - text: + 7 new),
+                              - code [ref=e582]: check --locked
+                              - text: clean, rumdl clean.
+                            - paragraph [ref=e583]:
+                              - text: "Tree-identity: PR-own content ("
+                              - code [ref=e584]: runner.rs
+                              - text: + own bullet) byte-identical vs the reviewed
+                              - link "564359d" [ref=e585] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/564359d515908db8ec1e118cf7f0d38a708e02c2
+                              - text: — the gen-1 CONVERGED verdict carries. CI reruns on the new head; merge gate still waits on CodeQL.
+                - generic [ref=e596]:
+                  - link [ref=e599] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e600]
+                  - generic [ref=e601]:
+                    - code [ref=e602]:
+                      - 'link "feat(delivery): wire configurable concurrency into BacklogRunner disp…" [ref=e603] [cursor=pointer]':
+                        - /url: /arbsec/orchestraitor/pull/289/commits/c49b8999898f3365e85ec26fb5b94873e53d887a
+                    - button "Commit message body" [ref=e605] [cursor=pointer]: …
+                  - code [ref=e615]:
+                    - link "c49b899" [ref=e616] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/pull/289/commits/c49b8999898f3365e85ec26fb5b94873e53d887a
+                - generic [ref=e623]:
+                  - link [ref=e625] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e626]
+                  - generic [ref=e627]:
+                    - link "mekwall" [ref=e628] [cursor=pointer]:
+                      - /url: /mekwall
+                    - link "force-pushed" [ref=e629] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/compare/cd4576e167780561c452abd883074a0a40b7f2d2..c49b8999898f3365e85ec26fb5b94873e53d887a
+                    - text: the
+                    - generic [ref=e630]: feat/286-runner-concurrency
+                    - text: branch from
+                    - link [ref=e632] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/commit/cd4576e167780561c452abd883074a0a40b7f2d2
+                      - code [ref=e633]: cd4576e
+                    - text: to
+                    - link [ref=e634] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                      - code [ref=e635]: c49b899
+                    - link "Compare" [ref=e636] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/compare/cd4576e167780561c452abd883074a0a40b7f2d2..c49b8999898f3365e85ec26fb5b94873e53d887a
+                    - link "September 27, 2026 03:2753 minutes ago" [ref=e639] [cursor=pointer]:
+                      - /url: "#event-31916691448"
+                - generic [ref=e641]:
+                  - link [ref=e643] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e644]
+                  - generic [ref=e646]:
+                    - generic [ref=e647]:
+                      - heading [level=3] [ref=e648]:
+                        - generic [ref=e649]:
+                          - strong [ref=e650]:
+                            - link "mekwall" [ref=e651] [cursor=pointer]:
+                              - /url: /mekwall
+                          - text: commented
+                          - link "Sep 27, 202651 minutes ago" [ref=e652] [cursor=pointer]:
+                            - /url: "#issuecomment-5852299881"
+                      - generic [ref=e653]:
+                        - group [ref=e655]:
+                          - button [ref=e656] [cursor=pointer]:
+                            - img "Show options" [ref=e659]
+                        - generic [ref=e661]:
+                          - generic "This user has previously committed to the orchestraitor repository." [ref=e662]: Contributor
+                          - generic "This user is the author of this pull request." [ref=e664]: Author
+                    - table [ref=e668]:
+                      - rowgroup [ref=e669]:
+                        - row [ref=e670]:
+                          - cell [ref=e671]:
+                            - paragraph [ref=e672]:
+                              - strong [ref=e673]:
+                                - text: Rebase onto post-
+                                - link "#409" [ref=e674] [cursor=pointer]:
+                                  - /url: https://github.com/arbsec/orchestraitor/pull/409
+                                - text: main
+                              - link "cd4576e" [ref=e675] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/cd4576e167780561c452abd883074a0a40b7f2d2
+                              - text: →
+                              - link "c49b899" [ref=e676] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                              - text: ": resolved the CHANGELOG collision by adopting the base branch's"
+                              - link "#386" [ref=e677] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/pull/386
+                              - text: re-scope ("keep consumer-visible entries only" — delivery/review-pipeline internals move out of the changelog), so this PR's CHANGELOG bullet is
+                              - strong [ref=e678]: dropped
+                              - text: "(was: after the"
+                              - link "#202" [ref=e679] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/issues/202
+                              - text: runner bullet, which
+                              - link "#386" [ref=e680] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/pull/386
+                              - text: itself removed). PR body updated to match.
+                            - paragraph [ref=e681]:
+                              - text: "Tree-identity: PR-own content ("
+                              - code [ref=e682]: crates/orchestraitor-delivery/src/runner.rs
+                              - text: ) is
+                              - strong [ref=e683]: byte-identical
+                              - text: to the reviewed
+                              - link "cd4576e" [ref=e684] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/cd4576e167780561c452abd883074a0a40b7f2d2
+                              - text: (0-line diff); the only delta vs the reviewed tree is the policy-mandated CHANGELOG bullet removal. Gates re-run green at
+                              - link "c49b899" [ref=e685] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                              - text: ": fmt clean, clippy"
+                              - code [ref=e686]: "-D warnings"
+                              - text: clean (workspace),
+                              - code [ref=e687]: check --locked
+                              - text: clean, nextest
+                              - strong [ref=e688]: 580/580
+                              - text: (workspace), rumdl clean. Fresh-context adversarial review (generation 2) will run against
+                              - link "c49b899" [ref=e689] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                              - text: ; CI reruns on the new head.
+                - generic [ref=e700]:
+                  - link [ref=e703] [cursor=pointer]:
+                    - /url: /apps/arbsec-agent
+                    - img "@arbsec-agent" [ref=e704]
+                  - generic [ref=e705]:
+                    - code [ref=e706]:
+                      - 'link "test(delivery): pin review-capacity and per-domain caps through Backl…" [ref=e707] [cursor=pointer]':
+                        - /url: /arbsec/orchestraitor/pull/289/commits/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                    - button "Commit message body" [ref=e709] [cursor=pointer]: …
+                  - code [ref=e719]:
+                    - link "2e57d1e" [ref=e720] [cursor=pointer]:
+                      - /url: /arbsec/orchestraitor/pull/289/commits/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                - generic [ref=e722]:
+                  - link [ref=e724] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e725]
+                  - generic [ref=e727]:
+                    - generic [ref=e728]:
+                      - heading [level=3] [ref=e729]:
+                        - generic [ref=e730]:
+                          - strong [ref=e731]:
+                            - link "mekwall" [ref=e732] [cursor=pointer]:
+                              - /url: /mekwall
+                          - text: commented
+                          - link "Sep 27, 202638 minutes ago" [ref=e733] [cursor=pointer]:
+                            - /url: "#issuecomment-5852370293"
+                      - generic [ref=e734]:
+                        - group [ref=e736]:
+                          - button [ref=e737] [cursor=pointer]:
+                            - img "Show options" [ref=e740]
+                        - generic [ref=e742]:
+                          - generic "This user has previously committed to the orchestraitor repository." [ref=e743]: Contributor
+                          - generic "This user is the author of this pull request." [ref=e745]: Author
+                    - table [ref=e749]:
+                      - rowgroup [ref=e750]:
+                        - row [ref=e751]:
+                          - cell [ref=e752]:
+                            - paragraph [ref=e753]:
+                              - strong [ref=e754]: Fresh-context adversarial review, generation 2
+                              - text: (against HEAD
+                              - link "c49b899" [ref=e755] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/c49b8999898f3365e85ec26fb5b94873e53d887a
+                              - text: "):"
+                              - strong [ref=e756]: FINDINGS — 2 LOW
+                              - text: ", both now remediated at"
+                              - link "2e57d1e" [ref=e757] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                              - text: .
+                            - list [ref=e758]:
+                              - listitem [ref=e759]:
+                                - strong [ref=e760]: gen2-1 [LOW]
+                                - text: "Runner-level test gap: the runner suite never exercises"
+                                - code [ref=e761]: review_capacity
+                                - text: binding or
+                                - code [ref=e762]: max_per_domain
+                                - text: through
+                                - code [ref=e763]: tick()
+                                - text: ; mutation
+                                - code [ref=e764]: select(..., 0)
+                                - text: →
+                                - code [ref=e765]: select(..., running.len())
+                                - text: survived 224/224 (semantics pinned only in
+                                - code [ref=e766]: schedule.rs
+                                - text: ).
+                                - strong [ref=e767]: "Fixed:"
+                                - code [ref=e768]: review_capacity_binds_dispatch_through_tick
+                                - text: "(review_capacity 2 < max_concurrent 4, including the running=1 < R=2 dispatch state that fails when the under-review argument is ignored — mutation re-run: killed) and"
+                                - code [ref=e769]: max_per_domain_binds_dispatch_through_tick
+                                - text: . 226/226 pass; fmt/clippy clean. Cheaper than a deferral record;
+                                - 'link "Task: delivery-daemon — wire ReviewPipeline trigger + under_review count into backlog execution (§9.33.3/§9.33.4 runtime) #290" [ref=e774] [cursor=pointer]':
+                                  - /url: https://github.com/arbsec/orchestraitor/issues/290
+                                - text: still owns the real under-review wiring.
+                              - listitem [ref=e775]:
+                                - strong [ref=e776]: gen2-2 [LOW, cosmetic]
+                                - text: Stale PR-body evidence numbers post-rebase (207 vs 224; rollback section still referenced the dropped CHANGELOG bullet).
+                                - strong [ref=e777]: "Fixed:"
+                                - text: body refreshed to 226 total / 217 base + 9 new and the rollback wording corrected.
+                            - paragraph [ref=e778]:
+                              - text: Liveness/determinism/fail-closed/§9.33.7-boundary checks re-derived independently — all hold. New commit
+                              - link "2e57d1e" [ref=e779] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                              - text: invalidates prior convergence; generation 3 will run against the current HEAD.
+                - generic [ref=e781]:
+                  - link [ref=e783] [cursor=pointer]:
+                    - /url: /mekwall
+                    - img "@mekwall" [ref=e784]
+                  - generic [ref=e786]:
+                    - generic [ref=e787]:
+                      - heading [level=3] [ref=e788]:
+                        - generic [ref=e789]:
+                          - strong [ref=e790]:
+                            - link "mekwall" [ref=e791] [cursor=pointer]:
+                              - /url: /mekwall
+                          - text: commented
+                          - link "Sep 27, 202629 minutes ago" [ref=e792] [cursor=pointer]:
+                            - /url: "#issuecomment-5852418493"
+                      - generic [ref=e793]:
+                        - group [ref=e795]:
+                          - button [ref=e796] [cursor=pointer]:
+                            - img "Show options" [ref=e799]
+                        - generic [ref=e801]:
+                          - generic "This user has previously committed to the orchestraitor repository." [ref=e802]: Contributor
+                          - generic "This user is the author of this pull request." [ref=e804]: Author
+                    - table [ref=e808]:
+                      - rowgroup [ref=e809]:
+                        - row [ref=e810]:
+                          - cell [ref=e811]:
+                            - paragraph [ref=e812]:
+                              - strong [ref=e813]: Fresh-context adversarial review, generation 3
+                              - text: (against HEAD
+                              - link "2e57d1e" [ref=e814] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                              - text: "):"
+                              - strong [ref=e815]: VERDICT CONVERGED
+                              - text: — one full generation, no CRITICAL/HIGH/MEDIUM findings.
+                            - paragraph [ref=e816]:
+                              - text: Reviewer independently re-derived the liveness analysis (cap-skipped tasks re-enter via
+                              - code [ref=e817]: dag.eligible
+                              - text: ;
+                              - code [ref=e818]: due
+                              - text: ⊆
+                              - code [ref=e819]: eligible
+                              - text: under monotonic completion; blocked ⟹ terminal stop at all 5 sites so
+                              - code [ref=e820]: select
+                              - text: accounting is never skewed;
+                              - code [ref=e821]: running.len() ≤ max_concurrent
+                              - text: "inductive; Paused re-insert net-zero; budget check after the selection gate delays but never loses a stop) and re-verified determinism (BTree* everywhere, journal equality), fail-closed construction (no serde/Default bypass), and the §9.33.7/§2.2 boundary. Mutation testing in scratch: M1"
+                              - code [ref=e822]: under_review → running.len()
+                              - text: killed by
+                              - code [ref=e823]: review_capacity_binds_dispatch_through_tick
+                              - text: (runner.rs:2134); M2 per-domain cap dropped killed by
+                              - code [ref=e824]: max_per_domain_binds_dispatch_through_tick
+                              - text: "(+2 schedule tests); M3 selection gate removed killed by 7 runner tests. Base counts verified: 217 + 9 = 226."
+                            - paragraph [ref=e825]: "Two LOW findings, both recorded per §9.33.2 and remediated/non-blocking:"
+                            - list [ref=e826]:
+                              - listitem [ref=e827]:
+                                - strong [ref=e828]: G3-F1 [LOW]
+                                - text: PR-body workspace test count was 580, actual 582 (580 + 2 gen-2 tests).
+                                - strong [ref=e829]: Fixed in the body
+                                - text: (no commit — HEAD convergence preserved).
+                              - listitem [ref=e830]:
+                                - strong [ref=e831]: G3-F2 [LOW]
+                                - code [ref=e832]: orc:checks
+                                - text: was checked while CodeQL was still pending at review time. Merge-gate independently refuses merge on non-passing checks; re-verified at merge time on the current HEAD.
+                            - paragraph [ref=e833]:
+                              - text: "Convergence: gen-3 against HEAD"
+                              - link "2e57d1e" [ref=e834] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                              - text: found no new noteworthy (≥MEDIUM) findings; gen-1/gen-2 LOW deferrals resolved or tracked (
+                              - link "#290" [ref=e835] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/issues/290
+                              - text: "). Merge gate: all required checks must be green at"
+                              - link "2e57d1e" [ref=e836] [cursor=pointer]:
+                                - /url: https://github.com/arbsec/orchestraitor/commit/2e57d1ef847f548ca0afa6b8e223367bce09f3d6
+                              - text: at merge time.
+                - generic [ref=e840]:
+                  - heading "This branch has not been deployed" [level=3] [ref=e844]
+                  - text: No deployments
+            - generic [ref=e847]:
+              - link "Sign up for free" [ref=e848] [cursor=pointer]:
+                - /url: /join?source=comment-repo
+              - strong [ref=e849]: to join this conversation on GitHub
+              - text: . Already have an account?
+              - link "Sign in to comment" [ref=e850] [cursor=pointer]:
+                - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Farbsec%2Forchestraitor%2Fpull%2F289
+        - generic [ref=e854]:
+          - form "Select reviewers" [ref=e856]:
+            - heading "Reviewers" [level=3] [ref=e857]
+            - text: No reviews
+          - form "Select assignees" [ref=e859]:
+            - heading "Assignees" [level=3] [ref=e860]
+            - text: No one assigned
+          - generic [ref=e861]:
+            - heading "Labels" [level=3] [ref=e862]
+            - generic [ref=e863]: None yet
+          - form "Select projects" [ref=e865]:
+            - heading "Projects" [level=3] [ref=e866]
+            - text: None yet
+          - form "Select milestones" [ref=e868]:
+            - heading "Milestone" [level=3] [ref=e869]
+            - text: No milestone
+          - form "Link issues" [ref=e875]:
+            - heading "Development" [level=3] [ref=e876]
+            - paragraph [ref=e877]: Successfully merging this pull request may close these issues.
+            - link [ref=e879] [cursor=pointer]:
+              - /url: https://github.com/arbsec/orchestraitor/issues/286
+              - img "Open issue" [ref=e880]
+              - text: "Task: delivery-runner — wire configurable concurrency into BacklogRunner dispatch (§9.33.3)"
+          - generic [ref=e884]:
+            - heading "1 participant" [level=3] [ref=e885]
+            - link [ref=e887] [cursor=pointer]:
+              - /url: /mekwall
+              - img "@mekwall" [ref=e888]
+  - contentinfo [ref=e889]:
+    - heading "Footer" [level=2] [ref=e890]
+    - generic [ref=e891]:
+      - generic [ref=e892]:
+        - link "GitHub Homepage" [ref=e893] [cursor=pointer]:
+          - /url: https://github.com
+        - generic [ref=e896]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e897]:
+        - heading "Footer navigation" [level=3] [ref=e898]
+        - list "Footer navigation" [ref=e899]:
+          - listitem [ref=e900]:
+            - link "Terms" [ref=e901] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e902]:
+            - link "Privacy" [ref=e903] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e904]:
+            - link "Security" [ref=e905] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e906]:
+            - link "Status" [ref=e907] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e908]:
+            - link "Community" [ref=e909] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e910]:
+            - link "Docs" [ref=e911] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e912]:
+            - link "Contact" [ref=e913] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e914]:
+            - button "Manage cookies" [ref=e916] [cursor=pointer]
+          - listitem [ref=e917]:
+            - button "Do not share my personal information" [ref=e919] [cursor=pointer]
