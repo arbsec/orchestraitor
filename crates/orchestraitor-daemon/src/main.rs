@@ -79,17 +79,14 @@ async fn watch_cycle() -> Result<ExitCode> {
         .wrap_err("worker role resolution failed")?;
 
     // The board client: the same reconciled read `orc loop` polls through.
-    let (board_config, _path) =
+    let (board_config_template, _path) =
         orchestraitor_board::BoardProjectConfig::load(&project_dir).into_diagnostic()?;
-    let token_uri = board_config
+    let token_uri = board_config_template
         .token_uri
         .clone()
         .ok_or(orchestraitor_board::BoardError::AuthNotConfigured)
         .into_diagnostic()?;
     let auth = Arc::new(orchestraitor_board::SecretUriAuth::new(token_uri));
-    let client = orchestraitor_board::BoardClient::new(auth)
-        .into_diagnostic()
-        .wrap_err("board client construction failed")?;
 
     // Durable stores: the same files `orc loop` uses, so recovery and
     // history are shared between the two operating modes.
@@ -108,9 +105,6 @@ async fn watch_cycle() -> Result<ExitCode> {
     // PR #555 review finding) and serializing one connection behind a
     // guard held for the whole run would deadlock the poller. WAL readers
     // never block on the runner's writes.
-    let events = orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
-        .into_diagnostic()
-        .wrap_err("watch event store open failed")?;
 
     // Prune leftover worktrees from previous invocations (of either
     // operating mode) before any spawn.
@@ -165,18 +159,6 @@ async fn watch_cycle() -> Result<ExitCode> {
         }
     });
 
-    let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
-        .into_diagnostic()
-        .wrap_err("loop run-state store open failed (reconcile handle)")?;
-    let poller = ReconcilePoller::new(
-        orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
-        // The poller's dedicated connection (see the comment above): opening a
-        // second handle on the same WAL database is safe — the reconcile scan
-        // only reads, and WAL readers never block the runner's writes.
-        Arc::new(std::sync::Mutex::new(poller_runs)),
-        Arc::new(std::sync::Mutex::new(events)),
-        Arc::new(JournallessSink),
-    );
     let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
 
     // Fail closed when the system clock is before the Unix epoch: a
@@ -192,19 +174,67 @@ async fn watch_cycle() -> Result<ExitCode> {
     // reconcile poller and run_watch, so the live-slot exclusion and the
     // runner's identity can never drift.
     let invocation_id = format!("watch-{start_unix_secs}");
-    let summary = run_watch(
-        loop_config,
-        poller,
-        starter,
-        &decisions,
-        &runs,
-        routing,
-        signal_rx,
-        start_unix_secs,
-        &invocation_id,
-    )
-    .await
-    .into_diagnostic()?;
+    // The daemon is ALWAYS-RUNNING (§9.36): the 4h whole-run budget ends one
+    // runner invocation, not the daemon — on RunBudgetExhausted a fresh
+    // invocation (new id, so restart recovery and slot exclusion stay scoped)
+    // continues watching until the operator's shutdown signal. A shutdown
+    // stop (or any other terminal reason) exits.
+    let summary = loop {
+        // A fresh client per invocation (reqwest build is cheap; the auth Arc
+        // is shared): the loop restarts only on the 4h run budget. The board
+        // config is cloned per invocation (cheap validated struct).
+        let client = orchestraitor_board::BoardClient::new(
+            Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>
+        )
+        .into_diagnostic()
+        .wrap_err("board client construction failed")?;
+        let board_config = board_config_template.clone();
+        // Fresh reconcile connections per invocation: cheap SQLite opens; the
+        // databases are durable and shared.
+        let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
+            .into_diagnostic()
+            .wrap_err("loop run-state store open failed (reconcile handle)")?;
+        let events =
+            orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
+                .into_diagnostic()
+                .wrap_err("watch event store open failed")?;
+        // A fresh poller per invocation: the reconcile state (promoted-set,
+        // divergence dedup) is invocation-scoped by design — recovery
+        // re-orphans and the new invocation re-observes cleanly. The event
+        // store is shared and durable.
+        let poller = ReconcilePoller::new(
+            orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
+            // The poller's dedicated connection (see the comment above): opening a
+            // second handle on the same WAL database is safe — the reconcile scan
+            // only reads, and WAL readers never block the runner's writes.
+            Arc::new(std::sync::Mutex::new(poller_runs)),
+            Arc::new(std::sync::Mutex::new(events)),
+            Arc::new(JournallessSink),
+        );
+        let summary = run_watch(
+            loop_config.clone(),
+            poller,
+            starter.clone(),
+            &decisions,
+            &runs,
+            routing.clone(),
+            signal_rx.clone(),
+            start_unix_secs,
+            &invocation_id,
+        )
+        .await
+        .into_diagnostic()?;
+        match summary.stop_reason {
+            orchestraitor_campaign::StopReason::RunBudgetExhausted => {
+                tracing::info!(
+                    cycles = summary.cycles,
+                    spawns = summary.spawns,
+                    "orcd watch: run budget exhausted; starting the next invocation"
+                );
+            }
+            _ => break summary,
+        }
+    };
 
     signal_task.abort();
     tracing::info!(

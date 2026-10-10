@@ -473,6 +473,7 @@ fn rfc3339_now() -> String {
 /// either mode prune identically). The same [`WorkerBudgets`] instance the
 /// loop runner validates feeds the worker, so the two enforcement layers
 /// cannot drift.
+#[derive(Clone)]
 pub struct DirectWatchStarter {
     project_dir: PathBuf,
     config_dir: PathBuf,

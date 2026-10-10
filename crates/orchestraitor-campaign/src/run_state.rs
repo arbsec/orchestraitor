@@ -419,16 +419,46 @@ impl LoopRunStore {
     /// fails. Each row is transitioned and decoded individually, so the
     /// rows recovered before a failure are already durable.
     pub fn recover_running_rows(&self, now_secs: u64) -> Result<Vec<RunRow>, CampaignError> {
+        // Atomic: the scan and every transition run in one transaction, so
+        // a mid-recovery failure leaves the store exactly as before the
+        // call — never half-orphaned (a PR #555 review finding). The rows
+        // are decoded inside the transaction and re-read after commit.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|source| self.err(source))?;
+        let mut ids = Vec::new();
+        {
+            let mut statement = tx
+                .prepare(&format!(
+                    "SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE status = 'running' ORDER BY id"
+                ))
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map([], decode_row)
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                ids.push(row.map_err(|source| self.err(source))?.id);
+            }
+        }
+        for id in &ids {
+            tx.execute(
+                "UPDATE loop_worker_runs
+                 SET status = ?2, finished_at_secs = ?3, spend_usd = 0.0, detail = ?4
+                 WHERE id = ?1 AND status = 'running'",
+                rusqlite::params![
+                    id,
+                    RunRowStatus::Orphaned.as_str(),
+                    secs_i64(now_secs, &self.path_label)?,
+                    "restart-recovery: supervisor did not reach a terminal status",
+                ],
+            )
+            .map_err(|source| self.err(source))?;
+        }
+        tx.commit().map_err(|source| self.err(source))?;
         let mut recovered = Vec::new();
-        for row in self.running_rows()? {
-            self.finish(
-                row.id,
-                RunRowStatus::Orphaned,
-                now_secs,
-                0.0,
-                "restart-recovery: supervisor did not reach a terminal status",
-            )?;
-            recovered.push(self.by_id(row.id)?);
+        for id in ids {
+            recovered.push(self.by_id(id)?);
         }
         Ok(recovered)
     }
