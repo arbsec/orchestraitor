@@ -403,10 +403,6 @@ impl<P: BoardPoller> ReconcilePoller<P> {
         }
     }
 
-    /// Sets the current watch invocation id (called by [`run_watch`] once
-    /// the runner's invocation identity exists). MUST be called before the
-    /// first poll; unset, no row is excluded and a live slot could be
-    /// misreported as divergent.
     /// Begins a new watch invocation: sets the invocation id and clears
     /// the divergence-dedup set (dedup is invocation-scoped — each
     /// invocation re-observes from the durable rows), while CARRYING
