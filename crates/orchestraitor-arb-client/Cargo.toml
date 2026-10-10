@@ -1,0 +1,32 @@
+[package]
+name = "orchestraitor-arbitraitor-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+# process-group kill for cancellation-aware child cleanup (issue #434):
+# rustix's safe wrappers keep the unsafe boundary inside the dependency,
+# matching arbitraitor-exec's own use (MIT OR Apache-2.0).
+rustix = { workspace = true }
+arbitraitor-core = { workspace = true }
+arbitraitor-exec = { workspace = true }
+arbitraitor-mcp = { workspace = true }
+arbitraitor-model = { workspace = true }
+arbitraitor-plugin-api = { workspace = true }
+arbitraitor-policy = { workspace = true }
+arbitraitor-receipt = { workspace = true }
+arbitraitor-sandbox = { workspace = true }
+orchestraitor-model = { path = "../orchestraitor-model" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Live cancellation tests spawn real mediated children (issue #434).
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

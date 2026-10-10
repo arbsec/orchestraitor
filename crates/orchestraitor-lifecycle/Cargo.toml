@@ -1,0 +1,24 @@
+[package]
+name = "orchestraitor-lifecycle"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task and session lifecycle state machine for Orchestraitor"
+
+[lints]
+workspace = true
+
+[dependencies]
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

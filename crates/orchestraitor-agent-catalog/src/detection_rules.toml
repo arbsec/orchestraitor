@@ -1,0 +1,106 @@
+threshold = 10
+
+[[rules]]
+domain = "frontend"
+weight = 10
+path_exact = "package.json"
+
+[[rules]]
+domain = "frontend"
+weight = 10
+path_prefix = "src/components/"
+
+[[rules]]
+domain = "frontend"
+weight = 10
+path_suffix = ".tsx"
+
+[[rules]]
+domain = "frontend"
+weight = 10
+path_contains = "vite.config."
+
+[[rules]]
+domain = "backend"
+weight = 4
+path_exact = "Cargo.toml"
+
+[[rules]]
+domain = "backend"
+weight = 8
+content_contains = "[lib]"
+
+[[rules]]
+domain = "backend"
+weight = 10
+path_exact = "pom.xml"
+
+[[rules]]
+domain = "backend"
+weight = 10
+path_suffix = ".csproj"
+
+[[rules]]
+domain = "data"
+weight = 10
+path_contains = "prisma/schema.prisma"
+
+[[rules]]
+domain = "data"
+weight = 10
+path_contains = "migrations/"
+
+[[rules]]
+domain = "data"
+weight = 10
+path_suffix = ".sql"
+
+[[rules]]
+domain = "devops"
+weight = 10
+path_exact = "Dockerfile"
+
+[[rules]]
+domain = "devops"
+weight = 10
+path_prefix = ".github/workflows/"
+
+[[rules]]
+domain = "devops"
+weight = 10
+path_suffix = ".tf"
+
+[[rules]]
+domain = "testing"
+weight = 10
+path_contains = "tests/"
+
+[[rules]]
+domain = "testing"
+weight = 10
+path_suffix = "_test.rs"
+
+[[rules]]
+domain = "documentation"
+weight = 6
+path_exact = "AGENTS.md"
+
+[[rules]]
+domain = "documentation"
+weight = 6
+path_exact = "CONTRIBUTING.md"
+
+[[rules]]
+domain = "documentation"
+weight = 6
+path_prefix = "book/"
+
+[[rules]]
+domain = "security"
+weight = 10
+path_exact = "SECURITY.md"
+
+[[rules]]
+domain = "security"
+weight = 10
+path_exact = ".github/SECURITY.md"

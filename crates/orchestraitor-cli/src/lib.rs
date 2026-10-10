@@ -1,0 +1,46 @@
+//! Command-line entry points for Orchestraitor.
+
+#![forbid(unsafe_code)]
+
+pub mod cli;
+pub mod commands;
+mod detection;
+pub mod init;
+mod render;
+mod scanner;
+
+use std::io::{self, Write};
+
+use clap::Parser;
+
+pub use cli::{Cli, Commands};
+
+/// Runs the CLI against process arguments and standard streams.
+///
+/// # Errors
+/// Returns a diagnostic when arguments, configuration, or provider metadata fail.
+pub fn run() -> miette::Result<()> {
+    let cli = Cli::parse();
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    run_with_writer(cli, &mut lock)
+}
+
+/// Runs a parsed command against a supplied writer.
+///
+/// # Errors
+/// Returns a diagnostic when the selected command fails.
+pub fn run_with_writer<W: Write>(cli: Cli, writer: &mut W) -> miette::Result<()> {
+    match cli.command {
+        Commands::Init(args) => init::run(&args, writer),
+        Commands::Config(command) => commands::config::run(&cli.paths, command, writer),
+        Commands::Models(command) => commands::models::run(&cli.paths, command, writer),
+        Commands::GitHub(command) => commands::github::run(&cli.paths, command, writer),
+        Commands::Routing(command) => commands::routing::run(&cli.paths, command, writer),
+        Commands::Board(command) => commands::board::run(&cli.paths, command, writer),
+        Commands::Worker(command) => commands::worker::run(&cli.paths, command, writer),
+        Commands::Campaign(command) => commands::campaign::run(&cli.paths, command, writer),
+        Commands::Loop(args) => commands::loop_runner::run(&cli.paths, &args, writer),
+        Commands::Simplify(command) => commands::simplify::run(&cli.paths, command, writer),
+    }
+}

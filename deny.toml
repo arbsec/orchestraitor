@@ -1,0 +1,75 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# bincode is unmaintained (RUSTSEC-2025-0141). Transitive via yara-x, which
+# enters the graph through arbitraitor-analysis at rev ab7af5e; same ignore
+# arbitraitor itself carries at that revision.
+# RUSTSEC-2026-0222/0269/0316/0327 affect the wasmtime 43.0.2 copy pulled in
+# transitively by yara-x 1.19.0 (wasmtime requirement ^43.0.2); no patched
+# 43.x exists and it cannot be bumped without upstream yara-x requiring a
+# newer wasmtime. Matches arbitraitor's own deny.toml at the pinned revision.
+# RUSTSEC-2026-0327 additionally cannot be fixed by updating yara-x: even the
+# latest release (1.21.0) requires wasmtime ^45.0.3, below every patched
+# range (>=48.0.4,<49 / >=49.0.2). Its flaw is an unvalidated async-lifted
+# *component-model* callback result count; yara-x uses wasmtime as an
+# internal synchronous engine for modules it compiles itself from YARA rule
+# text and never instantiates untrusted components, so the vulnerable path
+# is unreachable in our use.
+ignore = [
+    "RUSTSEC-2025-0141",
+    "RUSTSEC-2026-0222",
+    { id = "RUSTSEC-2026-0269", reason = "yara-x 1.19.0 requires wasmtime ^43.0.2, resolving the transitive copy to 43.0.2; no patched 43.x exists and yara-x cannot be bumped without an upstream wasmtime requirement change. Matches arbitraitor's ignore at the pinned revision; drop when yara-x requires a patched wasmtime." },
+    "RUSTSEC-2026-0316",
+    { id = "RUSTSEC-2026-0327", reason = "Unvalidated async-lifted component-model callback result count (native stack buffer overflow). yara-x 1.19.0 requires wasmtime ^43.0.2 and even the latest yara-x 1.21.0 requires ^45.0.3, below every patched range (>=48.0.4,<49 or >=49.0.2), so no dependency resolution reaches patched wasmtime. The vulnerable path (async component-model callbacks) is unreachable: yara-x embeds wasmtime as a synchronous engine for self-compiled YARA rule modules and never loads untrusted components. Drop when yara-x requires wasmtime >=48.0.4." },
+]
+
+[licenses]
+version = 2
+# Per tech-stack.md §18 and AGENTS.md: only MIT, Apache-2.0, BSD-3-Clause,
+# ISC, and Apache-2.0 WITH LLVM-exception are approved. Transitive deps with
+# other licenses are denied. Add per-crate exceptions here ONLY with justification.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/arbsec/arbitraitor.git"]

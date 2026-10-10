@@ -1,0 +1,144 @@
+//! Bash mediation seam: every bash call crosses the Arbitraitor boundary.
+//!
+//! The production implementation ([`MediatedBashMediator`]) wraps
+//! `MediatedWorker::spawn` + the cancellation-aware bash pipeline from
+//! `orchestraitor-arbitraitor-client`'s `bash_child` module (issue #311;
+//! cancellation-aware child cleanup added by issue #434): the preflight runs
+//! before the first execution surface exists, and the worker crate
+//! implements no security primitive itself (spec §2.2).
+//!
+//! Cancellation contract (issue #434): `run_bash` executes the mediated
+//! interpreter inside `spawn_blocking` while holding an owned child guard.
+//! Aborting the calling future drops that guard, which kills the
+//! interpreter's process group and reaps it — a stalled, timed-out, or
+//! drain-aborted run can no longer keep executing shell commands after the
+//! loop records its terminal status.
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use orchestraitor_arbitraitor_client::ArbitraitorClient;
+use orchestraitor_arbitraitor_client::bash_child::BashChild;
+use orchestraitor_arbitraitor_client::mediation::{MediatedWorker, WORKER_PLATFORM};
+
+pub use orchestraitor_arbitraitor_client::mediation::{MediatedRun, MediationError};
+
+/// Mediates bash execution through the Arbitraitor boundary.
+///
+/// The seam exists so tests can drive the loop deterministically; the only
+/// production implementation is [`MediatedBashMediator`], which crosses the
+/// #311 mediation module on every call.
+#[async_trait]
+pub trait BashMediator: Send + Sync {
+    /// Runs a bash script through the mediated boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediationError`] when the boundary refuses or fails — always
+    /// a typed, fail-closed refusal (spec §6.7).
+    async fn run_bash(&self, script: &str) -> Result<MediatedRun, MediationError>;
+}
+
+/// Production [`BashMediator`]: the #311 mediated worker, spawned lazily on
+/// the first bash call.
+///
+/// Lazy spawn keeps the fail-closed preflight contract exactly where it
+/// belongs — before any execution surface exists — while letting a run whose
+/// model never requests bash complete without probing the sandbox (the
+/// preflight is host-dependent by design: it refuses on hosts without the
+/// required controls, per ADR-0024 and the #755 stopgap).
+pub struct MediatedBashMediator {
+    client: ArbitraitorClient,
+    worker: Mutex<Option<MediatedWorker>>,
+}
+
+impl MediatedBashMediator {
+    /// Creates a mediator that will preflight and spawn on first use.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            client: ArbitraitorClient::default(),
+            worker: Mutex::new(None),
+        }
+    }
+
+    /// Returns the gated worker, spawning (and preflighting) on first use.
+    fn worker(&self) -> Result<MediatedWorker, MediationError> {
+        let mut guard = self.worker.lock().map_err(|_| MediationError::Bash {
+            reason: "mediator-lock",
+        })?;
+        if let Some(worker) = guard.as_ref() {
+            return Ok(worker.clone());
+        }
+        let spawned = MediatedWorker::spawn(&self.client, WORKER_PLATFORM)?;
+        *guard = Some(spawned.clone());
+        Ok(spawned)
+    }
+}
+
+impl Default for MediatedBashMediator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl BashMediator for MediatedBashMediator {
+    async fn run_bash(&self, script: &str) -> Result<MediatedRun, MediationError> {
+        // The preflight stays on the `MediatedWorker` path: it must run
+        // before the first execution surface exists (fail closed, spec
+        // §6.7); the bash pipeline itself is the cancellation-aware
+        // `BashChild` above.
+        self.worker()?;
+        let script = script.to_string();
+        // Cancellation contract (issue #434): Tokio cannot abort a
+        // `spawn_blocking` task once it starts, so the kill capability
+        // lives OUTSIDE the blocking closure. The child handle is shared
+        // as an `Arc`; a drop guard armed in THIS future calls
+        // `kill_group()` if the future is dropped before completion
+        // (the loop runner's `kill_where` abort), and the blocking
+        // `wait` — which polls the child — observes the kill and returns,
+        // letting the detached closure finish and free its resources.
+        let child = Arc::new(
+            tokio::task::spawn_blocking(BashChild::spawn)
+                .await
+                .map_err(|_| MediationError::Bash {
+                    reason: "task-join",
+                })??,
+        );
+        let mut guard = KillOnDrop(child.clone());
+        // The blocking task owns a clone; the guard keeps the kill handle.
+        let waiter =
+            tokio::task::spawn_blocking(move || Arc::clone(&child).wait(script.as_bytes()));
+        let result = waiter.await.map_err(|_| MediationError::Bash {
+            reason: "task-join",
+        })?;
+        // Completed (success or typed failure): the child is reaped and the
+        // drop path must not kill anything.
+        guard.disarm();
+        result
+    }
+}
+
+/// Calls [`BashChild::kill_group`] when dropped, unless disarmed.
+///
+/// Armed across the `await` on the blocking wait: an abort of the
+/// `run_bash` future drops the guard mid-await and kills the process group
+/// from the async side — the capability the blocking closure cannot
+/// provide for itself.
+struct KillOnDrop(Arc<BashChild>);
+
+impl KillOnDrop {
+    /// Marks the run completed: the drop path does nothing.
+    fn disarm(&mut self) {
+        // Swap in a stub whose kill is a no-op: `wait` already reaped the
+        // child, so a group signal would be harmless but pointless.
+        self.0 = Arc::new(BashChild::disarmed());
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        self.0.kill_group();
+    }
+}

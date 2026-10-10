@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# pr-review-local: run `coderabbit review --agent --base <base>` LOCALLY
+# against the current PR head (base = the PR's resolved base branch) for
+# remediation-loop feedback — without the GitHub trigger or the poll cycle.
+# Per owner directive (2026-10-09): a clean LOCAL CLI generation at the final
+# HEAD is the recorded convergence evidence before merge (see SKILL.md step
+# 6/CONVERGE); GitHub-side bot triggers are no-ops during plan pauses.
+#
+# Read-only: this script NEVER posts to GitHub. It only reads PR state
+# (the mergeable gate) and runs the local CLI.
+#
+# Flow:
+#   1. Resolve the PR for the current branch (or --pr <number>).
+#   2. Reuse the shared mergeable gate (`orc_lib_require_mergeable`, same
+#      pattern as pr-request-review/pr-review-post/pr-comment): a
+#      conflicting/unmergeable PR is refused (typed, exit 5), consistent
+#      with the no-review-while-conflicting rule.
+#   3. Run `coderabbit review --agent --base <PR base branch>` in the current
+#      worktree (environment passes through) — the explicit --base makes the
+#      scope the PR base-to-HEAD diff, not the CLI default of tracked worktree
+#      changes. A missing binary is a typed error — falling back to an
+#      `@coderabbitai review` trigger is NOT automatic.
+#   4. Print the raw findings to stdout.
+#   5. --json wraps the output as {pr, head, base, findings_raw} via jq (when jq
+#      is available; without jq, --json is a typed config error).
+#
+# Exit codes: 0 = review completed (regardless of findings);
+# 1 = GitHub lookup/read failure (PR lookup, head/base read);
+# 2 = config/state error (no PR for branch, jq missing for --json);
+# 3 = coderabbit CLI failure (non-zero exit, missing binary included);
+# 4 = local HEAD or worktree mismatch (findings would not match the
+#     reported PR head);
+# 5 = mergeable-gate refusal (PR conflicts with base / unproven state).
+# Missing coderabbit binary: exit 3 with the typed install message.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-review-local" "Run coderabbit review --agent --base <PR base branch> locally against the current PR head for remediation feedback (scope: the PR base-to-HEAD diff). Read-only: never posts to GitHub. Flags: --pr <number> (default: the PR for the current branch). --json wraps stdout as {pr, head, base, findings_raw}. Exit codes: 0 review completed; 1 GitHub lookup/read failure; 2 config/state error; 3 coderabbit CLI failure (missing binary included); 4 local HEAD/worktree mismatch; 5 mergeable-gate refusal."
+  exit "$ORC_OK"
+fi
+
+# --- PR resolution --------------------------------------------------------------
+# --pr <number> wins; otherwise resolve the PR for the current branch via
+# `gh pr list --head <branch>` (exact head match; empty = no PR yet).
+PR=""
+REST=()
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --pr)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --pr requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      PR="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --pr=*) PR="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    *)      REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+  esac
+done
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ -z "$PR" ]; then
+  PR="$(orc_lib_gh pr list --repo "$REPO" --head "$BRANCH" --state all \
+        --json number --limit 1 --jq '.[0].number // ""')" ||
+    { echo "error: could not look up the PR for branch $BRANCH" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+fi
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: no PR found for branch '$BRANCH' — open one with pr-create or pass --pr <number>" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+HEAD_AND_BASE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid,baseRefOid --jq '"\(.headRefOid) \(.baseRefOid)"')" ||
+  { echo "error: cannot read PR #$PR head" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+# shellcheck disable=SC2034  # exported via --json receipt: findings are scoped to this exact (head, base) pair
+HEAD_SHA="${HEAD_AND_BASE%% *}"
+BASE_SHA="${HEAD_AND_BASE#* }"
+
+# Resolve the PR's base branch so the CLI reviews the PR base-to-HEAD diff
+# (the review's actual scope), not merely the CLI default of tracked worktree
+# changes. Without --base, `coderabbit review` covers uncommitted/staged/
+# committed tracked changes regardless of the PR's merge base — too narrow
+# for a convergence-evidence generation.
+BASE_BRANCH="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json baseRefName --jq '.baseRefName')" ||
+  { echo "error: cannot read PR #$PR base branch" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+if [ -z "$BASE_BRANCH" ]; then
+  echo "error: PR #$PR returned an empty baseRefName" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+
+# Fail fast on --json without jq BEFORE consuming a review run whose requested
+# output cannot be produced.
+if [ "$OPT_JSON" = true ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: --json requires jq, which is not installed" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+# The CLI reviews the CURRENT WORKTREE but the findings are reported against
+# the PR head: validate that this checkout IS that head, with no uncommitted
+# tracked changes, so findings can never be attributed to code other than the
+# reported head.
+LOCAL_SHA="$(git rev-parse HEAD)" ||
+  { echo "error: cannot read the local HEAD commit" >&2; exit "$ORC_ERR_CONFIG"; }
+if [ "$LOCAL_SHA" != "$HEAD_SHA" ]; then
+  echo "error: local HEAD $LOCAL_SHA does not match PR #$PR head $HEAD_SHA — checkout the PR head (orc github push-branch re-lands the local tree as the App-signed head)" >&2
+  exit "$ORC_ERR_CONCURRENT"
+fi
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "error: worktree has uncommitted tracked changes — commit them via the verified landing path before reviewing, otherwise findings would not match the reported PR head" >&2
+  exit "$ORC_ERR_CONCURRENT"
+fi
+
+# --- Mergeable gate (shared; identical rule as the GitHub-trigger scripts) ------
+# A local review of a conflicting PR would remediate a diff that cannot land;
+# the typed refusal (exit 5) is the same no-review-while-conflicting rule.
+orc_lib_require_mergeable "$PR" "$REPO"
+
+# --- coderabbit CLI --------------------------------------------------------------
+if ! command -v coderabbit >/dev/null 2>&1; then
+  echo "error: coderabbit CLI not installed/authed — see coderabbit docs; falling back to @coderabbitai review is NOT automatic" >&2
+  exit "$ORC_ERR_POLICY"
+fi
+
+set +e
+FINDINGS_RAW="$(coderabbit review --agent --base "$BASE_BRANCH")"
+CR_RC=$?
+set -e
+if [ "$CR_RC" -ne 0 ]; then
+  # CodeRabbit can emit findings before failing; retain them for diagnosis,
+  # clearly marked as partial — never presented as a completed review.
+  if [ -n "$FINDINGS_RAW" ]; then
+    echo "--- partial coderabbit findings (review FAILED, exit $CR_RC) ---" >&2
+    printf '%s\n' "$FINDINGS_RAW" >&2
+  fi
+  echo "error: coderabbit review --agent --base $BASE_BRANCH failed with exit code $CR_RC" >&2
+  exit "$ORC_ERR_POLICY"
+fi
+
+# --- Output ----------------------------------------------------------------------
+if [ "$OPT_JSON" = true ]; then
+  jq -n --arg pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg findings_raw "$FINDINGS_RAW" \
+    '{pr: ($pr | tonumber), head: $head, base: $base, findings_raw: $findings_raw}'
+else
+  printf '%s\n' "$FINDINGS_RAW"
+fi

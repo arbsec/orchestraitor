@@ -1,0 +1,390 @@
+//! Layer loading, precedence resolution, and provenance tracking.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+
+use miette::{IntoDiagnostic, Result, bail, miette};
+use orchestraitor_core::{ConfigLayer, ConfigResolver, ConfigSource};
+
+use crate::cli::{CliLayer, ConfigPaths};
+use crate::commands::config::values::{flatten_json, read_value_map_from_str};
+
+pub(crate) const BUILT_IN_DEFAULTS: &str = r#"
+service_identities = ["arbsec-agent"]
+
+[normalization]
+format_on_write = true
+max_passes = 2
+safe_fix_classifications = ["format", "organize-imports"]
+
+# Pre-landing simplify pass (fail-open quality tooling; never a push gate):
+# the pre-commit hook runs a staged, check-only pass (format fixes never
+# auto-apply over a staged scope — whole-file rewrites would clobber
+# unstaged hunks); safe fixes stay suggest-only until the review-loop PR
+# adds the Arbitraitor classification gate. `model_pass` is parsed but not
+# wired in this slice — it activates with the shared sub-session runtime.
+[simplify]
+enabled = true
+auto_apply_format = true
+auto_apply_safe_fixes = false
+max_passes = 2
+max_files = 200
+pedantic = false
+model_pass = false
+
+[retry]
+max_attempts = 3
+backoff_ms = 250
+
+[github_app]
+slug = "arbsec-agent"
+enforcement = "recommended"
+
+# Anti-stuck guardrails for `orc loop` (spec §9.27.1/§9.36): defaults are
+# active; an explicit `0` disables a guard deliberately (warned).
+[loop]
+no_progress_turns = 5
+tool_repeat_count = 4
+tool_repeat_window = 8
+ci_poll_budget_secs = 1800
+max_task_attempts = 3
+task_retry_backoff_secs = 900
+
+# Static heuristic role routing table for the bootstrap (spec
+# 30-model-routing.md §9.45): every built-in orchestration role routes to the
+# single-provider default from spec §10.3 unless a higher layer overrides
+# `roles.<id>.routing.*`.
+[roles.explore.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+[roles.research.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+[roles.plan.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+[roles.implement.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+[roles.review.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+[roles.verify.routing]
+provider = "neuralwatt"
+model = "glm-5.3-flash"
+
+# Built-in declared tools (issue #535, T4): read-only sub-agent surfaces
+# over the shared sub-session runtime. Trusted built-in-defaults layer by
+# construction; both are visible to the implement role only.
+[tools.explore]
+kind = "subagent"
+subagent_role = "explore"
+instructions = "You are a read-only codebase explorer. Answer the parent's question using read_file and search only. Report file paths and line evidence."
+effort = "low"
+structured_summary = true
+max_summary_bytes = 4096
+visible_to = ["implement"]
+
+[tools.explore.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
+
+[tools.review]
+kind = "subagent"
+subagent_role = "review"
+instructions = "You are a read-only reviewer. Critique the code or diff the parent names. Report concrete defects with file paths; do not propose unrelated changes."
+effort = "low"
+max_summary_bytes = 8192
+visible_to = ["implement"]
+
+[tools.review.budget]
+max_turns = 12
+wall_clock_secs = 600
+max_result_bytes = 8192
+"#;
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedLayers {
+    pub(crate) resolver: ConfigResolver,
+    pub(crate) unknown_keys: Vec<UnknownKey>,
+    layer_values: Vec<LayerValues>,
+}
+
+impl LoadedLayers {
+    pub(crate) fn effective_map(&self) -> Result<BTreeMap<String, serde_json::Value>> {
+        let config = self.resolver.resolve_config().map_err(|error| {
+            miette!(
+                "configuration validation failed: {}",
+                error.structured().cause
+            )
+        })?;
+        let value = serde_json::to_value(config).into_diagnostic()?;
+        Ok(flatten_json(&value))
+    }
+
+    pub(crate) fn resolved_map(&self) -> Result<BTreeMap<String, ResolvedJson>> {
+        let mut resolved = BTreeMap::new();
+        reject_same_layer_conflicts(&self.layer_values)?;
+        let mut sorted = self.layer_values.clone();
+        sorted.sort_by_key(|layer| layer.layer);
+        for layer in sorted {
+            for (key, value) in layer.values {
+                resolved.insert(
+                    key,
+                    ResolvedJson {
+                        value,
+                        source_layer: layer.layer_name.clone(),
+                        source_name: layer.source_name.clone(),
+                        inherited: false,
+                        layer: layer.layer,
+                    },
+                );
+            }
+        }
+        Ok(resolved)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UnknownKey {
+    pub(crate) source: String,
+    pub(crate) key: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedJson {
+    pub(crate) value: serde_json::Value,
+    pub(crate) source_layer: String,
+    pub(crate) source_name: String,
+    pub(crate) inherited: bool,
+    /// Typed precedence layer that supplied the value, for comparing which
+    /// of several leaves under one prefix wins provenance attribution.
+    pub(crate) layer: ConfigLayer,
+}
+
+#[derive(Debug, Clone)]
+struct LayerValues {
+    layer: ConfigLayer,
+    layer_name: String,
+    source_name: String,
+    values: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Copy)]
+struct LayerLoad<'a> {
+    layer: ConfigLayer,
+    name: &'a str,
+    content: &'a str,
+}
+
+impl<'a> LayerLoad<'a> {
+    const fn inline(layer: ConfigLayer, name: &'a str, content: &'a str) -> Self {
+        Self {
+            layer,
+            name,
+            content,
+        }
+    }
+}
+
+pub(crate) fn load_layers(paths: &ConfigPaths) -> Result<LoadedLayers> {
+    let mut resolver = ConfigResolver::new();
+    let mut layer_values = Vec::new();
+    let mut unknown_keys = Vec::new();
+    add_layer(
+        &mut resolver,
+        &mut layer_values,
+        &mut unknown_keys,
+        &LayerLoad::inline(
+            ConfigLayer::BuiltInDefaults,
+            "built-in defaults",
+            BUILT_IN_DEFAULTS,
+        ),
+    )?;
+    for layer in [
+        CliLayer::User,
+        CliLayer::Org,
+        CliLayer::Project,
+        CliLayer::Dir,
+    ] {
+        for path in layer_files(paths, layer)? {
+            let name = path.display().to_string();
+            let content = fs::read_to_string(&path).into_diagnostic()?;
+            add_layer(
+                &mut resolver,
+                &mut layer_values,
+                &mut unknown_keys,
+                &LayerLoad::inline(config_layer(layer), &name, &content),
+            )?;
+        }
+    }
+    Ok(LoadedLayers {
+        resolver,
+        unknown_keys,
+        layer_values,
+    })
+}
+
+pub(crate) fn layer_path(paths: &ConfigPaths, layer: CliLayer) -> PathBuf {
+    match layer {
+        CliLayer::Project => paths.project_dir.join("orchestraitor.toml"),
+        CliLayer::User => paths.config_dir.join("user.toml"),
+        CliLayer::Org => paths.config_dir.join("org.toml"),
+        CliLayer::Dir => paths.config_dir.join("dir.toml"),
+    }
+}
+
+pub(crate) fn layer_name(layer: CliLayer) -> &'static str {
+    match layer {
+        CliLayer::Project => "project",
+        CliLayer::User => "user",
+        CliLayer::Org => "org",
+        CliLayer::Dir => "dir",
+    }
+}
+
+fn add_layer(
+    resolver: &mut ConfigResolver,
+    layer_values: &mut Vec<LayerValues>,
+    unknown_keys: &mut Vec<UnknownKey>,
+    load: &LayerLoad<'_>,
+) -> Result<()> {
+    let report = orchestraitor_core::config::parse_toml_config(load.content)
+        .map_err(|error| miette!("configuration parse failed: {}", error.structured().cause))?;
+    for key in report.unknown_keys {
+        unknown_keys.push(UnknownKey {
+            source: load.name.to_string(),
+            key,
+        });
+    }
+    *resolver = resolver
+        .clone()
+        .with_toml(
+            ConfigSource {
+                layer: load.layer,
+                name: load.name.to_string(),
+            },
+            load.content,
+        )
+        .map_err(|error| miette!("configuration parse failed: {}", error.structured().cause))?;
+    layer_values.push(LayerValues {
+        layer: load.layer,
+        layer_name: format_config_layer(load.layer),
+        source_name: load.name.to_string(),
+        values: read_value_map_from_str(load.content)?,
+    });
+    Ok(())
+}
+
+fn layer_files(paths: &ConfigPaths, layer: CliLayer) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let primary = layer_path(paths, layer);
+    if primary.exists() {
+        files.push(primary);
+    }
+    let dir = layer_shard_dir(paths, layer);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
+    for entry in entries {
+        let path = entry.into_diagnostic()?.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) == Some("toml") {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+fn reject_same_layer_conflicts(layers: &[LayerValues]) -> Result<()> {
+    let mut seen: BTreeMap<(ConfigLayer, String), Vec<String>> = BTreeMap::new();
+    for layer in layers {
+        for key in layer.values.keys() {
+            seen.entry((layer.layer, key.clone()))
+                .or_default()
+                .push(layer.source_name.clone());
+        }
+    }
+    for ((_, key), names) in seen {
+        if names.len() > 1 {
+            bail!(
+                "ambiguous configuration conflict for key `{}` from sources {:?}",
+                key,
+                names
+            );
+        }
+    }
+    Ok(())
+}
+
+fn layer_shard_dir(paths: &ConfigPaths, layer: CliLayer) -> PathBuf {
+    match layer {
+        CliLayer::Project => paths.project_dir.join("orchestraitor.d"),
+        CliLayer::User => paths.config_dir.join("user.d"),
+        CliLayer::Org => paths.config_dir.join("org.d"),
+        CliLayer::Dir => paths.config_dir.join("dir.d"),
+    }
+}
+
+const fn config_layer(layer: CliLayer) -> ConfigLayer {
+    match layer {
+        CliLayer::Project => ConfigLayer::Project,
+        CliLayer::User => ConfigLayer::GlobalUser,
+        CliLayer::Org => ConfigLayer::OrganizationTeam,
+        CliLayer::Dir => ConfigLayer::DirectoryDomain,
+    }
+}
+
+fn format_config_layer(layer: ConfigLayer) -> String {
+    match layer {
+        ConfigLayer::BuiltInDefaults => "built-in-defaults",
+        ConfigLayer::PluginDefaults => "plugin-defaults",
+        ConfigLayer::GlobalUser => "user",
+        ConfigLayer::OrganizationTeam => "org",
+        ConfigLayer::Project => "project",
+        ConfigLayer::DirectoryDomain => "dir",
+        ConfigLayer::TaskAgent => "task-agent",
+        ConfigLayer::CliFlag => "cli-flag",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use orchestraitor_agent_catalog::{
+        BOOTSTRAP_MODEL, BOOTSTRAP_PROVIDER, BUILT_IN_ORCHESTRATION_ROLES,
+    };
+    use orchestraitor_core::OrchestraitorError;
+
+    use super::*;
+
+    #[test]
+    fn built_in_defaults_ship_the_bootstrap_route_for_every_orchestration_role()
+    -> Result<(), OrchestraitorError> {
+        let report = orchestraitor_core::config::parse_toml_config(BUILT_IN_DEFAULTS)?;
+        assert!(
+            report.unknown_keys.is_empty(),
+            "built-in defaults must use known keys: {:?}",
+            report.unknown_keys
+        );
+        let roles = report.config.roles.ok_or(OrchestraitorError::Internal)?;
+        assert_eq!(roles.len(), BUILT_IN_ORCHESTRATION_ROLES.len());
+        for role in BUILT_IN_ORCHESTRATION_ROLES {
+            let routing = roles
+                .get(role.id)
+                .and_then(|role_config| role_config.routing.as_ref())
+                .ok_or(OrchestraitorError::Internal)?;
+            assert_eq!(routing.provider.as_deref(), Some(BOOTSTRAP_PROVIDER));
+            assert_eq!(routing.model.as_deref(), Some(BOOTSTRAP_MODEL));
+        }
+        Ok(())
+    }
+}

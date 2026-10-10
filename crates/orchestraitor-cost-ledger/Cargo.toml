@@ -1,0 +1,20 @@
+[package]
+name = "orchestraitor-cost-ledger"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Per-call cost, subscription utilization, and budget ledger for Orchestraitor"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+orchestraitor-core = { path = "../orchestraitor-core" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }

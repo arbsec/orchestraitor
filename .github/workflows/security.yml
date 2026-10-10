@@ -1,0 +1,51 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+    paths: &security_paths
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".mise.toml"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths: *security_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca  # v5.1.1
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad  # v2.87.26
+        with:
+          tool: cargo-deny
+      - name: Run cargo-deny
+        run: cargo deny check
+
+  cargo-audit:
+    name: Advisory Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca  # v5.1.1
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad  # v2.87.26
+        with:
+          tool: cargo-audit
+      - name: Run cargo-audit
+        # Same ignores as arbitraitor's own security.yml at the pinned rev:
+        # the advisories ride the yara-x transitive wasmtime/bincode graph
+        # that arbitraitor ab7af5e introduces.
+        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0222 --ignore RUSTSEC-2026-0269 --ignore RUSTSEC-2026-0316 --ignore RUSTSEC-2026-0327

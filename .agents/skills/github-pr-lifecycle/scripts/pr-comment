@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# pr-comment: comment on a PR through the service-identity wrapper.
+# Wraps `gh pr comment` via orc_lib_gh_service so the comment attributes to the
+# arbsec-agent GitHub App service identity, never a personal account
+# (AGENTS.md critical rules; .agents/project/orchestraitor-workflow.md).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-comment" "Comment on a PR (gh pr comment) through the service-identity wrapper. Positional: <pr-number> --body <text> (or --body-file <path>)."
+  exit "$ORC_OK"
+fi
+
+# Extract --body/--body-file flags (body may span several words); the first
+# remaining positional arg is the PR number, the rest pass through to gh.
+BODY=""
+BODY_FILE=""
+REST=()
+while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ORC_LIB_EXTRA_ARGS[0]}" in
+    --body)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body=*)       BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --body-file)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file=*)
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"
+      [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    *)              REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+  esac
+done
+
+PR="${REST[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+if [ -z "$BODY" ] && [ -z "$BODY_FILE" ]; then
+  echo "error: --body <text> or --body-file <path> required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+REPO="$(orc_lib_resolve_repo)"
+ARGS=(pr comment "$PR" --repo "$REPO")
+[ -n "$BODY" ] && ARGS+=(--body "$BODY")
+[ -n "$BODY_FILE" ] && ARGS+=(--body-file "$BODY_FILE")
+ARGS+=("${REST[@]:1}")
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh ${ARGS[*]}" >&2
+  echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
+  exit "$ORC_OK"
+fi
+
+# Conflict gate (owner directive 2026-10-07): no review trigger of any kind
+# (including an `@coderabbitai review` comment) may be posted while the PR
+# conflicts with its base — the automated review would evaluate an
+# unmergeable diff. Typed refusal (exit 5) on CONFLICTING/DIRTY. Runs AFTER
+# the enforcement decision inside orc_lib_run_or_dry_run's service routing —
+# this precondition read must never become the personal-auth write path the
+# enforcement gate exists to refuse (required + missing config refuses here
+# first, with the typed config error and rc:2, gh never invoked).
+orc_lib_require_mergeable "$PR" "$REPO"
+
+# Mutating call: service route or typed failure — never silent personal auth.
+COMMENT_URL="$(orc_lib_run_or_dry_run ARGS gh)"
+echo "Commented on PR #$PR: $COMMENT_URL" >&2
+printf '%s\n' "$COMMENT_URL"

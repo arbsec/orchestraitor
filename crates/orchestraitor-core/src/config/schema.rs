@@ -1,0 +1,402 @@
+//! Serializable configuration schema.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::secret::SecretUri;
+
+/// Root Orchestraitor configuration schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrchestraitorConfig {
+    /// Format and safe-fix normalization behavior.
+    pub normalization: Option<NormalizationConfig>,
+    /// Pre-landing simplify pass behavior (fail-open quality tooling).
+    pub simplify: Option<SimplifyConfig>,
+    /// Provider definitions keyed by provider id.
+    pub providers: Option<BTreeMap<String, ProviderConfig>>,
+    /// Agent domain routing and role templates.
+    pub agents: Option<AgentsConfig>,
+    /// Role routing table keyed by role id (spec `30-model-routing.md` §9.45).
+    pub roles: Option<BTreeMap<String, RoleConfig>>,
+    /// Declared-tool registry keyed by tool id (issue #535). Tool
+    /// definitions are honored from trusted layers only (built-in defaults,
+    /// plugin defaults, global user, organization/team); a definition in a
+    /// project or lower layer is a typed registry error, never a silent drop.
+    pub tools: Option<BTreeMap<String, ToolConfig>>,
+    /// Subscription definitions keyed by subscription id.
+    pub subscriptions: Option<BTreeMap<String, SubscriptionConfig>>,
+    /// Budget definitions keyed by budget id.
+    pub budgets: Option<BTreeMap<String, BudgetConfig>>,
+    /// Resource limit definitions keyed by limit id.
+    pub resource_limits: Option<BTreeMap<String, ResourceLimitConfig>>,
+    /// Retry behavior defaults.
+    pub retry: Option<RetryConfig>,
+    /// Data governance rules keyed by rule id.
+    pub data_governance: Option<BTreeMap<String, DataGovernanceConfig>>,
+    /// Data classification rules keyed by rule id.
+    pub data_classification: Option<BTreeMap<String, DataClassificationConfig>>,
+    /// GitHub App service identity used for agent-driven GitHub operations
+    /// (spec `10-orchestrator.md` §9.25.2).
+    pub github_app: Option<GitHubAppConfig>,
+    /// Decision-provider selection for model routing (spec
+    /// `30-model-routing.md` §9.45). Default-off: the heuristic table stays
+    /// the router when this block is absent.
+    pub routing: Option<RoutingDecisionProviderConfig>,
+    /// Service-identity bot slugs for the ready-queue assignee exclusion:
+    /// items assigned to a service identity stay schedulable while items
+    /// assigned to a human are excluded (spec `10-orchestrator.md` §9.41).
+    pub service_identities: Option<Vec<String>>,
+    /// Anti-stuck guardrails for `orc loop` (spec `10-orchestrator.md`
+    /// §9.27.1, §9.36 detection). Default-on; an explicit `0` disables a
+    /// guard deliberately.
+    pub r#loop: Option<LoopGuardrailsConfig>,
+    /// Watch-daemon settings (spec `10-orchestrator.md` §9.36). Absent
+    /// block keeps every documented default.
+    pub watch: Option<WatchConfigBlock>,
+}
+
+/// Watch-daemon configuration block (spec `10-orchestrator.md` §9.36):
+/// the poll-tick cadence and its knobs, operator-configurable through the
+/// §9.22 layered configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchConfigBlock {
+    /// Seconds between board polls (the §9.36 poll tick). Each tick is a
+    /// full reconcile/supervise pass. Zero is rejected fail-closed at
+    /// resolve time (a zero cadence is a runaway poll loop).
+    pub poll_interval_secs: Option<u64>,
+}
+
+/// Anti-stuck guardrail thresholds for `orc loop`
+/// (`[loop.guardrails]`; spec `10-orchestrator.md` §9.27.1). Absent keys
+/// inherit the bootstrap defaults; an explicit `0` disables the
+/// corresponding guard (a deliberate opt-out the loop warns about).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LoopGuardrailsConfig {
+    /// Consecutive identical worktree progress fingerprints that fail an
+    /// attempt as `no-progress` (default 5; `0` disables).
+    pub no_progress_turns: Option<u32>,
+    /// Repetitions of one normalized tool-call shape within
+    /// `tool_repeat_window` turns that kill an attempt as
+    /// `tool-loop-churn` (default 4; `0` disables).
+    pub tool_repeat_count: Option<u32>,
+    /// Churn sliding-window length in tool turns (default 8; `0` disables).
+    pub tool_repeat_window: Option<u32>,
+    /// Cumulative poll-shaped bash wall-clock per attempt, in whole
+    /// seconds (default 1800 = 30m; `0` disables).
+    pub ci_poll_budget_secs: Option<u64>,
+    /// Cross-invocation attempts per task before the task is marked
+    /// `stuck` (default 3, matching the worker attempt bound; `0`
+    /// disables the task budget).
+    pub max_task_attempts: Option<u32>,
+    /// Re-selection backoff after a failed task attempt, in whole seconds
+    /// (default 900 = 15m; `0` disables).
+    pub task_retry_backoff_secs: Option<u64>,
+}
+
+/// Decision-provider selection for model routing (spec
+/// `30-model-routing.md` §9.45). The heuristic table is the default; a
+/// configured provider is consulted first and the heuristic table remains
+/// the fallback chain when the provider is unavailable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoutingDecisionProviderConfig {
+    /// Decision provider implementation name. Shipped values are `fixture`
+    /// (deterministic, table-driven, offline) and `systemone` (the System
+    /// One decision protocol against any compatible endpoint — REQUIRED
+    /// `base_url`); any other value is a typed unknown-provider error at
+    /// resolve time.
+    pub provider: Option<String>,
+    /// Decision-endpoint base URL (spec §10.3), REQUIRED for
+    /// `routing.provider = "systemone"`: any System One-compatible endpoint
+    /// — the Neuralwatt cloud or a self-hosted decision engine alike. The
+    /// URL is per-project operator configuration, never hardcoded in code.
+    /// A trailing slash is normalized before the `/systemone` path is
+    /// appended. Plain-`http` endpoints are accepted for no-auth
+    /// local/tailnet deployments; startup fails closed when a credential
+    /// is configured against a non-`https` endpoint off loopback.
+    pub base_url: Option<String>,
+    /// Optional decision model id override — any model the endpoint
+    /// serves. Defaults to `clef-flash`.
+    pub model: Option<String>,
+    /// Optional credential reference for the decision endpoint, as a
+    /// `secret://` URI (`secret://env/NEURALWATT_API_KEY`) or the literal
+    /// `none`. Absent (or `none`) means the endpoint takes no auth (a
+    /// local/self-hosted deployment) and no `Authorization` header is
+    /// sent; a `secret://` URI resolves through the standard secret chain
+    /// and the resolved value never enters an error or log line. A
+    /// credential is never sent over plaintext `http` off loopback:
+    /// non-`https` endpoints must be no-auth (local/tailnet) or `https`.
+    pub api_key: Option<String>,
+}
+
+/// Enforcement mode for the GitHub App service identity (AGENTS.md; spec
+/// `10-orchestrator.md` §9.41).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceIdentityEnforcement {
+    /// Labelled bootstrap mode: when the `github_app` config does not resolve,
+    /// mutating GitHub operations take the personal-auth fallback with a loud
+    /// WARNING — a named bootstrap deviation, never a weakening of the org
+    /// rule for human operators.
+    #[default]
+    Recommended,
+    /// Fail-closed mode: when the `github_app` config does not resolve,
+    /// mutating GitHub operations fail with a typed error instead of falling
+    /// back to personal auth, and agent `git commit` paths refuse to produce
+    /// personal-identity commits.
+    Required,
+}
+
+/// GitHub App service identity configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitHubAppConfig {
+    /// How strictly the service identity is enforced when the `github_app`
+    /// config does not resolve. Default `recommended` (labelled bootstrap
+    /// deviation); `required` fails closed with a typed error.
+    pub enforcement: Option<ServiceIdentityEnforcement>,
+    /// GitHub App slug (e.g. `arbsec-agent`).
+    pub slug: Option<String>,
+    /// GitHub App client ID, used as the JWT `iss` claim. The numeric app ID
+    /// is rejected by GitHub with 401 (runbook `.omo/drafts/github-app-setup.md` §5).
+    pub client_id: Option<String>,
+    /// GitHub App installation ID for the deployment organization; installation
+    /// tokens are minted per installation.
+    pub installation_id: Option<u64>,
+    /// Secret URI for the App private key PEM (spec `40-arbitraitor-integration.md` §9.23).
+    pub private_key_uri: Option<SecretUri>,
+}
+
+/// Normalization configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NormalizationConfig {
+    /// Whether files are formatted before transactional promotion.
+    pub format_on_write: Option<bool>,
+    /// Maximum normalization passes before reporting failure.
+    pub max_passes: Option<u32>,
+    /// Names of fix classes considered safe by this profile.
+    pub safe_fix_classifications: Option<Vec<String>>,
+}
+
+/// Pre-landing simplify-pass configuration block (spec §9.5 normalization
+/// classes; fail-open quality tooling — never a push gate).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SimplifyConfig {
+    /// Master switch; the hooks and commands exit 0 (no-op) when false.
+    pub enabled: Option<bool>,
+    /// Auto-apply Format-class fixes (rustfmt, rumdl) — §9.5 Format class.
+    pub auto_apply_format: Option<bool>,
+    /// Auto-apply clippy machine-applicable suggestions on `.rs` files.
+    /// PR-1 note: the Arbitraitor output-classification gate that will
+    /// further scope safe-fix auto-apply lands with the review-loop PR;
+    /// until then safe-fix auto-apply is limited to exactly this surface.
+    pub auto_apply_safe_fixes: Option<bool>,
+    /// Maximum normalization passes (§9.5 convergence bound).
+    pub max_passes: Option<u32>,
+    /// Maximum files examined per pass.
+    pub max_files: Option<usize>,
+    /// Include `clippy::pedantic` findings.
+    pub pedantic: Option<bool>,
+    /// Model-driven simplification tier. Parsed but unused in this slice:
+    /// it is wired when the review-loop PR lands the shared sub-session
+    /// runtime (the flag exists so the config surface is final).
+    pub model_pass: Option<bool>,
+}
+
+/// Provider configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderConfig {
+    /// Explicit provider protocol name.
+    pub protocol: Option<String>,
+    /// Provider endpoint URL or local endpoint label.
+    pub endpoint: Option<String>,
+    /// Supported model identifiers.
+    pub models: Option<Vec<String>>,
+    /// Secret URI environment variables accepted by the provider.
+    pub env: Option<Vec<SecretUri>>,
+    /// Secret URI for a provider credential reference.
+    pub api_key: Option<SecretUri>,
+}
+
+/// Agent configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentsConfig {
+    /// Domain configurations keyed by domain id.
+    pub domains: Option<BTreeMap<String, DomainConfig>>,
+}
+
+/// Agent domain configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DomainConfig {
+    /// Human-readable domain description.
+    pub description: Option<String>,
+    /// Roles available inside this domain.
+    pub roles: Option<Vec<String>>,
+    /// Routing defaults for this domain.
+    pub routing: Option<RoutingConfig>,
+}
+
+/// Role configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleConfig {
+    /// Routing defaults for this role.
+    pub routing: Option<RoutingConfig>,
+}
+
+/// Per-invocation budget for a declared tool (issue #535, T2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolBudgetConfig {
+    /// Maximum conversation turns for one sub-session invocation.
+    pub max_turns: Option<u32>,
+    /// Hard wall-clock bound for one invocation (seconds). Absent inherits
+    /// the parent run's remaining deadline.
+    pub wall_clock_secs: Option<u64>,
+    /// Cap on the bytes of the result fed back to the parent.
+    pub max_result_bytes: Option<u64>,
+}
+
+/// Declared-tool configuration block for one `[tools.<id>]` entry (issue
+/// #535, T2). Each tool is either a rule-driven command invocation or a
+/// cheap-model sub-session with a scoped internal-tool allowlist.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolConfig {
+    /// Tool mechanism: `command` (fixed argv, mediated dispatch) or
+    /// `subagent` (cheap-model sub-session). `hybrid` is schema-reserved
+    /// and rejected at resolve time in v1.
+    pub kind: Option<String>,
+    /// Fixed argv for `command` tools. No shell interpretation: quoting
+    /// into the mediated script is Orchestraitor's code, never config text.
+    pub command: Option<Vec<String>>,
+    /// Orchestration role id for `subagent` tools (spec `30-model-routing.md`
+    /// §9.45 chain).
+    pub subagent_role: Option<String>,
+    /// Scoped internal-tool allowlist for `subagent` tools; typed values
+    /// (`read_file`, `search`, `bash`), never free strings.
+    pub internal_tools: Option<Vec<String>>,
+    /// Operator-authored instructions prepended to the sub-session prompt.
+    pub instructions: Option<String>,
+    /// Orchestration roles that may invoke the tool. Empty/absent = nobody
+    /// (an undeclared visibility is a refusal, never an implicit grant).
+    pub visible_to: Option<Vec<String>>,
+    /// Per-invocation budget.
+    pub budget: Option<ToolBudgetConfig>,
+    /// Role-level reasoning-effort policy (issue #535, owner-approved):
+    /// `low`, `medium`, or `high`; resolved through the layered chain with
+    /// provenance and recorded in decision records.
+    pub effort: Option<String>,
+    /// Cap on the sub-session finish summary returned to the parent (bytes).
+    pub max_summary_bytes: Option<u64>,
+    /// Structured-only finish for `explore`-class roles: the finish summary
+    /// MUST be a compact fielded payload, not prose narrative.
+    pub structured_summary: Option<bool>,
+}
+
+/// Model routing configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoutingConfig {
+    /// Provider identifier selected for this route.
+    pub provider: Option<String>,
+    /// Model identifier selected for this route.
+    pub model: Option<String>,
+    /// Optional profile name used by the route.
+    pub profile: Option<String>,
+}
+
+/// Subscription configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubscriptionConfig {
+    /// Provider id this subscription applies to.
+    pub provider: Option<String>,
+    /// Budget id attached to this subscription.
+    pub budget: Option<String>,
+}
+
+/// Token and cost budget configuration block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BudgetConfig {
+    /// Optional token cap.
+    pub token_cap: Option<u64>,
+    /// Optional cost cap in minor currency units.
+    pub cost_cap: Option<u64>,
+}
+
+/// Resource limit configuration block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceLimitConfig {
+    /// Maximum memory bytes for the named resource class.
+    pub memory_bytes: Option<u64>,
+    /// Maximum CPU milliseconds for the named resource class.
+    pub cpu_ms: Option<u64>,
+    /// Maximum output bytes for the named resource class.
+    pub output_bytes: Option<u64>,
+}
+
+/// Retry configuration block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RetryConfig {
+    /// Maximum attempts before surfacing the failure.
+    pub max_attempts: Option<u32>,
+    /// Backoff in milliseconds between attempts.
+    pub backoff_ms: Option<u64>,
+}
+
+/// Data governance configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DataGovernanceConfig {
+    /// Retention policy label.
+    pub retention: Option<String>,
+    /// Provenance policy label.
+    pub provenance: Option<String>,
+}
+
+/// Data classification configuration block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DataClassificationConfig {
+    /// Classification label.
+    pub label: Option<String>,
+    /// Whether this class may leave the local machine.
+    pub exportable: Option<bool>,
+}
+
+/// Configuration precedence layer.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub enum ConfigLayer {
+    /// Built-in defaults shipped as data.
+    BuiltInDefaults,
+    /// Plugin-provided defaults inserted below explicit user/project config.
+    PluginDefaults,
+    /// Global user configuration.
+    GlobalUser,
+    /// Organization or team policy layer.
+    OrganizationTeam,
+    /// Project configuration layer.
+    Project,
+    /// Directory or domain configuration layer.
+    DirectoryDomain,
+    /// Task or agent override layer.
+    TaskAgent,
+    /// Explicit CLI flag layer.
+    CliFlag,
+}
+
+/// Source metadata for a resolved value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigSource {
+    /// Precedence layer that supplied the value.
+    pub layer: ConfigLayer,
+    /// Human-readable source name.
+    pub name: String,
+}
+
+/// Resolved config value plus provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedValue<T> {
+    /// Effective value.
+    pub value: T,
+    /// Source layer and name that supplied the value.
+    pub source: ConfigSource,
+    /// Whether the value was inherited from a lower-precedence layer.
+    pub inherited: bool,
+}
