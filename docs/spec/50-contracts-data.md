@@ -554,6 +554,13 @@ pub struct ContextReceipt {
     pub omitted_count: u64,
     /// Reference-substitution applied by the memory graph (§9.15.2):
     /// spans replaced by `mem://` handles, with token counts before/after.
+    /// Backward compatibility: receipts written before §9.15.2 lack this
+    /// field; readers deserialize it with a default of an empty Vec
+    /// (`#[serde(default)]`) — never rejected, never migrated in place.
+    /// The §9.17.1 schema_version on the event envelope records which
+    /// shape a stored receipt uses; an unknown future shape is preserved
+    /// and flagged `uninterpreted`, per §9.17.1 schema versioning.
+    #[serde(default)]
     pub memory_elisions: Vec<MemoryElision>,
     pub index_digest: Digest,
     pub selection_policy_digest: Digest,
