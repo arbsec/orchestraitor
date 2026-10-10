@@ -202,7 +202,7 @@ impl BoardPoller for BoardSnapshotPoller {
 /// pass's snapshot is reconciled exactly once.
 pub struct ReconcilePoller<P: BoardPoller> {
     inner: P,
-    runs: Arc<tokio::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
+    runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
     events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
     sink: Arc<dyn ReconcileSink>,
 }
@@ -225,14 +225,17 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // board-diverged observation — the board wins (§9.43).
         //
         // The run-state store is `rusqlite`-backed (Send, not Sync): the
-        // poll lock serializes the scan against the runner's own ticks,
-        // which never overlap this poll (the runner awaits it).
+        // poller owns a DEDICATED connection (not the runner's), and the
+        // std-Mutex guard is held only across the synchronous `reconcile`
+        // call — never across an await — so `blocking_lock`'s
+        // async-context panic (a review finding, PR #555) cannot occur and
+        // the runner's ticks are never blocked. WAL readers never block on
+        // the runner's writes.
         let outcome = {
-            // `blocking_lock` inside the poll's async context is safe here:
-            // the watch cycle runs on a current-thread runtime and the
-            // runner awaits this poll before ticking — the mutex is never
-            // contended, so the block never actually blocks.
-            let runs = self.runs.blocking_lock();
+            let runs = self
+                .runs
+                .lock()
+                .map_err(|_| CampaignError::Loop("run-state store lock poisoned".to_string()))?;
             reconcile(&snapshot, &[], &[], &runs, &[])
         }
         .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
@@ -249,7 +252,7 @@ impl<P: BoardPoller> ReconcilePoller<P> {
     #[must_use]
     pub fn new(
         inner: P,
-        runs: Arc<tokio::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
+        runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
         events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
         sink: Arc<dyn ReconcileSink>,
     ) -> Self {

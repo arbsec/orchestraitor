@@ -100,14 +100,14 @@ async fn watch_cycle() -> Result<ExitCode> {
     let runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
         .into_diagnostic()
         .wrap_err("loop run-state store open failed")?;
-    // Shared between the reconcile poller and the runner: `rusqlite` is
-    // Send but not Sync, and the current-thread runtime means the mutex
-    // is never contended (the runner awaits each poll before ticking).
-    // `tokio::sync::Mutex` because the runner's borrow legitimately spans
-    // awaits; the reconcile poller takes `blocking_lock()` inside its
-    // synchronous scan (current-thread runtime: no contention, never
-    // blocking a worker).
-    let runs = Arc::new(tokio::sync::Mutex::new(runs));
+    // Two independent connections to the same WAL database: the runner
+    // borrows one directly (its borrow spans awaits, which a Mutex cannot
+    // — and need not — guard on a current-thread runtime); the reconcile
+    // poller owns the other behind a std Mutex held only across its
+    // synchronous scan. `blocking_lock` would panic in async context (a
+    // PR #555 review finding) and serializing one connection behind a
+    // guard held for the whole run would deadlock the poller. WAL readers
+    // never block on the runner's writes.
     let events = orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
         .into_diagnostic()
         .wrap_err("watch event store open failed")?;
@@ -170,28 +170,32 @@ async fn watch_cycle() -> Result<ExitCode> {
         }
     });
 
+    let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
+        .into_diagnostic()
+        .wrap_err("loop run-state store open failed (reconcile handle)")?;
     let poller = ReconcilePoller::new(
         orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
-        Arc::clone(&runs),
+        // The poller's dedicated connection (see the comment above): opening a
+        // second handle on the same WAL database is safe — the reconcile scan
+        // only reads, and WAL readers never block the runner's writes.
+        Arc::new(std::sync::Mutex::new(poller_runs)),
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
     let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
 
-    let runs_guard = runs.blocking_lock();
     let summary = run_watch(
         loop_config,
         poller,
         starter,
         &decisions,
-        &runs_guard,
+        &runs,
         routing,
         signal_rx,
         start_unix_secs,
     )
     .await
     .into_diagnostic()?;
-    drop(runs_guard);
 
     signal_task.abort();
     tracing::info!(
