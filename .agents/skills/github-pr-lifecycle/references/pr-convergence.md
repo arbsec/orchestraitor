@@ -53,6 +53,9 @@ review generation N (fresh context, current HEAD)
   → STOP when a local CLI review generation at the final HEAD reports
     zero actionable findings
     AND all earlier blocking findings are resolved
+    AND a `CLEAN` agent-review record for the current HEAD exists (see
+    "How `convergence-status` computes the verdict" below — a missing,
+    stale, or non-clean record blocks convergence)
   → record the evidence in the PR description: the pr-review-local command,
     the final HEAD SHA, findings=0
 ```
