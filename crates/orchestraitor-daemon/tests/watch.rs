@@ -7,9 +7,12 @@
 // Test-only allowances mirror the cli/daemon integration tests: a failed
 // assertion must fail the test loudly.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use orchestraitor_campaign::{LoopConfig, LoopRunStore, RunRow, RunRowStatus, StartRun};
+use orchestraitor_campaign::{
+    BoardPoller, LoopConfig, LoopRunStore, RunRow, RunRowStatus, StartRun,
+};
 use orchestraitor_daemon::{WatchConfig, acquire_instance_lock};
 
 const START_UNIX: u64 = 1_000_000;
@@ -218,4 +221,132 @@ fn the_cadence_wires_into_the_loop_config_guard_set() {
         budgets.max_concurrent_workers
     );
     assert_eq!(config.budgets.stall_timeout, budgets.stall_timeout);
+}
+
+/// A scripted poller: returns the queued snapshots in order (then repeats the
+/// last one), simulating board evolution across ticks.
+struct ScriptedPoller {
+    snapshots: std::sync::Mutex<Vec<orchestraitor_campaign::BoardSnapshot>>,
+}
+
+#[async_trait::async_trait]
+impl orchestraitor_campaign::BoardPoller for ScriptedPoller {
+    async fn poll(
+        &self,
+    ) -> Result<orchestraitor_campaign::BoardSnapshot, orchestraitor_campaign::CampaignError> {
+        let mut queue = self.snapshots.lock().expect("queue lock");
+        if queue.len() > 1 {
+            Ok(queue.remove(0))
+        } else {
+            Ok(queue[0].clone())
+        }
+    }
+}
+
+/// A capture sink recording every reconcile outcome.
+#[derive(Default)]
+struct CaptureSink {
+    outcomes: std::sync::Mutex<Vec<orchestraitor_campaign::ReconcileOutcome>>,
+}
+
+impl orchestraitor_daemon::ReconcileSink for CaptureSink {
+    fn record(&self, outcome: &orchestraitor_campaign::ReconcileOutcome) {
+        self.outcomes
+            .lock()
+            .expect("sink lock")
+            .push(outcome.clone());
+    }
+}
+
+fn ready_item(number: u64) -> orchestraitor_board::ReadyItem {
+    orchestraitor_board::ReadyItem {
+        number,
+        title: format!("fixture task {number}"),
+        url: format!("https://github.com/arbsec/orchestraitor/issues/{number}"),
+        repo: "arbsec/orchestraitor".to_string(),
+        item_id: format!("item-{number}"),
+    }
+}
+
+/// §9.40 promotion + §9.43 dedup, behavior-level: across three ticks the
+/// poller (1) records `unblocked-task-promoted` when a previously blocked
+/// candidate reaches the ready queue, and (2) records `board-diverged` for a
+/// vanished running task ONCE — not once per tick. Forbidden effects asserted
+/// absent: a missing promotion event, and duplicate divergence envelopes.
+#[tokio::test(flavor = "current_thread")]
+async fn poller_promotes_unblocked_tasks_and_deduplicates_divergences()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_campaign::{BoardSnapshot, LoopRunStore, ReconcileEvent, StartRun};
+    use orchestraitor_daemon::ReconcilePoller;
+
+    let dir = tempfile::tempdir()?;
+    let runs = LoopRunStore::open(&dir.path().join("loop.db"))?;
+    runs.start(&StartRun {
+        invocation_id: "watch-poller-test".to_string(),
+        decision_id: 1,
+        task_id: "board-arbsec_orchestraitor-42".to_string(),
+        repo: "arbsec/orchestraitor".to_string(),
+        number: 42,
+        started_at_secs: START_UNIX,
+    })?;
+    // Task 42: running locally but absent from the board's open set on every
+    // tick (the divergence). Task 43: blocked on tick 1, promoted on tick 2.
+
+    let tick1 = BoardSnapshot {
+        open: Vec::new(),
+        ready: Vec::new(),
+        blocked_candidates: vec![ready_item(43)],
+        warnings: Vec::new(),
+    };
+    let tick2 = BoardSnapshot {
+        open: Vec::new(),
+        ready: vec![ready_item(43)],
+        blocked_candidates: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let tick3 = tick2.clone();
+
+    let sink = Arc::new(CaptureSink::default());
+    let events_store =
+        orchestraitor_events::SqliteAuditStore::open(dir.path().join("watch-events.db"))?;
+    let poller = ReconcilePoller::new(
+        ScriptedPoller {
+            snapshots: std::sync::Mutex::new(vec![tick1, tick2, tick3]),
+        },
+        Arc::new(std::sync::Mutex::new(runs)),
+        Arc::new(std::sync::Mutex::new(events_store)),
+        Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
+    );
+
+    // Three ticks: blocked → promoted → steady state.
+    poller.poll().await?;
+    poller.poll().await?;
+    poller.poll().await?;
+
+    let recorded = sink.outcomes.lock().expect("sink lock");
+    let mut promotions = 0_usize;
+    let mut divergences = Vec::new();
+    for outcome in recorded.iter() {
+        for event in &outcome.events {
+            match event {
+                ReconcileEvent::UnblockedTaskPromoted { task_id, .. } => {
+                    promotions += 1;
+                    assert_eq!(task_id, "board-arbsec_orchestraitor-43");
+                }
+                ReconcileEvent::BoardDiverged { task_id, .. } => {
+                    divergences.push(task_id.clone());
+                }
+            }
+        }
+    }
+    assert_eq!(
+        promotions, 1,
+        "exactly one promotion when the blocked candidate reaches the ready queue"
+    );
+    assert_eq!(
+        divergences.len(),
+        1,
+        "the vanished running task records board-diverged ONCE, not once per tick          (forbidden effect: a duplicate envelope every cadence tick); got {divergences:?}"
+    );
+    Ok(())
 }

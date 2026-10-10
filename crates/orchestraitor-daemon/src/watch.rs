@@ -205,6 +205,15 @@ pub struct ReconcilePoller<P: BoardPoller> {
     runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
     events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
     sink: Arc<dyn ReconcileSink>,
+    /// The previous tick's blocked candidates (§9.40): a candidate that
+    /// appears on the NEXT tick's ready queue is a newly unblocked task —
+    /// without this, promotion events could never fire.
+    previous_blocked: std::sync::Mutex<Vec<orchestraitor_board::ReadyItem>>,
+    /// Task ids that already received a `board-diverged` event: the
+    /// divergence records once per task, not once per tick (a task that
+    /// stays absent from the open set must not produce an envelope every
+    /// cadence tick).
+    diverged_seen: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Where reconcile observations go. Production forwards into the daemon
@@ -231,15 +240,72 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // async-context panic (a review finding, PR #555) cannot occur and
         // the runner's ticks are never blocked. WAL readers never block on
         // the runner's writes.
+        //
+        // Dedup: a task that stays absent from the open set records its
+        // `board-diverged` event ONCE (the `diverged_seen` set), not once
+        // per cadence tick. Promotion: the previous tick's blocked
+        // candidates feed this tick's reconcile, so a candidate that
+        // reaches the ready queue records `unblocked-task-promoted`.
+        let previous_blocked = {
+            let previous = self
+                .previous_blocked
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            previous.clone()
+        };
         let outcome = {
             let runs = self
                 .runs
                 .lock()
                 .map_err(|_| CampaignError::Loop("run-state store lock poisoned".to_string()))?;
-            reconcile(&snapshot, &[], &[], &runs, &[])
+            reconcile(&snapshot, &previous_blocked, &[], &runs, &[])
         }
         .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
-        if !outcome.events.is_empty() {
+        // Dedup the divergence events against `seen` (a task that stays
+        // absent from the open set is recorded ONCE, not once per tick),
+        // then update the reconcile state AFTER a successful pass: the
+        // state must describe what the LAST RECORDED pass saw, so a failed
+        // (unrecorded) pass re-observes on the next tick.
+        let (events, newly_seen): (Vec<_>, Vec<_>) = {
+            let seen = self
+                .diverged_seen
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            let events: Vec<_> = outcome
+                .events
+                .iter()
+                .filter(|event| match event {
+                    ReconcileEvent::BoardDiverged { task_id, .. } => !seen.contains(task_id),
+                    ReconcileEvent::UnblockedTaskPromoted { .. } => true,
+                })
+                .cloned()
+                .collect();
+            let newly: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    ReconcileEvent::BoardDiverged { task_id, .. } => Some(task_id.clone()),
+                    ReconcileEvent::UnblockedTaskPromoted { .. } => None,
+                })
+                .collect();
+            (events, newly)
+        };
+        {
+            let mut previous = self
+                .previous_blocked
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            previous.clone_from(&snapshot.blocked_candidates);
+            let mut seen = self
+                .diverged_seen
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            seen.extend(newly_seen);
+        }
+        if !events.is_empty() {
+            let outcome = ReconcileOutcome {
+                events,
+                ready_task_ids: outcome.ready_task_ids,
+            };
             self.record_events(&outcome)?;
             self.sink.record(&outcome);
         }
@@ -261,6 +327,8 @@ impl<P: BoardPoller> ReconcilePoller<P> {
             runs,
             events,
             sink,
+            previous_blocked: std::sync::Mutex::new(Vec::new()),
+            diverged_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
