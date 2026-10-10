@@ -29,11 +29,11 @@ fn ready_item(number: u64) -> ReadyItem {
 /// Seeds a `paused` row the way a future pause control would: a direct
 /// status update through the same schema (test-only; no production
 /// mutation path for non-terminal rows exists by contract).
-fn rusqlite_touch_paused(path: std::path::PathBuf) {
+fn rusqlite_touch_paused(path: std::path::PathBuf, task_id: &str) {
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.execute(
-        "UPDATE loop_worker_runs SET status = 'paused' WHERE id = 1",
-        [],
+        "UPDATE loop_worker_runs SET status = 'paused' WHERE task_id = ?1",
+        [task_id],
     )
     .expect("pause update");
 }
@@ -122,7 +122,7 @@ fn paused_status_is_non_terminal_and_untouched_by_recovery() {
     start_row(&store, "board-arbsec_orchestraitor-44", 44);
     // Simulate a future pause control's durable write: the only sanctioned
     // non-running non-terminal spelling.
-    rusqlite_touch_paused(dir.path().join("loop.db"));
+    rusqlite_touch_paused(dir.path().join("loop.db"), "board-arbsec_orchestraitor-44");
     let recovered = store
         .recover_running_rows(START_UNIX + 60)
         .expect("recovery");

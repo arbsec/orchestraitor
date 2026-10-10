@@ -198,18 +198,21 @@ fn watch_cadence_resolves_from_layers_and_fails_closed() -> Result<(), Box<dyn s
 }
 
 /// §9.36: the watch cycle's `LoopConfig` wires the §9.22 cadence into the
-/// loop runner's poll gate — the runner keeps its guard set and the
-/// cadence only spaces the polls.
+/// loop runner's poll gate — via the PRODUCTION builder chain
+/// (`with_guardrails` + `with_min_poll_interval`, matching
+/// `watch_cycle`), so the runner keeps its guard set and the cadence
+/// only spaces the polls.
 #[test]
 fn the_cadence_wires_into_the_loop_config_guard_set() {
     let budgets = orchestraitor_worker::WorkerBudgets::bootstrap_defaults();
-    let config = LoopConfig::with_cadence(
+    let config = LoopConfig::with_guardrails(
         budgets.clone(),
         Duration::from_secs(5),
         None,
-        Some(Duration::from_mins(1)),
+        orchestraitor_campaign::GuardrailsSettings::default(),
     )
-    .expect("valid cadence config");
+    .expect("valid base config")
+    .with_min_poll_interval(Some(Duration::from_mins(1)));
     assert_eq!(
         config.min_poll_interval,
         Some(Duration::from_mins(1)),
