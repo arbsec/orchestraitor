@@ -139,11 +139,10 @@ pub fn reconcile(
 
 /// Scans the local `running` rows outside the supervised set.
 ///
-/// Rows from earlier invocations left `running` are restart-recovery
-/// surface, not reconcile surface: [`LoopRunStore::recover_running_rows`]
-/// transitions them before the first tick, so any `running` row seen here
-/// belongs to this daemon's live slots (excluded via `supervised_task_ids`)
-/// or is a concurrent-writer artifact the divergence check reports.
+/// The caller's recovery pass orphans the `running` rows it can reach at
+/// invocation start, but the loop's fatal-exit sweep is best-effort, so an
+/// earlier invocation's row can still be `running` here and IS reported —
+/// this daemon's live slots are excluded via `supervised_task_ids`.
 fn running_rows_not_supervised(
     supervised_task_ids: &[String],
     runs: &LoopRunStore,

@@ -248,12 +248,6 @@ pub trait ReconcileSink: Send + Sync {
 impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
     async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
         let snapshot = self.inner.poll().await?;
-        // The supervised slots' task ids are not visible here; the
-        // reconcile pass scans durable `running` rows and the caller's
-        // runner owns their supervision. A `running` row belonging to a
-        // live slot whose task vanished from the board is still a
-        // board-diverged observation — the board wins (§9.43).
-        //
         // The run-state store is `rusqlite`-backed (Send, not Sync): the
         // poller owns a DEDICATED connection (not the runner's), and the
         // std-Mutex guard is held only across the synchronous `reconcile`
@@ -706,10 +700,13 @@ impl LoopWorkerStarter for DirectWatchStarter {
 /// to be the [`ReconcilePoller`] wrapper so every tick's snapshot is
 /// reconciled; the cadence rides `LoopConfig::min_poll_interval`.
 ///
-/// Recovery (§9.24.2) runs once at startup — before the first tick — so a
-/// kill -9 mid-run leaves `orphaned` rows, never stranded `running` ones,
-/// and the tick resumes from durable state. `paused` stays paused by
-/// construction: the recovery helper only ever transitions `running`
+/// Recovery (§9.24.2) runs at every invocation start — before the first
+/// tick — so a kill -9 mid-run leaves `orphaned` rows, never stranded
+/// `running` ones, and the tick resumes from durable state. On the
+/// always-on daemon this includes the invocation after a run-budget
+/// restart: a row the previous invocation's drain failed to reap
+/// (best-effort sweep) is recorded orphaned there. `paused` stays paused
+/// by construction: the recovery helper only ever transitions `running`
 /// rows.
 ///
 /// # Errors
