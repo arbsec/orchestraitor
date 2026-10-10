@@ -415,9 +415,10 @@ impl LoopRunStore {
     ///
     /// # Errors
     ///
-    /// Returns [`CampaignError::Store`] when the update or the row decode
-    /// fails. Each row is transitioned and decoded individually, so the
-    /// rows recovered before a failure are already durable.
+    /// Returns [`CampaignError::Store`] when the scan, an update, or the
+    /// commit fails. The whole recovery runs in ONE transaction: a failure
+    /// rolls back every transition, leaving the store exactly as before the
+    /// call — never half-orphaned.
     pub fn recover_running_rows(&self, now_secs: u64) -> Result<Vec<RunRow>, CampaignError> {
         // Atomic: the scan and every transition run in one transaction, so
         // a mid-recovery failure leaves the store exactly as before the

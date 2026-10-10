@@ -113,14 +113,45 @@ async fn watch_cycle() -> Result<ExitCode> {
     // The pinned guard set: the same `WorkerBudgets` instance the runner
     // validates feeds the worker starter — the two layers cannot drift.
     let budgets = WorkerBudgets::bootstrap_defaults();
-    let loop_config = orchestraitor_campaign::LoopConfig::with_cadence(
+    // The [loop] guardrails resolve from the SAME layered config the
+    // foreground loop reads — the guard set is the same for both operating
+    // modes (a PR #555 review finding: with_cadence dropped operator
+    // guardrails).
+    let guardrails = match resolver.resolve_config() {
+        Ok(effective) => {
+            let values = effective.r#loop.as_ref().map(|block| {
+                orchestraitor_campaign::GuardrailsConfigValues {
+                    no_progress_turns: block.no_progress_turns,
+                    tool_repeat_count: block.tool_repeat_count,
+                    tool_repeat_window: block.tool_repeat_window,
+                    ci_poll_budget_secs: block.ci_poll_budget_secs,
+                    max_task_attempts: block.max_task_attempts,
+                    task_retry_backoff_secs: block.task_retry_backoff_secs,
+                }
+            });
+            let (settings, warnings) =
+                orchestraitor_campaign::GuardrailsSettings::from_config(values.as_ref());
+            for warning in &warnings {
+                tracing::warn!("orcd watch: {warning}");
+            }
+            settings
+        }
+        Err(error) => {
+            tracing::warn!(
+                "orcd watch: config resolution failed ({error}); anti-stuck guardrails fall                  back to defaults"
+            );
+            orchestraitor_campaign::GuardrailsSettings::default()
+        }
+    };
+    let loop_config = orchestraitor_campaign::LoopConfig::with_guardrails(
         budgets.clone(),
         Duration::from_secs(5),
         None,
-        Some(Duration::from_secs(watch_config.poll_interval_secs)),
+        guardrails,
     )
     .into_diagnostic()
-    .wrap_err("watch loop configuration rejected")?;
+    .wrap_err("watch loop configuration rejected")?
+    .with_min_poll_interval(Some(Duration::from_secs(watch_config.poll_interval_secs)));
 
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     // SIGTERM/SIGINT fan-in: one channel increment per signal. The loop
@@ -152,9 +183,25 @@ async fn watch_cycle() -> Result<ExitCode> {
     });
     #[cfg(not(unix))]
     let signal_task = tokio::spawn(async move {
+        let mut count = 0_u64;
         loop {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                let _ignore = signal_tx.send(1);
+            match tokio::signal::ctrl_c().await {
+                // Each send increments the watch channel: a second signal
+                // still registers as a change.
+                Ok(()) => {
+                    count = count.wrapping_add(1);
+                    let _ignore = signal_tx.send(count);
+                }
+                // Handler registration failed: retrying at once would
+                // busy-spin the current-thread runtime; break and let the
+                // process default action handle further signals.
+                Err(error) => {
+                    tracing::warn!(
+                        "orcd watch: ctrl-c handler failed ({error}); \
+                         further signals take the process default action"
+                    );
+                    break;
+                }
             }
         }
     });
@@ -165,21 +212,29 @@ async fn watch_cycle() -> Result<ExitCode> {
     // `unwrap_or_default` 0 would make the invocation id repeat across
     // restarts, misclassifying earlier rows as current-invocation slots
     // (excluded from selection and divergence checks).
-    let start_unix_secs = std::time::SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .into_diagnostic()
         .wrap_err("system clock is before the Unix epoch")?;
-    // The invocation id is derived ONCE here and handed to both the
-    // reconcile poller and run_watch, so the live-slot exclusion and the
-    // runner's identity can never drift.
-    let invocation_id = format!("watch-{start_unix_secs}");
     // The daemon is ALWAYS-RUNNING (§9.36): the 4h whole-run budget ends one
     // runner invocation, not the daemon — on RunBudgetExhausted a fresh
-    // invocation (new id, so restart recovery and slot exclusion stay scoped)
-    // continues watching until the operator's shutdown signal. A shutdown
-    // stop (or any other terminal reason) exits.
+    // invocation (NEW id and clock origin, derived inside the loop: a reused
+    // id would make excluded_tasks accumulate across 4h windows and a stale
+    // clock origin would skew every guard timestamp) continues watching
+    // until the operator's shutdown signal. A shutdown stop (or any other
+    // terminal reason) exits.
     let summary = loop {
+        // Fresh per-invocation identity and clock origin (the Tokio clock
+        // restarts at zero on each runner run, so the wall-clock origin
+        // must be re-read too — a stale origin would skew daily-spend day
+        // boundaries, row timestamps, and backoff checks).
+        let start_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .into_diagnostic()
+            .wrap_err("system clock is before the Unix epoch")?;
+        let invocation_id = format!("watch-{start_unix_secs}");
         // A fresh client per invocation (reqwest build is cheap; the auth Arc
         // is shared): the loop restarts only on the 4h run budget. The board
         // config is cloned per invocation (cheap validated struct).
