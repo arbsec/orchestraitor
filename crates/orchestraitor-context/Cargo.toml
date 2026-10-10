@@ -26,6 +26,7 @@ orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tree-sitter = { workspace = true }

@@ -4525,6 +4525,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestraitor-codegraph"
+version = "0.0.0"
+dependencies = [
+ "orchestraitor-context",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "orchestraitor-context"
 version = "0.0.0"
 dependencies = [
@@ -4533,6 +4546,7 @@ dependencies = [
  "orchestraitor-core",
  "orchestraitor-model",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
@@ -4796,6 +4810,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "orchestraitor-arbitraitor-client",
+ "orchestraitor-context",
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-provider-neuralwatt",

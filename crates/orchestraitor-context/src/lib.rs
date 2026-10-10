@@ -11,6 +11,7 @@ mod error;
 mod index;
 mod language;
 mod parser;
+pub mod persist;
 mod provenance;
 mod query;
 mod types;

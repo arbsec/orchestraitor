@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use orchestraitor_context::{ContextIndex, ContextItem, ContextQuery};
+
 use crate::action::WorkerAction;
 use crate::mediator::{BashMediator, MediationError};
 use crate::paths::resolve_confined;
@@ -65,6 +67,10 @@ pub(crate) struct ToolTurn {
 pub(crate) struct ToolExecutor<'a> {
     root: &'a Path,
     bash: &'a dyn BashMediator,
+    /// Codegraph snapshot loaded lazily from `.orchestraitor/codegraph.json`
+    /// (spec `10-orchestrator.md` §9.38). `None` when absent or unparsable;
+    /// the search tool then falls back to plain content search only.
+    codegraph: Option<ContextIndex>,
     receipts: Vec<ToolReceipt>,
     untrusted_writes: Vec<String>,
 }
@@ -72,9 +78,11 @@ pub(crate) struct ToolExecutor<'a> {
 impl<'a> ToolExecutor<'a> {
     /// Creates an executor for one run.
     pub(crate) fn new(root: &'a Path, bash: &'a dyn BashMediator) -> Self {
+        let codegraph = orchestraitor_context::persist::load_index(root).ok();
         Self {
             root,
             bash,
+            codegraph,
             receipts: Vec::new(),
             untrusted_writes: Vec::new(),
         }
@@ -190,6 +198,13 @@ impl<'a> ToolExecutor<'a> {
         if !base.is_dir() {
             return self.admitted_refusal("search", "search-root-invalid");
         }
+        // Codegraph lane: `sym:<name>` queries the read-only symbol index
+        // (spec `10-orchestrator.md` §9.38) instead of walking files. The
+        // index is a pre-built snapshot — no execution, no network — so the
+        // query is a pure read through the same confinement root.
+        if let Some(name) = pattern.strip_prefix("sym:") {
+            return self.symbol_search(name);
+        }
         let matches = search_files(&base, self.root, pattern);
         self.push_receipt("search", true, "completed", None, None);
         let observation = if matches.is_empty() {
@@ -203,6 +218,60 @@ impl<'a> ToolExecutor<'a> {
         };
         ToolTurn {
             observation,
+            mediation_failure: None,
+        }
+    }
+
+    /// Codegraph symbol lookup for `search sym:<name>`: exact symbol match
+    /// plus signature bodies, bounded like every model-facing observation.
+    /// Falls through to the content-search answer when no index is loaded
+    /// or no symbol matches, so `sym:` never returns less than `search`.
+    fn symbol_search(&mut self, name: &str) -> ToolTurn {
+        let query = self.codegraph.as_ref().map(ContextQuery::new);
+        let mut lines = Vec::new();
+        if let Some(query) = query.as_ref() {
+            for hit in query.find_symbol(name, None, None) {
+                let signature = query
+                    .symbol_signature(&hit.id)
+                    .ok()
+                    .and_then(|item| match item {
+                        ContextItem::Symbol(record) => Some(record.signature),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "{}:{} [{:?}] {signature}",
+                    hit.path.display(),
+                    hit.range.start_line,
+                    hit.kind
+                ));
+            }
+        }
+        self.push_receipt("search", true, "completed", None, None);
+        if lines.is_empty() {
+            // No index or no match: run the plain content search so the
+            // answer degrades to the always-available lane.
+            let matches = search_files(self.root, self.root, name);
+            let observation = if matches.is_empty() {
+                "[search] no matches".to_string()
+            } else {
+                format!(
+                    "[search] {} match(es)\n{}",
+                    matches.len(),
+                    truncate_chars(&matches.join("\n"), MAX_OBSERVATION_CHARS)
+                )
+            };
+            return ToolTurn {
+                observation,
+                mediation_failure: None,
+            };
+        }
+        ToolTurn {
+            observation: format!(
+                "[codegraph] {} symbol(s) named `{name}`\n{}",
+                lines.len(),
+                truncate_chars(&lines.join("\n"), MAX_OBSERVATION_CHARS)
+            ),
             mediation_failure: None,
         }
     }
@@ -283,6 +352,7 @@ mod tests {
     use super::*;
     use crate::mediator::{BashMediator, MediatedRun};
     use async_trait::async_trait;
+    use orchestraitor_context::Indexer;
 
     /// `MediationError` is not `Clone`, so the fixture stores a mode and
     /// builds the outcome per call.
@@ -468,5 +538,72 @@ mod tests {
         let a_pos = turn.observation.find("a.txt").unwrap();
         let c_pos = turn.observation.find("b/c.txt").unwrap();
         assert!(a_pos < c_pos, "matches must be in sorted path order");
+    }
+
+    fn index_workspace(root: &std::path::Path) {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn add(left: i32, right: i32) -> i32 {\n    left + right\n}\n",
+        )
+        .unwrap();
+        let mut indexer = Indexer::default();
+        indexer.index_repository(root).unwrap();
+        orchestraitor_context::persist::store_index(root, indexer.index()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sym_query_returns_indexed_symbols_with_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        index_workspace(temp.path());
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+
+        let turn = executor
+            .dispatch(&WorkerAction::Search {
+                pattern: "sym:add".to_string(),
+                path: None,
+            })
+            .await;
+
+        let receipt = executor.receipts.last().unwrap();
+        assert_eq!(receipt.tool, "search");
+        assert_eq!(receipt.outcome, "completed");
+        assert!(
+            turn.observation
+                .contains("[codegraph] 1 symbol(s) named `add`")
+        );
+        assert!(turn.observation.contains("src/lib.rs:1"));
+        assert!(
+            turn.observation
+                .contains("pub fn add(left: i32, right: i32) -> i32 {")
+        );
+        assert!(turn.mediation_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn sym_query_without_index_falls_back_to_content_search() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        // "add" appears in source text but no index snapshot exists.
+        fs::write(temp.path().join("src/lib.rs"), "pub fn add() {}\n").unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+
+        let turn = executor
+            .dispatch(&WorkerAction::Search {
+                pattern: "sym:add".to_string(),
+                path: None,
+            })
+            .await;
+
+        assert_eq!(executor.receipts.last().unwrap().outcome, "completed");
+        assert!(
+            turn.observation.contains("[search]"),
+            "no-index sym: must degrade to content search, got: {}",
+            turn.observation
+        );
+        assert!(turn.observation.contains("src/lib.rs:1"));
+        assert!(!turn.observation.contains("[codegraph]"));
     }
 }

@@ -31,6 +31,7 @@ members = [
     "crates/orchestraitor-workspace",
     "crates/orchestraitor-workspace-hack",
     "xtask",
+    "crates/orchestraitor-codegraph",
 ]
 
 [workspace.package]

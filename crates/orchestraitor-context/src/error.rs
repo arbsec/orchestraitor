@@ -50,4 +50,11 @@ pub enum ContextError {
         /// Language name being configured.
         language: &'static str,
     },
+    /// An index persistence operation failed (read, write, or parse).
+    #[error("index persistence failed: {operation}")]
+    Persistence {
+        /// Description of the failed operation, including the path and
+        /// underlying error message.
+        operation: String,
+    },
 }

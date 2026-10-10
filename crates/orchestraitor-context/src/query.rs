@@ -36,7 +36,7 @@ pub struct RepositorySummary {
 }
 
 /// Bounded source body for a symbol, returned by [`ContextQuery::symbol_body`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SymbolBody {
     /// Symbol id the body belongs to.
     pub symbol_id: SymbolId,
@@ -159,19 +159,62 @@ impl<'a> ContextQuery<'a> {
 
     /// Returns a bounded source body for a symbol, capped at `line_budget` lines.
     ///
-    /// MVP stub: returns [`ContextError::NotFound`] until the bounded body reader
-    /// is wired up. The stub keeps the public API surface stable so callers can
-    /// structure their requests ahead of the LSP-backed implementation.
+    /// Reads the symbol's blob bytes through the index (never the working
+    /// tree), extracts the symbol's line range from `LocationRange`, and
+    /// truncates to `line_budget` lines when set.
     ///
     /// # Errors
-    /// Always returns [`ContextError::NotFound`] in this stub.
+    /// Returns [`ContextError::NotFound`] when `symbol_id` is absent or its
+    /// blob bytes are unavailable.
     pub fn symbol_body(
         &self,
         symbol_id: &SymbolId,
-        _line_budget: Option<u32>,
+        line_budget: Option<u32>,
     ) -> Result<SymbolBody, ContextError> {
-        Err(ContextError::NotFound {
-            id: symbol_id.0.clone(),
+        let record = self
+            .index
+            .symbols()
+            .get(symbol_id)
+            .ok_or_else(|| ContextError::NotFound {
+                id: symbol_id.0.clone(),
+            })?;
+        let bytes =
+            self.index
+                .source_bytes(&record.path)
+                .ok_or_else(|| ContextError::NotFound {
+                    id: format!("{}:source", symbol_id.0),
+                })?;
+        let text = String::from_utf8_lossy(bytes);
+        let start_line = record.range.start_line.max(1); // one-based
+        let end_line = record.range.end_line;
+        let budget = line_budget.unwrap_or(u32::MAX);
+        let mut body_lines = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            if line_number < start_line {
+                continue;
+            }
+            if line_number > end_line
+                || body_lines.len() >= usize::try_from(budget).unwrap_or(usize::MAX)
+            {
+                break;
+            }
+            body_lines.push(line);
+        }
+        let actual_end = start_line
+            .saturating_add(u32::try_from(body_lines.len()).unwrap_or(u32::MAX))
+            .saturating_sub(1);
+        let truncated =
+            u32::try_from(body_lines.len()).unwrap_or(u32::MAX) >= budget && actual_end < end_line;
+        Ok(SymbolBody {
+            symbol_id: symbol_id.clone(),
+            path: record.path.clone(),
+            start_line,
+            end_line: actual_end.min(end_line),
+            text: body_lines.join("\n"),
+            lines_used: u32::try_from(body_lines.len()).unwrap_or(u32::MAX),
+            truncated,
+            provenance: record.provenance.clone(),
         })
     }
 

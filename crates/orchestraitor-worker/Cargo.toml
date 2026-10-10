@@ -17,6 +17,17 @@ workspace = true
 # sibling provider crates (orchestraitor-provider-api, -neuralwatt).
 async-trait = "0.1"
 orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+# Codegraph: read-only symbol/call-graph index for the search tool (spec
+# `10-orchestrator.md` §9.38; issue #316 + §9.18.1). Grammars enabled for
+# the languages the worker encounters in this repo's delivery loop.
+orchestraitor-context = { path = "../orchestraitor-context", features = [
+    "grammar-rust",
+    "grammar-typescript",
+    "grammar-python",
+    "grammar-javascript",
+    "grammar-go",
+    "grammar-bash",
+] }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 orchestraitor-provider-neuralwatt = { path = "../orchestraitor-provider-neuralwatt" }

@@ -186,7 +186,12 @@ fn appendix_e_queries_return_bounded_provenance_items() {
     assert_eq!(hits.len(), 1);
     assert!(excerpt.text.contains("pub fn add"));
     assert_eq!(excerpt.provenance.trust_class, TrustClass::Untrusted);
-    assert!(matches!(body, Err(crate::ContextError::NotFound { .. })));
+    let body = body.expect("indexed symbol should have a bounded body");
+    assert_eq!(body.path, symbol.path);
+    assert_eq!(body.start_line, symbol.range.start_line);
+    assert_eq!(body.lines_used, 1);
+    assert!(body.truncated);
+    assert!(!body.text.is_empty());
     assert!(related.is_empty());
     assert!(diagnostics.is_empty());
     assert!(expanded.items.is_empty());

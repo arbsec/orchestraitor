@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// In-memory content-addressed repository context index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContextIndex {
     /// Blobs indexed by SHA-256 content digest.
     blobs: BTreeMap<Digest, BlobRecord>,
