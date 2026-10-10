@@ -1071,13 +1071,12 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         }
         counters.cycles += 1;
         // Arm the next poll window: the cadence (when configured) spaces
-        // board polls at the operator's interval. The two gates take their
-        // MAXIMUM — the cadence always bounds the next poll in watch mode,
-        // so a no-op pass's `BackingOff` delay is advisory there (a
-        // transient poll failure waits the full cadence before the retry,
-        // which is the rate-limit courtesy §9.36 asks of the poller). The
-        // foreground loop (`min_poll_interval = None`) keeps backoff as the
-        // only gate.
+        // board polls at the operator's interval. BOTH gates apply and the
+        // later deadline wins (they take their maximum): in watch mode the
+        // next poll waits for at least the cadence, and repeated no-op
+        // passes can push it out to the backoff cap — the rate-limit
+        // courtesy §9.36 asks of the poller. The foreground loop
+        // (`min_poll_interval = None`) keeps backoff as the only gate.
         self.next_poll_allowed_at = self
             .next_poll_allowed_at
             .max(elapsed)

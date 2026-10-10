@@ -62,6 +62,10 @@ pub enum RunRowStatus {
     /// is a later slice). Non-terminal and lease-protected: restart
     /// recovery leaves a paused row exactly where it is (§9.24.2 —
     /// `paused` stays paused), and it never transitions to `orphaned`.
+    /// Gap to close WITH the future pause control: `finish` only updates
+    /// `running` rows, so no current API can move a paused row to a
+    /// terminal state — a stranded paused row needs the pause control's
+    /// own resume/cancel path (issue #503 slice note).
     Paused,
 }
 

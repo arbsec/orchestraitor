@@ -76,12 +76,13 @@ rows all behave exactly as documented for
   (§9.24.2: the operator can extend; the next tick re-runs the work
   fresh). Rows killed mid-run by the beat-staleness machinery keep the
   loop's own typed statuses.
-- **Failed polls cost one full interval.** The cadence spaces board polls
-  at the configured interval regardless of the previous poll's outcome:
-  a transient poll failure (network blip, rate limit) waits the full
-  interval before the retry — the rate-limit courtesy §9.36 asks of the
-  poller. Supervision continues on every tick either way, so in-flight
-  workers are unaffected.
+- **Failed polls and no-op passes cost time.** The next poll waits for
+  the LATER of the cadence and the no-spawn backoff: a transient poll
+  failure (network blip, rate limit) waits the full interval before the
+  retry, and repeated no-op passes can delay polls up to the 5m backoff
+  cap — beyond the configured cadence (the rate-limit courtesy §9.36
+  asks of the poller). Supervision continues on every tick either way,
+  so in-flight workers are unaffected.
 - **Reconcile events.** Every tick's reconcile records its NEW observations
   once per invocation (duplicates within an invocation are suppressed):
   `board-diverged` when a locally-`running` task is no longer open on the
