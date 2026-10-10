@@ -49,11 +49,11 @@ and a run budget. Guard-weakening configuration is rejected fail-closed. Run sta
 (`loop.db`, one row per supervised run, updated with heartbeat liveness and a terminal
 status; the decision records in `campaign.db` are the append-only audit trail), and a
 single-instance lock ensures only one loop invocation runs at a time. These loop mechanics
-land with #434 — they are not shipped yet.
+ship today — see [`docs/cli/orc-loop.md`](docs/cli/orc-loop.md) for the foreground
+runner and [`docs/cli/orcd-watch.md`](docs/cli/orcd-watch.md) for the daemon's
+always-on mode.
 
-See [`docs/cli/orc-campaign.md`](docs/cli/orc-campaign.md) for the manager selection pass;
-the cron-shaped `orc loop` runner and its `docs/cli/orc-loop.md` reference land with the
-bootstrap-loop PR (#434).
+See [`docs/cli/orc-campaign.md`](docs/cli/orc-campaign.md) for the manager selection pass.
 
 ## Relationship to Arbitraitor
 

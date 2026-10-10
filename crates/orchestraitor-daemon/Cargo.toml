@@ -56,7 +56,4 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 tracing = { workspace = true }
 
 [dev-dependencies]
-# rusqlite (MIT): seeding the durable paused row the recovery contract is
-# tested against (the pause control itself is a later slice).
-rusqlite = { workspace = true }
 tempfile = { workspace = true }

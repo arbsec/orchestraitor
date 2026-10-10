@@ -270,8 +270,11 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // The runner's live slots: rows of the CURRENT invocation. The worker
         // may legitimately move or close the board item while its run is
         // still finishing — that is normal supervision, never a divergence
-        // (a PR #555 review finding). Earlier invocations' rows are
-        // recovery surface and stay in scope.
+        // (a PR #555 review finding). Earlier invocations' rows stay in
+        // scope: the recovery pass at each invocation start orphans the
+        // rows it can reach, but the loop's fatal-exit sweep is best-effort
+        // and can leave a row `running`, so an earlier-invocation row seen
+        // here is reported rather than assumed-live.
         // The supervised set and the reconcile input read under one
         // `runs` lock so both see the same store snapshot (a PR #555
         // review thread): the runner writes through its own connection,

@@ -117,33 +117,30 @@ async fn watch_cycle() -> Result<ExitCode> {
     // foreground loop reads — the guard set is the same for both operating
     // modes (a PR #555 review finding: with_cadence dropped operator
     // guardrails).
-    let guardrails = match resolver.resolve_config() {
-        Ok(effective) => {
-            let values = effective.r#loop.as_ref().map(|block| {
-                orchestraitor_campaign::GuardrailsConfigValues {
-                    no_progress_turns: block.no_progress_turns,
-                    tool_repeat_count: block.tool_repeat_count,
-                    tool_repeat_window: block.tool_repeat_window,
-                    ci_poll_budget_secs: block.ci_poll_budget_secs,
-                    max_task_attempts: block.max_task_attempts,
-                    task_retry_backoff_secs: block.task_retry_backoff_secs,
-                }
+    // Fail closed on config resolution failure: defaulting the guardrails
+    // would silently ignore an operator's loop.* settings (a disabled or
+    // tightened guard must never silently widen — the same fail-closed rule
+    // WatchConfig::from_layers applies to the cadence).
+    let effective = resolver
+        .resolve_config()
+        .map_err(|error| miette::miette!("configuration resolution failed: {error}"))?;
+    let values =
+        effective
+            .r#loop
+            .as_ref()
+            .map(|block| orchestraitor_campaign::GuardrailsConfigValues {
+                no_progress_turns: block.no_progress_turns,
+                tool_repeat_count: block.tool_repeat_count,
+                tool_repeat_window: block.tool_repeat_window,
+                ci_poll_budget_secs: block.ci_poll_budget_secs,
+                max_task_attempts: block.max_task_attempts,
+                task_retry_backoff_secs: block.task_retry_backoff_secs,
             });
-            let (settings, warnings) =
-                orchestraitor_campaign::GuardrailsSettings::from_config(values.as_ref());
-            for warning in &warnings {
-                tracing::warn!("orcd watch: {warning}");
-            }
-            settings
-        }
-        Err(error) => {
-            tracing::warn!(
-                "orcd watch: config resolution failed ({error}); \
-                 anti-stuck guardrails fall back to defaults"
-            );
-            orchestraitor_campaign::GuardrailsSettings::default()
-        }
-    };
+    let (guardrails, warnings) =
+        orchestraitor_campaign::GuardrailsSettings::from_config(values.as_ref());
+    for warning in &warnings {
+        tracing::warn!("orcd watch: {warning}");
+    }
     let loop_config = orchestraitor_campaign::LoopConfig::with_guardrails(
         budgets.clone(),
         Duration::from_secs(5),
@@ -209,15 +206,6 @@ async fn watch_cycle() -> Result<ExitCode> {
 
     let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
 
-    // Fail closed when the system clock is before the Unix epoch: a
-    // `unwrap_or_default` 0 would make the invocation id repeat across
-    // restarts, misclassifying earlier rows as current-invocation slots
-    // (excluded from selection and divergence checks).
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .into_diagnostic()
-        .wrap_err("system clock is before the Unix epoch")?;
     // The daemon is ALWAYS-RUNNING (§9.36): the 4h whole-run budget ends one
     // runner invocation, not the daemon — on RunBudgetExhausted a fresh
     // invocation (NEW id and clock origin, derived inside the loop: a reused
