@@ -49,7 +49,7 @@ fn efficiency(
         serde_json::to_writer_pretty(&mut *writer, &rollups).into_diagnostic()?;
         writeln!(writer).into_diagnostic()?;
     } else {
-        render_markdown(writer, &rollups);
+        render_markdown(writer, &rollups).map_err(|error| miette::miette!(error))?;
     }
     Ok(())
 }
@@ -59,17 +59,25 @@ fn efficiency(
 /// under profile grouping the median column carries the spec-required
 /// median of per-session ratios (the group-sum `savings` weights
 /// sessions by their baseline).
-fn render_markdown(writer: &mut dyn Write, rollups: &[TokenEfficiencyRollup]) {
-    let _ignore = writeln!(
+///
+/// # Errors
+///
+/// Returns a diagnostic when writing to the output writer fails (a
+/// broken pipe must not report success for an incomplete report).
+fn render_markdown(
+    writer: &mut dyn Write,
+    rollups: &[TokenEfficiencyRollup],
+) -> std::result::Result<(), std::io::Error> {
+    writeln!(
         writer,
         "| group | input | output | cached (read) | candidate | selected | savings | median savings |"
-    );
-    let _ignore = writeln!(
+    )?;
+    writeln!(
         writer,
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
-    );
+    )?;
     for rollup in rollups {
-        let _ignore = writeln!(
+        writeln!(
             writer,
             "| {} | {} | {} | {} | {} | {} | {} | {} |",
             group_label(rollup),
@@ -88,8 +96,9 @@ fn render_markdown(writer: &mut dyn Write, rollups: &[TokenEfficiencyRollup]) {
             rollup
                 .median_session_savings_ratio()
                 .map_or_else(|| "—".to_owned(), |ratio| format!("{:.1}%", ratio * 100.0),),
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// The grouping key's display label.
