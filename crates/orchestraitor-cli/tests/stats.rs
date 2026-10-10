@@ -98,6 +98,13 @@ fn stats_efficiency_json_reports_savings_and_unmeasured() -> miette::Result<()> 
         .as_f64()
         .unwrap_or_else(|| panic!("savings must be measured when a receipt exists"));
     assert!((savings - 0.4).abs() < 1e-12, "1 - 60_000/100_000 = 0.4");
+    // The median serializes as null under session grouping (it is a
+    // profile-grouping-only stat: one session needs no median).
+    assert!(
+        measured["median_savings_ratio"].is_null(),
+        "session grouping carries no median: {}",
+        measured["median_savings_ratio"]
+    );
 
     let unmeasured = rollups
         .iter()

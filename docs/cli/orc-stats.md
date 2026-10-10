@@ -48,5 +48,7 @@ the token-saving features are worth:
 1. Run the same task suite with the features enabled under one profile
    (e.g. `profiles.fast` with `context_profile = "aggressive"`).
 2. Run it with them disabled under another profile label.
-3. Compare the two groups' savings medians. MVP-10's 30% median
-   context-token-reduction gate is evaluated from these rollups.
+3. Compare the two groups' median savings (`median savings` column). These
+   receipt-derived medians support the profile A/B comparison; the MVP-10
+   30% median gate itself is evaluated against the direct-harness baseline,
+   not against these rollups (spec §13.5.1).

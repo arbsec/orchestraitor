@@ -290,6 +290,7 @@ impl CostLedger {
                 compacted_tool_output_tokens: compacted,
                 savings_ratio: savings,
                 session_savings_ratios: None,
+                median_savings_ratio: None,
             })
         })?;
         let mut rollups = Vec::new();
@@ -331,11 +332,18 @@ impl CostLedger {
             if let Some(ratio) = TokenEfficiencyRollup::savings_from_receipt(
                 candidate, selected, raw_tool, compacted,
             ) {
-                let label = self.conn.query_row(
-                    "SELECT COALESCE(profile, '') FROM cost_entries WHERE session = ?1 LIMIT 1",
-                    params![session],
-                    |row| row.get::<_, String>(0),
-                )?;
+                // A receipt may be recorded before its session has any
+                // cost entry; it carries no profile label, so it is
+                // skipped rather than failing the whole report.
+                let label = self
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(profile, '') FROM cost_entries WHERE session = ?1 LIMIT 1",
+                        params![session],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .unwrap_or_default();
                 session_savings.push((label, session, ratio));
             }
         }
@@ -348,6 +356,7 @@ impl CostLedger {
                 .collect();
             ratios.sort_by(|a, b| a.0.cmp(&b.0));
             rollup.session_savings_ratios = Some(ratios);
+            rollup.median_savings_ratio = rollup.median_session_savings_ratio();
         }
         Ok(())
     }

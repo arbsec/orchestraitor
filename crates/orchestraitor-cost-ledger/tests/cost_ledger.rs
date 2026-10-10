@@ -609,9 +609,14 @@ fn profile_rollup_reports_median_of_session_ratios() {
         .api_spend()
         .insert_cost_entry(&entry("sess-3", "req-3"))
         .unwrap();
-    // Session ratios: 60%, 0-baseline (no ratio), 80% — median 70%.
+    // Session ratios: 60%, zero-baseline receipt (no measurable ratio),
+    // 80% — median 70%. The zero-baseline session HAS a receipt; it must
+    // still be omitted from the median, never counted as 0%.
     ledger
         .insert_context_receipt(&receipt("sess-1", "ctx-1", 100_000, 40_000, 0, 0))
+        .unwrap();
+    ledger
+        .insert_context_receipt(&receipt("sess-2", "ctx-2", 0, 0, 0, 0))
         .unwrap();
     ledger
         .insert_context_receipt(&receipt("sess-3", "ctx-3", 100_000, 20_000, 0, 0))

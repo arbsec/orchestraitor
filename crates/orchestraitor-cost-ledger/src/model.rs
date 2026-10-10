@@ -318,6 +318,11 @@ pub struct TokenEfficiencyRollup {
     /// median never fabricates a 0% for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_savings_ratios: Option<Vec<(String, f64)>>,
+    /// The serialized [`TokenEfficiencyRollup::median_session_savings_ratio`]
+    /// value: the spec-required A/B comparison stat, directly readable by
+    /// JSON consumers. `None` when no session in the group has a
+    /// measurable ratio (never a fabricated 0).
+    pub median_savings_ratio: Option<f64>,
 }
 
 impl TokenEfficiencyRollup {
