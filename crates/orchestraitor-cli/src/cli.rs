@@ -108,6 +108,10 @@ pub enum Commands {
     /// one campaign pass, supervise the in-flight workers, repeat (issue
     /// #314; the §9.36 watch daemon deepens this in E8).
     Loop(LoopArgs),
+    /// Run the rule-driven pre-landing simplify pass (fail-open quality
+    /// tooling; spec §9.5 normalization classes).
+    #[command(subcommand)]
+    Simplify(SimplifyCommand),
 }
 
 /// Arguments for `orc loop`.
@@ -508,4 +512,46 @@ pub struct WorkerRunArgs {
     /// Alternate provider base URL for simulator-backed tests.
     #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
     pub worker_provider_endpoint: Option<String>,
+}
+
+/// `orc simplify` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum SimplifyCommand {
+    /// Run the rule-driven pre-landing simplify pass (fail-open: exits 0
+    /// unless `--pedantic-check` finds unaddressed suggestions).
+    Run(SimplifyRunArgs),
+}
+
+/// Fix policy for `orc simplify run --fix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SimplifyFixMode {
+    /// Run checks only; never modify files.
+    None,
+    /// Auto-apply Format-class fixes (rustfmt, rumdl) when
+    /// `simplify.auto_apply_format` allows.
+    Format,
+    /// Additionally auto-apply clippy machine-applicable suggestions on
+    /// `.rs` files when `simplify.auto_apply_safe_fixes` allows.
+    Safe,
+}
+
+/// Arguments for `orc simplify run`.
+#[derive(Debug, Clone, Args)]
+pub struct SimplifyRunArgs {
+    /// Scope the report to files staged for commit (hooks pass this).
+    #[arg(long)]
+    pub staged: bool,
+    /// Restrict the report to these paths (repeatable).
+    #[arg(long = "path", value_name = "PATH")]
+    pub paths: Vec<String>,
+    /// Fix policy for the pass.
+    #[arg(long, value_enum, default_value_t = SimplifyFixMode::None)]
+    pub fix: SimplifyFixMode,
+    /// Pedantic-check mode: exit 1 when unaddressed suggestions exist
+    /// (fast-feedback for the pre-push hook; never a push gate).
+    #[arg(long)]
+    pub pedantic_check: bool,
+    /// Emit the typed report as stable JSON.
+    #[arg(long)]
+    pub json: bool,
 }

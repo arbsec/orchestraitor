@@ -12,6 +12,8 @@ use crate::secret::SecretUri;
 pub struct OrchestraitorConfig {
     /// Format and safe-fix normalization behavior.
     pub normalization: Option<NormalizationConfig>,
+    /// Pre-landing simplify pass behavior (fail-open quality tooling).
+    pub simplify: Option<SimplifyConfig>,
     /// Provider definitions keyed by provider id.
     pub providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Agent domain routing and role templates.
@@ -160,6 +162,31 @@ pub struct NormalizationConfig {
     pub max_passes: Option<u32>,
     /// Names of fix classes considered safe by this profile.
     pub safe_fix_classifications: Option<Vec<String>>,
+}
+
+/// Pre-landing simplify-pass configuration block (spec §9.5 normalization
+/// classes; fail-open quality tooling — never a push gate).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SimplifyConfig {
+    /// Master switch; the hooks and commands exit 0 (no-op) when false.
+    pub enabled: Option<bool>,
+    /// Auto-apply Format-class fixes (rustfmt, rumdl) — §9.5 Format class.
+    pub auto_apply_format: Option<bool>,
+    /// Auto-apply clippy machine-applicable suggestions on `.rs` files.
+    /// PR-1 note: the Arbitraitor output-classification gate that will
+    /// further scope safe-fix auto-apply lands with the review-loop PR;
+    /// until then safe-fix auto-apply is limited to exactly this surface.
+    pub auto_apply_safe_fixes: Option<bool>,
+    /// Maximum normalization passes (§9.5 convergence bound).
+    pub max_passes: Option<u32>,
+    /// Maximum files examined per pass.
+    pub max_files: Option<usize>,
+    /// Include `clippy::pedantic` findings.
+    pub pedantic: Option<bool>,
+    /// Model-driven simplification tier. Parsed but unused in this slice:
+    /// it is wired when the review-loop PR lands the shared sub-session
+    /// runtime (the flag exists so the config surface is final).
+    pub model_pass: Option<bool>,
 }
 
 /// Provider configuration block.

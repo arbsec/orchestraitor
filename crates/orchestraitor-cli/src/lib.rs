@@ -41,5 +41,6 @@ pub fn run_with_writer<W: Write>(cli: Cli, writer: &mut W) -> miette::Result<()>
         Commands::Worker(command) => commands::worker::run(&cli.paths, command, writer),
         Commands::Campaign(command) => commands::campaign::run(&cli.paths, command, writer),
         Commands::Loop(args) => commands::loop_runner::run(&cli.paths, &args, writer),
+        Commands::Simplify(command) => commands::simplify::run(&cli.paths, command, writer),
     }
 }

@@ -72,10 +72,11 @@ REPO="$(orc_lib_resolve_repo)"
 
 # --- Gate 1: mergeability ------------------------------------------------------
 # The no-review-while-conflicting rule: refuse on CONFLICTING/DIRTY.
-PR_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json state,headRefOid,mergeStateStatus)" ||
+PR_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json state,baseRefOid,headRefOid,mergeStateStatus)" ||
   { echo "error: cannot read PR #$PR (not found or gh failure)" >&2; exit "$ORC_ERR_CONFIG"; }
 STATE="$(jq -r '.state' <<<"$PR_STATE")"
 HEAD_SHA="$(jq -r '.headRefOid' <<<"$PR_STATE")"
+BASE_SHA="$(jq -r '.baseRefOid' <<<"$PR_STATE")"
 MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$PR_STATE")"
 if [ "$STATE" = "CLOSED" ]; then
   echo "error: PR #$PR is CLOSED; refusing to review" >&2
@@ -120,6 +121,12 @@ if [ -n "$RECORD_FILE" ]; then
   REVIEWED_SHA="$(jq -r '.head_sha // empty' "$RECORD_FILE")"
   if ! [[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$REVIEWED_SHA" != "$HEAD_SHA" ]; then
     echo "error: .head_sha must be the full reviewed commit SHA and match the current PR head; nothing posted" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+
+  REVIEWED_BASE="$(jq -r '.base_oid // empty' "$RECORD_FILE")"
+  if ! [[ "$REVIEWED_BASE" =~ ^[0-9a-f]{40}$ ]] || [ "$REVIEWED_BASE" != "$BASE_SHA" ]; then
+    echo "error: .base_oid must be the full base commit SHA the diff was reviewed against and match the current PR base; nothing posted" >&2
     exit "$ORC_ERR_CONFIG"
   fi
 
@@ -186,7 +193,7 @@ Suggested fix: ${FIX}"
 
 $(cat "$SUMMARY_FILE")
 
-Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REVIEWER_AGENT:-unspecified}, head: ${HEAD_SHA})"
+Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REVIEWER_AGENT:-unspecified}, head: ${HEAD_SHA}, base: ${BASE_SHA})"
     ARGS=(pr comment "$PR" --repo "$REPO" --body "$SUMMARY_BODY")
     orc_lib_run_or_dry_run ARGS gh >/dev/null
   fi
@@ -205,6 +212,7 @@ Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REV
     echo "- verdict: ${VERDICT}"
     echo "- reviewer-agent: ${REVIEWER_AGENT:-unspecified}"
     echo "- head SHA: ${REVIEWED_SHA}"
+    echo "- base OID: ${REVIEWED_BASE}"
     echo "- findings: ${N_FINDINGS}"
     echo
     if [ "$N_FINDINGS" -gt 0 ]; then
@@ -215,7 +223,7 @@ Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REV
       echo "No findings."
     fi
   } > "$RECORD_PATH"
-  echo "{\"pr\":$PR,\"verdict\":\"$VERDICT\",\"findings\":$N_FINDINGS,\"posted_in_thread\":$POSTED,\"head_sha\":\"$HEAD_SHA\",\"record\":\"$RECORD_PATH\"}"
+  echo "{\"pr\":$PR,\"verdict\":\"$VERDICT\",\"findings\":$N_FINDINGS,\"posted_in_thread\":$POSTED,\"head_sha\":\"$HEAD_SHA\",\"base_oid\":\"$BASE_SHA\",\"record\":\"$RECORD_PATH\"}"
   exit "$ORC_OK"
 fi
 
@@ -234,6 +242,7 @@ PROMPT_FILE="$(mktemp)"
   echo
   echo "REVIEW SCOPE — PR #$PR"
   echo "  head SHA:     $HEAD_SHA"
+  echo "  base OID:     $BASE_SHA"
   echo "  merge state:  $MERGE_STATE"
   echo "  files:        $FILES_CHANGED"
   echo "  additions:    +$ADDITIONS"
@@ -246,13 +255,14 @@ PROMPT_FILE="$(mktemp)"
   echo "REQUIRED VERDICT FORMAT"
   echo "Return a single JSON object written to a file, exactly this shape:"
   echo
-  echo "  {\"head_sha\": \"$HEAD_SHA\", \"verdict\": \"CLEAN|FINDINGS\", \"findings\": ["
+  echo "  {\"head_sha\": \"$HEAD_SHA\", \"base_oid\": \"$BASE_SHA\", \"verdict\": \"CLEAN|FINDINGS\", \"findings\": ["
   echo '    {"severity": "CRITICAL|HIGH|MEDIUM|LOW", "path": "<repo-relative path>",'
   echo '     "line": <number|null>, "description": "<observed fact with file:line evidence>",'
   echo '     "fix-suggestion": "<concrete fix>"}'
   echo '  ]}'
   echo
   echo "head_sha must name the exact full commit SHA reviewed; a changed PR head is rejected."
+  echo "base_oid must name the exact full base commit SHA the diff was reviewed against; a changed PR base is rejected."
   echo "One finding object per issue; omit findings or use [] when CLEAN."
   echo "Finish the report with the final verdict line:"
   echo
