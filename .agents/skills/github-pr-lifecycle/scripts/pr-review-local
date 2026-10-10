@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# pr-review-local: run `coderabbit review --agent` LOCALLY against the current
-# PR head for fast remediation-loop feedback — without the GitHub trigger or
-# the poll cycle. The GitHub-side CodeRabbit review generation against the
-# final head REMAINS the recorded convergence evidence before merge (see
-# SKILL.md step 6/CONVERGE); this local run only accelerates iteration.
+# pr-review-local: run `coderabbit review --agent --base <base>` LOCALLY
+# against the current PR head (base = the PR's resolved base branch) for
+# remediation-loop feedback — without the GitHub trigger or the poll cycle.
+# Per owner directive (2026-10-09): a clean LOCAL CLI generation at the final
+# HEAD is the recorded convergence evidence before merge (see SKILL.md step
+# 6/CONVERGE); GitHub-side bot triggers are no-ops during plan pauses.
 #
 # Read-only: this script NEVER posts to GitHub. It only reads PR state
 # (the mergeable gate) and runs the local CLI.
@@ -14,16 +15,21 @@
 #      pattern as pr-request-review/pr-review-post/pr-comment): a
 #      conflicting/unmergeable PR is refused (typed, exit 5), consistent
 #      with the no-review-while-conflicting rule.
-#   3. Run `coderabbit review --agent` in the current worktree (environment
-#      passes through). A missing binary is a typed error — falling back to
-#      an `@coderabbitai review` trigger is NOT automatic.
+#   3. Run `coderabbit review --agent --base <PR base branch>` in the current
+#      worktree (environment passes through) — the explicit --base makes the
+#      scope the PR base-to-HEAD diff, not the CLI default of tracked worktree
+#      changes. A missing binary is a typed error — falling back to an
+#      `@coderabbitai review` trigger is NOT automatic.
 #   4. Print the raw findings to stdout.
 #   5. --json wraps the output as {pr, head, findings_raw} via jq (when jq
 #      is available; without jq, --json is a typed config error).
 #
 # Exit codes: 0 = review completed (regardless of findings);
+# 1 = GitHub lookup/read failure (PR lookup, head/base read);
 # 2 = config/state error (no PR for branch, jq missing for --json);
-# 3 = coderabbit CLI failure (non-zero exit);
+# 3 = coderabbit CLI failure (non-zero exit, missing binary included);
+# 4 = local HEAD or worktree mismatch (findings would not match the
+#     reported PR head);
 # 5 = mergeable-gate refusal (PR conflicts with base / unproven state).
 # Missing coderabbit binary: exit 3 with the typed install message.
 set -euo pipefail
@@ -34,7 +40,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-review-local" "Run coderabbit review --agent locally against the current PR head for fast remediation feedback. Read-only: never posts to GitHub. Flags: --pr <number> (default: the PR for the current branch). --json wraps stdout as {pr, head, findings_raw}."
+  orc_lib_print_help "pr-review-local" "Run coderabbit review --agent --base <PR base branch> locally against the current PR head for remediation feedback (scope: the PR base-to-HEAD diff). Read-only: never posts to GitHub. Flags: --pr <number> (default: the PR for the current branch). --json wraps stdout as {pr, head, findings_raw}. Exit codes: 0 review completed; 1 GitHub lookup/read failure; 2 config/state error; 3 coderabbit CLI failure (missing binary included); 4 local HEAD/worktree mismatch; 5 mergeable-gate refusal."
   exit "$ORC_OK"
 fi
 
@@ -70,6 +76,18 @@ fi
 HEAD_SHA="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid --jq '.headRefOid')" ||
   { echo "error: cannot read PR #$PR head" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
 
+# Resolve the PR's base branch so the CLI reviews the PR base-to-HEAD diff
+# (the review's actual scope), not merely the CLI default of tracked worktree
+# changes. Without --base, `coderabbit review` covers uncommitted/staged/
+# committed tracked changes regardless of the PR's merge base — too narrow
+# for a convergence-evidence generation.
+BASE_BRANCH="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json baseRefName --jq '.baseRefName')" ||
+  { echo "error: cannot read PR #$PR base branch" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+if [ -z "$BASE_BRANCH" ]; then
+  echo "error: PR #$PR returned an empty baseRefName" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+
 # Fail fast on --json without jq BEFORE consuming a review run whose requested
 # output cannot be produced.
 if [ "$OPT_JSON" = true ] && ! command -v jq >/dev/null 2>&1; then
@@ -104,7 +122,7 @@ if ! command -v coderabbit >/dev/null 2>&1; then
 fi
 
 set +e
-FINDINGS_RAW="$(coderabbit review --agent)"
+FINDINGS_RAW="$(coderabbit review --agent --base "$BASE_BRANCH")"
 CR_RC=$?
 set -e
 if [ "$CR_RC" -ne 0 ]; then
@@ -114,7 +132,7 @@ if [ "$CR_RC" -ne 0 ]; then
     echo "--- partial coderabbit findings (review FAILED, exit $CR_RC) ---" >&2
     printf '%s\n' "$FINDINGS_RAW" >&2
   fi
-  echo "error: coderabbit review --agent failed with exit code $CR_RC" >&2
+  echo "error: coderabbit review --agent --base $BASE_BRANCH failed with exit code $CR_RC" >&2
   exit "$ORC_ERR_POLICY"
 fi
 
