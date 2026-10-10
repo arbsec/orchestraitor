@@ -307,11 +307,44 @@ pub struct TokenEfficiencyRollup {
     /// raw_tool_output)` — the measured reduction against the
     /// compiler-candidate counterfactual baseline. `None` when no receipt
     /// exists or the denominator is zero (reported as "not measured",
-    /// never as zero savings).
+    /// never as zero savings). Under profile grouping this is derived
+    /// from group-summed counters and weights sessions by their baseline;
+    /// use [`TokenEfficiencyRollup::median_session_savings_ratio`] for
+    /// the spec-required median comparison.
     pub savings_ratio: Option<f64>,
+    /// Per-session savings ratios inside the group (profile grouping
+    /// only; `None` when the grouping does not carry sessions). Sessions
+    /// without receipts (or with a zero baseline) are omitted — the
+    /// median never fabricates a 0% for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_savings_ratios: Option<Vec<(String, f64)>>,
 }
 
 impl TokenEfficiencyRollup {
+    /// The median of the group's per-session savings ratios (spec
+    /// §13.5.1: "the comparison is over medians across sessions"). `None`
+    /// when no session in the group has a measured ratio. The median of
+    /// an even count is the mean of the two middle values.
+    #[must_use]
+    pub fn median_session_savings_ratio(&self) -> Option<f64> {
+        let mut ratios: Vec<f64> = self
+            .session_savings_ratios
+            .as_ref()?
+            .iter()
+            .map(|(_, ratio)| *ratio)
+            .collect();
+        if ratios.is_empty() {
+            return None;
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = ratios.len() / 2;
+        Some(if ratios.len() % 2 == 1 {
+            ratios[mid]
+        } else {
+            f64::midpoint(ratios[mid - 1], ratios[mid])
+        })
+    }
+
     /// Computes the savings ratio from summed receipt counters (spec
     /// §13.5.1). `None` when the denominator is zero: a zero candidate
     /// baseline carries no measurable savings, and reporting a value would
@@ -343,6 +376,9 @@ pub enum EfficiencyGrouping {
     /// One rollup per session id (spec §13.5.1 per-session table).
     Session,
     /// One rollup per profile label; entries without a label group under
-    /// `None` (spec §13.5.1 A/B comparison).
+    /// `None` (spec §13.5.1 A/B comparison). Session-level savings live
+    /// on [`TokenEfficiencyRollup::session_savings_ratios`] so consumers
+    /// compute the spec-required MEDIAN of per-session ratios (a ratio
+    /// of group sums would weight sessions by their baseline).
     Profile,
 }

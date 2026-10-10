@@ -27,6 +27,7 @@ session (spec §18.4, §13.5.1):
 | candidate | summed candidate context tokens from receipts (the compiler's candidate set before selection) |
 | selected | summed selected context tokens from receipts |
 | savings | `1 − (selected + compacted tool output) / (candidate + raw tool output)` when a receipt exists |
+| median savings | the median of the group's per-session savings ratios (`--group-by-profile` only). The A/B comparison stat: a ratio of summed counters would weight sessions by their baseline. |
 
 A `—` in the savings column means no context receipt was recorded for the
 group: savings are not measurable there, and `orc stats` never substitutes a

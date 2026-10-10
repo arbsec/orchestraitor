@@ -323,9 +323,13 @@ measured zero.
 the same task suite under two configuration profiles — one with the features
 enabled (e.g. `profiles.fast` with `context_profile = "aggressive"`) and one
 without — then compare the profile-grouped rollups (`orc stats efficiency
---group-by-profile`). The comparison is over medians across sessions in each
-group; a single session is a data point, not a verdict (MVP-10's 30% median
-gate consumes these rollups).
+--group-by-profile`). The comparison is over MEDIANS of per-session savings
+ratios in each group (`median savings` column / `median_savings_ratio`):
+a ratio computed from counters summed across sessions would weight sessions
+by their baseline size and is shown for display only. Sessions without a
+measurable ratio are omitted from the median — never counted as 0%. A single
+session is a data point, not a verdict (MVP-10's 30% median gate consumes
+these medians).
 
 **Honest limitation.** `candidate_tokens` is the compiler's OWN candidate
 set — what the compiler considered before selection. A true

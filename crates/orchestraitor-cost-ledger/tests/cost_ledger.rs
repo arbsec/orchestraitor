@@ -584,6 +584,64 @@ fn efficiency_groups_by_profile_for_ab_comparison() {
     assert_eq!(standard.savings_ratio, None);
 }
 
+/// §13.5.1: the profile A/B comparison is over the MEDIAN of per-session
+/// ratios — a ratio of group-summed counters would weight sessions by
+/// their baseline. The rollup carries the per-session ratios and the
+/// median derives from them; sessions without a measurable ratio are
+/// omitted, never counted as 0%.
+#[test]
+fn profile_rollup_reports_median_of_session_ratios() {
+    let ledger = CostLedger::open_in_memory().unwrap();
+    let entry = |session: &str, request_id: &str| {
+        let mut entry = cost_entry_with_session(session, request_id, 10, 1);
+        entry.profile = Some(String::from("aggressive"));
+        entry
+    };
+    ledger
+        .api_spend()
+        .insert_cost_entry(&entry("sess-1", "req-1"))
+        .unwrap();
+    ledger
+        .api_spend()
+        .insert_cost_entry(&entry("sess-2", "req-2"))
+        .unwrap();
+    ledger
+        .api_spend()
+        .insert_cost_entry(&entry("sess-3", "req-3"))
+        .unwrap();
+    // Session ratios: 60%, 0-baseline (no ratio), 80% — median 70%.
+    ledger
+        .insert_context_receipt(&receipt("sess-1", "ctx-1", 100_000, 40_000, 0, 0))
+        .unwrap();
+    ledger
+        .insert_context_receipt(&receipt("sess-3", "ctx-3", 100_000, 20_000, 0, 0))
+        .unwrap();
+
+    let rollups = ledger
+        .token_efficiency_rollups(EfficiencyGrouping::Profile)
+        .unwrap();
+    let aggressive = rollups
+        .iter()
+        .find(|rollup| rollup.profile.as_deref() == Some("aggressive"))
+        .unwrap_or_else(|| panic!("aggressive group must exist"));
+    let ratios = aggressive
+        .session_savings_ratios
+        .as_ref()
+        .unwrap_or_else(|| panic!("profile grouping must carry per-session ratios"));
+    assert_eq!(
+        ratios.len(),
+        2,
+        "the unmeasurable (zero-baseline) session is omitted, never 0%"
+    );
+    let median = aggressive
+        .median_session_savings_ratio()
+        .unwrap_or_else(|| panic!("median must be measurable"));
+    assert!(
+        (median - 0.7).abs() < 1e-12,
+        "median of 0.6/0.8 is 0.7, got {median}"
+    );
+}
+
 /// Old receipt JSON (pre-§13.5.1) deserializes with the documented
 /// defaults — the serde back-compat contract pinned in §18.4.
 #[test]

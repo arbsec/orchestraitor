@@ -289,13 +289,67 @@ impl CostLedger {
                 raw_tool_output_tokens: raw_tool,
                 compacted_tool_output_tokens: compacted,
                 savings_ratio: savings,
+                session_savings_ratios: None,
             })
         })?;
         let mut rollups = Vec::new();
         for row in rows {
             rollups.push(row?);
         }
+        if matches!(grouping, EfficiencyGrouping::Profile) {
+            self.attach_session_savings_ratios(&mut rollups)?;
+        }
         Ok(rollups)
+    }
+
+    /// Attaches per-session savings ratios to profile-grouped rollups
+    /// (spec §13.5.1: the A/B comparison is over the MEDIAN of per-session
+    /// ratios — a ratio of group sums would weight sessions by their
+    /// baseline). One session = one profile label (enforced at insert), so
+    /// each session's receipt sums unambiguously belong to one group.
+    fn attach_session_savings_ratios(
+        &self,
+        rollups: &mut [TokenEfficiencyRollup],
+    ) -> LedgerResult<()> {
+        let sql = "SELECT session, \
+                   SUM(candidate_tokens), SUM(selected_tokens), \
+                   SUM(raw_tool_output_tokens), SUM(compacted_tool_output_tokens) \
+                   FROM context_receipts GROUP BY session";
+        let mut statement = self.conn.prepare(sql)?;
+        let sessions = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                u64_from_sql(row, 1)?,
+                u64_from_sql(row, 2)?,
+                u64_from_sql(row, 3)?,
+                u64_from_sql(row, 4)?,
+            ))
+        })?;
+        let mut session_savings: Vec<(String, String, f64)> = Vec::new();
+        for row in sessions {
+            let (session, candidate, selected, raw_tool, compacted) = row?;
+            if let Some(ratio) = TokenEfficiencyRollup::savings_from_receipt(
+                candidate, selected, raw_tool, compacted,
+            ) {
+                let label = self.conn.query_row(
+                    "SELECT COALESCE(profile, '') FROM cost_entries WHERE session = ?1 LIMIT 1",
+                    params![session],
+                    |row| row.get::<_, String>(0),
+                )?;
+                session_savings.push((label, session, ratio));
+            }
+        }
+        for rollup in rollups {
+            let key = rollup.profile.as_deref().unwrap_or_default();
+            let mut ratios: Vec<(String, f64)> = session_savings
+                .iter()
+                .filter(|(label, _, _)| label == key)
+                .map(|(_, session, ratio)| (session.clone(), *ratio))
+                .collect();
+            ratios.sort_by(|a, b| a.0.cmp(&b.0));
+            rollup.session_savings_ratios = Some(ratios);
+        }
+        Ok(())
     }
 }
 
@@ -403,6 +457,8 @@ CREATE TABLE IF NOT EXISTS context_receipts (
   request_id TEXT PRIMARY KEY, session TEXT NOT NULL, task_class TEXT NOT NULL, budget_tokens INTEGER NOT NULL, candidate_tokens INTEGER NOT NULL, selected_tokens INTEGER NOT NULL,
   omitted_count INTEGER NOT NULL, raw_tool_output_tokens INTEGER NOT NULL DEFAULT 0, compacted_tool_output_tokens INTEGER NOT NULL DEFAULT 0, repeated_tokens_avoided INTEGER NOT NULL DEFAULT 0, prompt_cache_eligible_tokens INTEGER NOT NULL DEFAULT 0, recorded_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_cost_entries_session ON cost_entries(session);
+CREATE INDEX IF NOT EXISTS idx_context_receipts_session ON context_receipts(session);
 ";
 
 const ROLLUP_SQL: &str = "SELECT agent_domain_id, SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(request_count), COALESCE(SUM(monetary_cost_measured), 0), COALESCE(SUM(monetary_cost_estimated), 0) FROM cost_entries WHERE agent_domain_id = ?1 GROUP BY agent_domain_id";
@@ -412,6 +468,23 @@ fn insert_entry(conn: &Connection, entry: &CostEntry) -> LedgerResult<()> {
     // entries mix labels would double-count its receipts across profile
     // groups in `token_efficiency_rollups`. The NULL-vs-label mix is also
     // refused: NULL means "no profile recorded", not a second group.
+    // The check and the INSERT share one write transaction so two
+    // connections inserting different profiles for the same NEW session
+    // serialize: the loser re-reads the committed label and fails typed
+    // instead of both succeeding.
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = insert_entry_locked(conn, entry);
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;")?,
+        Err(error) => {
+            let _ignore = conn.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn insert_entry_locked(conn: &Connection, entry: &CostEntry) -> LedgerResult<()> {
     let existing: Option<Option<String>> = conn
         .query_row(
             "SELECT profile FROM cost_entries WHERE session = ?1 LIMIT 1",

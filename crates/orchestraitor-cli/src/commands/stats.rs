@@ -55,17 +55,23 @@ fn efficiency(
 }
 
 /// Renders the rollups as a markdown table. Savings shows `—` when no
-/// receipt exists for the group (spec §13.5.1: not measured is not zero).
+/// receipt exists for the group (spec §13.5.1: not measured is not zero);
+/// under profile grouping the median column carries the spec-required
+/// median of per-session ratios (the group-sum `savings` weights
+/// sessions by their baseline).
 fn render_markdown(writer: &mut dyn Write, rollups: &[TokenEfficiencyRollup]) {
     let _ignore = writeln!(
         writer,
-        "| group | input | output | cached (read) | candidate | selected | savings |"
+        "| group | input | output | cached (read) | candidate | selected | savings | median savings |"
     );
-    let _ignore = writeln!(writer, "| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+    let _ignore = writeln!(
+        writer,
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
     for rollup in rollups {
         let _ignore = writeln!(
             writer,
-            "| {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
             group_label(rollup),
             rollup.input_tokens,
             rollup.output_tokens,
@@ -78,6 +84,9 @@ fn render_markdown(writer: &mut dyn Write, rollups: &[TokenEfficiencyRollup]) {
                 .map_or_else(|| "—".to_owned(), |tokens| tokens.to_string()),
             rollup
                 .savings_ratio
+                .map_or_else(|| "—".to_owned(), |ratio| format!("{:.1}%", ratio * 100.0),),
+            rollup
+                .median_session_savings_ratio()
                 .map_or_else(|| "—".to_owned(), |ratio| format!("{:.1}%", ratio * 100.0),),
         );
     }
