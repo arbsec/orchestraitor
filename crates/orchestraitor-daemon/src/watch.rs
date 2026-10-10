@@ -163,15 +163,18 @@ pub fn acquire_instance_lock(config_dir: &Path) -> Result<InstanceLock, DaemonEr
 /// Production poll side for the daemon: the same reconciled board read
 /// `orc loop` performs (open items + ready queue + blocked candidates +
 /// warnings).
+#[derive(Clone)]
 pub struct BoardSnapshotPoller {
-    client: BoardClient,
+    /// Shared for the daemon's lifetime: the always-on loop clones the
+    /// poller per invocation, and the client behind the Arc persists.
+    client: Arc<BoardClient>,
     config: BoardProjectConfig,
 }
 
 impl BoardSnapshotPoller {
     /// Builds the daemon-side poller over the board client.
     #[must_use]
-    pub fn new(client: BoardClient, config: BoardProjectConfig) -> Self {
+    pub fn new(client: Arc<BoardClient>, config: BoardProjectConfig) -> Self {
         Self { client, config }
     }
 }
@@ -200,6 +203,7 @@ impl BoardPoller for BoardSnapshotPoller {
 /// `board-diverged` events (§9.43) and unblocked-task promotions (§9.40)
 /// into the injected sink. The reconcile rides the poll tick, so every
 /// pass's snapshot is reconciled exactly once.
+#[derive(Clone)]
 pub struct ReconcilePoller<P: BoardPoller> {
     inner: P,
     runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
@@ -208,18 +212,18 @@ pub struct ReconcilePoller<P: BoardPoller> {
     /// The previous tick's blocked candidates (§9.40): a candidate that
     /// appears on the NEXT tick's ready queue is a newly unblocked task —
     /// without this, promotion events could never fire.
-    previous_blocked: std::sync::Mutex<Vec<orchestraitor_board::ReadyItem>>,
+    previous_blocked: Arc<std::sync::Mutex<Vec<orchestraitor_board::ReadyItem>>>,
     /// Task ids that already received a `board-diverged` event: the
     /// divergence records once per task, not once per tick (a task that
     /// stays absent from the open set must not produce an envelope every
     /// cadence tick).
-    diverged_seen: std::sync::Mutex<std::collections::HashSet<String>>,
+    diverged_seen: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// The current watch invocation id, set by [`Self::set_invocation`]
     /// before the runner starts. Rows from THIS invocation are the
     /// runner's own live slots — the worker may legitimately move or close
     /// the board item while the run finishes, which is normal supervision,
     /// never a divergence. Earlier invocations' rows are recovery surface.
-    current_invocation: std::sync::Mutex<Option<String>>,
+    current_invocation: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// The reconcile-poller seam `run_watch` needs beyond reading snapshots:
@@ -227,11 +231,17 @@ pub struct ReconcilePoller<P: BoardPoller> {
 /// excluded from the divergence scan. Blanket-implemented for
 /// [`ReconcilePoller`]; tests with plain pollers implement it as a no-op.
 pub trait SetWatchInvocation {
-    /// Sets the current watch invocation id.
+    /// Begins a new watch invocation (id + dedup reset; `previous_blocked`
+    /// carried).
+    fn begin_invocation(&mut self, invocation_id: &str);
+    /// Sets the current watch invocation id without touching state.
     fn set_invocation(&mut self, invocation_id: &str);
 }
 
 impl<P: BoardPoller> SetWatchInvocation for ReconcilePoller<P> {
+    fn begin_invocation(&mut self, invocation_id: &str) {
+        ReconcilePoller::begin_invocation(self, invocation_id);
+    }
     fn set_invocation(&mut self, invocation_id: &str) {
         ReconcilePoller::set_invocation(self, invocation_id);
     }
@@ -387,9 +397,9 @@ impl<P: BoardPoller> ReconcilePoller<P> {
             runs,
             events,
             sink,
-            previous_blocked: std::sync::Mutex::new(Vec::new()),
-            diverged_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
-            current_invocation: std::sync::Mutex::new(None),
+            previous_blocked: Arc::new(std::sync::Mutex::new(Vec::new())),
+            diverged_seen: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            current_invocation: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -397,15 +407,36 @@ impl<P: BoardPoller> ReconcilePoller<P> {
     /// the runner's invocation identity exists). MUST be called before the
     /// first poll; unset, no row is excluded and a live slot could be
     /// misreported as divergent.
-    pub fn set_invocation(&mut self, invocation_id: &str) {
-        match self.current_invocation.get_mut() {
-            Ok(slot) => *slot = Some(invocation_id.to_string()),
+    /// Begins a new watch invocation: sets the invocation id and clears
+    /// the divergence-dedup set (dedup is invocation-scoped — each
+    /// invocation re-observes from the durable rows), while CARRYING
+    /// `previous_blocked` across the boundary: a task blocked on the last
+    /// tick of invocation N and ready on the first tick of N+1 is a
+    /// promotion the spec requires recording (a PR #555 review thread).
+    /// Called by [`run_watch`] once the runner's invocation identity
+    /// exists; MUST run before the first poll.
+    pub fn begin_invocation(&mut self, invocation_id: &str) {
+        match self.current_invocation.lock() {
+            Ok(mut slot) => *slot = Some(invocation_id.to_string()),
             // A poisoned lock means a previous reconcile panicked mid-scan.
             // This path RECOVERS the guard via into_inner() (not fail-loud):
             // the setter runs at invocation start, before any reconcile scan,
             // so a poisoned guard here cannot reflect this invocation's own
             // panic — overwriting the stale value is safe and the next
             // poll's poison handling still surfaces any real corruption.
+            Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
+        }
+        match self.diverged_seen.lock() {
+            Ok(mut seen) => seen.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+
+    /// Sets the current watch invocation id without touching reconcile
+    /// state (test convenience).
+    pub fn set_invocation(&mut self, invocation_id: &str) {
+        match self.current_invocation.lock() {
+            Ok(mut slot) => *slot = Some(invocation_id.to_string()),
             Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
         }
     }
@@ -743,8 +774,9 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     // Single source for the invocation id: the caller derives it ONCE and
     // this function hands the same string to the reconcile poller and the
     // runner, so the live-slot exclusion and the runner's identity can
-    // never drift.
-    poller.set_invocation(invocation_id);
+    // never drift. begin_invocation resets the dedup set (invocation-
+    // scoped) while carrying previous_blocked across the boundary.
+    poller.begin_invocation(invocation_id);
     let runner = LoopRunner::new(
         loop_config,
         poller,

@@ -213,6 +213,33 @@ async fn watch_cycle() -> Result<ExitCode> {
     // clock origin would skew every guard timestamp) continues watching
     // until the operator's shutdown signal. A shutdown stop (or any other
     // terminal reason) exits.
+    // The reconcile poller is built ONCE for the daemon's lifetime: its
+    // `previous_blocked` state CARRIES across run-budget boundaries (a task
+    // blocked on the last tick of invocation N and ready on the first tick
+    // of N+1 is a promotion §9.40 requires recording), while run_watch's
+    // begin_invocation re-scopes the divergence dedup set per invocation.
+    // The board client and dedicated run-state/event-store handles are
+    // shared for the daemon's lifetime.
+    let client = orchestraitor_board::BoardClient::new(
+        Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>
+    )
+    .into_diagnostic()
+    .wrap_err("board client construction failed")?;
+    let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
+        .into_diagnostic()
+        .wrap_err("loop run-state store open failed (reconcile handle)")?;
+    let events = orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
+        .into_diagnostic()
+        .wrap_err("watch event store open failed")?;
+    let poller = ReconcilePoller::new(
+        orchestraitor_daemon::BoardSnapshotPoller::new(Arc::new(client), board_config_template),
+        // The poller's dedicated connection (see the comment above): opening a
+        // second handle on the same WAL database is safe — the reconcile scan
+        // only reads, and WAL readers never block the runner's writes.
+        Arc::new(std::sync::Mutex::new(poller_runs)),
+        Arc::new(std::sync::Mutex::new(events)),
+        Arc::new(JournallessSink),
+    );
     let mut run_ordinal = 0_u64;
     let summary = loop {
         // The run ordinal disambiguates invocation ids even if two restarts
@@ -229,47 +256,20 @@ async fn watch_cycle() -> Result<ExitCode> {
         // Fresh per-invocation identity and clock origin (the Tokio clock
         // restarts at zero on each runner run, so the wall-clock origin
         // must be re-read too — a stale origin would skew daily-spend day
-        // boundaries, row timestamps, and backoff checks).
+        // boundaries, row timestamps, and backoff checks). The run ordinal
+        // disambiguates ids even if two restarts land in the same second.
         let start_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .into_diagnostic()
             .wrap_err("system clock is before the Unix epoch")?;
         let invocation_id = format!("watch-{start_unix_secs}-{run_ordinal}");
-        // A fresh client per invocation (reqwest build is cheap; the auth Arc
-        // is shared): the loop restarts only on the 4h run budget. The board
-        // config is cloned per invocation (cheap validated struct).
-        let client = orchestraitor_board::BoardClient::new(
-            Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>
-        )
-        .into_diagnostic()
-        .wrap_err("board client construction failed")?;
-        let board_config = board_config_template.clone();
-        // Fresh reconcile connections per invocation: cheap SQLite opens; the
-        // databases are durable and shared.
-        let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
-            .into_diagnostic()
-            .wrap_err("loop run-state store open failed (reconcile handle)")?;
-        let events =
-            orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
-                .into_diagnostic()
-                .wrap_err("watch event store open failed")?;
-        // A fresh poller per invocation: the reconcile state (promoted-set,
-        // divergence dedup) is invocation-scoped by design — recovery
-        // re-orphans and the new invocation re-observes cleanly. The event
-        // store is shared and durable.
-        let poller = ReconcilePoller::new(
-            orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
-            // The poller's dedicated connection (see the comment above): opening a
-            // second handle on the same WAL database is safe — the reconcile scan
-            // only reads, and WAL readers never block the runner's writes.
-            Arc::new(std::sync::Mutex::new(poller_runs)),
-            Arc::new(std::sync::Mutex::new(events)),
-            Arc::new(JournallessSink),
-        );
+        // The poller (built once, before the loop) carries its
+        // previous_blocked state across budget boundaries; run_watch's
+        // begin_invocation re-scopes the divergence dedup set per invocation.
         let summary = run_watch(
             loop_config.clone(),
-            poller,
+            poller.clone(),
             starter.clone(),
             &decisions,
             &runs,
