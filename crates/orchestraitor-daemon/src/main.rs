@@ -225,7 +225,12 @@ async fn watch_cycle() -> Result<ExitCode> {
     // clock origin would skew every guard timestamp) continues watching
     // until the operator's shutdown signal. A shutdown stop (or any other
     // terminal reason) exits.
+    let mut run_ordinal = 0_u64;
     let summary = loop {
+        // The run ordinal disambiguates invocation ids even if two restarts
+        // land in the same second (a PR #555 review thread): a repeated id
+        // would merge the exclusion scopes of two invocations.
+        run_ordinal = run_ordinal.wrapping_add(1);
         // Fresh per-invocation identity and clock origin (the Tokio clock
         // restarts at zero on each runner run, so the wall-clock origin
         // must be re-read too — a stale origin would skew daily-spend day
@@ -235,7 +240,7 @@ async fn watch_cycle() -> Result<ExitCode> {
             .map(|duration| duration.as_secs())
             .into_diagnostic()
             .wrap_err("system clock is before the Unix epoch")?;
-        let invocation_id = format!("watch-{start_unix_secs}");
+        let invocation_id = format!("watch-{start_unix_secs}-{run_ordinal}");
         // A fresh client per invocation (reqwest build is cheap; the auth Arc
         // is shared): the loop restarts only on the 4h run budget. The board
         // config is cloned per invocation (cheap validated struct).

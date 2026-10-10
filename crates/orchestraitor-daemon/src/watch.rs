@@ -272,31 +272,35 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // still finishing — that is normal supervision, never a divergence
         // (a PR #555 review finding). Earlier invocations' rows are
         // recovery surface and stay in scope.
-        let supervised_task_ids: Vec<String> = {
+        // The supervised set and the reconcile input read under one
+        // `runs` lock so both see the same store snapshot (a PR #555
+        // review thread): the runner writes through its own connection,
+        // and a torn read across two locks could misclassify a row the
+        // runner just started.
+        let (previous_blocked, supervised_task_ids) = {
             let invocation = self
                 .current_invocation
                 .lock()
                 .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
-            match invocation.as_deref() {
-                Some(current) => {
-                    let runs = self.runs.lock().map_err(|_| {
-                        CampaignError::Loop("run-state store lock poisoned".to_string())
-                    })?;
-                    runs.runs_for_invocation(current)?
-                        .into_iter()
-                        .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Running)
-                        .map(|row| row.task_id)
-                        .collect()
-                }
-                None => Vec::new(),
+            let mut supervised = Vec::new();
+            if let Some(current) = invocation.as_deref() {
+                let runs = self.runs.lock().map_err(|_| {
+                    CampaignError::Loop("run-state store lock poisoned".to_string())
+                })?;
+                supervised = runs
+                    .runs_for_invocation(current)?
+                    .into_iter()
+                    .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Running)
+                    .map(|row| row.task_id)
+                    .collect();
             }
-        };
-        let previous_blocked = {
-            let previous = self
-                .previous_blocked
-                .lock()
-                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
-            previous.clone()
+            let previous_blocked = {
+                let previous = self.previous_blocked.lock().map_err(|_| {
+                    CampaignError::Loop("reconcile state lock poisoned".to_string())
+                })?;
+                previous.clone()
+            };
+            (previous_blocked, supervised)
         };
         let outcome = {
             let runs = self
@@ -399,8 +403,12 @@ impl<P: BoardPoller> ReconcilePoller<P> {
     pub fn set_invocation(&mut self, invocation_id: &str) {
         match self.current_invocation.get_mut() {
             Ok(slot) => *slot = Some(invocation_id.to_string()),
-            // A poisoned lock means a previous reconcile panicked mid-scan:
-            // fail loud, never continue silently (same contract as poll()).
+            // A poisoned lock means a previous reconcile panicked mid-scan.
+            // This path RECOVERS the guard via into_inner() (not fail-loud):
+            // the setter runs at invocation start, before any reconcile scan,
+            // so a poisoned guard here cannot reflect this invocation's own
+            // panic — overwriting the stale value is safe and the next
+            // poll's poison handling still surfaces any real corruption.
             Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
         }
     }
