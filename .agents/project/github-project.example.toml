@@ -128,6 +128,10 @@ ready_value  = "Ready"
 # Board field carrying the P0-P3 priority used by the epic-focus rule
 # (spec §9.41); defaults to "Priority" when unset.
 # priority_field = "Priority"
+# When false, the ready-queue predicate (orc loop / orc campaign) skips the
+# Target option check — leaf type + Status = Ready + no blockers are the only
+# gates. Status is always required. Defaults to true (Target = MVP enforced).
+# require_target = true
 
 # --- Board auth (bootstrap) ---------------------------------------------------
 # `orc board` never sniffs ambient credentials: the token source is declared here as a secret

@@ -75,7 +75,6 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.14 | `40-arbitraitor-integration.md#914-arbitraitor-backed-output-quarantine-and-promotion` |
 | §9.15 | `20-harness-worker.md#915-context-compiler` |
 | §9.15.1 | `20-harness-worker.md#9151-context-and-instruction-provenance` |
-| §9.15.2 | `20-harness-worker.md#9152-memory-graph-and-working-set-compaction` |
 | §9.16 | `20-harness-worker.md#916-lsp-and-semantic-intelligence` |
 | §9.17 | `20-harness-worker.md#917-event-and-receipt-store` |
 | §9.17.1 | `20-harness-worker.md#9171-forensic-reconstruction-and-reproducibility` |

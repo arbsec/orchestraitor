@@ -13,6 +13,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Optional `Target` gate in the ready-queue predicate**: the board config
+  (`.agents/project/github-project.local.toml`) accepts a new optional
+  `[mvp].require_target` key. When set to `false`, `orc loop`, `orc campaign`, and
+  `orc board ready` schedule leaf items by type, `Status = Ready`, and unresolved
+  blockers only — the `Target = MVP` check is skipped, enabling post-MVP work on the
+  shared board. The key defaults to `true`, so existing configs are unchanged.
 - **Declared tools**: tools are now configuration. Each
   `[tools.<id>]` entry in the layered config declares a tool as either a
   `command` (a fixed argv dispatched through the same Arbitraitor-mediated

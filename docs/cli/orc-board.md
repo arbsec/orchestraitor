@@ -46,6 +46,11 @@ orc board guarded-move <item-id> --status "<Status option name>" --session <sess
   issue is excluded with a warning even when its board fields say Ready/MVP. Only the
   repositories listed under `[project].repos` are in scope, and results sort by issue number.
   Malformed or undecidable items are skipped with a warning on stderr, never a crash.
+  Setting `[mvp].require_target = false` in the local config drops the `Target` gate from
+  the ready-queue predicate (used by `orc board ready`, `orc loop`, and `orc campaign`):
+  leaf type, `Status=Ready`, and no unresolved blockers become the only gates — intended
+  for post-MVP scheduling on the shared board. `Status=Ready` is always required; the key
+  defaults to `true` (the MVP gate), so existing configs are unchanged.
 - `orc board move` finds the board item for an issue number in the configured repositories
   (searching every configured repo; ambiguous same-numbered issues across them fail with a
   typed error rather than picking one), writes the Status single-select field via

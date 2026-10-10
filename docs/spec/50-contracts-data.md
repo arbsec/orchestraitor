@@ -265,7 +265,6 @@ Required telemetry:
 - prompt-cache eligible tokens;
 - repeated tokens avoided;
 - tool output before and after compaction;
-- memory-graph compaction counters: nodes substituted, tokens elided, expansions requested/served, tombstones, purges (§9.15.2);
 - context expansion requests;
 - provider-reported input/output/reasoning tokens;
 - estimated monetary cost;
@@ -279,7 +278,6 @@ Initial targets:
 - 50% reduction on large-repository navigation tasks;
 - less than 3% relative task-success regression;
 - no hidden truncation of security-relevant findings;
-- memory-graph elision is receipted: every reference-substitution is visible in the context receipt with a resolvable handle (§9.15.2).
 - context compiler overhead below 300 ms p95 for cached repositories.
 - normalization orchestration overhead below 25 ms p95, excluding formatter process time.
 - compact normalization patch generation below 15 ms p95 for files under 1 MiB.
@@ -552,36 +550,8 @@ pub struct ContextReceipt {
     pub selected_tokens: u64,
     pub selected_items: Vec<ContextItemRef>,
     pub omitted_count: u64,
-    /// Reference-substitution applied by the memory graph (§9.15.2):
-    /// spans replaced by `mem://` handles, with token counts before/after.
-    /// Backward compatibility: receipts written before §9.15.2 lack this
-    /// field; readers deserialize it with a default of an empty Vec
-    /// (`#[serde(default)]`) — never rejected, never migrated in place.
-    /// The §9.17.1 schema_version on the event envelope records which
-    /// shape a stored receipt uses; an unknown future shape is preserved
-    /// and flagged `uninterpreted`, per §9.17.1 schema versioning.
-    #[serde(default)]
-    pub memory_elisions: Vec<MemoryElision>,
     pub index_digest: Digest,
     pub selection_policy_digest: Digest,
-}
-
-/// A single reference-substitution applied during compilation (§9.15.2).
-/// Carries the stub's provenance so elided untrusted content cannot gain
-/// instruction authority on re-insertion (invariant 3, §9.15.2).
-pub struct MemoryElision {
-    pub node_id: MemoryNodeId,
-    pub digest: Digest,          // full payload digest (§9.15.1)
-    pub digest_prefix: String,   // short form shown in the stub handle
-    pub kind: MemoryNodeKind,
-    pub origin: ProvenanceOrigin,
-    pub age: ContextAge,         // §9.15.1 envelope field
-    pub sensitivity: DataSensitivity, // §9.15.1 envelope field
-    pub trust_class: TrustClass,
-    pub source_ref: SourceRef,   // §9.15.1 envelope field
-    pub tokens_before: u64,
-    pub tokens_after: u64,
-    pub handle: String, // mem://<node_id>#<digest-prefix>
 }
 ```
 

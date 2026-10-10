@@ -377,7 +377,7 @@ This extends the context compiler (§9.15) and its provenance envelope (§9.15.1
 
 Learn from rejected changes, review comments, user corrections, repeatedly failing checks, post-agent manual edits, and model/domain performance. Propose updates to instructions, skills, routing, and verification. Never modify durable project knowledge automatically.
 
-This is an advisory system, not an autonomous one. It surfaces patterns (e.g., "the frontend agent's patches are rejected 40% of the time; the common cause is missing CSS import in the test fixture") and proposes changes. The user approves every modification to project configuration. Distilled feedback becomes project-scope nodes in the memory graph (§9.15.2) — proposed, not auto-promoted; the user's approval is the pin.
+This is an advisory system, not an autonomous one. It surfaces patterns (e.g., "the frontend agent's patches are rejected 40% of the time; the common cause is missing CSS import in the test fixture") and proposes changes. The user approves every modification to project configuration.
 
 ### 5. Earned autonomy
 
@@ -401,7 +401,7 @@ This builds on the checkpoint system in §9.24.2 and the session durability in M
 
 Provide a common interface over built-in indexing, LSP, Serena, CodeGraph, and codebase-memory. Share project identity, file generations, and invalidation events across indexes. Each index remains isolated and attributable.
 
-This extends the context compiler (§9.15) and the LSP integration (§9.16) from "one index" to "federated indexes query." The federation layer routes queries to the appropriate index, merges results, and attributes each result to its source. No index gains authority over another. The memory graph (§9.15.2) participates as a first-class index: its FTS + recursive-CTE retrieval joins the federation with the same attribution rules.
+This extends the context compiler (§9.15) and the LSP integration (§9.16) from "one index" to "federated indexes query." The federation layer routes queries to the appropriate index, merges results, and attributes each result to its source. No index gains authority over another.
 
 ### 9. System Assistance mode
 
