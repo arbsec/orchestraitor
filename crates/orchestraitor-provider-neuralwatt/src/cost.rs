@@ -183,6 +183,7 @@ fn build_entry(
         monetary_cost_basis: MonetaryCostBasis::UtilizationOnly,
         subscription_attribution_id: None,
         routing_decision: input.routing_decision.to_owned(),
+        profile: None,
     }
 }
 

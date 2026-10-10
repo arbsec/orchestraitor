@@ -285,6 +285,55 @@ Initial targets:
 - compact normalization patch generation below 15 ms p95 for files under 1 MiB.
 - no full-repository scan after ordinary agent writes when a changed-layer journal is available.
 
+#### 13.5.1 Measurement and comparison methodology
+
+Token savings are measured from recorded telemetry only — never estimated
+post hoc. The measurement surface:
+
+- **Context receipts** (§18.4) carry the per-request deltas: `candidate_tokens`,
+  `selected_tokens`, `raw_tool_output_tokens`, `compacted_tool_output_tokens`,
+  `repeated_tokens_avoided`, and `prompt_cache_eligible_tokens`. Fields without
+  an active producer carry `0`; a rollup MUST NOT present a `0`-produced field
+  as a measured saving.
+- The **cost ledger** (§9.19.4) stores the receipt counters keyed by the same
+  session id its cost entries carry, so per-session efficiency joins cost rows
+  (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`)
+  with receipt deltas without a second store.
+- Each cost entry records the **named profile** (§9.22.5) the run resolved
+  through (`roles.<role>.routing.profile`), enabling profile-grouped A/B
+  comparison.
+
+**Per-session savings formula.** For a session with summed receipt counters:
+
+```text
+baseline = candidate_tokens + raw_tool_output_tokens
+delivered = selected_tokens + compacted_tool_output_tokens
+savings_ratio = 1 - delivered / baseline        (when baseline > 0 and a receipt exists)
+```
+
+`orc stats efficiency` reports this per session or per profile. A session (or
+group) with no receipt reports no savings value — reported as `—` in the
+markdown table and `null` in JSON — never `0%`: a missing measurement is not a
+measured zero.
+
+**A/B comparison.** To measure what the token-saving features are worth, run
+the same task suite under two configuration profiles — one with the features
+enabled (e.g. `profiles.fast` with `context_profile = "aggressive"`) and one
+without — then compare the profile-grouped rollups (`orc stats efficiency
+--group-by-profile`). The comparison is over medians across sessions in each
+group; a single session is a data point, not a verdict (MVP-10's 30% median
+gate consumes these rollups).
+
+**Honest limitation.** `candidate_tokens` is the compiler's OWN candidate
+set — what the compiler considered before selection. A true
+no-compiler baseline would include items the compiler never even considered
+(whole files a smarter naive loader would have shipped). The measured ratio
+therefore under-counts true savings; it is a lower bound, and the MVP-10
+30% median gate is evaluated against the direct-harness baseline, not this
+ratio. Conversely, `selected_tokens` counts compiler estimates, not
+provider-reported prompt tokens; provider-reported `input_tokens` on the cost
+entries remain the authoritative spend measure.
+
 ### 13.6 Build and binary size
 
 - Feature-gated optional backends
@@ -562,6 +611,23 @@ pub struct ContextReceipt {
     /// and flagged `uninterpreted`, per §9.17.1 schema versioning.
     #[serde(default)]
     pub memory_elisions: Vec<MemoryElision>,
+    /// Token-efficiency telemetry (§13.5.1), summed over the compiled
+    /// build: raw tool-output tokens before compaction; tool-output tokens
+    /// after compaction (equal to raw when no compaction ran); tokens
+    /// avoided by dedup/prompt-cache reuse; tokens eligible for provider
+    /// prompt-cache reuse. Backward compatibility: receipts written
+    /// before §13.5.1 lack these fields; readers deserialize each with a
+    /// default of `0` (`#[serde(default)]`) — never rejected, never
+    /// migrated in place. A field without an active producer carries `0`
+    /// (honest telemetry: never estimated).
+    #[serde(default)]
+    pub raw_tool_output_tokens: u64,
+    #[serde(default)]
+    pub compacted_tool_output_tokens: u64,
+    #[serde(default)]
+    pub repeated_tokens_avoided: u64,
+    #[serde(default)]
+    pub prompt_cache_eligible_tokens: u64,
     pub index_digest: Digest,
     pub selection_policy_digest: Digest,
 }

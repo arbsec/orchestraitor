@@ -202,6 +202,7 @@ file and anchor. New references should cite the target document directly, for ex
 | §13.3.1 | `50-contracts-data.md#1331-startup-progress-feedback` |
 | §13.4 | `50-contracts-data.md#134-model-path-performance` |
 | §13.5 | `50-contracts-data.md#135-token-efficiency-budgets` |
+| §13.5.1 | `50-contracts-data.md#1351-measurement-and-comparison-methodology` |
 | §13.6 | `50-contracts-data.md#136-build-and-binary-size` |
 | §14 | `40-arbitraitor-integration.md#14-security-modes` |
 | §14.1 | `40-arbitraitor-integration.md#141-strict` |

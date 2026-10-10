@@ -481,6 +481,7 @@ async fn dispatch_subagent(
         // ledger request_ids drop spend rows).
         spawn_seq: state.subsession_events.len() as u64,
         attribution: config.attribution.clone(),
+        profile: config.profile.clone(),
         cost_sink: config.cost_sink.clone(),
     };
     match Box::pin(run_subsession(

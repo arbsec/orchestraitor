@@ -87,6 +87,7 @@ impl<'a> CostRecorder<'a> {
                 input.surface.as_str(),
                 input.route.routing_decision
             ),
+            profile: None,
         };
         self.ledger.api_spend().insert_cost_entry(&entry)?;
         Ok(())

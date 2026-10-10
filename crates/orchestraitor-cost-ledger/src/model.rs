@@ -96,6 +96,14 @@ pub struct CostEntry {
     pub subscription_attribution_id: Option<SubscriptionId>,
     /// Routing precedence decision that selected the provider and model.
     pub routing_decision: String,
+    /// Named configuration profile the run's context settings resolved
+    /// through (spec §9.22.5; the A/B grouping label for §13.5.1
+    /// comparisons). `None` when the run carried no profile label.
+    /// Backward compatibility: rows written before §13.5.1 lack this
+    /// column; readers deserialize it with a default of `None`
+    /// (`#[serde(default)]`).
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 impl CostEntry {
@@ -229,4 +237,112 @@ impl DomainCostRollup {
             + self.cache_read_tokens
             + self.cache_write_tokens
     }
+}
+
+/// A context receipt recorded for efficiency rollups (spec §13.5.1). The
+/// session id is the join key to `CostEntry` rows; the §18.4 receipt's
+/// digest/provenance fields stay in the receipt producer — the ledger
+/// stores only the counters the rollup math needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptRecord {
+    /// Context request that produced the receipt (ledger-unique key).
+    pub request_id: String,
+    /// Session the request belonged to (the rollup join key).
+    pub session: SessionId,
+    /// Task class of the request (spec §9.19.1).
+    pub task_class: String,
+    /// Token budget imposed for the request.
+    pub budget_tokens: u64,
+    /// Total tokens of all candidate items before selection.
+    pub candidate_tokens: u64,
+    /// Tokens actually selected for the prompt.
+    pub selected_tokens: u64,
+    /// Number of candidate items omitted from selection.
+    pub omitted_count: u64,
+    /// Tokens of raw tool output included in the build, before compaction.
+    pub raw_tool_output_tokens: u64,
+    /// Tokens of tool output after compaction (same build).
+    pub compacted_tool_output_tokens: u64,
+    /// Tokens avoided by dedup/cache reuse during the build.
+    pub repeated_tokens_avoided: u64,
+    /// Tokens in the compiled prompt eligible for prompt-cache reuse.
+    pub prompt_cache_eligible_tokens: u64,
+}
+
+/// Token-efficiency summary for one grouping key (session, agent, or
+/// profile; spec §13.5.1). Token deltas come from context receipts keyed
+/// by the same session id the cost entries carry; a session without
+/// receipts reports `None` savings — never an estimated number.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TokenEfficiencyRollup {
+    /// Session id the rollup is keyed by (empty when grouped by profile).
+    pub session: Option<String>,
+    /// Domain-agent id the rollup is keyed by (empty when grouped by
+    /// session or profile).
+    pub agent_domain_id: Option<String>,
+    /// Profile grouping label.
+    pub profile: Option<String>,
+    /// Summed provider-reported input tokens.
+    pub input_tokens: u64,
+    /// Summed provider-reported output tokens.
+    pub output_tokens: u64,
+    /// Summed cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Summed cache-write tokens.
+    pub cache_write_tokens: u64,
+    /// Summed candidate context tokens from receipts (`None` when the
+    /// group produced no receipts).
+    pub candidate_tokens: Option<u64>,
+    /// Summed selected context tokens from receipts (`None` when the
+    /// group produced no receipts).
+    pub selected_tokens: Option<u64>,
+    /// Summed raw tool-output tokens entering compiled contexts (spec
+    /// §13.5; `None` when the group produced no receipts).
+    pub raw_tool_output_tokens: Option<u64>,
+    /// Summed tool-output tokens after compaction (spec §13.5; `None`
+    /// when the group produced no receipts).
+    pub compacted_tool_output_tokens: Option<u64>,
+    /// Compiled-context savings ratio (spec §13.5.1):
+    /// `1 - (selected + compacted_tool_output) / (candidate +
+    /// raw_tool_output)` — the measured reduction against the
+    /// compiler-candidate counterfactual baseline. `None` when no receipt
+    /// exists or the denominator is zero (reported as "not measured",
+    /// never as zero savings).
+    pub savings_ratio: Option<f64>,
+}
+
+impl TokenEfficiencyRollup {
+    /// Computes the savings ratio from summed receipt counters (spec
+    /// §13.5.1). `None` when the denominator is zero: a zero candidate
+    /// baseline carries no measurable savings, and reporting a value would
+    /// fabricate one.
+    #[must_use]
+    pub fn savings_from_receipt(
+        candidate_tokens: u64,
+        selected_tokens: u64,
+        raw_tool_output_tokens: u64,
+        compacted_tool_output_tokens: u64,
+    ) -> Option<f64> {
+        let selected_total = selected_tokens.saturating_add(compacted_tool_output_tokens);
+        let baseline = candidate_tokens.saturating_add(raw_tool_output_tokens);
+        if baseline == 0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "token counts are far below 2^53; the ratio only feeds a percentage display"
+        )]
+        let ratio = 1.0 - (selected_total as f64) / (baseline as f64);
+        Some(ratio)
+    }
+}
+
+/// Queries the ledger's token-efficiency summaries.
+#[derive(Debug, Clone, Copy)]
+pub enum EfficiencyGrouping {
+    /// One rollup per session id (spec §13.5.1 per-session table).
+    Session,
+    /// One rollup per profile label; entries without a label group under
+    /// `None` (spec §13.5.1 A/B comparison).
+    Profile,
 }

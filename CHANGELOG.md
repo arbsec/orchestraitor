@@ -13,6 +13,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Token-efficiency statistics** (`orc stats efficiency`): read-only
+  reporting over the cost ledger showing, per session or per configuration
+  profile, provider-reported input/output/cache tokens alongside
+  context-compiler receipt deltas (candidate vs selected tokens, tool-output
+  compaction) and the derived savings ratio. Sessions without receipts
+  report no savings value — never a fabricated number (spec §13.5.1).
+  `--group-by-profile` compares runs recorded under different profile
+  labels, the A/B mechanism for verifying that the token-saving features
+  actually save; `--json` emits the same rollups as stable JSON. Cost
+  entries now carry the run's profile label (`roles.<role>.routing.profile`);
+  existing ledgers migrate in place on open.
 - **Declared tools**: tools are now configuration. Each
   `[tools.<id>]` entry in the layered config declares a tool as either a
   `command` (a fixed argv dispatched through the same Arbitraitor-mediated

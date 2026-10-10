@@ -73,6 +73,10 @@ pub struct WorkerConfig {
     /// carried from the spawning tool definition. `None` = the routing
     /// default (no explicit effort on the wire).
     pub effort: Option<crate::tooldef::ReasoningEffort>,
+    /// Named configuration profile the run resolved through (spec §9.22.5);
+    /// recorded on every cost entry the run writes so §13.5.1 A/B
+    /// comparisons can group by profile. `None` = no profile label.
+    pub profile: Option<String>,
     /// Structured-only finish (issue #535 §9.45): the system prompt demands
     /// a compact fielded summary payload instead of prose narrative.
     pub structured_summary: bool,
@@ -113,6 +117,7 @@ impl std::fmt::Debug for WorkerConfig {
                 &self.subsession_routing.keys().collect::<Vec<_>>(),
             )
             .field("effort", &self.effort)
+            .field("profile", &self.profile)
             .field("structured_summary", &self.structured_summary)
             .finish()
     }
@@ -137,6 +142,7 @@ impl WorkerConfig {
             subsession_allowed_internal: std::collections::BTreeSet::new(),
             subsession_routing: std::collections::BTreeMap::new(),
             effort: None,
+            profile: None,
             structured_summary: false,
         }
     }
@@ -163,6 +169,14 @@ impl WorkerConfig {
     #[must_use]
     pub fn with_effort(mut self, effort: Option<crate::tooldef::ReasoningEffort>) -> Self {
         self.effort = effort;
+        self
+    }
+
+    /// Sets the profile label recorded on this run's cost entries (spec
+    /// §9.22.5, §13.5.1).
+    #[must_use]
+    pub fn with_profile(mut self, profile: Option<String>) -> Self {
+        self.profile = profile;
         self
     }
 

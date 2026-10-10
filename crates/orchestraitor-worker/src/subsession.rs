@@ -70,6 +70,9 @@ pub struct SubsessionParent {
     /// inherit it with the sub-session role and a tool-suffixed session
     /// stem (CR finding #3: child spend must land in the ledger).
     pub attribution: Option<orchestraitor_provider_neuralwatt::cost::CostAttribution>,
+    /// The §13.5.1 profile label inherited from the parent run's config;
+    /// recorded on the child's cost rows so A/B grouping spans sub-sessions.
+    pub profile: Option<String>,
     /// The parent's cost sink; the child's per-call rows land in the same
     /// ledger (CR finding #3).
     pub cost_sink: Option<std::sync::Arc<dyn orchestraitor_provider_neuralwatt::CostSink>>,
@@ -90,6 +93,7 @@ impl std::fmt::Debug for SubsessionParent {
             .field("session_id", &self.session_id)
             .field("spawn_seq", &self.spawn_seq)
             .field("attribution", &self.attribution)
+            .field("profile", &self.profile)
             .field("cost_sink", &self.cost_sink.is_some())
             .finish()
     }
@@ -225,7 +229,10 @@ fn child_worker_config(
     )
     // Reasoning-effort tier (issue #535 §9.45): the child's model calls
     // send it — never a silent drop back to the routing default.
-    .with_effort(def.effort);
+    .with_effort(def.effort)
+    // The §13.5.1 profile label: the child's cost rows must group with the
+    // parent run's, so the label inherits (never reset mid-run).
+    .with_profile(parent.profile.clone());
     if let (Some(attribution), Some(sink)) = (&parent.attribution, &parent.cost_sink) {
         let child_attribution = orchestraitor_provider_neuralwatt::cost::CostAttribution {
             agent_domain_id: attribution.agent_domain_id.clone(),

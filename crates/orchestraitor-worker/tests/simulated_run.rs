@@ -906,6 +906,7 @@ fn subsession_parent(depth: u8) -> SubsessionParent {
         session_id: "test-session".to_string(),
         spawn_seq: 1,
         attribution: None,
+        profile: None,
         cost_sink: None,
     }
 }
