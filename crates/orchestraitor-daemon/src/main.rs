@@ -219,6 +219,13 @@ async fn watch_cycle() -> Result<ExitCode> {
         // land in the same second (a PR #555 review thread): a repeated id
         // would merge the exclusion scopes of two invocations.
         run_ordinal = run_ordinal.wrapping_add(1);
+        // The signal count observed when this invocation started: a signal
+        // DURING the invocation preempts the budget drain and keeps
+        // RunBudgetExhausted as the summary reason, but the operator asked
+        // for shutdown — compare against the baseline, not absolute zero
+        // (a PR #555 review thread: the cumulative count is not a
+        // pending-signal test).
+        let signal_baseline = *signal_rx.borrow();
         // Fresh per-invocation identity and clock origin (the Tokio clock
         // restarts at zero on each runner run, so the wall-clock origin
         // must be re-read too — a stale origin would skew daily-spend day
@@ -275,10 +282,9 @@ async fn watch_cycle() -> Result<ExitCode> {
         .into_diagnostic()?;
         match summary.stop_reason {
             orchestraitor_campaign::StopReason::RunBudgetExhausted
-                // A signal that preempted the budget drain keeps the budget
-                // stop as the summary reason — but the operator asked for
-                // shutdown, so restart only when no signal is pending.
-                if *signal_rx.borrow() == 0 =>
+                // Restart only when no signal arrived during this
+                // invocation (baseline comparison above).
+                if *signal_rx.borrow() == signal_baseline =>
             {
                 tracing::info!(
                     cycles = summary.cycles,
