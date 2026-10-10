@@ -173,7 +173,7 @@ async fn watch_cycle() -> Result<ExitCode> {
     let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
         .into_diagnostic()
         .wrap_err("loop run-state store open failed (reconcile handle)")?;
-    let poller = ReconcilePoller::new(
+    let mut poller = ReconcilePoller::new(
         orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
         // The poller's dedicated connection (see the comment above): opening a
         // second handle on the same WAL database is safe — the reconcile scan
@@ -184,6 +184,10 @@ async fn watch_cycle() -> Result<ExitCode> {
     );
     let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
 
+    // The reconcile poller must know the runner's invocation identity so
+    // live slots are excluded from the divergence scan (run_watch derives
+    // the same id below).
+    poller.set_invocation(&format!("watch-{start_unix_secs}"));
     let summary = run_watch(
         loop_config,
         poller,

@@ -214,6 +214,12 @@ pub struct ReconcilePoller<P: BoardPoller> {
     /// stays absent from the open set must not produce an envelope every
     /// cadence tick).
     diverged_seen: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The current watch invocation id, set by [`Self::set_invocation`]
+    /// before the runner starts. Rows from THIS invocation are the
+    /// runner's own live slots — the worker may legitimately move or close
+    /// the board item while the run finishes, which is normal supervision,
+    /// never a divergence. Earlier invocations' rows are recovery surface.
+    current_invocation: std::sync::Mutex<Option<String>>,
 }
 
 /// Where reconcile observations go. Production forwards into the daemon
@@ -246,6 +252,30 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // per cadence tick. Promotion: the previous tick's blocked
         // candidates feed this tick's reconcile, so a candidate that
         // reaches the ready queue records `unblocked-task-promoted`.
+        // The runner's live slots: rows of the CURRENT invocation. The worker
+        // may legitimately move or close the board item while its run is
+        // still finishing — that is normal supervision, never a divergence
+        // (a PR #555 review finding). Earlier invocations' rows are
+        // recovery surface and stay in scope.
+        let supervised_task_ids: Vec<String> = {
+            let invocation = self
+                .current_invocation
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            match invocation.as_deref() {
+                Some(current) => {
+                    let runs = self.runs.lock().map_err(|_| {
+                        CampaignError::Loop("run-state store lock poisoned".to_string())
+                    })?;
+                    runs.runs_for_invocation(current)?
+                        .into_iter()
+                        .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Running)
+                        .map(|row| row.task_id)
+                        .collect()
+                }
+                None => Vec::new(),
+            }
+        };
         let previous_blocked = {
             let previous = self
                 .previous_blocked
@@ -258,7 +288,13 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                 .runs
                 .lock()
                 .map_err(|_| CampaignError::Loop("run-state store lock poisoned".to_string()))?;
-            reconcile(&snapshot, &previous_blocked, &[], &runs, &[])
+            reconcile(
+                &snapshot,
+                &previous_blocked,
+                &supervised_task_ids,
+                &runs,
+                &[],
+            )
         }
         .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
         // Dedup the divergence events against `seen` (a task that stays
@@ -329,6 +365,20 @@ impl<P: BoardPoller> ReconcilePoller<P> {
             sink,
             previous_blocked: std::sync::Mutex::new(Vec::new()),
             diverged_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
+            current_invocation: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Sets the current watch invocation id (called by [`run_watch`] once
+    /// the runner's invocation identity exists). MUST be called before the
+    /// first poll; unset, no row is excluded and a live slot could be
+    /// misreported as divergent.
+    pub fn set_invocation(&mut self, invocation_id: &str) {
+        match self.current_invocation.get_mut() {
+            Ok(slot) => *slot = Some(invocation_id.to_string()),
+            // A poisoned lock means a previous reconcile panicked mid-scan:
+            // fail loud, never continue silently (same contract as poll()).
+            Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
         }
     }
 

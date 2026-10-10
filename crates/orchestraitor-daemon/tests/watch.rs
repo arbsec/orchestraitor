@@ -346,7 +346,69 @@ async fn poller_promotes_unblocked_tasks_and_deduplicates_divergences()
     assert_eq!(
         divergences.len(),
         1,
-        "the vanished running task records board-diverged ONCE, not once per tick          (forbidden effect: a duplicate envelope every cadence tick); got {divergences:?}"
+        "the vanished running task records board-diverged ONCE, not once per tick \
+         (forbidden effect: a duplicate envelope every cadence tick); got {divergences:?}"
+    );
+    Ok(())
+}
+
+/// A running row of the CURRENT invocation whose task leaves the board's
+/// open set is NORMAL supervision (the worker moved/closed the item while
+/// finishing), never a divergence — the runner's live slots are excluded
+/// from the divergence scan. Forbidden effect asserted absent: a
+/// `board-diverged` record for ordinary in-flight work.
+#[tokio::test(flavor = "current_thread")]
+async fn live_slots_of_the_current_invocation_are_not_divergences()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_campaign::{BoardSnapshot, LoopRunStore, ReconcileEvent, StartRun};
+    use orchestraitor_daemon::ReconcilePoller;
+
+    let dir = tempfile::tempdir()?;
+    let runs = LoopRunStore::open(&dir.path().join("loop.db"))?;
+    runs.start(&StartRun {
+        invocation_id: "watch-current".to_string(),
+        decision_id: 1,
+        task_id: "board-arbsec_orchestraitor-42".to_string(),
+        repo: "arbsec/orchestraitor".to_string(),
+        number: 42,
+        started_at_secs: START_UNIX,
+    })?;
+
+    // Every tick: task 42 (currently supervised) absent from the open set.
+    let tick = BoardSnapshot {
+        open: Vec::new(),
+        ready: Vec::new(),
+        blocked_candidates: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let sink = Arc::new(CaptureSink::default());
+    let mut poller = ReconcilePoller::new(
+        ScriptedPoller {
+            snapshots: std::sync::Mutex::new(vec![tick.clone(), tick]),
+        },
+        Arc::new(std::sync::Mutex::new(runs)),
+        Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::SqliteAuditStore::open(dir.path().join("watch-events.db"))?,
+        )),
+        Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
+    );
+    poller.set_invocation("watch-current");
+
+    poller.poll().await?;
+    poller.poll().await?;
+
+    let recorded = sink.outcomes.lock().expect("sink lock");
+    let divergences: Vec<_> = recorded
+        .iter()
+        .flat_map(|outcome| outcome.events.iter())
+        .filter_map(|event| match event {
+            ReconcileEvent::BoardDiverged { task_id, .. } => Some(task_id.clone()),
+            ReconcileEvent::UnblockedTaskPromoted { .. } => None,
+        })
+        .collect();
+    assert!(
+        divergences.is_empty(),
+        "a live slot is normal supervision, never a divergence; got {divergences:?}"
     );
     Ok(())
 }
