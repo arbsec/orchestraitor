@@ -304,7 +304,20 @@ async fn watch_cycle() -> Result<ExitCode> {
         "orcd watch: stopped ({:?})",
         summary.stop_reason
     );
-    Ok(ExitCode::SUCCESS)
+    // A non-shutdown terminal stop (spend soft cap, guardrails exhausted)
+    // must be VISIBLE to the supervisor: exit non-zero so `Restart=on-
+    // failure` restarts the daemon (e.g. the next UTC day after a spend
+    // cap) instead of silently staying down (a PR #555 review finding).
+    match summary.stop_reason {
+        orchestraitor_campaign::StopReason::Shutdown => Ok(ExitCode::SUCCESS),
+        _ => Err(miette::miette!(
+            "orcd watch stopped: {:?} ({} cycles, {} spawns, {} completed)",
+            summary.stop_reason,
+            summary.cycles,
+            summary.spawns,
+            summary.completed
+        )),
+    }
 }
 
 fn socket_path() -> PathBuf {

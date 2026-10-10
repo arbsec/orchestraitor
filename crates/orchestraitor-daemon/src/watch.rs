@@ -312,12 +312,12 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // then update the reconcile state AFTER a successful pass: the
         // state must describe what the LAST RECORDED pass saw, so a failed
         // (unrecorded) pass re-observes on the next tick.
-        let (events, newly_seen): (Vec<_>, Vec<_>) = {
+        let events: Vec<_> = {
             let seen = self
                 .diverged_seen
                 .lock()
                 .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
-            let events: Vec<_> = outcome
+            outcome
                 .events
                 .iter()
                 .filter(|event| match event {
@@ -325,43 +325,41 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                     ReconcileEvent::UnblockedTaskPromoted { .. } => true,
                 })
                 .cloned()
-                .collect();
-            let newly: Vec<_> = events
-                .iter()
-                .filter_map(|event| match event {
-                    ReconcileEvent::BoardDiverged { task_id, .. } => Some(task_id.clone()),
-                    ReconcileEvent::UnblockedTaskPromoted { .. } => None,
-                })
-                .collect();
-            (events, newly)
+                .collect()
         };
         if !events.is_empty() {
+            // Per-event atomicity (a PR #555 review finding): each event is
+            // appended and its dedup state updated before the next — a
+            // mid-batch failure leaves the store and the dedup state
+            // CONSISTENT (both describe exactly the recorded prefix), so a
+            // retry records only the unrecorded suffix and never
+            // duplicates. `previous_blocked` updates after the batch: it
+            // describes the snapshot, not an event.
+            let mut recorded = Vec::new();
+            for event in &events {
+                let single = ReconcileOutcome {
+                    events: vec![event.clone()],
+                    ready_task_ids: outcome.ready_task_ids.clone(),
+                };
+                self.record_events(&single)?;
+                if let ReconcileEvent::BoardDiverged { task_id, .. } = event {
+                    let mut seen = self.diverged_seen.lock().map_err(|_| {
+                        CampaignError::Loop("reconcile state lock poisoned".to_string())
+                    })?;
+                    seen.insert(task_id.clone());
+                }
+                recorded.push(event.clone());
+            }
             let outcome = ReconcileOutcome {
-                events,
+                events: recorded,
                 ready_task_ids: outcome.ready_task_ids,
             };
-            self.record_events(&outcome)?;
             self.sink.record(&outcome);
-        }
-        // The reconcile state updates ONLY after a successfully recorded
-        // pass: if record_events fails, the tick's outcome is lost and the
-        // next tick must re-observe it — otherwise a retry would drop the
-        // divergence and could double-record promotions (a PR #555 review
-        // finding). The state update failing after a successful record is
-        // fail-loud: the poll errors and the loop backs off (the events
-        // are durable; the state is derived and a duplicate-suppressed
-        // retry re-reads the durable rows).
-        {
             let mut previous = self
                 .previous_blocked
                 .lock()
                 .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
             previous.clone_from(&snapshot.blocked_candidates);
-            let mut seen = self
-                .diverged_seen
-                .lock()
-                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
-            seen.extend(newly_seen);
         }
         Ok(snapshot)
     }
