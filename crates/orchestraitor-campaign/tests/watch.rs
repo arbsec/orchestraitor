@@ -144,7 +144,7 @@ fn reconcile_records_board_diverged_for_vanished_running_task() {
         blocked_candidates: Vec::new(),
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[], &[], &runs, &[]).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[], &[], &runs).expect("reconcile");
     assert_eq!(outcome.events.len(), 1, "one divergence recorded");
     match &outcome.events[0] {
         orchestraitor_campaign::ReconcileEvent::BoardDiverged {
@@ -185,7 +185,7 @@ fn reconcile_ignores_running_rows_still_open_on_the_board() {
         blocked_candidates: Vec::new(),
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[], &[], &runs, &[]).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[], &[], &runs).expect("reconcile");
     assert!(
         outcome.events.is_empty(),
         "an open running task is not a divergence, got {:?}",
@@ -205,7 +205,7 @@ fn reconcile_records_unblocked_task_promotion() {
         warnings: Vec::new(),
     };
     // Previous pass: task 42 was a blocked candidate.
-    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs, &[]).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs).expect("reconcile");
     assert_eq!(outcome.events.len(), 1, "one promotion recorded");
     match &outcome.events[0] {
         orchestraitor_campaign::ReconcileEvent::UnblockedTaskPromoted {
@@ -237,7 +237,7 @@ fn reconcile_ignores_still_blocked_candidates() {
         blocked_candidates: vec![ready_item(42)],
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs, &[]).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs).expect("reconcile");
     assert!(
         outcome.events.is_empty(),
         "still-blocked is not a promotion"

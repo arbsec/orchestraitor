@@ -6,7 +6,8 @@ is a foreground runner: poll the board → run one campaign pass (via
 [orc campaign](orc-campaign.md)'s selection, one decision record) → spawn the worker →
 supervise the in-flight runs → pace the next pass. It is deliberately NOT the always-on
 watch daemon — no adaptive tick, no budget classes beyond the minimal guards, no
-`orc backlog` controls, no restart recovery. Those deepen in E8.
+`orc backlog` controls, no restart recovery (the [`orcd watch`](orcd-watch.md)
+daemon provides restart recovery today; the remaining deepenings land in E8).
 
 ```sh
 orc loop [--json] [--max-cycles N]

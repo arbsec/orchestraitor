@@ -86,7 +86,6 @@ pub fn reconcile(
     previous_blocked: &[ReadyItem],
     supervised_task_ids: &[String],
     runs: &LoopRunStore,
-    prior_terminal_task_ids: &[String],
 ) -> Result<ReconcileOutcome, CampaignError> {
     let mut events = Vec::new();
 
@@ -100,8 +99,7 @@ pub fn reconcile(
         .map(|facts| task_id_for(&facts.repo, facts.number))
         .collect();
     for row in running_rows_not_supervised(supervised_task_ids, runs)? {
-        if !open_task_ids.contains(&row.task_id) && !prior_terminal_task_ids.contains(&row.task_id)
-        {
+        if !open_task_ids.contains(&row.task_id) {
             events.push(ReconcileEvent::BoardDiverged {
                 task_id: row.task_id.clone(),
                 local_status: row.status,

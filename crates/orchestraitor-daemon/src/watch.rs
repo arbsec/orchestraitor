@@ -304,13 +304,7 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                 .runs
                 .lock()
                 .map_err(|_| CampaignError::Loop("run-state store lock poisoned".to_string()))?;
-            reconcile(
-                &snapshot,
-                &previous_blocked,
-                &supervised_task_ids,
-                &runs,
-                &[],
-            )
+            reconcile(&snapshot, &previous_blocked, &supervised_task_ids, &runs)
         }
         .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
         // Dedup the divergence events against `seen` (a task that stays

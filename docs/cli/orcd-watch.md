@@ -82,11 +82,13 @@ rows all behave exactly as documented for
   interval before the retry — the rate-limit courtesy §9.36 asks of the
   poller. Supervision continues on every tick either way, so in-flight
   workers are unaffected.
-- **Reconcile events.** Every poll tick records its reconcile outcome
-  before the pass plans: `board-diverged` when a locally-`running` task is
-  no longer open on the board (board wins), `unblocked-task-promoted` when
-  a previously blocked candidate appears on the ready queue. Events carry
-  identifiers only — never board content.
+- **Reconcile events.** Every tick's reconcile records its NEW observations
+  once per invocation (duplicates within an invocation are suppressed):
+  `board-diverged` when a locally-`running` task is no longer open on the
+  board (board wins), `unblocked-task-promoted` when a previously blocked
+  candidate appears on the ready queue. A tick with no new observations
+  records nothing; a record failure surfaces as a poll failure and the
+  pass does not plan. Events carry identifiers only — never board content.
 
 ## State
 
