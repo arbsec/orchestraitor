@@ -564,10 +564,14 @@ pub struct ContextReceipt {
 /// instruction authority on re-insertion (invariant 3, §9.15.2).
 pub struct MemoryElision {
     pub node_id: MemoryNodeId,
-    pub digest_prefix: String,
+    pub digest: Digest,          // full payload digest (§9.15.1)
+    pub digest_prefix: String,   // short form shown in the stub handle
     pub kind: MemoryNodeKind,
     pub origin: ProvenanceOrigin,
+    pub age: ContextAge,         // §9.15.1 envelope field
+    pub sensitivity: DataSensitivity, // §9.15.1 envelope field
     pub trust_class: TrustClass,
+    pub source_ref: SourceRef,   // §9.15.1 envelope field
     pub tokens_before: u64,
     pub tokens_after: u64,
     pub handle: String, // mem://<node_id>#<digest-prefix>
