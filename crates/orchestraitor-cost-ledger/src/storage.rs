@@ -333,9 +333,10 @@ impl CostLedger {
                 candidate, selected, raw_tool, compacted,
             ) {
                 // A receipt may be recorded before its session has any
-                // cost entry; it carries no profile label, so it is
-                // skipped rather than failing the whole report.
-                let label = self
+                // cost entry; that session carries no profile label, so
+                // the receipt is SKIPPED entirely (not folded into the
+                // unprofiled group — it would skew that group's median).
+                if let Some(label) = self
                     .conn
                     .query_row(
                         "SELECT COALESCE(profile, '') FROM cost_entries WHERE session = ?1 LIMIT 1",
@@ -343,8 +344,9 @@ impl CostLedger {
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?
-                    .unwrap_or_default();
-                session_savings.push((label, session, ratio));
+                {
+                    session_savings.push((label, session, ratio));
+                }
             }
         }
         for rollup in rollups {
