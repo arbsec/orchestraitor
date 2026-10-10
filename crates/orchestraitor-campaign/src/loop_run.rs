@@ -212,12 +212,11 @@ impl LoopConfig {
     /// Sets the §9.36 poll-tick cadence on an existing configuration,
     /// PRESERVING the configured `[loop]` guardrails (a PR #555 review
     /// finding: `with_cadence` defaulted them, so the watch daemon ignored
-    /// every operator `loop.*` key the foreground loop honors). All other
-    /// validation matches [`LoopConfig::new`].
+    /// every operator `loop.*` key the foreground loop honors).
     ///
-    /// # Errors
-    ///
-    /// Returns [`CampaignError::Loop`] naming the rejected guard.
+    /// Validation is DEFERRED to [`LoopRunner::new`] (which re-validates at
+    /// construction), so this builder itself cannot fail; a zero cadence is
+    /// rejected fail-closed there.
     #[must_use]
     pub fn with_min_poll_interval(mut self, interval: Option<Duration>) -> Self {
         self.min_poll_interval = interval;

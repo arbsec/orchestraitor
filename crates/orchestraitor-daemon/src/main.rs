@@ -138,7 +138,8 @@ async fn watch_cycle() -> Result<ExitCode> {
         }
         Err(error) => {
             tracing::warn!(
-                "orcd watch: config resolution failed ({error}); anti-stuck guardrails fall                  back to defaults"
+                "orcd watch: config resolution failed ({error}); \
+                 anti-stuck guardrails fall back to defaults"
             );
             orchestraitor_campaign::GuardrailsSettings::default()
         }
@@ -359,29 +360,30 @@ model = "glm-5.3-flash"
         )
         .map_err(|error| miette::miette!("configuration parse failed: {error}"))?;
 
-    let layers: [(ConfigLayer, &str, Vec<PathBuf>); 4] = [
+    // Primary files plus their `*.toml` shard directories (user.d/, org.d/,
+    // orchestraitor.d/, dir.d/) — the same layer files the CLI reads, shard
+    // support included. All files in one layer group share the layer, so a
+    // duplicate key across shards fails through the resolver's
+    // same-layer-conflict check instead of silently choosing one file.
+    let layers: Vec<(ConfigLayer, Vec<PathBuf>)> = vec![
         (
             ConfigLayer::GlobalUser,
-            "user",
-            vec![config_dir.join("user.toml")],
+            primary_and_shards(config_dir, "user.toml", "user.d"),
         ),
         (
             ConfigLayer::OrganizationTeam,
-            "org",
-            vec![config_dir.join("org.toml")],
+            primary_and_shards(config_dir, "org.toml", "org.d"),
         ),
         (
             ConfigLayer::Project,
-            "project",
-            vec![project_dir.join("orchestraitor.toml")],
+            primary_and_shards(project_dir, "orchestraitor.toml", "orchestraitor.d"),
         ),
         (
             ConfigLayer::DirectoryDomain,
-            "dir",
-            vec![config_dir.join("dir.toml")],
+            primary_and_shards(config_dir, "dir.toml", "dir.d"),
         ),
     ];
-    for (layer, _name, files) in layers {
+    for (layer, files) in layers {
         for file in files {
             if !file.exists() {
                 continue;
@@ -399,4 +401,22 @@ model = "glm-5.3-flash"
         }
     }
     Ok(resolver)
+}
+
+/// A layer's primary file followed by its shard directory's `*.toml` files
+/// (sorted for deterministic order — the CLI sorts the same way).
+fn primary_and_shards(base: &std::path::Path, primary: &str, shard_dir_name: &str) -> Vec<PathBuf> {
+    let mut files = vec![base.join(primary)];
+    let shard_dir = base.join(shard_dir_name);
+    let Ok(entries) = std::fs::read_dir(&shard_dir) else {
+        return files;
+    };
+    let mut shards: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(std::ffi::OsStr::to_str) == Some("toml"))
+        .collect();
+    shards.sort();
+    files.extend(shards);
+    files
 }
