@@ -64,7 +64,10 @@ fi
 # Gate 2: ALL automatic checks pass (no fail, no pending; known-disabled
 # skips excluded inside pr-checks itself).
 CHECKS_JSON="$(mktemp)"
-if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
+# `bash`-invoke (not direct exec): the callee's executable bit is not
+# guaranteed in every checkout — the App-signed landing path
+# (createCommitOnBranch) cannot represent 100755 (issue #556).
+if ! bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
   REASONS+=("pr-checks could not classify checks")
 fi
 if [ -s "$CHECKS_JSON" ]; then
