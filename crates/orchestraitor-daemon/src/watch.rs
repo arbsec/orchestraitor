@@ -222,6 +222,21 @@ pub struct ReconcilePoller<P: BoardPoller> {
     current_invocation: std::sync::Mutex<Option<String>>,
 }
 
+/// The reconcile-poller seam `run_watch` needs beyond reading snapshots:
+/// handing the poller the runner's invocation identity so live slots are
+/// excluded from the divergence scan. Blanket-implemented for
+/// [`ReconcilePoller`]; tests with plain pollers implement it as a no-op.
+pub trait SetWatchInvocation {
+    /// Sets the current watch invocation id.
+    fn set_invocation(&mut self, invocation_id: &str);
+}
+
+impl<P: BoardPoller> SetWatchInvocation for ReconcilePoller<P> {
+    fn set_invocation(&mut self, invocation_id: &str) {
+        ReconcilePoller::set_invocation(self, invocation_id);
+    }
+}
+
 /// Where reconcile observations go. Production forwards into the daemon
 /// runner's journal; tests capture in memory.
 pub trait ReconcileSink: Send + Sync {
@@ -325,6 +340,22 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                 .collect();
             (events, newly)
         };
+        if !events.is_empty() {
+            let outcome = ReconcileOutcome {
+                events,
+                ready_task_ids: outcome.ready_task_ids,
+            };
+            self.record_events(&outcome)?;
+            self.sink.record(&outcome);
+        }
+        // The reconcile state updates ONLY after a successfully recorded
+        // pass: if record_events fails, the tick's outcome is lost and the
+        // next tick must re-observe it — otherwise a retry would drop the
+        // divergence and could double-record promotions (a PR #555 review
+        // finding). The state update failing after a successful record is
+        // fail-loud: the poll errors and the loop backs off (the events
+        // are durable; the state is derived and a duplicate-suppressed
+        // retry re-reads the durable rows).
         {
             let mut previous = self
                 .previous_blocked
@@ -336,14 +367,6 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                 .lock()
                 .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
             seen.extend(newly_seen);
-        }
-        if !events.is_empty() {
-            let outcome = ReconcileOutcome {
-                events,
-                ready_task_ids: outcome.ready_task_ids,
-            };
-            self.record_events(&outcome)?;
-            self.sink.record(&outcome);
         }
         Ok(snapshot)
     }
@@ -682,15 +705,16 @@ impl LoopWorkerStarter for DirectWatchStarter {
     clippy::too_many_arguments,
     reason = "each dependency is a distinct seam (config, two hermeticity traits, two durable stores, routing identity, shutdown channel, virtual clock origin); grouping them would hide which argument serves which invariant — the loop runner's own constructor documents the same tradeoff"
 )]
-pub async fn run_watch<P: BoardPoller, S: LoopWorkerStarter>(
+pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter>(
     loop_config: LoopConfig,
-    poller: P,
+    mut poller: P,
     starter: S,
     decisions: &CampaignDecisionStore,
     runs: &orchestraitor_campaign::LoopRunStore,
     routing: RoleRoutingDecision,
     shutdown: tokio::sync::watch::Receiver<u64>,
     start_unix_secs: u64,
+    invocation_id: &str,
 ) -> Result<LoopSummary, DaemonError> {
     // §9.24.2 restart recovery BEFORE the first tick: running → orphaned.
     let recovered = runs
@@ -704,7 +728,11 @@ pub async fn run_watch<P: BoardPoller, S: LoopWorkerStarter>(
         );
     }
 
-    let invocation_id = format!("watch-{start_unix_secs}");
+    // Single source for the invocation id: the caller derives it ONCE and
+    // this function hands the same string to the reconcile poller and the
+    // runner, so the live-slot exclusion and the runner's identity can
+    // never drift.
+    poller.set_invocation(invocation_id);
     let runner = LoopRunner::new(
         loop_config,
         poller,
@@ -712,7 +740,7 @@ pub async fn run_watch<P: BoardPoller, S: LoopWorkerStarter>(
         decisions,
         runs,
         routing,
-        invocation_id,
+        invocation_id.to_string(),
         start_unix_secs,
     )
     .map_err(|error| DaemonError::WatchRun(error.to_string()))?;

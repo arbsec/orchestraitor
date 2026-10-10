@@ -128,11 +128,6 @@ async fn watch_cycle() -> Result<ExitCode> {
     .into_diagnostic()
     .wrap_err("watch loop configuration rejected")?;
 
-    let start_unix_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     // SIGTERM/SIGINT fan-in: one channel increment per signal. The loop
     // runner's graceful drain bounds the shutdown by the 5s daemon budget.
@@ -173,7 +168,7 @@ async fn watch_cycle() -> Result<ExitCode> {
     let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
         .into_diagnostic()
         .wrap_err("loop run-state store open failed (reconcile handle)")?;
-    let mut poller = ReconcilePoller::new(
+    let poller = ReconcilePoller::new(
         orchestraitor_daemon::BoardSnapshotPoller::new(client, board_config),
         // The poller's dedicated connection (see the comment above): opening a
         // second handle on the same WAL database is safe — the reconcile scan
@@ -184,10 +179,19 @@ async fn watch_cycle() -> Result<ExitCode> {
     );
     let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
 
-    // The reconcile poller must know the runner's invocation identity so
-    // live slots are excluded from the divergence scan (run_watch derives
-    // the same id below).
-    poller.set_invocation(&format!("watch-{start_unix_secs}"));
+    // Fail closed when the system clock is before the Unix epoch: a
+    // `unwrap_or_default` 0 would make the invocation id repeat across
+    // restarts, misclassifying earlier rows as current-invocation slots
+    // (excluded from selection and divergence checks).
+    let start_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .into_diagnostic()
+        .wrap_err("system clock is before the Unix epoch")?;
+    // The invocation id is derived ONCE here and handed to both the
+    // reconcile poller and run_watch, so the live-slot exclusion and the
+    // runner's identity can never drift.
+    let invocation_id = format!("watch-{start_unix_secs}");
     let summary = run_watch(
         loop_config,
         poller,
@@ -197,6 +201,7 @@ async fn watch_cycle() -> Result<ExitCode> {
         routing,
         signal_rx,
         start_unix_secs,
+        &invocation_id,
     )
     .await
     .into_diagnostic()?;
