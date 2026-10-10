@@ -281,7 +281,12 @@ async fn watch_cycle() -> Result<ExitCode> {
         .await
         .into_diagnostic()?;
         match summary.stop_reason {
-            orchestraitor_campaign::StopReason::RunBudgetExhausted => {
+            orchestraitor_campaign::StopReason::RunBudgetExhausted
+                // A signal that preempted the budget drain keeps the budget
+                // stop as the summary reason — but the operator asked for
+                // shutdown, so restart only when no signal is pending.
+                if *signal_rx.borrow() == 0 =>
+            {
                 tracing::info!(
                     cycles = summary.cycles,
                     spawns = summary.spawns,

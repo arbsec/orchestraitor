@@ -437,6 +437,9 @@ impl<P: BoardPoller> ReconcilePoller<P> {
             let head = store
                 .head()
                 .map_err(|error| CampaignError::Loop(format!("event store head: {error}")))?;
+            // Category note: `ToolRequest` is the loop's orchestration-tool
+            // class today; a dedicated reconcile category is the tracked
+            // follow-up (#557) — switching it is a §9.17 schema change.
             let envelope = EventEnvelope::try_new(EventEnvelopeInput {
                 schema_version: CURRENT_SCHEMA_VERSION,
                 monotonic_seq: u64::try_from(head.seq_base)
