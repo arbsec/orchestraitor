@@ -385,19 +385,20 @@ model = "glm-5.3-flash"
     let layers: Vec<(ConfigLayer, Vec<PathBuf>)> = vec![
         (
             ConfigLayer::GlobalUser,
-            primary_and_shards(config_dir, "user.toml", "user.d"),
+            primary_and_shards(config_dir, "user.toml", "user.d").into_diagnostic()?,
         ),
         (
             ConfigLayer::OrganizationTeam,
-            primary_and_shards(config_dir, "org.toml", "org.d"),
+            primary_and_shards(config_dir, "org.toml", "org.d").into_diagnostic()?,
         ),
         (
             ConfigLayer::Project,
-            primary_and_shards(project_dir, "orchestraitor.toml", "orchestraitor.d"),
+            primary_and_shards(project_dir, "orchestraitor.toml", "orchestraitor.d")
+                .into_diagnostic()?,
         ),
         (
             ConfigLayer::DirectoryDomain,
-            primary_and_shards(config_dir, "dir.toml", "dir.d"),
+            primary_and_shards(config_dir, "dir.toml", "dir.d").into_diagnostic()?,
         ),
     ];
     for (layer, files) in layers {
@@ -421,19 +422,29 @@ model = "glm-5.3-flash"
 }
 
 /// A layer's primary file followed by its shard directory's `*.toml` files
-/// (sorted for deterministic order — the CLI sorts the same way).
-fn primary_and_shards(base: &std::path::Path, primary: &str, shard_dir_name: &str) -> Vec<PathBuf> {
+/// (sorted for deterministic order — the CLI sorts the same way). Only
+/// `NotFound` means "no shard directory"; any other directory-read or entry
+/// error propagates so a shard is never silently omitted (a PR #555 review
+/// thread).
+fn primary_and_shards(
+    base: &std::path::Path,
+    primary: &str,
+    shard_dir_name: &str,
+) -> std::io::Result<Vec<PathBuf>> {
     let mut files = vec![base.join(primary)];
     let shard_dir = base.join(shard_dir_name);
-    let Ok(entries) = std::fs::read_dir(&shard_dir) else {
-        return files;
+    let entries = match std::fs::read_dir(&shard_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error),
     };
     let mut shards: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
         .filter(|path| path.extension().and_then(std::ffi::OsStr::to_str) == Some("toml"))
         .collect();
     shards.sort();
     files.extend(shards);
-    files
+    Ok(files)
 }
