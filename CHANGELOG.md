@@ -44,19 +44,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   Foreground `orc loop` remains a documented operating mode; the pinned
   guard set is unchanged. Documented in
   [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
-- **Token-efficiency statistics** (`orc stats efficiency`): reporting
-  over the cost ledger showing, per session or per configuration
-  profile, provider-reported input/output/cache tokens alongside
-  context-compiler receipt deltas (candidate vs selected tokens, tool-output
-  compaction) and the derived savings ratio. Sessions without receipts
-  report no savings value — never a fabricated number (spec §13.5.1).
-  `--group-by-profile` compares runs recorded under different profile
-  labels, the A/B mechanism for verifying that the token-saving features
-  actually save; `--json` emits the same rollups as stable JSON. Cost
-  entries now carry the run's profile label (`roles.<role>.routing.profile`);
-  existing ledgers migrate in place the next time a writer (`orc loop`)
-  opens them; `orc stats` never migrates and reports a migration-required
-  error on a legacy ledger.
 - **Optional `Target` gate in the ready-queue predicate**: the board config
   (`.agents/project/github-project.local.toml`) accepts a new optional
   `[mvp].require_target` key. When set to `false`, `orc loop`, `orc campaign`, and
