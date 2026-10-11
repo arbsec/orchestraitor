@@ -10,6 +10,7 @@
 mod error;
 mod rpc;
 mod server;
+mod watch;
 
 /// Startup capability probing and Arbitraitor version negotiation (spec §6.7, §9.6, §16.7).
 pub mod capability;
@@ -39,4 +40,9 @@ pub use store::{
 pub use supervision::{
     CommandSpec, GatewaySpec, ProcessStatus, SupervisionError, SupervisionEvent, Supervisor,
     WorkerSpec,
+};
+pub use watch::{
+    BoardSnapshotPoller, DEFAULT_POLL_INTERVAL_SECS, DirectWatchStarter, InstanceLock,
+    JournallessSink, POLL_INTERVAL_CONFIG_KEY, ReconcilePoller, ReconcileSink, SetWatchInvocation,
+    WatchConfig, acquire_instance_lock, run_watch,
 };

@@ -42,4 +42,34 @@ pub enum DaemonError {
     /// The daemon runtime could not start.
     #[error("failed to build daemon runtime: {0}")]
     BuildRuntime(io::Error),
+
+    /// Another `orc loop` or `orcd watch` instance already holds the
+    /// loop's instance lock (§9.36 single-flight, issue #503).
+    #[error("another `orc loop` or `orcd watch` instance already holds the lock at {path}")]
+    WatchAlreadyRunning {
+        /// Lock file path that is held.
+        path: PathBuf,
+    },
+
+    /// The loop's instance lock could not be created or locked for an
+    /// OS-level reason (permission, I/O) — not another instance.
+    #[error("instance lock at {path} could not be acquired: {reason}")]
+    WatchLock {
+        /// Lock file path that failed.
+        path: PathBuf,
+        /// Log-safe failure reason.
+        reason: String,
+    },
+
+    /// The watch configuration (`watch.*` layered config) is invalid.
+    #[error("watch configuration: {0}")]
+    WatchConfig(String),
+
+    /// The watch cycle failed on durable state or the loop runner.
+    #[error("watch run failed: {0}")]
+    WatchRun(String),
+
+    /// The event store rejected a reconcile record.
+    #[error("event store rejected a reconcile record: {0}")]
+    EventStore(String),
 }

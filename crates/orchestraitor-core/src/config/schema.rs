@@ -52,6 +52,20 @@ pub struct OrchestraitorConfig {
     /// §9.27.1, §9.36 detection). Default-on; an explicit `0` disables a
     /// guard deliberately.
     pub r#loop: Option<LoopGuardrailsConfig>,
+    /// Watch-daemon settings (spec `10-orchestrator.md` §9.36). Absent
+    /// block keeps every documented default.
+    pub watch: Option<WatchConfigBlock>,
+}
+
+/// Watch-daemon configuration block (spec `10-orchestrator.md` §9.36):
+/// the poll-tick cadence and its knobs, operator-configurable through the
+/// §9.22 layered configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchConfigBlock {
+    /// Seconds between board polls (the §9.36 poll tick). Each tick is a
+    /// full reconcile/supervise pass. Zero is rejected fail-closed at
+    /// resolve time (a zero cadence is a runaway poll loop).
+    pub poll_interval_secs: Option<u64>,
 }
 
 /// Anti-stuck guardrail thresholds for `orc loop`

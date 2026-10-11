@@ -1,0 +1,839 @@
+//! `orcd watch` — the daemon's running mode (spec `10-orchestrator.md`
+//! §9.36 thin slice, issue #503): the port of `orc loop`'s poll/supervise
+//! cycle into the always-running daemon.
+//!
+//! One instance: the daemon takes over single-flight ownership of the
+//! loop's instance lock (`<config-dir>/loop.lock` — the same advisory lock
+//! `orc loop` holds), so a daemon and a foreground loop are mutually
+//! exclusive on one config dir. Foreground `orc loop` remains a documented
+//! operating mode; the daemon is the ownership successor of the same lock,
+//! not a second mechanism.
+//!
+//! Restart recovery (§9.24.2): before the first tick, every `running` row
+//! in `loop.db` transitions to `orphaned` — never directly `failed` — via
+//! [`LoopRunStore::recover_running_rows`]; the tick then resumes from
+//! durable state. A `paused` row stays paused (§9.24.2); the recovery
+//! helper only ever transitions `running` rows.
+//!
+//! Reconcile (§9.36): every poll tick is a reconcile pass with board-wins
+//! semantics (§9.43) — the [`ReconcilePoller`] wraps the plain board
+//! poller and records `board-diverged` events plus newly unblocked-task
+//! promotions (§9.40) into the daemon event store on every snapshot.
+//!
+//! Lease/heartbeat detection (§9.36): the loop's beat-staleness
+//! machinery IS the lease check — a campaign run whose worker produces no
+//! decision progress (no beat) inside the stall window is killed and
+//! recorded `stalled` (it counts against the task retry budget, as in
+//! `orc loop`); a row the supervisor never reached a terminal status for
+//! is `orphaned` by restart recovery. A lease-expired row is never
+//! `failed` directly.
+//!
+//! This crate implements no security primitive: killing, capping, and
+//! pacing are orchestration limits (spec §9.27.3); the sandbox boundary
+//! remains Arbitraitor's.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use orchestraitor_agent_catalog::RoleRoutingDecision;
+use orchestraitor_board::{BoardClient, BoardProjectConfig};
+use orchestraitor_campaign::{
+    BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunner,
+    LoopSummary, LoopWorkerStarter, ReconcileEvent, ReconcileOutcome, SelectedTask, WorkerProcess,
+    reconcile,
+};
+use orchestraitor_worker::bootstrap::build_bootstrap_transport;
+use orchestraitor_worker::{
+    MediatedBashMediator, ModelId, PendingDeliverySink, ProviderId, WorkerBudgets, WorkerConfig,
+    run_worker,
+};
+
+use crate::error::DaemonError;
+
+/// The watch daemon's default poll cadence (§9.36 fixed default;
+/// operator-configurable via the §9.22 layered configuration key
+/// `watch.poll_interval_secs`).
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
+
+/// The §9.22 layered configuration key carrying the poll cadence in
+/// seconds.
+pub const POLL_INTERVAL_CONFIG_KEY: &str = "watch.poll_interval_secs";
+
+/// Operator-configurable watch settings (spec §9.22 via §9.36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchConfig {
+    /// Seconds between poll ticks. Each tick is a full reconcile +
+    /// supervise pass; the loop runner's supervision ticks and backoff
+    /// stay in force underneath the cadence.
+    pub poll_interval_secs: u64,
+}
+
+impl WatchConfig {
+    /// Builds and validates the watch configuration. Fail-closed: a zero
+    /// interval is a runaway poll loop and is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] naming the rejected value.
+    pub fn new(poll_interval_secs: u64) -> Result<Self, DaemonError> {
+        if poll_interval_secs == 0 {
+            return Err(DaemonError::WatchConfig(format!(
+                "{POLL_INTERVAL_CONFIG_KEY} must be at least 1 second (got 0)"
+            )));
+        }
+        Ok(Self { poll_interval_secs })
+    }
+
+    /// The documented fixed default cadence (§9.36).
+    #[must_use]
+    pub const fn default_cadence() -> Self {
+        Self {
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+        }
+    }
+
+    /// Resolves the operator-configured cadence through the §9.22 layered
+    /// resolver. An absent key falls back to the fixed default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] when the configured value is
+    /// invalid.
+    pub fn from_layers(
+        resolver: &orchestraitor_core::config::ConfigResolver,
+    ) -> Result<Self, DaemonError> {
+        let configured = resolver
+            .resolve_value(POLL_INTERVAL_CONFIG_KEY, |config| {
+                config
+                    .watch
+                    .as_ref()
+                    .and_then(|watch| watch.poll_interval_secs)
+            })
+            .map_err(|error| {
+                DaemonError::WatchConfig(format!("{POLL_INTERVAL_CONFIG_KEY}: {error}"))
+            })?;
+        match configured {
+            Some(resolved_value) => Self::new(resolved_value.value),
+            None => Ok(Self::default_cadence()),
+        }
+    }
+}
+
+/// Holds the loop's advisory instance lock for the daemon's lifetime.
+#[derive(Debug)]
+pub struct InstanceLock {
+    _file: std::fs::File,
+}
+
+/// Acquires the loop's advisory instance lock or rejects with the typed
+/// single-flight error.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::WatchAlreadyRunning`] when another `orc loop`
+/// or `orcd watch` instance holds the lock, and
+/// [`DaemonError::WatchLock`] when the lock file cannot be created or
+/// locked for an OS-level reason (permission, I/O). A fresh config dir is
+/// created (the lock file's parent must exist before the open).
+pub fn acquire_instance_lock(config_dir: &Path) -> Result<InstanceLock, DaemonError> {
+    std::fs::create_dir_all(config_dir).map_err(|source| DaemonError::WatchLock {
+        path: config_dir.to_path_buf(),
+        reason: format!("config dir creation failed: {source}"),
+    })?;
+    let path = config_dir.join("loop.lock");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|source| DaemonError::WatchLock {
+            path: path.clone(),
+            reason: format!("lock file open failed: {source}"),
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(InstanceLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(DaemonError::WatchAlreadyRunning { path }),
+        Err(error) => Err(DaemonError::WatchLock {
+            path,
+            reason: format!("lock acquisition failed: {error}"),
+        }),
+    }
+}
+
+/// Production poll side for the daemon: the same reconciled board read
+/// `orc loop` performs (open items + ready queue + blocked candidates +
+/// warnings).
+#[derive(Clone)]
+pub struct BoardSnapshotPoller {
+    /// Shared for the daemon's lifetime: the always-on loop clones the
+    /// poller per invocation, and the client behind the Arc persists.
+    client: Arc<BoardClient>,
+    config: BoardProjectConfig,
+}
+
+impl BoardSnapshotPoller {
+    /// Builds the daemon-side poller over the board client.
+    #[must_use]
+    pub fn new(client: Arc<BoardClient>, config: BoardProjectConfig) -> Self {
+        Self { client, config }
+    }
+}
+
+#[async_trait]
+impl BoardPoller for BoardSnapshotPoller {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        let (open, warnings) = self
+            .client
+            .item_facts(&self.config)
+            .await
+            .map_err(|error| CampaignError::Loop(format!("board poll failed: {error}")))?;
+        let ready = orchestraitor_board::ready_queue(&open, &self.config);
+        let blocked_candidates = orchestraitor_board::blocked_candidates(&open, &self.config);
+        Ok(BoardSnapshot {
+            open,
+            ready,
+            blocked_candidates,
+            warnings,
+        })
+    }
+}
+
+/// The reconcile-wrapping poller (§9.36): delegates to the inner poller,
+/// then runs the reconcile pass over the fresh snapshot — recording
+/// `board-diverged` events (§9.43) and unblocked-task promotions (§9.40)
+/// into the injected sink. The reconcile rides the poll tick, so every
+/// pass's snapshot is reconciled exactly once.
+#[derive(Clone)]
+pub struct ReconcilePoller<P: BoardPoller> {
+    inner: P,
+    events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
+    sink: Arc<dyn ReconcileSink>,
+    /// The previous tick's blocked candidates (§9.40): a candidate that
+    /// appears on the NEXT tick's ready queue is a newly unblocked task —
+    /// without this, promotion events could never fire.
+    previous_blocked: Arc<std::sync::Mutex<Vec<orchestraitor_board::ReadyItem>>>,
+    /// Task ids that already received a `board-diverged` event: the
+    /// divergence records once per task, not once per tick (a task that
+    /// stays absent from the open set must not produce an envelope every
+    /// cadence tick).
+    diverged_seen: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// The rows this invocation's restart recovery reaped (`running` →
+    /// `orphaned`, §9.24.2), set by [`Self::set_recovered`] before the
+    /// runner starts. These are the crashed-run rows whose liveness claim
+    /// the board may have overruled while the daemon was down — the
+    /// reconcile's divergence scope (a PR #564 review finding).
+    recovered_orphaned: Arc<std::sync::Mutex<Vec<orchestraitor_campaign::RunRow>>>,
+}
+
+/// The reconcile-poller seam `run_watch` needs beyond reading snapshots:
+/// handing the poller the recovery outcome and the runner's invocation
+/// identity. Blanket-implemented for [`ReconcilePoller`]; tests with
+/// plain pollers implement both as no-ops.
+pub trait SetWatchInvocation {
+    /// Begins a new watch invocation (dedup reset; `previous_blocked`
+    /// carried).
+    fn begin_invocation(&mut self, invocation_id: &str);
+    /// Supplies this invocation's recovered rows (the restart recovery's
+    /// outcome) as the reconcile divergence scope.
+    fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>);
+}
+
+impl<P: BoardPoller> SetWatchInvocation for ReconcilePoller<P> {
+    fn begin_invocation(&mut self, invocation_id: &str) {
+        ReconcilePoller::begin_invocation(self, invocation_id);
+    }
+    fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>) {
+        ReconcilePoller::set_recovered(self, recovered);
+    }
+}
+
+/// Where reconcile observations go. Production forwards into the daemon
+/// runner's journal; tests capture in memory.
+pub trait ReconcileSink: Send + Sync {
+    /// Records one reconcile outcome.
+    fn record(&self, outcome: &ReconcileOutcome);
+}
+
+#[async_trait]
+impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        let snapshot = self.inner.poll().await?;
+        // The run-state store is `rusqlite`-backed (Send, not Sync): the
+        // poller owns a DEDICATED connection (not the runner's), and the
+        // std-Mutex guard is held only across the synchronous `reconcile`
+        // call — never across an await — so `blocking_lock`'s
+        // async-context panic (a review finding, PR #555) cannot occur and
+        // the runner's ticks are never blocked. WAL readers never block on
+        // the runner's writes.
+        //
+        // Dedup: a task that stays absent from the open set records its
+        // `board-diverged` event ONCE (the `diverged_seen` set), not once
+        // per cadence tick. Promotion: the previous tick's blocked
+        // candidates feed this tick's reconcile, so a candidate that
+        // reaches the ready queue records `unblocked-task-promoted`.
+        // The divergence scope: this invocation's RECOVERED rows (set by
+        // `set_recovered` from the §9.24.2 restart recovery). A live slot
+        // of the CURRENT invocation is never in scope — the worker may
+        // legitimately move or close the board item while its run is
+        // still finishing, which is normal supervision, never a
+        // divergence (a PR #555 review finding; a PR #564 review finding
+        // re-scoped the check after the old supervised-exclusion scan
+        // proved unreachable in production).
+        let (previous_blocked, recovered_orphaned) = {
+            let previous_blocked = {
+                let previous = self.previous_blocked.lock().map_err(|_| {
+                    CampaignError::Loop("reconcile state lock poisoned".to_string())
+                })?;
+                previous.clone()
+            };
+            let recovered = {
+                let recovered = self.recovered_orphaned.lock().map_err(|_| {
+                    CampaignError::Loop("reconcile state lock poisoned".to_string())
+                })?;
+                recovered.clone()
+            };
+            (previous_blocked, recovered)
+        };
+        let outcome = reconcile(&snapshot, &previous_blocked, &recovered_orphaned)
+            .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
+        // Dedup the divergence events against `seen` (a task that stays
+        // absent from the open set is recorded ONCE, not once per tick),
+        // then update the reconcile state AFTER a successful pass: the
+        // state must describe what the LAST RECORDED pass saw, so a failed
+        // (unrecorded) pass re-observes on the next tick.
+        let events: Vec<_> = {
+            let seen = self
+                .diverged_seen
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            outcome
+                .events
+                .iter()
+                .filter(|event| match event {
+                    ReconcileEvent::BoardDiverged { task_id, .. } => !seen.contains(task_id),
+                    ReconcileEvent::UnblockedTaskPromoted { .. } => true,
+                })
+                .cloned()
+                .collect()
+        };
+        if !events.is_empty() {
+            // Per-event atomicity (a PR #555 review finding): each event is
+            // appended and its dedup state updated before the next — a
+            // mid-batch failure leaves the store and the dedup state
+            // CONSISTENT (both describe exactly the recorded prefix), so a
+            // retry records only the unrecorded suffix and never
+            // duplicates. `previous_blocked` updates after the batch: it
+            // describes the snapshot, not an event.
+            let mut recorded = Vec::new();
+            for event in &events {
+                let single = ReconcileOutcome {
+                    events: vec![event.clone()],
+                    ready_task_ids: outcome.ready_task_ids.clone(),
+                };
+                self.record_events(&single)?;
+                match event {
+                    ReconcileEvent::BoardDiverged { task_id, .. } => {
+                        let mut seen = self.diverged_seen.lock().map_err(|_| {
+                            CampaignError::Loop("reconcile state lock poisoned".to_string())
+                        })?;
+                        seen.insert(task_id.clone());
+                    }
+                    // A recorded promotion leaves the previous_blocked set
+                    // BEFORE the next event is recorded: a mid-batch failure
+                    // then re-observes only the UNRECORDED suffix on the
+                    // retry tick — the recorded promotion can never re-fire
+                    // (a PR #564 review finding; BoardDiverged is covered by
+                    // the `diverged_seen` dedup).
+                    ReconcileEvent::UnblockedTaskPromoted { repo, number, .. } => {
+                        let mut previous = self.previous_blocked.lock().map_err(|_| {
+                            CampaignError::Loop("reconcile state lock poisoned".to_string())
+                        })?;
+                        previous.retain(|candidate| {
+                            !(candidate.repo == *repo && candidate.number == *number)
+                        });
+                    }
+                }
+                recorded.push(event.clone());
+            }
+            let outcome = ReconcileOutcome {
+                events: recorded,
+                ready_task_ids: outcome.ready_task_ids,
+            };
+            self.sink.record(&outcome);
+        }
+        // previous_blocked updates on EVERY successful poll — not only when
+        // events were recorded (a PR #555 review finding): a tick with no
+        // reconcile events is the common case, and its blocked candidates
+        // are exactly what the NEXT tick's promotion detection compares
+        // against. Inside the guard, promotion would fire only when some
+        // unrelated event happened on the earlier tick.
+        {
+            let mut previous = self
+                .previous_blocked
+                .lock()
+                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
+            previous.clone_from(&snapshot.blocked_candidates);
+        }
+        Ok(snapshot)
+    }
+}
+
+impl<P: BoardPoller> ReconcilePoller<P> {
+    /// Builds the reconcile-wrapping poller.
+    #[must_use]
+    pub fn new(
+        inner: P,
+        events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
+        sink: Arc<dyn ReconcileSink>,
+    ) -> Self {
+        Self {
+            inner,
+            events,
+            sink,
+            previous_blocked: Arc::new(std::sync::Mutex::new(Vec::new())),
+            diverged_seen: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            recovered_orphaned: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Supplies this invocation's recovered rows (the §9.24.2 restart
+    /// recovery's outcome) as the reconcile divergence scope. Called by
+    /// [`run_watch`] after recovery, before the first poll. The scope
+    /// persists for the whole invocation: the recovered rows are fixed at
+    /// recovery time, and the per-task `diverged_seen` dedup keeps the
+    /// event at one record per task even across cadence ticks.
+    pub fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>) {
+        match self.recovered_orphaned.lock() {
+            Ok(mut slot) => *slot = recovered,
+            // A poisoned lock means a previous reconcile panicked mid-scan.
+            // This path RECOVERS the guard via into_inner() (not fail-loud):
+            // the setter runs at invocation start, before any reconcile scan,
+            // so a poisoned guard here cannot reflect this invocation's own
+            // panic — overwriting the stale value is safe and the next
+            // poll's poison handling still surfaces any real corruption.
+            Err(poisoned) => *poisoned.into_inner() = recovered,
+        }
+    }
+
+    /// Begins a new watch invocation: sets the invocation id and clears
+    /// the divergence-dedup set (dedup is invocation-scoped — each
+    /// invocation re-observes from the durable rows), while CARRYING
+    /// `previous_blocked` across the boundary: a task blocked on the last
+    /// tick of invocation N and ready on the first tick of N+1 is a
+    /// promotion the spec requires recording (a PR #555 review thread).
+    /// Called by [`run_watch`] once the runner's invocation identity
+    /// exists; MUST run before the first poll.
+    pub fn begin_invocation(&mut self, invocation_id: &str) {
+        let _ = invocation_id;
+        match self.diverged_seen.lock() {
+            Ok(mut seen) => seen.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+
+    /// Persists the reconcile events into the daemon event store.
+    /// Fail-closed: a reconcile that cannot be recorded surfaces as a
+    /// transient poll error (the loop backs off and re-polls) — the
+    /// observation is never silently dropped.
+    fn record_events(&self, outcome: &ReconcileOutcome) -> Result<(), CampaignError> {
+        use orchestraitor_events::{
+            AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
+        };
+        let mut store = self
+            .events
+            .lock()
+            .map_err(|_| CampaignError::Loop("reconcile event store lock poisoned".to_string()))?;
+        for event in &outcome.events {
+            let payload = match event {
+                ReconcileEvent::BoardDiverged { task_id, .. } => serde_json::json!({
+                    "event": "board-diverged",
+                    "task_id": task_id,
+                }),
+                ReconcileEvent::UnblockedTaskPromoted {
+                    task_id,
+                    number,
+                    repo,
+                } => serde_json::json!({
+                    "event": "unblocked-task-promoted",
+                    "task_id": task_id,
+                    "number": number,
+                    "repo": repo,
+                }),
+            };
+            let head = store
+                .head()
+                .map_err(|error| CampaignError::Loop(format!("event store head: {error}")))?;
+            // Category note: `ToolRequest` is the loop's orchestration-tool
+            // class today; a dedicated reconcile category is the tracked
+            // follow-up (#557) — switching it is a §9.17 schema change.
+            let envelope = EventEnvelope::try_new(EventEnvelopeInput {
+                schema_version: CURRENT_SCHEMA_VERSION,
+                monotonic_seq: u64::try_from(head.seq_base)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+                wall_clock_ts: rfc3339_now(),
+                correlation_id: orchestraitor_model::OperationId::new(),
+                parent_op_id: None,
+                category: EventCategory::ToolRequest,
+                payload,
+                prev_hash: head.prev_hash,
+            })
+            .map_err(|error| CampaignError::Loop(format!("event envelope: {error}")))?;
+            store
+                .append(envelope)
+                .map_err(|error| CampaignError::Loop(format!("event append: {error}")))?;
+        }
+        Ok(())
+    }
+}
+
+/// RFC 3339 wall-clock timestamp; a formatting failure falls back to the
+/// epoch rather than panicking (the same idiom the MCP board tools use).
+fn rfc3339_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
+}
+
+/// Production worker side for the daemon: the direct-path starter `orc
+/// loop` uses, rebuilt over the daemon's config-dir layout (task fixtures
+/// under `<config-dir>/worker-tasks/`, per-task git worktrees under
+/// `<config-dir>/loop-worktrees/` — the same layouts, so leftovers from
+/// either mode prune identically). The same [`WorkerBudgets`] instance the
+/// loop runner validates feeds the worker, so the two enforcement layers
+/// cannot drift.
+#[derive(Clone)]
+pub struct DirectWatchStarter {
+    project_dir: PathBuf,
+    config_dir: PathBuf,
+    provider_endpoint: Option<String>,
+    budgets: WorkerBudgets,
+    /// The worker-side anti-stuck guardrail thresholds resolved from
+    /// `[loop]` — the SAME settings the runner validates, so the daemon
+    /// cannot drift from the foreground loop's enforcement (a PR #564
+    /// review finding: the worker config never received them).
+    guardrails: orchestraitor_worker::GuardrailsConfig,
+}
+
+impl DirectWatchStarter {
+    /// Builds the daemon-side starter.
+    #[must_use]
+    pub fn new(
+        project_dir: PathBuf,
+        config_dir: PathBuf,
+        provider_endpoint: Option<String>,
+        budgets: WorkerBudgets,
+        guardrails: orchestraitor_worker::GuardrailsConfig,
+    ) -> Self {
+        Self {
+            project_dir,
+            config_dir,
+            provider_endpoint,
+            budgets,
+            guardrails,
+        }
+    }
+
+    /// Prepares (or reuses) the task's git worktree under
+    /// `<config-dir>/loop-worktrees/<task-id>` — the same layout and
+    /// branch scheme (`orc-loop/<task-id>`) the foreground loop uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Spawn`] when `git worktree add` fails or
+    /// the project directory is not a git work tree.
+    fn prepare_worktree(&self, task_id: &str) -> Result<PathBuf, CampaignError> {
+        let base = self.config_dir.join("loop-worktrees");
+        std::fs::create_dir_all(&base).map_err(|error| CampaignError::Spawn {
+            task_id: task_id.to_string(),
+            message: format!("worktree base dir creation failed: {error}"),
+        })?;
+        // Task ids are repo-scoped slugs (deterministic charset per the
+        // #313 selection contract), so they are safe path components.
+        let worktree = base.join(task_id);
+        let branch = format!("orc-loop/{task_id}");
+        // `-B` (not `-b`): a previous invocation's branch for this task
+        // still exists after its worktree was pruned — the reset makes the
+        // task re-runnable.
+        let output = Self::git(&self.project_dir)
+            .args(["worktree", "add"])
+            .arg(&worktree)
+            .arg("-B")
+            .arg(&branch)
+            .output()
+            .map_err(|error| CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: format!("git worktree add failed to run: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(CampaignError::Spawn {
+                task_id: task_id.to_string(),
+                message: format!(
+                    "git worktree add failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(worktree)
+    }
+
+    /// Test-only wrapper over the private [`Self::prepare_worktree`]: the
+    /// worktree-reuse regression test exercises the exact spawn path.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare_worktree`].
+    pub fn prepare_worktree_for_test(&self, task_id: &str) -> Result<PathBuf, CampaignError> {
+        self.prepare_worktree(task_id)
+    }
+
+    /// A `git` invocation anchored at `dir` with repository-location
+    /// environment variables scrubbed (the same hygiene `orc loop`
+    /// applies): a `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` inherited
+    /// from a hook or wrapper shell would otherwise redirect the worktree
+    /// operations away from `dir`.
+    fn git(dir: &Path) -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command.current_dir(dir);
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            command.env_remove(variable);
+        }
+        command
+    }
+
+    /// Removes every leftover worktree from previous invocations (of
+    /// either `orc loop` or earlier watch runs). Called once at process
+    /// start AND before every subsequent invocation in the run loop: a
+    /// task that ran in invocation N keeps its worktree (worktrees are
+    /// never removed on run completion), and `git worktree add` into an
+    /// already-registered path fails — without the per-invocation prune a
+    /// retried task would count as a spawn failure and could strand as
+    /// `stuck` without ever running (a PR #564 review finding). Removal
+    /// failures are logged — never fatal, never silent.
+    pub fn prune_worktrees(config_dir: &Path, project_dir: &Path) {
+        let base = config_dir.join("loop-worktrees");
+        // Clear stale registrations FIRST (a removed directory, an
+        // interrupted remove): without this, `worktree remove` on a
+        // dangling path fails and the directory survives.
+        let _ignore = Self::git(project_dir).args(["worktree", "prune"]).output();
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return; // no worktree base yet — nothing to prune
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let task_id = entry.file_name().to_string_lossy().into_owned();
+            let output = Self::git(project_dir)
+                .args(["worktree", "remove", "--force"])
+                .arg(entry.path())
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let branch = format!("orc-loop/{task_id}");
+                    match Self::git(project_dir)
+                        .args(["branch", "-D", &branch])
+                        .output()
+                    {
+                        Ok(o) if o.status.success() => {}
+                        Ok(o) => tracing::warn!(
+                            task_id,
+                            detail = %String::from_utf8_lossy(&o.stderr).trim(),
+                            "orcd watch: worktree branch prune failed"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id,
+                                detail = %error,
+                                "orcd watch: worktree branch prune failed"
+                            );
+                        }
+                    }
+                }
+                Ok(output) => tracing::warn!(
+                    task_id,
+                    detail = %String::from_utf8_lossy(&output.stderr).trim(),
+                    "orcd watch: worktree prune failed"
+                ),
+                Err(error) => tracing::warn!(
+                    task_id,
+                    detail = %error,
+                    "orcd watch: worktree prune failed"
+                ),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LoopWorkerStarter for DirectWatchStarter {
+    async fn start(
+        &self,
+        selected: &SelectedTask,
+        routing: &RoleRoutingDecision,
+        prior_daily_spend_usd: f64,
+    ) -> Result<WorkerProcess, CampaignError> {
+        // The same bootstrap-only gate the foreground `DirectLoopStarter`
+        // enforces (spec §10.3): the direct-path worker runs the bootstrap
+        // provider exclusively, so a routing misconfiguration must fail
+        // the spawn — never silently run a non-bootstrap provider behind
+        // the daemon's pinned budget set (a PR #564 review finding).
+        if routing.provider != orchestraitor_agent_catalog::BOOTSTRAP_PROVIDER {
+            return Err(CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!(
+                    "bootstrap worker supports only the `{}` provider (spec §10.3); \
+                     roles.{}.routing.provider resolved to `{}`",
+                    orchestraitor_agent_catalog::BOOTSTRAP_PROVIDER,
+                    routing.role,
+                    routing.provider
+                ),
+            });
+        }
+        let tasks_dir = self.config_dir.join("worker-tasks");
+        std::fs::create_dir_all(&tasks_dir).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("worker-tasks dir creation failed: {error}"),
+        })?;
+        let task = orchestraitor_worker::WorkerTask {
+            id: selected.task_id.clone(),
+            slug: selected.task_id.clone(),
+            description: format!(
+                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
+                 the issue and its referenced spec sections. Work in the checked-out task \
+                 worktree; deliver per the worker contract.",
+                selected.number, selected.repo, selected.title, selected.url,
+            ),
+        };
+        let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
+        let task_bytes =
+            serde_json::to_vec_pretty(&task).map_err(|error| CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!("task fixture serialization failed: {error}"),
+            })?;
+        // Write + rename so a crashed write can never leave a half-file
+        // that the id-mismatch check would silently (mis)load.
+        let temp_path = tasks_dir.join(format!(".{}.tmp", selected.task_id));
+        std::fs::write(&temp_path, &task_bytes).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture write failed: {error}"),
+        })?;
+        std::fs::rename(&temp_path, &task_path).map_err(|error| CampaignError::Spawn {
+            task_id: selected.task_id.clone(),
+            message: format!("task fixture rename failed: {error}"),
+        })?;
+        let transport = Arc::new(
+            build_bootstrap_transport(self.provider_endpoint.clone()).map_err(|error| {
+                CampaignError::Spawn {
+                    task_id: selected.task_id.clone(),
+                    message: format!("transport construction failed: {error}"),
+                }
+            })?,
+        );
+        let mediator = Arc::new(MediatedBashMediator::new());
+        let worktree = self.prepare_worktree(&selected.task_id)?;
+        let (beats_tx, beats_rx) = tokio::sync::watch::channel(0_u64);
+        let mut config = WorkerConfig::new(
+            ProviderId::from_string(routing.provider.clone()),
+            ModelId::from_string(routing.model.clone()),
+            self.budgets.clone(),
+        );
+        config.guardrails = self.guardrails.clone();
+        config.prior_daily_spend_usd = prior_daily_spend_usd;
+        let config = config.with_progress(beats_tx);
+        let run = tokio::spawn(async move {
+            run_worker(
+                &task,
+                &worktree,
+                &*transport,
+                &*mediator,
+                &PendingDeliverySink,
+                &config,
+            )
+            .await
+        });
+        Ok(WorkerProcess {
+            beats: beats_rx,
+            run,
+        })
+    }
+}
+
+/// The watch daemon's poll/supervise cycle: recover durable state, then
+/// run the loop runner until shutdown. The poller passed here is expected
+/// to be the [`ReconcilePoller`] wrapper so every tick's snapshot is
+/// reconciled; the cadence rides `LoopConfig::min_poll_interval`.
+///
+/// Recovery (§9.24.2) runs at every invocation start — before the first
+/// tick — so a kill -9 mid-run leaves `orphaned` rows, never stranded
+/// `running` ones, and the tick resumes from durable state. On the
+/// always-on daemon this includes the invocation after a run-budget
+/// restart: a row the previous invocation's drain failed to reap
+/// (best-effort sweep) is recorded orphaned there. `paused` stays paused
+/// by construction: the recovery helper only ever transitions `running`
+/// rows.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::WatchRun`] when a durable write fails or the
+/// loop runner exits with an error.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each dependency is a distinct seam (config, two hermeticity traits, two durable stores, routing identity, shutdown channel, virtual clock origin); grouping them would hide which argument serves which invariant — the loop runner's own constructor documents the same tradeoff"
+)]
+pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter>(
+    loop_config: LoopConfig,
+    mut poller: P,
+    starter: S,
+    decisions: &CampaignDecisionStore,
+    runs: &orchestraitor_campaign::LoopRunStore,
+    routing: RoleRoutingDecision,
+    shutdown: tokio::sync::watch::Receiver<u64>,
+    start_unix_secs: u64,
+    invocation_id: &str,
+) -> Result<LoopSummary, DaemonError> {
+    // §9.24.2 restart recovery BEFORE the first tick: running → orphaned.
+    let recovered = runs
+        .recover_running_rows(start_unix_secs)
+        .map_err(|error| DaemonError::WatchRun(error.to_string()))?;
+    for row in &recovered {
+        tracing::warn!(
+            run_id = row.id,
+            task_id = %row.task_id,
+            "orcd watch: restart recovery orphaned a running row"
+        );
+    }
+
+    // Single source for the invocation id: the caller derives it ONCE and
+    // this function hands the same string to the reconcile poller and the
+    // runner, so the runner's identity and the reconcile bookkeeping can
+    // never drift. The recovered rows are the reconcile divergence scope
+    // (board-wins over the crashed run's liveness claim, §9.43/§9.36);
+    // begin_invocation resets the per-invocation dedup set while carrying
+    // `previous_blocked` across the boundary.
+    poller.set_recovered(recovered);
+    poller.begin_invocation(invocation_id);
+    let runner = LoopRunner::new(
+        loop_config,
+        poller,
+        starter,
+        decisions,
+        runs,
+        routing,
+        invocation_id.to_string(),
+        start_unix_secs,
+    )
+    .map_err(|error| DaemonError::WatchRun(error.to_string()))?;
+    let summary = runner
+        .run(shutdown)
+        .await
+        .map_err(|error| DaemonError::WatchRun(error.to_string()))?;
+    Ok(summary)
+}
+
+/// A no-op reconcile sink for callers that only need the durable event
+/// records.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct JournallessSink;
+
+impl ReconcileSink for JournallessSink {
+    fn record(&self, _outcome: &ReconcileOutcome) {}
+}

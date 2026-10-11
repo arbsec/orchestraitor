@@ -16,22 +16,41 @@ name = "orcd"
 path = "src/main.rs"
 
 [dependencies]
+# async-trait (MIT OR Apache-2.0): object-safe impls of the campaign loop's
+# BoardPoller/LoopWorkerStarter seams in the watch mode; matches the cli and
+# campaign crates.
+async-trait = "0.1"
 hex = { workspace = true }
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 miette = { workspace = true }
 orchestraitor-adapter-api = { path = "../orchestraitor-adapter-api" }
 orchestraitor-adapter-host = { path = "../orchestraitor-adapter-host" }
+orchestraitor-agent-catalog = { path = "../orchestraitor-agent-catalog" }
 orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+# orchestraitor-board (MIT OR Apache-2.0): the #308 board client the watch
+# mode polls through (same reconciled read `orc loop` does).
+orchestraitor-board = { path = "../orchestraitor-board" }
+# orchestraitor-campaign (MIT OR Apache-2.0): the loop runner the watch mode
+# ports (issue #503) — poll/supervise cycle, decision store, run-state store,
+# and the §9.36 reconcile pass.
+orchestraitor-campaign = { path = "../orchestraitor-campaign" }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-events = { path = "../orchestraitor-events" }
 orchestraitor-lifecycle = { path = "../orchestraitor-lifecycle" }
 orchestraitor-mcp = { path = "../orchestraitor-mcp" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
+# orchestraitor-worker (MIT OR Apache-2.0): the pinned guard set and the
+# bootstrap transport the watch mode's direct-path starter wires.
+orchestraitor-worker = { path = "../orchestraitor-worker" }
 rusqlite = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# time (MIT OR Apache-2.0): RFC 3339 wall-clock stamps on reconcile audit
+# events; already in the lock via the mcp crate.
+time = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tracing = { workspace = true }

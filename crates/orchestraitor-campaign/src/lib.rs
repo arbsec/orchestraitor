@@ -27,6 +27,7 @@ mod guardrails;
 mod loop_run;
 mod run_state;
 mod session;
+mod watch;
 
 pub use decision::{
     BlockedNode, CampaignDecision, CampaignDecisionStore, DecisionKind, NoOpReason, SelectedTask,
@@ -48,3 +49,4 @@ pub use session::{
     plan_pass_with_selector, plan_pass_with_selector_async, run_once, run_once_with_selector,
     task_id_for,
 };
+pub use watch::{ReconcileEvent, ReconcileOutcome, reconcile};

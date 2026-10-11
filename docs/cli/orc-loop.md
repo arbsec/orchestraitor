@@ -6,7 +6,8 @@ is a foreground runner: poll the board → run one campaign pass (via
 [orc campaign](orc-campaign.md)'s selection, one decision record) → spawn the worker →
 supervise the in-flight runs → pace the next pass. It is deliberately NOT the always-on
 watch daemon — no adaptive tick, no budget classes beyond the minimal guards, no
-`orc backlog` controls, no restart recovery. Those deepen in E8.
+`orc backlog` controls, no restart recovery (the [`orcd watch`](orcd-watch.md)
+daemon provides restart recovery today; the remaining deepenings land in E8).
 
 ```sh
 orc loop [--json] [--max-cycles N]
@@ -109,8 +110,11 @@ clears the backoff and the no-progress streak.
   durable per-task retry state (`task_retry_state`: total attempts, last failure
   class, no-progress streak, backoff window). Row statuses include `stuck` (the
   cross-invocation budget exhausted). Concurrency counts only workers supervised by
-  the current invocation. Historical rows remain unchanged on startup; restart
-  recovery is deferred to the E8 watch daemon.
+  the current invocation. Historical rows remain unchanged on startup; the
+  [`orcd watch`](orcd-watch.md) daemon performs §9.24.2 restart recovery over this
+  store (a row still `running` transitions to `orphaned` — never directly
+  `failed`), and the two operating modes share the same single-flight lock and
+  durable stores.
 - Cost ledger: `<config-dir>/cost.db` — one cost entry per worker model call (spec
   §9.19.4), attributed to the board task (agent), the routed orchestration role, and
   the loop invocation + task session. A ledger-open failure degrades to unattributed

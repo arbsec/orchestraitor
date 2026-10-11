@@ -126,6 +126,13 @@ pub struct LoopConfig {
     /// Optional cycle bound (board polls) — a QA/evidence affordance; `None`
     /// runs until a terminal stop or shutdown.
     pub max_cycles: Option<u64>,
+    /// Minimum wall-clock spacing between board polls (the §9.36 poll-tick
+    /// cadence, issue #503). `None` keeps the foreground loop's behavior:
+    /// a pass may poll on every tick once its backoff expires. The watch
+    /// daemon sets this from the §9.22-configured cadence so the always-on
+    /// daemon polls at the operator's interval instead of spinning on the
+    /// 1s supervision tick.
+    pub min_poll_interval: Option<Duration>,
     /// Anti-stuck guardrail thresholds (spec §9.27.1): worker-side guard
     /// limits plus the cross-invocation task retry budget/backoff.
     /// Defaults apply when absent (`Default::default()`).
@@ -154,6 +161,31 @@ impl LoopConfig {
         )
     }
 
+    /// Builds a configuration with an explicit §9.36 poll-tick cadence
+    /// (the watch daemon's mode, issue #503). See
+    /// [`LoopConfig::min_poll_interval`]. All other validation matches
+    /// [`LoopConfig::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Loop`] naming the rejected guard.
+    pub fn with_cadence(
+        budgets: WorkerBudgets,
+        shutdown_budget: Duration,
+        max_cycles: Option<u64>,
+        min_poll_interval: Option<Duration>,
+    ) -> Result<Self, CampaignError> {
+        let config = Self {
+            budgets,
+            shutdown_budget,
+            max_cycles,
+            min_poll_interval,
+            guardrails: GuardrailsSettings::default(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validates and returns the configuration with explicit guardrail
     /// settings. See [`LoopConfig::new`] for the validation contract.
     ///
@@ -170,10 +202,25 @@ impl LoopConfig {
             budgets,
             shutdown_budget,
             max_cycles,
+            min_poll_interval: None,
             guardrails,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Sets the §9.36 poll-tick cadence on an existing configuration,
+    /// PRESERVING the configured `[loop]` guardrails (a PR #555 review
+    /// finding: `with_cadence` defaulted them, so the watch daemon ignored
+    /// every operator `loop.*` key the foreground loop honors).
+    ///
+    /// Validation is DEFERRED to [`LoopRunner::new`] (which re-validates at
+    /// construction), so this builder itself cannot fail; a zero cadence is
+    /// rejected fail-closed there.
+    #[must_use]
+    pub fn with_min_poll_interval(mut self, interval: Option<Duration>) -> Self {
+        self.min_poll_interval = interval;
+        self
     }
 
     /// Fail-closed guard validation.
@@ -211,6 +258,13 @@ impl LoopConfig {
         if self.budgets.run_deadline().is_zero() {
             return Err(CampaignError::Loop(
                 "guard-weakening rejected: worker run deadline must be positive".to_string(),
+            ));
+        }
+        if let Some(interval) = self.min_poll_interval
+            && interval.is_zero()
+        {
+            return Err(CampaignError::Loop(
+                "guard-weakening rejected: poll cadence must be positive when set".to_string(),
             ));
         }
         Ok(())
@@ -498,6 +552,10 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     started: tokio::time::Instant,
     backoff_index: u32,
     next_pass_allowed_at: Duration,
+    /// The §9.36 poll-tick cadence gate (watch mode, issue #503): the
+    /// earliest elapsed time the next board poll may start. `ZERO` when no
+    /// cadence is configured (the foreground loop).
+    next_poll_allowed_at: Duration,
     slots: Vec<Slot>,
     /// Clone of the shutdown channel, armed during `pass` so a signal that
     /// arrives mid-poll (the board client can block up to its 60s total
@@ -534,7 +592,10 @@ impl Counters {
             RunRowStatus::TimedOut => self.timed_out += 1,
             RunRowStatus::AbortedShutdown => self.aborted_on_stop += 1,
             RunRowStatus::Stuck => self.stuck += 1,
-            RunRowStatus::Running => {}
+            // Restart recovery's orphaned rows and a paused row are never
+            // reaped by this invocation: recovery runs before the runner
+            // exists and pausing is not yet reachable mid-run.
+            RunRowStatus::Orphaned | RunRowStatus::Paused | RunRowStatus::Running => {}
         }
     }
 }
@@ -580,6 +641,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             started: tokio::time::Instant::now(),
             backoff_index: 0,
             next_pass_allowed_at: Duration::ZERO,
+            next_poll_allowed_at: Duration::ZERO,
             slots: Vec::new(),
             shutdown: None,
         })
@@ -999,10 +1061,26 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     ) -> Result<bool, CampaignError> {
         if self.slots.len() >= self.config.budgets.max_concurrent_workers as usize
             || elapsed < self.next_pass_allowed_at
+            // The §9.36 poll-tick cadence (watch mode): a poll may only
+            // start once the configured interval has elapsed since the
+            // last poll. Supervision continues every tick regardless —
+            // the cadence gates the poll, never the reaping.
+            || elapsed < self.next_poll_allowed_at
         {
             return Ok(false);
         }
         counters.cycles += 1;
+        // Arm the next poll window: the cadence (when configured) spaces
+        // board polls at the operator's interval. BOTH gates apply and the
+        // later deadline wins (they take their maximum): in watch mode the
+        // next poll waits for at least the cadence, and repeated no-op
+        // passes can push it out to the backoff cap — the rate-limit
+        // courtesy §9.36 asks of the poller. The foreground loop
+        // (`min_poll_interval = None`) keeps backoff as the only gate.
+        self.next_poll_allowed_at = self
+            .next_poll_allowed_at
+            .max(elapsed)
+            .saturating_add(self.config.min_poll_interval.unwrap_or_default());
 
         // Scoped: the poll future borrows the poller, so the race — and
         // that borrow — must end before the pass mutates runner state.
@@ -1342,6 +1420,10 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// arbitration is single-pointed: `Ok(run)` wins over any recorded
     /// intent (abort-after-completion is a no-op), cancellation resolves to
     /// the intent, and a panic is a typed failure — never a stall.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the arbitration table (natural/cancelled/panicked x intent) is read top-to-bottom as one decision matrix; extracting arms would scatter the single-pointed arbitration the spec reviews as one table"
+    )]
     async fn reap_finished(&mut self) -> Result<Vec<Reaped>, CampaignError> {
         let mut results = Vec::new();
         let mut index = 0;
@@ -1448,8 +1530,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 // `Stuck` rows re-use the WorkerFinished journal shape (a
                 // stuck classification is a terminal run observation).
                 // `finish` rejects non-terminal statuses, so `Running`
-                // never occurs here.
-                RunRowStatus::Stuck | RunRowStatus::Running => LoopEvent::WorkerFinished {
+                // never occurs here. `Orphaned`/`Paused` rows are likewise
+                // unreachable mid-run: recovery transitions them before
+                // the runner exists, and pausing is a later slice.
+                RunRowStatus::Stuck
+                | RunRowStatus::Running
+                | RunRowStatus::Orphaned
+                | RunRowStatus::Paused => LoopEvent::WorkerFinished {
                     run_id: slot.run_id,
                     task_id: slot.task_id.clone(),
                     completed: false,
@@ -1509,7 +1596,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // Rows aborted for loop-level reasons are not task outcomes:
             // shutdown/budget drains re-record the same task in a later
             // invocation, and `stuck` rows are terminal bookkeeping.
-            RunRowStatus::AbortedShutdown | RunRowStatus::Stuck | RunRowStatus::Running => Ok(None),
+            // `Orphaned`/`Paused` are unreachable mid-run for the same
+            // reason as the journal match above.
+            RunRowStatus::AbortedShutdown
+            | RunRowStatus::Stuck
+            | RunRowStatus::Running
+            | RunRowStatus::Orphaned
+            | RunRowStatus::Paused => Ok(None),
         }
     }
 }

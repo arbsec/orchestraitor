@@ -13,6 +13,35 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- `orcd watch`: the watch daemon's running mode (spec `10-orchestrator.md`
+  §9.36 thin slice; #503) — the `orc loop` poll/supervise cycle as the
+  daemon's always-on mode, on a fixed default 60s poll cadence
+  (operator-configurable via the new `watch.poll_interval_secs` layered
+  config key; zero rejected fail-closed). Every tick is a reconcile pass
+  with board-wins semantics: local disagreement with the board records a
+  `board-diverged` event and a newly unblocked task records an
+  `unblocked-task-promoted` event, both into the new append-only,
+  hash-chain-validated event store at `<config-dir>/watch-events.db`.
+  Crash-safe restart per §9.24.2: on startup every `loop.db` row still
+  `running` transitions to `orphaned` — never directly `failed` — and the
+  tick resumes from durable state; a `paused` row stays paused. Single
+  flight: `orcd watch` takes over the loop's instance lock
+  (`<config-dir>/loop.lock`), so a foreground `orc loop` and the daemon
+  are mutually exclusive and a crashed daemon never wedges the next run.
+  Foreground `orc loop` remains a documented operating mode; the pinned
+  guard set is unchanged. Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
+- **Token-efficiency statistics** (`orc stats efficiency`): reporting
+  over the cost ledger showing, per session or per configuration
+  profile, provider-reported input/output/cache tokens alongside
+  context-compiler receipt deltas (candidate vs selected tokens, tool-output
+  compaction) and the derived savings ratio. Sessions without receipts
+  report no savings value — never a fabricated number (spec §13.5.1).
+  `--group-by-profile` compares runs recorded under different profile
+  labels, the A/B mechanism for verifying that the token-saving features
+  actually save; `--json` emits the same rollups as stable JSON. Cost
+  entries now carry the run's profile label (`roles.<role>.routing.profile`);
+  existing ledgers migrate in place on open.
 - **Optional `Target` gate in the ready-queue predicate**: the board config
   (`.agents/project/github-project.local.toml`) accepts a new optional
   `[mvp].require_target` key. When set to `false`, `orc loop`, `orc campaign`, and
