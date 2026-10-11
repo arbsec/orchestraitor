@@ -15,7 +15,7 @@ pub use schema::{
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     RoutingDecisionProviderConfig, ServiceIdentityEnforcement, SubscriptionConfig,
-    ToolBudgetConfig, ToolConfig, WatchConfigBlock,
+    ToolBudgetConfig, ToolConfig, WatchConfigBlock, WatchKickoffConfig,
 };
 
 /// Result alias for config operations.

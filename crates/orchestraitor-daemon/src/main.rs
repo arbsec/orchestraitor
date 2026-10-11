@@ -149,7 +149,8 @@ async fn watch_cycle() -> Result<ExitCode> {
     )
     .into_diagnostic()
     .wrap_err("watch loop configuration rejected")?
-    .with_min_poll_interval(Some(Duration::from_secs(watch_config.poll_interval_secs)));
+    .with_min_poll_interval(Some(Duration::from_secs(watch_config.poll_interval_secs)))
+    .with_kickoff(watch_config.kickoff);
 
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     // SIGTERM/SIGINT fan-in: one channel increment per signal. The loop
@@ -238,6 +239,10 @@ async fn watch_cycle() -> Result<ExitCode> {
     // The prune inside the invocation loop needs the project dir after the
     // starter owns its clone.
     let prune_project_dir = project_dir.clone();
+    // The spend-cap comparison in the invocation loop reads the SAME
+    // pinned cap the runner enforces — cloned before the starter takes
+    // its owned copy, so the two layers cannot drift.
+    let daily_spend_cap_usd = budgets.daily_spend_soft_cap_usd;
     let starter = DirectWatchStarter::new(
         project_dir,
         config_dir.clone(),
@@ -246,6 +251,10 @@ async fn watch_cycle() -> Result<ExitCode> {
         loop_config.guardrails.worker_guardrails(),
     );
     let mut run_ordinal = 0_u64;
+    // The §9.19.6 budget window carried across invocations: the previous
+    // invocation's last-pass UTC day (`None` before the first). See the
+    // invocation loop below.
+    let mut budget_day: Option<u64> = None;
     // Whether the operator signalled shutdown during the FINAL invocation
     // (a signal during a budget drain preempts the drain but the summary
     // keeps the budget cause — the exit code must still be a clean
@@ -284,6 +293,12 @@ async fn watch_cycle() -> Result<ExitCode> {
             .into_diagnostic()
             .wrap_err("system clock is before the Unix epoch")?;
         let invocation_id = format!("watch-{start_unix_secs}-{run_ordinal}");
+        // The §9.19.6 budget window crosses invocation boundaries (a gen-4
+        // review fix): the previous invocation's last-pass UTC day seeds
+        // this invocation's first-pass comparison, so a day boundary
+        // between invocations observes the budget-window-reset kick-off
+        // condition. `None` on the first invocation (no previous window).
+        let previous_budget_day = budget_day.take();
         // The poller (built once, before the loop) carries its
         // previous_blocked state across budget boundaries; run_watch's
         // begin_invocation re-scopes the divergence dedup set per invocation.
@@ -297,13 +312,29 @@ async fn watch_cycle() -> Result<ExitCode> {
             signal_rx.clone(),
             start_unix_secs,
             &invocation_id,
+            previous_budget_day,
         )
         .await
         .into_diagnostic()?;
+        // Hand this invocation's final budget window to the next one.
+        budget_day = summary.final_budget_day;
         match summary.stop_reason {
+            // Both budget stops restart the ALWAYS-ON daemon (§9.36): the
+            // run budget ends one invocation, and the daily-spend soft cap
+            // ends one invocation UNTIL ITS WINDOW RESETS (§9.19.6 — the
+            // per-day budget window). A restart before the window resets
+            // would spin: the spend stays at/above the cap for the rest of
+            // the UTC day, so every restart would immediately re-stop.
+            // After a spend-cap stop the loop therefore WAITS for the next
+            // UTC day boundary before the restart — racing the operator's
+            // shutdown signal, which ends the wait (and the daemon) at
+            // once. Only then can the fresh invocation's first pass
+            // observe the §9.19.6 budget-window-reset kick-off condition.
+            // Restart only when no signal arrived during this invocation
+            // (baseline comparison above); a non-shutdown stop still exits
+            // non-zero when the restart bound is exhausted by a signal
+            // race, keeping the supervisor visible.
             orchestraitor_campaign::StopReason::RunBudgetExhausted
-                // Restart only when no signal arrived during this
-                // invocation (baseline comparison above).
                 if *signal_rx.borrow() == signal_baseline =>
             {
                 tracing::info!(
@@ -311,6 +342,67 @@ async fn watch_cycle() -> Result<ExitCode> {
                     spawns = summary.spawns,
                     "orcd watch: run budget exhausted; starting the next invocation"
                 );
+            }
+            orchestraitor_campaign::StopReason::SpendSoftCap
+                if *signal_rx.borrow() == signal_baseline =>
+            {
+                let now_unix_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .into_diagnostic()
+                    .wrap_err("system clock is before the Unix epoch")?;
+                // The spend-cap drain is unbounded (in-flight runs finish
+                // naturally), so it CAN cross midnight UTC: when it does,
+                // the §9.19.6 window has already reset and the recorded
+                // daily spend (new UTC day = empty window) is below the
+                // cap — restart at once instead of idling for up to a
+                // full extra day (a gen-6 review finding). Wait for the
+                // next boundary only when the spend is still at or above
+                // the cap.
+                let daily_spend = runs
+                    .daily_spend(now_unix_secs)
+                    .map_err(|error| miette::miette!("daily spend read failed: {error}"))?;
+                if daily_spend < daily_spend_cap_usd {
+                    tracing::info!(
+                        daily_spend,
+                        "orcd watch: spend-cap drain crossed the UTC day \
+                         boundary and the new window is below the cap; \
+                         starting the next invocation"
+                    );
+                } else {
+                    let wait = std::time::Duration::from_secs(86_400 - (now_unix_secs % 86_400));
+                    tracing::info!(
+                        wait_secs = wait.as_secs(),
+                        daily_spend,
+                        "orcd watch: daily spend cap reached; waiting for the next \
+                         UTC day boundary (the §9.19.6 budget window reset) before \
+                         the next invocation"
+                    );
+                    let mut wait_rx = signal_rx.clone();
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {
+                            // The window reset: start the next invocation.
+                        }
+                        changed = wait_rx.changed() => {
+                            // The operator signalled shutdown during the
+                            // wait: a signal during a budget drain
+                            // preempts the drain but the summary keeps the
+                            // budget cause; the OPERATOR asked for
+                            // shutdown, so exit SUCCESS below (the same
+                            // rule as a signal during a drain).
+                            if changed.is_ok() {
+                                signalled = true;
+                                break summary;
+                            }
+                            // Sender gone without a signal cannot happen
+                            // here (the signal task owns the sender for
+                            // the process's lifetime); treat it as
+                            // shutdown.
+                            signalled = true;
+                            break summary;
+                        }
+                    }
+                }
             }
             _ => {
                 // A signal during a budget drain preempts the drain but the
@@ -333,10 +425,14 @@ async fn watch_cycle() -> Result<ExitCode> {
         "orcd watch: stopped ({:?})",
         summary.stop_reason
     );
-    // A non-shutdown terminal stop (spend soft cap, guardrails exhausted)
-    // must be VISIBLE to the supervisor: exit non-zero so `Restart=on-
-    // failure` restarts the daemon (e.g. the next UTC day after a spend
-    // cap) instead of silently staying down (a PR #555 review finding).
+    // A non-shutdown terminal stop (guardrails exhausted) must be VISIBLE
+    // to the supervisor: exit non-zero so `Restart=on-failure` restarts
+    // the daemon instead of silently staying down (a PR #555 review
+    // finding). The spend soft cap and the run budget are NOT in this
+    // class anymore: the invocation loop above restarts them itself (the
+    // run budget ends one invocation; the spend cap ends one until its
+    // §9.19.6 per-day window resets), so they only reach this line when a
+    // signal raced the budget stop.
     // EXCEPT when the operator signalled shutdown during the drain: then
     // the exit is a clean shutdown (the audit rows keep the budget cause).
     if signalled || summary.stop_reason == orchestraitor_campaign::StopReason::Shutdown {
@@ -399,6 +495,9 @@ provider = "neuralwatt"
 model = "glm-5.3-flash"
 "#;
 
+    // The §9.36 kick-off condition enables ship as TOML data (§9.22.1:
+    // built-in defaults are data, never compiled constants), layered so
+    // every enable is overridable at any higher layer.
     let mut resolver = ConfigResolver::new()
         .with_toml(
             ConfigSource {
@@ -406,6 +505,14 @@ model = "glm-5.3-flash"
                 name: "built-in defaults".to_string(),
             },
             BUILT_IN_DEFAULTS,
+        )
+        .map_err(|error| miette::miette!("configuration parse failed: {error}"))?
+        .with_toml(
+            ConfigSource {
+                layer: ConfigLayer::BuiltInDefaults,
+                name: "built-in watch defaults".to_string(),
+            },
+            orchestraitor_daemon::WATCH_BUILT_IN_DEFAULTS_TOML,
         )
         .map_err(|error| miette::miette!("configuration parse failed: {error}"))?;
 

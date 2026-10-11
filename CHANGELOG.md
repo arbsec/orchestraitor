@@ -13,6 +13,24 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Configurable kick-off conditions for `orcd watch`**: the daemon now
+  spawns a campaign session only when none is in flight and at least one
+  kick-off condition holds — new eligible work appeared on the board, a
+  blocked task became unblocked, a worker slot was released, a per-day
+  budget window reset, or an external GitHub event arrived. Conditions
+  are operator-configurable through the new `[watch.kickoff]` layered
+  config block; built-in defaults ship as TOML data, and the
+  external-event condition ships disarmed (its event source is not
+  implemented yet, so it can never fire). Disabling every condition
+  yields an idle-but-healthy daemon: the tick keeps polling and
+  supervising, every skipped pass persists a typed no-op decision record
+  (the rationale carries the kick-off verdict) and journals a
+  `kickoff-skipped` event — never a silent drop. A budget stop stays an
+  explicit `blocked`/`needs-human` state and kick-off never bypasses a
+  budget; the daily-spend soft cap now ends one daemon invocation until
+  its per-day budget window resets: the daemon waits for the next UTC
+  day boundary (shutdown-interruptible) and restarts. Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
 - **Token-efficiency statistics** (`orc stats efficiency`): reporting
   over the cost ledger showing, per session or per configuration
   profile, provider-reported input/output/cache tokens alongside

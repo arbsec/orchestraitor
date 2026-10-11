@@ -53,6 +53,53 @@ configuration the CLI reads (`user.toml`, `org.toml`,
 poll_interval_secs = 300   # default 60; zero is rejected fail-closed
 ```
 
+### Kick-off conditions (§9.36)
+
+The daemon spawns a campaign session when none is in flight and at least
+one kick-off condition holds. The five conditions (spec §9.36) are
+operator-configurable through the `[watch.kickoff]` layered block; the
+built-in defaults ship as TOML data (§9.22.1), never compiled constants:
+
+```toml
+[watch.kickoff]
+new_eligible_work = true      # ready-queue work the previous pass did not see ready
+unblocked_promotion = true    # a blocked task became unblocked (§9.40 promotion)
+slot_released = true          # a lease or worker slot was released
+budget_window_reset = true    # a per-day budget window reset (§9.19.6)
+external_event = false        # an external GitHub event arrived (§9.47)
+```
+
+Notes:
+
+- An absent `[watch.kickoff]` block (or absent key) inherits the built-in
+  default shown above. Any higher layer (user, org, project, directory)
+  overrides any key.
+- `external_event` ships **disarmed**: the §9.47 GitHub event source
+  (relay PUSH + conditional POLL ingress) is not implemented yet — the
+  condition type and its config key exist, but the wired source is empty,
+  so the condition can never fire. It lands with issue #504.
+- **Disabling every condition yields an idle-but-healthy daemon**: the
+  tick keeps polling and supervising, run state stays durable and
+  reconciled — but no campaign session is ever kicked off. Every skipped
+  pass persists exactly one typed no-op decision record (the rationale
+  carries the kick-off verdict) and journals a `kickoff-skipped` event in
+  the run summary — never a silent drop.
+- **Budget stops are not a condition.** The budget gates (daily spend
+  soft cap, whole-run budget) run before any kick-off evaluation and
+  produce the explicit `blocked`/`needs-human` state (§9.33.4) — kick-off
+  never bypasses a budget to keep the loop moving. Both budget stops end
+  one daemon invocation, not the daemon: the invocation loop restarts on
+  `RunBudgetExhausted` immediately, and on `SpendSoftCap` only after
+  waiting for the next UTC day boundary (racing the operator's shutdown
+  signal) — the spend stays at/above the cap for the rest of the day, so
+  an immediate restart would spin, and only a post-boundary invocation's
+  first pass can observe the §9.19.6 budget-window-reset condition. Only
+  a shutdown signal (or a signal racing the wait) ends the process.
+- While a campaign is in flight with free capacity, the active session's
+  scheduling continues under the concurrency cap; the kick-off evaluation
+  gates starting a session from idle, not the in-flight session's own
+  spawn decisions.
+
 The pinned guard set (concurrency 2, stall 10m, worker timeout 45m,
 backoff 10s·2^n capped 5m, $10/day spend soft cap, 4h run budget) is
 unchanged from [`orc loop`](orc-loop.md#guard-set) — the daemon hands the

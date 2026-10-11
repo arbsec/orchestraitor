@@ -60,6 +60,26 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 /// seconds.
 pub const POLL_INTERVAL_CONFIG_KEY: &str = "watch.poll_interval_secs";
 
+/// The §9.22 layered configuration key prefix carrying the §9.36
+/// kick-off condition enables (issue #505).
+pub const KICKOFF_CONFIG_KEY_PREFIX: &str = "watch.kickoff";
+
+/// The built-in defaults TOML data for the `[watch]` block (§9.22.1:
+/// built-in defaults ship as TOML data, never as compile-time constants
+/// in business logic). Layered under `ConfigLayer::BuiltInDefaults`, so
+/// every enable is overridable at any higher layer.
+pub const WATCH_BUILT_IN_DEFAULTS_TOML: &str = r"
+[watch]
+poll_interval_secs = 60
+
+[watch.kickoff]
+new_eligible_work = true
+unblocked_promotion = true
+slot_released = true
+budget_window_reset = true
+external_event = false
+";
+
 /// Operator-configurable watch settings (spec §9.22 via §9.36).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchConfig {
@@ -67,6 +87,11 @@ pub struct WatchConfig {
     /// supervise pass; the loop runner's supervision ticks and backoff
     /// stay in force underneath the cadence.
     pub poll_interval_secs: u64,
+    /// The §9.36 kick-off condition enables (issue #505): which
+    /// conditions the spawn path evaluates. Resolved from the
+    /// `[watch.kickoff]` layered block; absent keys inherit the built-in
+    /// defaults.
+    pub kickoff: orchestraitor_campaign::KickoffSettings,
 }
 
 impl WatchConfig {
@@ -76,20 +101,28 @@ impl WatchConfig {
     /// # Errors
     ///
     /// Returns [`DaemonError::WatchConfig`] naming the rejected value.
-    pub fn new(poll_interval_secs: u64) -> Result<Self, DaemonError> {
+    pub fn new(
+        poll_interval_secs: u64,
+        kickoff: orchestraitor_campaign::KickoffSettings,
+    ) -> Result<Self, DaemonError> {
         if poll_interval_secs == 0 {
             return Err(DaemonError::WatchConfig(format!(
                 "{POLL_INTERVAL_CONFIG_KEY} must be at least 1 second (got 0)"
             )));
         }
-        Ok(Self { poll_interval_secs })
+        Ok(Self {
+            poll_interval_secs,
+            kickoff,
+        })
     }
 
-    /// The documented fixed default cadence (§9.36).
+    /// The documented fixed default cadence (§9.36) with the built-in
+    /// default kick-off enables.
     #[must_use]
     pub const fn default_cadence() -> Self {
         Self {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            kickoff: orchestraitor_campaign::KickoffSettings::builtin_defaults(),
         }
     }
 
@@ -114,9 +147,52 @@ impl WatchConfig {
                 DaemonError::WatchConfig(format!("{POLL_INTERVAL_CONFIG_KEY}: {error}"))
             })?;
         match configured {
-            Some(resolved_value) => Self::new(resolved_value.value),
-            None => Ok(Self::default_cadence()),
+            Some(resolved_value) => {
+                Self::new(resolved_value.value, Self::resolve_kickoff(resolver)?)
+            }
+            None => Ok(Self {
+                poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+                kickoff: Self::resolve_kickoff(resolver)?,
+            }),
         }
+    }
+
+    /// Resolves the §9.36 kick-off condition enables (issue #505) from
+    /// the layered `[watch.kickoff]` block. Every absent key inherits the
+    /// built-in default; the resolved enables are the effective AND of
+    /// the merged block against those defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] when the layered config
+    /// cannot be resolved.
+    fn resolve_kickoff(
+        resolver: &orchestraitor_core::config::ConfigResolver,
+    ) -> Result<orchestraitor_campaign::KickoffSettings, DaemonError> {
+        let merged = resolver.resolve_config().map_err(|error| {
+            DaemonError::WatchConfig(format!("{KICKOFF_CONFIG_KEY_PREFIX}: {error}"))
+        })?;
+        let defaults = orchestraitor_campaign::KickoffSettings::builtin_defaults();
+        let Some(block) = merged
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.kickoff.as_ref())
+        else {
+            return Ok(defaults);
+        };
+        Ok(orchestraitor_campaign::KickoffSettings {
+            new_eligible_work: block
+                .new_eligible_work
+                .unwrap_or(defaults.new_eligible_work),
+            unblocked_promotion: block
+                .unblocked_promotion
+                .unwrap_or(defaults.unblocked_promotion),
+            slot_released: block.slot_released.unwrap_or(defaults.slot_released),
+            budget_window_reset: block
+                .budget_window_reset
+                .unwrap_or(defaults.budget_window_reset),
+            external_event: block.external_event.unwrap_or(defaults.external_event),
+        })
     }
 }
 
@@ -789,6 +865,7 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     shutdown: tokio::sync::watch::Receiver<u64>,
     start_unix_secs: u64,
     invocation_id: &str,
+    previous_budget_day: Option<u64>,
 ) -> Result<LoopSummary, DaemonError> {
     // §9.24.2 restart recovery BEFORE the first tick: running → orphaned.
     let recovered = runs
@@ -821,7 +898,12 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
         invocation_id.to_string(),
         start_unix_secs,
     )
-    .map_err(|error| DaemonError::WatchRun(error.to_string()))?;
+    .map_err(|error| DaemonError::WatchRun(error.to_string()))?
+    // The §9.19.6 budget window crosses invocation boundaries: the daemon
+    // hands the previous invocation's last-pass UTC day in, so a first
+    // pass after a day boundary observes the budget-window-reset kick-off
+    // condition (issue #505, gen-4 review fix).
+    .with_previous_budget_day(previous_budget_day);
     let summary = runner
         .run(shutdown)
         .await

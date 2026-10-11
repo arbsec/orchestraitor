@@ -75,6 +75,11 @@ pub enum NoOpReason {
     AllBlocked,
     /// Every tracked item is closed — the epic has nothing open left.
     EpicExhausted,
+    /// The §9.36 kick-off gate skipped the pass (issue #505): no campaign
+    /// was in flight and no ARMED kick-off condition held. The gate's
+    /// verdict (which conditions held, if any) is in the record's
+    /// rationale.
+    KickoffGate,
 }
 
 /// Whether a pass selected a task or was a typed no-op.

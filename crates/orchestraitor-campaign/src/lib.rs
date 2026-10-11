@@ -24,6 +24,7 @@
 mod decision;
 mod error;
 mod guardrails;
+mod kickoff;
 mod loop_run;
 mod run_state;
 mod session;
@@ -38,6 +39,10 @@ pub use guardrails::{
     DEFAULT_CI_POLL_BUDGET_SECS, DEFAULT_MAX_TASK_ATTEMPTS, DEFAULT_NO_PROGRESS_TURNS,
     DEFAULT_TASK_RETRY_BACKOFF_SECS, DEFAULT_TOOL_REPEAT_COUNT, DEFAULT_TOOL_REPEAT_WINDOW,
     GuardrailsConfigValues, GuardrailsSettings,
+};
+pub use kickoff::{
+    EmptyKickoffEvents, KickoffCondition, KickoffEventSource, KickoffExternalEvent,
+    KickoffObservation, KickoffSettings, KickoffVerdict, evaluate as evaluate_kickoff,
 };
 pub use loop_run::{
     BoardPoller, LoopConfig, LoopEvent, LoopRunner, LoopSummary, LoopWorkerStarter, StopReason,

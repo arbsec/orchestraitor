@@ -192,9 +192,131 @@ fn watch_cadence_resolves_from_layers_and_fails_closed() -> Result<(), Box<dyn s
     assert_eq!(config.poll_interval_secs, 300);
 
     // A zero cadence is a runaway poll loop: rejected fail-closed.
-    let zero = WatchConfig::new(0);
+    let zero = WatchConfig::new(
+        0,
+        orchestraitor_campaign::KickoffSettings::builtin_defaults(),
+    );
     assert!(zero.is_err(), "a zero cadence must be rejected");
     Ok(())
+}
+
+/// §9.22 layered config (issue #505): the kick-off condition enables
+/// resolve through the `[watch.kickoff]` block — absent keys inherit the
+/// built-in defaults, a higher layer overrides, and disabling every
+/// condition yields the idle-but-healthy configuration.
+#[test]
+fn watch_kickoff_resolves_from_layers_with_built_in_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    // No configuration: the built-in defaults (§9.22.1 — shipped as TOML
+    // data in the daemon's built-in defaults layer, mirrored by the
+    // resolver fallback here).
+    let resolver = ConfigResolver::new();
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert_eq!(
+        config.kickoff,
+        orchestraitor_campaign::KickoffSettings::builtin_defaults(),
+        "absent [watch.kickoff] inherits the built-in defaults"
+    );
+    assert!(
+        !config.kickoff.external_event,
+        "the §9.47 external-event condition ships disarmed (#504 pending)"
+    );
+
+    // A partial block: configured keys override, absent keys inherit.
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::Project,
+            name: "test-project".to_string(),
+        },
+        "[watch.kickoff]\nnew_eligible_work = false\n",
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(
+        !config.kickoff.new_eligible_work,
+        "the project layer overrides the default"
+    );
+    assert!(
+        config.kickoff.unblocked_promotion,
+        "an absent key inherits the built-in default"
+    );
+
+    // Disabling every condition: the idle-but-healthy configuration —
+    // resolution succeeds (nothing to reject), the daemon simply never
+    // kicks off.
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::Project,
+            name: "test-project".to_string(),
+        },
+        "[watch.kickoff]\nnew_eligible_work = false\nunblocked_promotion = false\nslot_released = false\nbudget_window_reset = false\nexternal_event = false\n",
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert_eq!(
+        config.kickoff,
+        orchestraitor_campaign::KickoffSettings {
+            new_eligible_work: false,
+            unblocked_promotion: false,
+            slot_released: false,
+            budget_window_reset: false,
+            external_event: false,
+        },
+        "all-disabled resolves cleanly: the daemon idles but stays healthy"
+    );
+    Ok(())
+}
+
+/// §9.22.1 (issue #505): the built-in defaults ship as TOML data — the
+/// constant parses, its keys are known, and it agrees with the resolver
+/// fallback defaults.
+#[test]
+fn the_built_in_defaults_ship_as_parsable_toml_data() -> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::BuiltInDefaults,
+            name: "built-in watch defaults".to_string(),
+        },
+        orchestraitor_daemon::WATCH_BUILT_IN_DEFAULTS_TOML,
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert_eq!(
+        config.kickoff,
+        orchestraitor_campaign::KickoffSettings::builtin_defaults(),
+        "the shipped TOML data and the fallback defaults agree"
+    );
+    assert_eq!(
+        config.poll_interval_secs,
+        orchestraitor_daemon::DEFAULT_POLL_INTERVAL_SECS,
+        "the shipped TOML data carries the documented cadence default"
+    );
+    Ok(())
+}
+
+/// The §9.36 kick-off enables wire through the PRODUCTION builder chain
+/// (`with_guardrails` + `with_min_poll_interval` + `with_kickoff`,
+/// matching `watch_cycle`) into the loop runner's config — the runner
+/// evaluates exactly the operator-resolved conditions.
+#[test]
+fn the_kickoff_settings_wire_into_the_loop_config() {
+    let settings = orchestraitor_campaign::KickoffSettings {
+        new_eligible_work: false,
+        ..orchestraitor_campaign::KickoffSettings::builtin_defaults()
+    };
+    let config = LoopConfig::with_guardrails(
+        orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        orchestraitor_campaign::GuardrailsSettings::default(),
+    )
+    .expect("valid base config")
+    .with_kickoff(settings);
+    assert_eq!(
+        config.kickoff, settings,
+        "the runner evaluates the operator-resolved enables"
+    );
 }
 
 /// §9.36: the watch cycle's `LoopConfig` wires the §9.22 cadence into the

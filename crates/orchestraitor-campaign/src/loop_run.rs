@@ -46,6 +46,7 @@ use orchestraitor_worker::{RunStatus, WorkerBudgets, WorkerError, WorkerRun};
 use crate::decision::{NoOpReason, SelectedTask};
 use crate::error::CampaignError;
 use crate::guardrails::GuardrailsSettings;
+use crate::kickoff::KickoffObservation;
 use crate::run_state::{LoopRunStore, RunRowStatus, StartRun};
 use crate::session::{BoardSnapshot, plan_pass_with_skips_async, task_id_for};
 
@@ -137,6 +138,11 @@ pub struct LoopConfig {
     /// limits plus the cross-invocation task retry budget/backoff.
     /// Defaults apply when absent (`Default::default()`).
     pub guardrails: crate::guardrails::GuardrailsSettings,
+    /// The §9.36 kick-off condition enables (issue #505): which kick-off
+    /// conditions the daemon/spawn path evaluates. Defaults arm every
+    /// board/reconcile-derived condition (the built-in defaults TOML
+    /// layer ships the same data per §9.22.1).
+    pub kickoff: crate::kickoff::KickoffSettings,
 }
 
 impl LoopConfig {
@@ -181,6 +187,7 @@ impl LoopConfig {
             max_cycles,
             min_poll_interval,
             guardrails: GuardrailsSettings::default(),
+            kickoff: crate::kickoff::KickoffSettings::builtin_defaults(),
         };
         config.validate()?;
         Ok(config)
@@ -204,6 +211,7 @@ impl LoopConfig {
             max_cycles,
             min_poll_interval: None,
             guardrails,
+            kickoff: crate::kickoff::KickoffSettings::builtin_defaults(),
         };
         config.validate()?;
         Ok(config)
@@ -220,6 +228,16 @@ impl LoopConfig {
     #[must_use]
     pub fn with_min_poll_interval(mut self, interval: Option<Duration>) -> Self {
         self.min_poll_interval = interval;
+        self
+    }
+
+    /// Sets the §9.36 kick-off condition enables on an existing
+    /// configuration (issue #505). The watch daemon resolves them from
+    /// the §9.22 layered `[watch.kickoff]` block; the foreground loop
+    /// keeps the built-in defaults.
+    #[must_use]
+    pub fn with_kickoff(mut self, kickoff: crate::kickoff::KickoffSettings) -> Self {
+        self.kickoff = kickoff;
         self
     }
 
@@ -366,6 +384,16 @@ pub enum LoopEvent {
         /// The scheduled delay in whole seconds.
         delay_secs: u64,
     },
+    /// A pass reached the §9.36 kick-off evaluation and no ARMED condition
+    /// held (issue #505): the pass skipped with its typed verdict, never
+    /// silently. The fired set records which conditions held; conditions
+    /// that held but are disarmed are NOT listed.
+    KickoffSkipped {
+        /// The kick-off conditions that held this pass (empty when none
+        /// held; the pass is skipped in both cases — a hold under a
+        /// disarmed condition is the visible no-fire case).
+        fired: Vec<crate::kickoff::KickoffCondition>,
+    },
 }
 
 /// The end-of-run report: typed counts plus the event journal.
@@ -397,6 +425,12 @@ pub struct LoopSummary {
     pub task_budget_skips: u64,
     /// Whole seconds of loop elapsed time (virtual under tests).
     pub elapsed_secs: u64,
+    /// The runner's final §9.19.6 budget window: the UTC day of the last
+    /// completed pass (`None` when no pass ran). The daemon's invocation
+    /// loop hands this to the NEXT invocation's
+    /// `LoopRunner::with_previous_budget_day`, so the window comparison
+    /// survives restarts (issue #505, gen-4 review fix).
+    pub final_budget_day: Option<u64>,
     /// The event journal, in observation order.
     pub events: Vec<LoopEvent>,
 }
@@ -562,6 +596,19 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     /// timeout) interrupts the pass instead of waiting for it and the rest
     /// of the tick. `None` outside `run` — the field is seeded there.
     shutdown: Option<tokio::sync::watch::Receiver<u64>>,
+    /// Kick-off state (§9.36, issue #505): the ready-queue and
+    /// blocked-candidate task ids the previous pass observed (empty
+    /// before the first pass — a restart re-observes fresh, so new work
+    /// present at startup fires condition 1).
+    previous_ready_ids: HashSet<String>,
+    previous_blocked_ids: HashSet<String>,
+    /// Whether a supervised run reached a terminal status since the last
+    /// pass (a lease/worker slot was released — condition 3).
+    slot_released_since_pass: bool,
+    /// The UTC day of the last pass's clock reading (§9.19.6 per-day
+    /// budget window). `None` before the first pass. A moved boundary is
+    /// a budget-window reset — condition 4.
+    last_pass_day: Option<u64>,
 }
 
 /// The loop runner's typed counters (summarized into [`LoopSummary`]).
@@ -606,6 +653,43 @@ struct Reaped {
     status: RunRowStatus,
 }
 
+/// The no-op rationale for a kick-off-skipped pass (issue #505): the
+/// verdict (which ARMED conditions held) plus the observable inputs, so
+/// the durable decision record shows why the poll produced no work.
+fn kick_off_rationale(
+    verdict: &crate::kickoff::KickoffVerdict,
+    observation: &KickoffObservation,
+) -> String {
+    let fired = if verdict.fired.is_empty() {
+        "none".to_string()
+    } else {
+        verdict
+            .fired
+            .iter()
+            .map(|condition| condition.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "kick-off gate: no campaign in flight and no armed condition mandated a spawn \
+         (conditions held: {fired}; ready queue: {} item(s); slot released: {}; \
+         budget window reset: {})",
+        observation.ready_ids.len(),
+        observation.slot_released,
+        observation.budget_window_reset,
+    )
+}
+
+/// One §9.36 kick-off gate decision for a pass (issue #505).
+enum KickoffGate {
+    /// The pass proceeds to plan (a campaign is in flight or a
+    /// condition fired).
+    Proceed,
+    /// No campaign is in flight and no armed condition held: the
+    /// pass is skipped (the verdict rides the journal event).
+    Skipped(KickoffObservation),
+}
+
 impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// Builds a runner. Validation runs here and again at `run` — a
     /// weakened guard must never reach the supervision loop.
@@ -644,6 +728,10 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             next_poll_allowed_at: Duration::ZERO,
             slots: Vec::new(),
             shutdown: None,
+            previous_ready_ids: HashSet::new(),
+            previous_blocked_ids: HashSet::new(),
+            slot_released_since_pass: false,
+            last_pass_day: None,
         })
     }
 
@@ -658,6 +746,30 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     ) -> Self {
         self.task_selector = Some(selector);
         self
+    }
+
+    /// Seeds the §9.19.6 per-day budget window the runner's FIRST pass
+    /// compares against (issue #505, gen-4 review fix): the always-on
+    /// daemon hands the PREVIOUS invocation's last-pass UTC day across
+    /// the restart boundary, so a first pass after a day boundary
+    /// observes the budget-window-reset kick-off condition — without the
+    /// seed, `last_pass_day` starts `None` and the first pass can never
+    /// claim a reset. The foreground loop (one invocation) never needs
+    /// this.
+    #[must_use]
+    pub fn with_previous_budget_day(mut self, day: Option<u64>) -> Self {
+        self.last_pass_day = day;
+        self
+    }
+
+    /// The runner's final §9.19.6 budget-window state: the UTC day of the
+    /// last completed pass (`None` when no pass ran). The daemon's
+    /// invocation loop hands this to the NEXT invocation's
+    /// [`Self::with_previous_budget_day`], so the window comparison
+    /// survives restarts.
+    #[must_use]
+    pub const fn final_budget_day(&self) -> Option<u64> {
+        self.last_pass_day
     }
 
     /// Unix seconds under the runner's clock: loop-start wall time plus the
@@ -675,6 +787,20 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     /// Returns elapsed time on the Tokio clock, including virtual test time.
     fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Whether the §9.19.6 per-day budget window reset since the last
+    /// pass (issue #505, kick-off condition 4): a moved UTC day boundary.
+    /// First pass of an invocation reads `None` — no reset is claimed
+    /// without a previous window to compare against.
+    fn budget_window_reset(&mut self, now_secs: u64) -> bool {
+        let day = now_secs - (now_secs % 86_400);
+        let reset = match self.last_pass_day {
+            Some(previous) => day != previous,
+            None => false,
+        };
+        self.last_pass_day = Some(day);
+        reset
     }
 
     /// Waits one tick, racing the shutdown channel: a signal starts (or
@@ -909,6 +1035,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             tasks_stuck: counters.stuck,
             task_budget_skips: counters.task_budget_skips,
             elapsed_secs: final_elapsed.as_secs(),
+            final_budget_day: self.last_pass_day,
             events,
         })
     }
@@ -1013,6 +1140,10 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
     ) -> Result<(), CampaignError> {
         for reaped in self.reap_finished().await? {
             counters.note(&reaped);
+            // A terminal reap releases the run's worker slot (§9.36
+            // kick-off condition 3, issue #505): the next pass's kick-off
+            // evaluation observes the release once.
+            self.slot_released_since_pass = true;
             events.push(reaped.event);
         }
         Ok(())
@@ -1219,6 +1350,116 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         *drain_deadline = self.elapsed() + self.config.shutdown_budget;
     }
 
+    /// Evaluates the §9.36 kick-off gate (issue #505): when NO campaign
+    /// is in flight (no supervised worker slot), a pass spawns only when
+    /// at least one ARMED condition holds — the explicit, configurable
+    /// replacement of the implicit "ready queue non-empty → spawn"
+    /// trigger. While a campaign IS in flight with free capacity, the
+    /// active session's scheduling continues under the concurrency cap
+    /// (that is supervision, not a new kick-off). The §9.33.4 budget
+    /// gates (spend soft cap, run budget) run before this point in the
+    /// run loop: a budget stop produces the explicit
+    /// `blocked`/`needs-human` state and never reaches here as a silent
+    /// skip, and kick-off never bypasses a budget.
+    ///
+    /// The cross-invocation exclusions (`excluded_tasks` — in-flight and
+    /// already-run tasks, retry-budget and backoff windows) apply BEFORE
+    /// the condition evaluation: an eligible-but-excluded task is not a
+    /// kick-off candidate, so a ready task under backoff can never
+    /// satisfy `new_eligible_work` now AND block its own later kick-off
+    /// by having been recorded as previously-ready (a gen-1 review
+    /// finding).
+    fn kickoff_gate(
+        &mut self,
+        now: u64,
+        snapshot: &BoardSnapshot,
+        excluded: &HashSet<String>,
+    ) -> KickoffGate {
+        let campaign_in_flight = !self.slots.is_empty();
+        let observation = KickoffObservation {
+            ready_ids: snapshot
+                .ready
+                .iter()
+                .map(|item| task_id_for(&item.repo, item.number))
+                .filter(|task_id| !excluded.contains(task_id))
+                .collect(),
+            previous_ready_ids: std::mem::take(&mut self.previous_ready_ids),
+            previous_blocked_ids: std::mem::take(&mut self.previous_blocked_ids),
+            slot_released: std::mem::take(&mut self.slot_released_since_pass),
+            budget_window_reset: self.budget_window_reset(now),
+            // The §9.47 source lands with issue #504; the runner wires the
+            // empty source, so this condition is defined and configurable
+            // but never fires today.
+            external_events: Vec::new(),
+        };
+        let verdict = crate::kickoff::evaluate(&self.config.kickoff, &observation);
+        // The previous pass's queues feed the NEXT pass's evaluation;
+        // this pass's snapshot becomes that state — tracked on EVERY
+        // pass, so the idle evaluation always compares against the last
+        // observed board, busy or not.
+        self.previous_ready_ids.clone_from(&observation.ready_ids);
+        self.previous_blocked_ids = snapshot
+            .blocked_candidates
+            .iter()
+            .map(|item| task_id_for(&item.repo, item.number))
+            .collect();
+        if !campaign_in_flight && !verdict.kick_off() {
+            return KickoffGate::Skipped(observation);
+        }
+        KickoffGate::Proceed
+    }
+
+    /// Records one kick-off-skipped pass (issue #505, gen-1 review fix):
+    /// exactly one durable decision record per pass (§9.35) even when the
+    /// gate skips it — the no-op record's rationale carries the kick-off
+    /// verdict, so the durable decision history shows why the poll
+    /// produced no work — plus the mirrored journal events and the
+    /// exclusion/budget-skip counters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError`] when the decision record cannot be
+    /// persisted (durable-state failure is fatal, as everywhere).
+    fn record_kickoff_skip(
+        &mut self,
+        events: &mut Vec<LoopEvent>,
+        elapsed: Duration,
+        observation: &KickoffObservation,
+        budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
+    ) -> Result<(), CampaignError> {
+        let verdict = crate::kickoff::evaluate(&self.config.kickoff, observation);
+        let rationale = crate::session::append_budget_skips_str(
+            &kick_off_rationale(&verdict, observation),
+            budget_skips,
+        );
+        let stored = self.decisions.record(&crate::decision::CampaignDecision {
+            kind: crate::decision::DecisionKind::NoOp,
+            no_op_reason: Some(NoOpReason::KickoffGate),
+            selected: None,
+            role: self.routing.role.clone(),
+            provider: self.routing.provider.clone(),
+            model: self.routing.model.clone(),
+            precedence_path: "kick-off-gate".to_string(),
+            fallback_reason: self.routing.fallback_reason.clone(),
+            worker_args: Vec::new(),
+            rationale,
+            alternatives: Vec::new(),
+            blocked_graph: Vec::new(),
+            skipped: Vec::new(),
+        })?;
+        events.push(LoopEvent::PassPlanned {
+            decision_id: stored.id,
+            selected: false,
+            no_op_reason: Some(NoOpReason::KickoffGate),
+            task_id: None,
+        });
+        events.push(LoopEvent::KickoffSkipped {
+            fired: verdict.fired,
+        });
+        self.pace_no_spawn(events, elapsed);
+        Ok(())
+    }
+
     /// Plans one campaign pass from a freshly polled snapshot and spawns
     /// when a task was selected — reached only after `pass` has re-checked
     /// the budget against the completed poll.
@@ -1230,7 +1471,26 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         now: u64,
         mut snapshot: BoardSnapshot,
     ) -> Result<bool, CampaignError> {
+        // The cross-invocation exclusions feed BOTH the kick-off gate's
+        // candidate set and the pass's planning — one computation, one
+        // view of what is kick-off-able this pass (a gen-1 review
+        // finding).
         let task_exclusions = self.excluded_tasks(now)?;
+        if !task_exclusions.budget_skips.is_empty() {
+            counters.task_budget_skips += task_exclusions.budget_skips.len() as u64;
+        }
+        match self.kickoff_gate(now, &snapshot, &task_exclusions.excluded) {
+            KickoffGate::Skipped(observation) => {
+                self.record_kickoff_skip(
+                    events,
+                    elapsed,
+                    &observation,
+                    &task_exclusions.budget_skips,
+                )?;
+                return Ok(false);
+            }
+            KickoffGate::Proceed => {}
+        }
         let excluded = &task_exclusions.excluded;
         let budget_skips = &task_exclusions.budget_skips;
         snapshot
@@ -1244,9 +1504,6 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             budget_skips,
         )
         .await?;
-        if !budget_skips.is_empty() {
-            counters.task_budget_skips += budget_skips.len() as u64;
-        }
         let selected = stored.decision.selected.as_ref();
         events.push(LoopEvent::PassPlanned {
             decision_id: stored.id,
@@ -1311,6 +1568,15 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                         task_id: selected.task_id.clone(),
                         completed: false,
                     });
+                    // The attempted task IS this pass's kick-off: the
+                    // gate fired and the spawn path ran for IT. The
+                    // previous-ready set shrinks to the ATTEMPTED task —
+                    // unselected ready siblings were never attempted, so
+                    // they stay fresh for the next pass's kick-off
+                    // evaluation (a gen-3 review finding: otherwise a
+                    // sibling waits for an outside event the failed
+                    // sibling's backoff cannot provide).
+                    self.previous_ready_ids = [selected.task_id.clone()].into_iter().collect();
                     self.pace_no_spawn(events, self.elapsed());
                     return Ok(false);
                 }

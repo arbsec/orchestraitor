@@ -11,7 +11,7 @@ use crate::config::{
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     RoutingDecisionProviderConfig, SubscriptionConfig, ToolBudgetConfig, ToolConfig,
-    WatchConfigBlock, parse_toml_config,
+    WatchConfigBlock, WatchKickoffConfig, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -198,6 +198,19 @@ impl OrchestraitorConfig {
 impl WatchConfigBlock {
     fn merge(&mut self, next: Self) {
         merge_scalar(&mut self.poll_interval_secs, next.poll_interval_secs);
+        merge_option(&mut self.kickoff, next.kickoff, |current, next| {
+            current.merge(&next);
+        });
+    }
+}
+
+impl WatchKickoffConfig {
+    fn merge(&mut self, next: &Self) {
+        merge_scalar(&mut self.new_eligible_work, next.new_eligible_work);
+        merge_scalar(&mut self.unblocked_promotion, next.unblocked_promotion);
+        merge_scalar(&mut self.slot_released, next.slot_released);
+        merge_scalar(&mut self.budget_window_reset, next.budget_window_reset);
+        merge_scalar(&mut self.external_event, next.external_event);
     }
 }
 

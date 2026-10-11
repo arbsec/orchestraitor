@@ -60,12 +60,38 @@ pub struct OrchestraitorConfig {
 /// Watch-daemon configuration block (spec `10-orchestrator.md` §9.36):
 /// the poll-tick cadence and its knobs, operator-configurable through the
 /// §9.22 layered configuration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WatchConfigBlock {
     /// Seconds between board polls (the §9.36 poll tick). Each tick is a
     /// full reconcile/supervise pass. Zero is rejected fail-closed at
     /// resolve time (a zero cadence is a runaway poll loop).
     pub poll_interval_secs: Option<u64>,
+    /// §9.36 kick-off condition enables (issue #505). Absent block keeps
+    /// the built-in defaults (every board/reconcile-derived condition
+    /// armed; the external-event condition disarmed until the §9.47
+    /// source exists).
+    pub kickoff: Option<WatchKickoffConfig>,
+}
+
+/// Kick-off condition enables (`[watch.kickoff]`; spec
+/// `10-orchestrator.md` §9.36, issue #505). An absent key inherits the
+/// built-in default; every condition is operator-disablable. Disabling
+/// every condition yields an idle-but-healthy daemon: the tick keeps
+/// polling and supervising, and no campaign session is ever kicked off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchKickoffConfig {
+    /// Arm the new-eligible-work condition (default: true).
+    pub new_eligible_work: Option<bool>,
+    /// Arm the unblocked-promotion condition (§9.40; default: true).
+    pub unblocked_promotion: Option<bool>,
+    /// Arm the slot-released condition (default: true).
+    pub slot_released: Option<bool>,
+    /// Arm the budget-window-reset condition (§9.19.6; default: true).
+    pub budget_window_reset: Option<bool>,
+    /// Arm the external-event condition (§9.47; default: false — the
+    /// event source lands with issue #504, so the shipped source is
+    /// empty and the condition can never fire).
+    pub external_event: Option<bool>,
 }
 
 /// Anti-stuck guardrail thresholds for `orc loop`
