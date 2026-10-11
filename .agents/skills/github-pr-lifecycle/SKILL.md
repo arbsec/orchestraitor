@@ -50,10 +50,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   diff touches a §21.1 security-sensitive class) and
                   `pr-labels-from-issue` (copies the process-label allowlist
                   — MVP, task, epic, spike, bug, documentation, test,
-                  dependencies, github-actions, spec, needs-human-review,
-                  blocked:* — from the PR's Closes/Fixes/Resolves issues,
-                  #469) immediately after the PR exists; both steps are
-                  non-fatal and print the exact manual command on failure.
+                  dependencies, github-actions, spec, blocked:arbitraitor,
+                  blocked:orchestraitor; `needs-human-review` is never
+                  copied from issues, it is diff-derived — from the PR's
+                  Closes/Fixes/Resolves issues, #469) immediately after the
+                  PR exists; both steps are non-fatal and print the exact
+                  manual command on failure.
                   `pr-labels <pr>` remains the manual fallback/reconcile
                   step (step 9) — never the primary mechanism. Labels derive
                   from launch facts only, applied idempotently.

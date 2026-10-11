@@ -139,7 +139,9 @@ assert 'multiple refs exit 0' 0 "$RC"
 api_calls="$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
 assert 'three issue fetches' 3 "$api_calls"
 assert 'keyword-only extraction (no bare #999)' 0 "$(grep -c 'issues/999' "$GH_LOG")"
-assert 'labels from all issues applied' '["MVP","bug","dependencies","spec","test"]' "$(pr_edit_adds | jq -sc 'add | unique | sort' -c)"
+assert 'labels from all issues applied (order-independent)' \
+  "$(pr_edit_adds | jq -sc 'add // [] | unique | sort' -c)" \
+  '["MVP","bug","dependencies","spec","test"]'
 assert 'non-allowlisted issue label (question) not copied' 0 "$(pr_edit_adds | jq '[.[] | select(. == "question")] | length' -r)"
 
 # (a3) duplicate refs deduplicated (same issue referenced twice).
@@ -172,7 +174,9 @@ export PR_BODY="Closes #999, Closes #101 and Closes #102" PR_LABELS="agent-creat
 run pr-labels-from-issue 77 --repo test-org/repo
 assert 'failing issue does not fail the run' 0 "$RC"
 assert 'failure warning names the skipped issue' 1 "$(grep -cF 'issue #999' "$TMP/stderr")"
-assert 'other issues still contribute labels' '["MVP","spec"]' "$(pr_edit_adds | jq -sc 'add | unique | sort' -c)"
+assert 'other issues still contribute labels (order-independent)' \
+  "$(pr_edit_adds | jq -sc 'add // [] | unique | sort' -c)" \
+  '["MVP","spec"]'
 
 # (d2) no references in body -> exit 0, no mutations.
 unset ISSUE_FAIL
