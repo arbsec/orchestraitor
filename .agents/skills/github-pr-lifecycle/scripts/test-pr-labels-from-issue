@@ -240,9 +240,21 @@ case "$1/${2:-}" in
   auth/status) exit 0 ;;
   pr/create) printf '%s\n' "https://github.com/test-org/repo/pull/77"; exit 0 ;;
   pr/edit) echo "stub: pr edit failed" >&2; exit 1 ;;
-  pr/view) out="{\"body\":$(jq -cn --arg b "${PR_BODY:-Closes #101}" '$b')}";;
-  api/*) exit 1 ;;
-  *) exit 0 ;;
+  pr/view)
+    case "$*" in
+      *--json\ body*) out="{\"body\":$(jq -cn --arg b "${PR_BODY:-Closes #101}" '$b')}";;
+      *--json\ author*) out="{\"author\":{\"login\":\"app/arbsec-agent\"}}";;
+      *--json\ labels*) out='{"labels":[]}';;
+      *) out="{}" ;;
+    esac ;;
+  api/repos/test-org/repo/issues/*)
+    # Succeed so pr-labels-from-issue reaches its failing `pr edit`: this
+    # fixture isolates the CHAIN's non-fatality (a labeler failing at its
+    # mutation), not the partial-read path (covered separately above).
+    out='{"labels":[{"name":"MVP"}]}';;
+  api/repos/test-org/repo/pulls/*/files)
+    printf '%s\n' '{"filename":"README.md","patch":"@@ -1 +1,2 @@\n+doc line\n"}';;
+  *) out="{}" ;;
 esac
 j=""; prev=""
 for a in "$@"; do [ "$prev" = "--jq" ] && j="$a"; prev="$a"; done
@@ -254,7 +266,7 @@ OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --re
 assert 'labeling failure does not fail pr-create' 0 "$RC"
 assert 'PR URL still emitted on labeling failure' 'https://github.com/test-org/repo/pull/77' "$OUT"
 assert 'failure warnings name the PR' 2 "$(grep -cF 'PR #77' "$TMP/stderr")"
-assert 'failure warnings name the manual commands' 2 "$(grep -cF 'pr-labels' "$TMP/stderr")"
+assert 'failure warnings name the manual commands' 4 "$(grep -cF 'pr-labels' "$TMP/stderr")"
 
 printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

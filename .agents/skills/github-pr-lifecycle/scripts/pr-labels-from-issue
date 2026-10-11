@@ -40,10 +40,10 @@ REPO="$(orc_lib_resolve_repo)"
 # Process-classification allowlist: labels the repo uses to classify WORK
 # (what kind of task this is, what blocks it). Intersected with each linked
 # issue's labels verbatim — an issue label not on this list is never copied.
-# The `needs-human-review` label is NOT in the allowlist on purpose: it is
-# derived from the PR's own diff by `pr-labels` (§21.1 classes), and copying
-# it from an issue would attach a human gate to a PR whose diff may not
-# warrant one.
+# The `needs-human-review` label is deliberately NOT copied from issues: it
+# is the §21.1 human gate derived from the PR's own diff by `pr-labels`; an
+# issue carrying it must not impose that gate on a PR whose diff may not
+# warrant one. The script never removes any label.
 PROCESS_LABELS=(
   "MVP"
   "task"
@@ -55,7 +55,6 @@ PROCESS_LABELS=(
   "dependencies"
   "github-actions"
   "spec"
-  "needs-human-review"
   "blocked:arbitraitor"
   "blocked:orchestraitor"
 )
@@ -87,15 +86,25 @@ if [ "${#ISSUE_NUMBERS[@]}" -eq 0 ]; then
   exit "$ORC_OK"
 fi
 
+# Comma-joined issue numbers for the JSON receipt (never space-joined).
+ISSUES_JSON='['
+for index in "${!ISSUE_NUMBERS[@]}"; do
+  [ "$index" -gt 0 ] && ISSUES_JSON+=','
+  ISSUES_JSON+="${ISSUE_NUMBERS[$index]}"
+done
+ISSUES_JSON+=']'
+
 # --- Copy process labels, issue by issue ---------------------------------------
 # Per-issue reads ride the routed transport (same route as the mutating
 # calls); a failing issue read is non-fatal — the remaining issues still
 # contribute their labels.
 declare -A TO_ADD=()
+declare -A SKIPPED=()
 for issue in "${ISSUE_NUMBERS[@]}"; do
   issue_labels=""
   if ! issue_labels="$(orc_lib_gh api "repos/$REPO/issues/$issue" --jq '[.labels[].name] | join(",")' 2>/dev/null)"; then
     echo "warning: could not read labels of issue #$issue (skipped; remaining references unaffected)" >&2
+    SKIPPED["$issue"]=1
     continue
   fi
   if [ -z "$issue_labels" ]; then
@@ -115,7 +124,7 @@ done
 
 if [ "${#TO_ADD[@]}" -eq 0 ]; then
   echo "note: no allowlisted process labels found on the linked issues; nothing to add" >&2
-  echo '{"pr":'"$PR"',"issues":['"${ISSUE_NUMBERS[*]}"'],"labels_added":[]}'
+  echo '{"pr":'"$PR"',"issues":'"$ISSUES_JSON"',"labels_added":[]}'
   exit "$ORC_OK"
 fi
 
@@ -148,9 +157,22 @@ done
 ADDED_JSON+=']'
 
 if [ "${#ADD[@]}" -eq 0 ]; then
+  # Partial failure: some issue reads were skipped — the label copy is
+  # INCOMPLETE even though this run succeeded for the rest. Warn with the
+  # exact manual retry command; still exit 0 (a partial label copy never
+  # orphans the PR).
+  if [ "${#SKIPPED[@]}" -gt 0 ]; then
+    echo "WARNING: pr-labels-from-issue could not read ${#SKIPPED[@]} linked issue(s) (${!SKIPPED[*]}); the label copy is INCOMPLETE — retry manually:" >&2
+    echo "  bash \"$SCRIPT_DIR/pr-labels-from-issue\" $PR --repo $REPO" >&2
+  fi
   echo "note: all process labels already present on PR #$PR; nothing to add (idempotent)" >&2
   echo '{"pr":'"$PR"',"labels_added":[]}'
   exit "$ORC_OK"
+fi
+
+if [ "${#SKIPPED[@]}" -gt 0 ]; then
+  echo "WARNING: pr-labels-from-issue could not read ${#SKIPPED[@]} linked issue(s) (${!SKIPPED[*]}); the label copy is INCOMPLETE — retry manually:" >&2
+  echo "  bash \"$SCRIPT_DIR/pr-labels-from-issue\" $PR --repo $REPO" >&2
 fi
 
 if [ "$OPT_DRY_RUN" = true ]; then
