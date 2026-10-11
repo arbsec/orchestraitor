@@ -2645,3 +2645,97 @@ async fn a_failed_spawn_keeps_unstarted_siblings_fresh() {
     );
     assert_eq!(summary.completed, 1, "the sibling completes");
 }
+
+/// Gen-4 review remediation: a SEEDED previous budget day makes the FIRST
+/// pass of a fresh invocation observe the §9.19.6 budget-window reset when
+/// the day boundary moved between invocations — exactly the daemon's
+/// spend-cap restart path. Without the seed, `last_pass_day` starts
+/// `None` and the first pass can never claim a reset, so a daemon with
+/// only `budget_window_reset` armed would never resume.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_budget_day_fires_the_reset_on_a_moved_boundary() {
+    // START_UNIX = 1_000_000 → UTC day 11. The seed says the previous
+    // invocation's last pass ran on day 0 (the epoch day): the boundary
+    // moved, so the first pass fires BudgetWindowReset — and, with ONLY
+    // that condition armed and no fresh ready work, nothing else.
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        new_eligible_work: false,
+        unblocked_promotion: false,
+        slot_released: false,
+        budget_window_reset: true,
+        external_event: false,
+    });
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1]),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap()
+    .with_previous_budget_day(Some(0));
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(
+        summary.spawns, 1,
+        "the seeded day boundary fires the reset condition: the pass \
+         kicks off"
+    );
+    assert_eq!(
+        summary.final_budget_day,
+        Some(950_400),
+        "the summary carries the runner's final window (START_UNIX's UTC day)"
+    );
+    // The inverse seed (same day) does NOT fire: no reset within one
+    // window (the §21.4 negative case).
+    let config2 = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        new_eligible_work: false,
+        unblocked_promotion: false,
+        slot_released: false,
+        budget_window_reset: true,
+        external_event: false,
+    });
+    let decisions2 = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs2 = LoopRunStore::open_in_memory().unwrap();
+    let runner2 = LoopRunner::new(
+        config2,
+        FakePoller {
+            snapshot: snapshot_with(&[1]),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        &decisions2,
+        &runs2,
+        routing(),
+        "inv-2".to_string(),
+        START_UNIX,
+    )
+    .unwrap()
+    .with_previous_budget_day(Some(950_400));
+    let summary2 = runner2.run(never()).await.unwrap();
+    assert_eq!(summary2.spawns, 0, "the same-day seed never claims a reset");
+}

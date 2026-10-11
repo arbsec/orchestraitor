@@ -425,6 +425,12 @@ pub struct LoopSummary {
     pub task_budget_skips: u64,
     /// Whole seconds of loop elapsed time (virtual under tests).
     pub elapsed_secs: u64,
+    /// The runner's final §9.19.6 budget window: the UTC day of the last
+    /// completed pass (`None` when no pass ran). The daemon's invocation
+    /// loop hands this to the NEXT invocation's
+    /// `LoopRunner::with_previous_budget_day`, so the window comparison
+    /// survives restarts (issue #505, gen-4 review fix).
+    pub final_budget_day: Option<u64>,
     /// The event journal, in observation order.
     pub events: Vec<LoopEvent>,
 }
@@ -742,6 +748,30 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         self
     }
 
+    /// Seeds the §9.19.6 per-day budget window the runner's FIRST pass
+    /// compares against (issue #505, gen-4 review fix): the always-on
+    /// daemon hands the PREVIOUS invocation's last-pass UTC day across
+    /// the restart boundary, so a first pass after a day boundary
+    /// observes the budget-window-reset kick-off condition — without the
+    /// seed, `last_pass_day` starts `None` and the first pass can never
+    /// claim a reset. The foreground loop (one invocation) never needs
+    /// this.
+    #[must_use]
+    pub fn with_previous_budget_day(mut self, day: Option<u64>) -> Self {
+        self.last_pass_day = day;
+        self
+    }
+
+    /// The runner's final §9.19.6 budget-window state: the UTC day of the
+    /// last completed pass (`None` when no pass ran). The daemon's
+    /// invocation loop hands this to the NEXT invocation's
+    /// [`Self::with_previous_budget_day`], so the window comparison
+    /// survives restarts.
+    #[must_use]
+    pub const fn final_budget_day(&self) -> Option<u64> {
+        self.last_pass_day
+    }
+
     /// Unix seconds under the runner's clock: loop-start wall time plus the
     /// (virtual) elapsed time.
     fn now_secs(&self, elapsed: Duration) -> Result<u64, CampaignError> {
@@ -1005,6 +1035,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             tasks_stuck: counters.stuck,
             task_budget_skips: counters.task_budget_skips,
             elapsed_secs: final_elapsed.as_secs(),
+            final_budget_day: self.last_pass_day,
             events,
         })
     }

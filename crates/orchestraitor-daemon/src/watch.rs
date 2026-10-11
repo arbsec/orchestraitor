@@ -865,6 +865,7 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     shutdown: tokio::sync::watch::Receiver<u64>,
     start_unix_secs: u64,
     invocation_id: &str,
+    previous_budget_day: Option<u64>,
 ) -> Result<LoopSummary, DaemonError> {
     // §9.24.2 restart recovery BEFORE the first tick: running → orphaned.
     let recovered = runs
@@ -897,7 +898,12 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
         invocation_id.to_string(),
         start_unix_secs,
     )
-    .map_err(|error| DaemonError::WatchRun(error.to_string()))?;
+    .map_err(|error| DaemonError::WatchRun(error.to_string()))?
+    // The §9.19.6 budget window crosses invocation boundaries: the daemon
+    // hands the previous invocation's last-pass UTC day in, so a first
+    // pass after a day boundary observes the budget-window-reset kick-off
+    // condition (issue #505, gen-4 review fix).
+    .with_previous_budget_day(previous_budget_day);
     let summary = runner
         .run(shutdown)
         .await

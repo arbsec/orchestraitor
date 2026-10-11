@@ -247,6 +247,10 @@ async fn watch_cycle() -> Result<ExitCode> {
         loop_config.guardrails.worker_guardrails(),
     );
     let mut run_ordinal = 0_u64;
+    // The §9.19.6 budget window carried across invocations: the previous
+    // invocation's last-pass UTC day (`None` before the first). See the
+    // invocation loop below.
+    let mut budget_day: Option<u64> = None;
     // Whether the operator signalled shutdown during the FINAL invocation
     // (a signal during a budget drain preempts the drain but the summary
     // keeps the budget cause — the exit code must still be a clean
@@ -285,6 +289,12 @@ async fn watch_cycle() -> Result<ExitCode> {
             .into_diagnostic()
             .wrap_err("system clock is before the Unix epoch")?;
         let invocation_id = format!("watch-{start_unix_secs}-{run_ordinal}");
+        // The §9.19.6 budget window crosses invocation boundaries (a gen-4
+        // review fix): the previous invocation's last-pass UTC day seeds
+        // this invocation's first-pass comparison, so a day boundary
+        // between invocations observes the budget-window-reset kick-off
+        // condition. `None` on the first invocation (no previous window).
+        let previous_budget_day = budget_day.take();
         // The poller (built once, before the loop) carries its
         // previous_blocked state across budget boundaries; run_watch's
         // begin_invocation re-scopes the divergence dedup set per invocation.
@@ -298,9 +308,12 @@ async fn watch_cycle() -> Result<ExitCode> {
             signal_rx.clone(),
             start_unix_secs,
             &invocation_id,
+            previous_budget_day,
         )
         .await
         .into_diagnostic()?;
+        // Hand this invocation's final budget window to the next one.
+        budget_day = summary.final_budget_day;
         match summary.stop_reason {
             // Both budget stops restart the ALWAYS-ON daemon (§9.36): the
             // run budget ends one invocation, and the daily-spend soft cap
