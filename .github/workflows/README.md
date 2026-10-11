@@ -12,7 +12,7 @@ any change to the Rust workspace must pass, as defined in
 
 | Workflow | Enforces | Trigger paths |
 |---|---|---|
-| [code.yml](code.yml) | `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo check --locked`, `cargo nextest run --workspace --all-features`, `cargo doc` | `**/*.rs`, `**/Cargo.toml`, `Cargo.lock`, `.mise.toml`, itself |
+| [code.yml](code.yml) | `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo check --workspace --all-targets --all-features --locked`, `cargo nextest run --workspace --all-features`, `cargo doc` | `**/*.rs`, `**/Cargo.toml`, `Cargo.lock`, `.mise.toml`, itself |
 | [coverage.yml](coverage.yml) | Full-workspace test run with LCOV upload to Qlty Cloud (no threshold enforced yet) | `**/*.rs`, `**/Cargo.toml`, `Cargo.lock`, itself |
 | [invariants.yml](invariants.yml) | Security invariant property tests (`cargo nextest run --workspace`) | `**/*.rs`, `**/Cargo.toml`, `Cargo.lock`, `.mise.toml`, itself |
 | [security.yml](security.yml) | `cargo deny check` (licenses, bans, sources, advisories) and `cargo audit` | `**/Cargo.toml`, `Cargo.lock`, `deny.toml`, `.mise.toml`, itself |
