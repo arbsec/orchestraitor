@@ -137,17 +137,17 @@ if [ "${#TO_ADD[@]}" -eq 0 ]; then
   exit "$ORC_OK"
 fi
 
-EXISTING="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')" ||
+EXISTING="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')" ||
   { echo "error: cannot read PR #$PR labels" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
-IFS=',' read -r -a existing_array <<< "$EXISTING"
 
 # Idempotency: a label already present on the PR (in any case GitHub stored
-# it) is not re-added.
+# it) is not re-added. Names are read as WHOLE values (one per line) — a
+# label name containing a comma is never split into fragments.
 declare -A EXISTING_SET=()
-for label in "${existing_array[@]}"; do
+while IFS= read -r label; do
   [ -z "$label" ] && continue
   EXISTING_SET["$label"]=1
-done
+done <<< "$EXISTING"
 
 ADD=()
 for label in "${!TO_ADD[@]}"; do
