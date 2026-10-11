@@ -146,6 +146,9 @@ for label in "${!TO_ADD[@]}"; do
     ADD+=("$label")
   fi
 done
+# Deterministic application order: bash hash iteration must not decide which
+# label lands first (and the JSON receipt must be reproducible run to run).
+IFS=$'\n' read -r -d '' -a ADD < <(printf '%s\n' "${ADD[@]}" | sort && printf '\0') || true
 
 ADDED_JSON='['
 first=true

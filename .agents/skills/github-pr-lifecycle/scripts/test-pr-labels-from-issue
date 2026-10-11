@@ -128,8 +128,8 @@ echo "--- pr-labels-from-issue ---"
 export PR_BODY="Closes #101" PR_LABELS="agent-created"
 run pr-labels-from-issue 77 --repo test-org/repo
 assert 'single ref exits 0' 0 "$RC"
-assert 'single ref copies only process labels' '["MVP","bug"]' "$(pr_edit_adds | jq -sc 'add // []' -c)"
-assert 'agent-created not copied' 0 "$(jq '[.[] | select(.[0:2] == ["pr","edit"])] | length' "$GH_LOG" >/dev/null; pr_edit_adds | jq '[.[] | select(. == "agent-created")] | length' -r)"
+assert 'single ref copies only process labels' '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'agent-created not copied' 0 "$(pr_edit_adds | jq '[.[] | select(. == "agent-created")] | length' -r)"
 
 # (a2) multiple refs (Closes/Fixes/Resolves, mixed case, several issues).
 export ISSUE_102_LABELS="spec,test" ISSUE_103_LABELS="dependencies,question"
@@ -140,7 +140,7 @@ api_calls="$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
 assert 'three issue fetches' 3 "$api_calls"
 assert 'keyword-only extraction (no bare #999)' 0 "$(grep -c 'issues/999' "$GH_LOG")"
 assert 'labels from all issues applied (order-independent)' \
-  "$(pr_edit_adds | jq -sc 'add // [] | unique | sort' -c)" \
+  "$(pr_edit_adds | jq -c 'unique | sort')" \
   '["MVP","bug","dependencies","spec","test"]'
 assert 'non-allowlisted issue label (question) not copied' 0 "$(pr_edit_adds | jq '[.[] | select(. == "question")] | length' -r)"
 
@@ -175,7 +175,7 @@ run pr-labels-from-issue 77 --repo test-org/repo
 assert 'failing issue does not fail the run' 0 "$RC"
 assert 'failure warning names the skipped issue' 1 "$(grep -cF 'issue #999' "$TMP/stderr")"
 assert 'other issues still contribute labels (order-independent)' \
-  "$(pr_edit_adds | jq -sc 'add // [] | unique | sort' -c)" \
+  "$(pr_edit_adds | jq -c 'unique | sort')" \
   '["MVP","spec"]'
 
 # (d2) no references in body -> exit 0, no mutations.
@@ -227,8 +227,8 @@ case "$second_edit" in
   *)
     assert 'pr-labels-from-issue runs second' 'pr edit 77 … process label' "$second_edit" ;;
 esac
-receipt_first="$(grep -n '"labels_added":\["agent-created"\]' "$TMP/stderr" | head -1 | cut -d: -f1)"
-receipt_second="$(grep -n '"labels_added":\["MVP' "$TMP/stderr" | head -1 | cut -d: -f1)"
+receipt_first="$(grep -n '"author":"app/arbsec-agent"' "$TMP/stderr" | head -1 | cut -d: -f1)"
+receipt_second="$(grep -n '"labels_added":\[' "$TMP/stderr" | grep -v '"author"' | head -1 | cut -d: -f1)"
 if [ -n "$receipt_first" ] && [ -n "$receipt_second" ] && [ "$receipt_first" -lt "$receipt_second" ]; then
   assert 'pr-labels receipt precedes from-issue receipt' ok ok
 else
