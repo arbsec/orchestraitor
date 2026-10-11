@@ -166,7 +166,7 @@ if [ "${#ADD[@]}" -eq 0 ]; then
     echo "  bash \"$SCRIPT_DIR/pr-labels-from-issue\" $PR --repo $REPO" >&2
   fi
   echo "note: all process labels already present on PR #$PR; nothing to add (idempotent)" >&2
-  echo '{"pr":'"$PR"',"labels_added":[]}'
+  echo '{"pr":'"$PR"',"issues":'"$ISSUES_JSON"',"labels_added":[]}'
   exit "$ORC_OK"
 fi
 

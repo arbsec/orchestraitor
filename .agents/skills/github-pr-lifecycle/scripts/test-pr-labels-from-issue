@@ -232,7 +232,7 @@ receipt_second="$(grep -n '"labels_added":\["MVP' "$TMP/stderr" | head -1 | cut 
 if [ -n "$receipt_first" ] && [ -n "$receipt_second" ] && [ "$receipt_first" -lt "$receipt_second" ]; then
   assert 'pr-labels receipt precedes from-issue receipt' ok ok
 else
-  assert 'pr-labels receipt precedes from-issue receipt' "first<$second" "first=$receipt_first second=$receipt_second"
+  assert 'pr-labels receipt precedes from-issue receipt' 'first<second' "first=$receipt_first second=$receipt_second"
 fi
 
 # (f) a failing labeler is non-fatal: pr-create still exits 0 and the URL stands.
