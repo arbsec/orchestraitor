@@ -1224,6 +1224,76 @@ fn github_gh_env_injects_gh_token_into_child_and_propagates_exit() -> miette::Re
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn github_gh_env_passes_child_arguments_verbatim() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_github_app_project_config(&temp)?;
+    // Regression (issue #541): `gh api '…?per_page=100&since=<ts>'` through
+    // gh-env returned pre-window comments, so the wrapper was suspected of
+    // rewriting or dropping query parameters. The wrapper must pass the
+    // child argv through UNCHANGED — every argument, including quoted URLs
+    // with `&`, `=`, and `?`, verbatim and in order. The child records its
+    // argv NUL-separated so embedded shell metacharacters are observable.
+    let child = temp.path().join("child.sh");
+    let out_file = temp.path().join("child.out");
+    fs::write(
+        &child,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > \"{}\"\n",
+            out_file.display()
+        ),
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let (endpoint, _auth_rx) = spawn_mint_then_api_server(200, "{}")?;
+
+    // `--` ends orc's own flag parsing, so everything after it — including
+    // an argument that itself starts with a dash — must reach the child.
+    let issue_url =
+        "repos/arbsec/orchestraitor/issues/comments?per_page=100&since=2026-10-08T19:00:00Z";
+    let output = github_cli(
+        &temp,
+        &endpoint,
+        &[
+            "github",
+            "gh-env",
+            "--",
+            &child.display().to_string(),
+            "api",
+            issue_url,
+            "-H",
+            "Accept: application/vnd.github+json",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let raw = fs::read(&out_file).into_diagnostic()?;
+    let observed: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf8_lossy)
+        .map(std::borrow::Cow::into_owned)
+        .collect();
+    assert_eq!(
+        observed,
+        vec![
+            "api".to_string(),
+            issue_url.to_string(),
+            "-H".to_string(),
+            "Accept: application/vnd.github+json".to_string(),
+        ],
+        "child argv must match the wrapper arguments verbatim and in order"
+    );
+    Ok(())
+}
+
 #[test]
 fn github_gh_env_fails_typed_when_child_is_missing() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;

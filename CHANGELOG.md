@@ -616,6 +616,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- Documented GitHub's `since` filter semantics for the issue-comment API
+  endpoints: the filter applies to `updated_at`, not `created_at`, so
+  responses include comments created before the requested window even when
+  the parameter is honored. A new regression test pins the `orc github
+  gh-env` child-argument passthrough contract: every argument after `--`
+  — including quoted URLs that carry query parameters (`?since=…`,
+  `?per_page=100`), options beginning with `-`, and their order — reaches
+  the child command unchanged. The wrapper's runtime behavior is unchanged
+  by this release.
 - Simplify: an empty staged index drops the staged filter instead of hiding
   every file-scoped finding; timed-out tools have their process group (or
   Windows process tree) terminated and their output readers joined; applied
