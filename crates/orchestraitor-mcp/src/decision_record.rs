@@ -252,9 +252,9 @@ pub enum DecisionRecordError {
     /// A `selected` decision must not carry a no-op reason.
     #[error("a `selected` decision.record must not carry a no-op reason")]
     SelectedWithNoOpReason,
-    /// A no-op decision must carry one of the three typed reasons.
+    /// A no-op decision must carry one of the typed reasons.
     #[error(
-        "a `no-op` decision.record must carry a typed reason (empty-queue | all-blocked | epic-exhausted)"
+        "a `no-op` decision.record must carry a typed reason (empty-queue | all-blocked | epic-exhausted | kickoff-gate)"
     )]
     NoOpWithoutReason,
     /// A no-op decision must not carry a selected task.
