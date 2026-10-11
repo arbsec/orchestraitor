@@ -65,6 +65,20 @@ fn seed_ledger(path: &std::path::Path) {
         .unwrap();
 }
 
+/// Runs `orc stats efficiency` (markdown output) against `config_dir`.
+fn run_efficiency(config_dir: &std::path::Path) -> miette::Result<String> {
+    let mut output = Vec::new();
+    let cli = Cli::parse_from([
+        "orc",
+        "--config-dir",
+        &config_dir.display().to_string(),
+        "stats",
+        "efficiency",
+    ]);
+    orchestraitor_cli::run_with_writer(cli, &mut output)?;
+    String::from_utf8(output).into_diagnostic()
+}
+
 #[test]
 fn stats_efficiency_json_reports_savings_and_unmeasured() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
@@ -267,5 +281,84 @@ fn stats_efficiency_with_only_unmeasured_sessions_renders_dashes() -> miette::Re
     let text = String::from_utf8(output).into_diagnostic()?;
     assert!(text.contains("| sess-x |"), "session row renders: {text}");
     assert!(text.contains("| — | — | — |"), "unmeasured savings dashes");
+    Ok(())
+}
+
+/// `orc stats efficiency` never writes: on a legacy ledger that predates
+/// the reporting schema, the read-only open fails with a typed
+/// migration-required error and the FILE IS UNCHANGED (forbidden effect
+/// asserted absent: an in-place migration by a reporting command — the
+/// exact defect the PR #565 review found, where `CostLedger::open` ran
+/// `BEGIN IMMEDIATE` + `CREATE`/`ALTER` under a reporting read).
+#[test]
+fn stats_efficiency_on_legacy_ledger_fails_typed_without_writing() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    let ledger_path = config_dir.join("cost.db");
+
+    // Build a LEGACY ledger: the pre-profile schema (no `profile`
+    // column, no `context_receipts` table).
+    let legacy_sql = "
+        CREATE TABLE cost_entries (
+            id INTEGER PRIMARY KEY,
+            session TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            cache_read_tokens INTEGER NOT NULL,
+            cache_write_tokens INTEGER NOT NULL,
+            request_count INTEGER NOT NULL
+        );
+        INSERT INTO cost_entries (session, input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens, request_count)
+        VALUES ('legacy-session', 100, 10, 0, 0, 1);
+    ";
+    {
+        let conn = rusqlite::Connection::open(&ledger_path).into_diagnostic()?;
+        conn.execute_batch(legacy_sql).into_diagnostic()?;
+    }
+    let before = fs::read(&ledger_path).into_diagnostic()?;
+
+    let result = run_efficiency(&config_dir);
+    let error = format!("{}", result.unwrap_err());
+    assert!(
+        error.contains("needs migration"),
+        "the error must name the migration requirement, got: {error}"
+    );
+
+    // Forbidden effect asserted absent: the legacy ledger was NOT
+    // migrated (no schema writes, no row changes) by the reporting read.
+    let after = fs::read(&ledger_path).into_diagnostic()?;
+    assert_eq!(
+        before, after,
+        "a reporting command must never write to the ledger"
+    );
+    Ok(())
+}
+
+/// The read-only open takes no write lock: the report succeeds while a
+/// writer holds a `BEGIN IMMEDIATE` transaction on the same database
+/// (the contention failure the PR #565 review identified — a migrating
+/// open could hit `SQLITE_BUSY` and fail the report).
+#[test]
+fn stats_efficiency_reads_while_a_writer_holds_the_write_lock() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).into_diagnostic()?;
+    seed_ledger(&config_dir.join("cost.db"));
+
+    // A writer holding an open IMMEDIATE transaction (not committed).
+    let writer = rusqlite::Connection::open(config_dir.join("cost.db")).into_diagnostic()?;
+    writer.execute_batch("BEGIN IMMEDIATE;").into_diagnostic()?;
+
+    // The report must NOT contend: read-only readers never block on a
+    // WAL/rollback writer's reserved lock for schema-complete databases.
+    let result = run_efficiency(&config_dir);
+    writer.execute_batch("ROLLBACK;").into_diagnostic()?;
+    let output = result?;
+    assert!(
+        output.contains("sess-measured"),
+        "the report read the ledger while a writer held the write lock"
+    );
     Ok(())
 }

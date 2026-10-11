@@ -19,11 +19,14 @@ pub fn run(paths: &ConfigPaths, command: StatsCommand, writer: &mut dyn Write) -
     }
 }
 
-/// `orc stats efficiency`: opens the EXISTING ledger and prints
+/// `orc stats efficiency`: opens the EXISTING ledger READ-ONLY and prints
 /// per-session or per-profile rollups. A missing ledger file is a typed
 /// error, never a silently created empty one — a reporting command must
-/// not write to disk (schema creation / migration) or fabricate an empty
-/// report for a mistyped config dir.
+/// not write to disk (schema creation / migration), so the ledger opens
+/// via [`CostLedger::open_read_only`]: no write lock is taken (no
+/// contention with a running `orc loop`) and a legacy ledger is rejected
+/// with a typed migration-required error instead of being migrated as a
+/// side effect of reading it (a PR #565 review finding).
 fn efficiency(
     paths: &ConfigPaths,
     args: &StatsEfficiencyArgs,
@@ -36,7 +39,7 @@ fn efficiency(
             ledger_path.display()
         ));
     }
-    let ledger = CostLedger::open(&ledger_path).into_diagnostic()?;
+    let ledger = CostLedger::open_read_only(&ledger_path).into_diagnostic()?;
     let grouping = if args.group_by_profile {
         EfficiencyGrouping::Profile
     } else {

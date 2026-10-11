@@ -8,7 +8,7 @@ use crate::model::{
     UtilizationLabel,
 };
 use orchestraitor_model::AgentId;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::path::Path;
 
 /// SQLite-backed cost ledger.
@@ -39,6 +39,45 @@ impl CostLedger {
         };
         ledger.init_schema()?;
         Ok(ledger)
+    }
+
+    /// Opens a ledger READ-ONLY for reporting (`orc stats efficiency`):
+    /// no schema creation, no migration, no write lock — the command must
+    /// not write to disk (its own contract), and a `BEGIN IMMEDIATE` here
+    /// would contend with a running `orc loop`'s write transaction (a
+    /// PR #565 review finding).
+    ///
+    /// A legacy ledger that predates the reporting schema (`profile`
+    /// column or `context_receipts` table) is rejected with a typed
+    /// migration-required error — the report is never silently degraded
+    /// and the ledger is never mutated as a side effect of reading it.
+    ///
+    /// # Errors
+    /// Returns [`LedgerError::MigrationRequired`] when the ledger lacks
+    /// the reporting schema, and [`LedgerError::Sqlite`] when `SQLite`
+    /// cannot open the file read-only or the schema probe fails.
+    pub fn open_read_only(path: &Path) -> LedgerResult<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // The probe reads the schema (no writes): a legacy ledger fails
+        // closed here instead of migrating in place under a reporting
+        // command.
+        let profile_columns: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
+            [],
+            |row| row.get(0),
+        )?;
+        let receipt_tables: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'context_receipts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if profile_columns == 0 || receipt_tables == 0 {
+            return Err(LedgerError::MigrationRequired);
+        }
+        Ok(Self { conn })
     }
 
     /// Returns the separate API spend table facade.

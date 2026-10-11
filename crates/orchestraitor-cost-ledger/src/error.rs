@@ -34,6 +34,14 @@ pub enum LedgerError {
         /// The session whose entries would mix profile labels.
         session: String,
     },
+    /// The ledger predates the reporting schema (`profile` column or
+    /// `context_receipts` table). A read-only reporting command refuses
+    /// to migrate in place — run `orc loop` once (or any writer) to
+    /// migrate, then re-run the report.
+    #[error(
+        "cost ledger predates the reporting schema and needs migration (run a writer such as `orc loop` once, then retry)"
+    )]
+    MigrationRequired,
 }
 
 impl LedgerError {
@@ -46,7 +54,8 @@ impl LedgerError {
             | Self::IntegerRange
             | Self::InvalidStoredValue(_)
             | Self::Float(_)
-            | Self::ProfileConflict { .. } => Retryability::NotRetriable,
+            | Self::ProfileConflict { .. }
+            | Self::MigrationRequired => Retryability::NotRetriable,
         }
     }
 }
