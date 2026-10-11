@@ -347,14 +347,31 @@ impl CostLedger {
     /// ratios — a ratio of group sums would weight sessions by their
     /// baseline). One session = one profile label (enforced at insert), so
     /// each session's receipt sums unambiguously belong to one group.
+    ///
+    /// The label lookup is ONE joined query, not a `query_row` per
+    /// receipt session (a PR #565 gen-2 review finding: per-session
+    /// lookups made the profile report an N+1 over a ledger that grows
+    /// with every loop run).
     fn attach_session_savings_ratios(
         &self,
         rollups: &mut [TokenEfficiencyRollup],
     ) -> LedgerResult<()> {
-        let sql = "SELECT session, \
-                   SUM(candidate_tokens), SUM(selected_tokens), \
-                   SUM(raw_tool_output_tokens), SUM(compacted_tool_output_tokens) \
-                   FROM context_receipts GROUP BY session";
+        // A receipt may be recorded before its session has any cost
+        // entry; that session carries no profile label, so the receipt is
+        // SKIPPED entirely (not folded into the unprofiled group — it
+        // would skew that group's median). The LEFT JOIN + `WHERE
+        // profile IS NOT NULL`-style filter expresses the same skip in
+        // one query: sessions with no cost entry produce no row.
+        let sql = "SELECT r.session, \
+                   SUM(r.candidate_tokens), SUM(r.selected_tokens), \
+                   SUM(r.raw_tool_output_tokens), SUM(r.compacted_tool_output_tokens), \
+                   COALESCE(c.profile, '') AS label \
+                   FROM context_receipts r \
+                   JOIN (SELECT session, MAX(profile) AS profile FROM cost_entries \
+                         WHERE profile IS NOT NULL GROUP BY session) c \
+                   ON c.session = r.session \
+                   GROUP BY r.session, label \
+                   ORDER BY r.session";
         let mut statement = self.conn.prepare(sql)?;
         let sessions = statement.query_map([], |row| {
             Ok((
@@ -363,29 +380,16 @@ impl CostLedger {
                 u64_from_sql(row, 2)?,
                 u64_from_sql(row, 3)?,
                 u64_from_sql(row, 4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         let mut session_savings: Vec<(String, String, f64)> = Vec::new();
         for row in sessions {
-            let (session, candidate, selected, raw_tool, compacted) = row?;
+            let (session, candidate, selected, raw_tool, compacted, label) = row?;
             if let Some(ratio) = TokenEfficiencyRollup::savings_from_receipt(
                 candidate, selected, raw_tool, compacted,
             ) {
-                // A receipt may be recorded before its session has any
-                // cost entry; that session carries no profile label, so
-                // the receipt is SKIPPED entirely (not folded into the
-                // unprofiled group — it would skew that group's median).
-                if let Some(label) = self
-                    .conn
-                    .query_row(
-                        "SELECT COALESCE(profile, '') FROM cost_entries WHERE session = ?1 LIMIT 1",
-                        params![session],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                {
-                    session_savings.push((label, session, ratio));
-                }
+                session_savings.push((label, session, ratio));
             }
         }
         for rollup in rollups {
