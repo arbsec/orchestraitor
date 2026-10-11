@@ -49,4 +49,30 @@ fi
 # Mutating call: service route or typed failure — never silent personal auth.
 PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
 echo "Created PR: $PR_URL" >&2
+
+# --- Deterministic labeling chain (arbsec/orchestraitor#469) --------------------
+# A created PR MUST NOT depend on worker discretion for its labels: run
+# `pr-labels` (attribution: agent-created / needs-human-review) and then
+# `pr-labels-from-issue` (process labels copied from Closes/Fixes/Resolves
+# issues) right here. The PR already exists, so a labeling failure must
+# never orphan it — each step is non-fatal: on failure it prints a warning
+# naming the PR and the exact manual command, and pr-create still succeeds.
+PR_NUMBER="${PR_URL##*/}"
+case "$PR_URL" in
+  */[0-9]*) : ;;
+  *) PR_NUMBER="" ;;
+esac
+if [ -n "$PR_NUMBER" ]; then
+  if ! bash "$SCRIPT_DIR/pr-labels" "$PR_NUMBER" --repo "$(orc_lib_resolve_repo)" >&2; then
+    echo "WARNING: automatic labeling of PR #$PR_NUMBER failed (pr-labels); apply manually:" >&2
+    echo "  bash $SCRIPT_DIR/pr-labels $PR_NUMBER --repo $(orc_lib_resolve_repo)" >&2
+  fi
+  if ! bash "$SCRIPT_DIR/pr-labels-from-issue" "$PR_NUMBER" --repo "$(orc_lib_resolve_repo)" >&2; then
+    echo "WARNING: linked-issue label copy for PR #$PR_NUMBER failed (pr-labels-from-issue); apply manually:" >&2
+    echo "  bash $SCRIPT_DIR/pr-labels-from-issue $PR_NUMBER --repo $(orc_lib_resolve_repo)" >&2
+  fi
+else
+  echo "WARNING: could not derive a PR number from '$PR_URL'; automatic labeling was skipped — apply manually with pr-labels and pr-labels-from-issue" >&2
+fi
+
 printf '%s\n' "$PR_URL"

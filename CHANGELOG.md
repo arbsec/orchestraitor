@@ -349,12 +349,23 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
-  A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
+- **PRs created through the PR-lifecycle scripts now self-label** (skill-script
+  behavior): `pr-create` automatically chains `pr-labels` (attribution:
+  `agent-created`, `needs-human-review`) and the new `pr-labels-from-issue`
+  immediately after the PR exists, so attribution and process classification
+  no longer depend on the worker remembering to run them. `pr-labels-from-issue`
+  copies the process-label allowlist (`MVP`, `task`, `epic`, `spike`, `bug`,
+  `documentation`, `test`, `dependencies`, `github-actions`, `spec`,
+  `needs-human-review`, `blocked:*`) from the PR's `Closes`/`Fixes`/`Resolves`
+  linked issues onto the PR, idempotently. Both labeling steps are non-fatal:
+  a labeling failure prints the exact manual command and never fails (or
+  orphans) the created PR. Manual `pr-labels <pr>` /
+  `pr-labels-from-issue <pr>` invocations remain the reconcile/fallback path.
+- A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
   remote head: it lands one empty App-signed commit on top of the remote head so
   the evaluated head chain is fully verified (fixing the unsigned-head case that
   forced plain pushes after conflict rebases); it is a no-op on an already
   verified head and fails closed if the landing is not verified.
-
 - **Service-identity enforcement is now pinned to `required` for this
   repository** (owner mandate, 2026-10-02: no GitHub writes under the
   personal account, ever). `github_app.enforcement = "required"` in

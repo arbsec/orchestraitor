@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# pr-labels-from-issue: copy process labels from a PR's linked issues
+# (arbsec/orchestraitor#469). A PR that closes `Closes #N` / `Fixes #N` /
+# `Resolves #N` references inherits the PROCESS labels its linked issues
+# already carry — the classification the issue triage produced — instead of
+# relying on a worker to re-derive it (or forget to).
+#
+# Only the process-classification allowlist is copied, and only when the
+# issue actually carries the label: non-process labels (attribution,
+# lifecycle noise) are never copied, and the script never removes any label.
+# Application is idempotent: a label already on the PR is not re-added.
+#
+# Positional: <pr-number>. Flags: --repo <owner/name>, --dry-run.
+# All gh calls route through the service-identity wrapper (orc_lib_gh_service)
+# for mutations; issue reads use the same routed transport as pr-labels.
+#
+# Exit codes: 0 ok (including "no linked issues" and per-issue skips that
+# only warned) | 1 PR read failure | 2 usage/config error.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues (Closes/Fixes/Resolves #N) onto the PR, idempotently. Positional: <pr-number>. Flags: --repo <owner/name>."
+  exit "$ORC_OK"
+fi
+
+PR="${ORC_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: numeric PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+
+# Process-classification allowlist: labels the repo uses to classify WORK
+# (what kind of task this is, what blocks it). Intersected with each linked
+# issue's labels verbatim — an issue label not on this list is never copied.
+# The `needs-human-review` label is NOT in the allowlist on purpose: it is
+# derived from the PR's own diff by `pr-labels` (§21.1 classes), and copying
+# it from an issue would attach a human gate to a PR whose diff may not
+# warrant one.
+PROCESS_LABELS=(
+  "MVP"
+  "task"
+  "epic"
+  "spike"
+  "bug"
+  "documentation"
+  "test"
+  "dependencies"
+  "github-actions"
+  "spec"
+  "needs-human-review"
+  "blocked:arbitraitor"
+  "blocked:orchestraitor"
+)
+
+# --- Read the PR body ----------------------------------------------------------
+BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/pr-labels-from-issue-body.XXXXXX")"
+trap 'rm -f "$BODY_FILE"' EXIT
+orc_lib_gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$BODY_FILE" ||
+  { echo "error: cannot read PR #$PR body" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+
+# Extract linked-issue numbers from the PR body: keyword references
+# (`Closes #N`, `Fixes #N`, `Resolves #N` — case-insensitive, plural forms
+# included), one per match, several allowed. Reference extraction is bounded
+# by the keyword grammar, never by free-form text: a bare `#N` without a
+# closing keyword is NOT a link and is ignored.
+ISSUE_NUMBERS=()
+seen_numbers=""
+while IFS= read -r num; do
+  [ -z "$num" ] && continue
+  if printf '%s' "$seen_numbers" | grep -qxF "$num"; then continue; fi
+  seen_numbers="${seen_numbers}${num}"$'\n'
+  ISSUE_NUMBERS+=("$num")
+done < <( { grep -ioE '\b(closes|fixes|resolves)\s+#[0-9]+' "$BODY_FILE" || true; } |
+  { grep -ioE '#[0-9]+' || true; } | tr -d '#')
+
+if [ "${#ISSUE_NUMBERS[@]}" -eq 0 ]; then
+  echo "note: PR #$PR body has no Closes/Fixes/Resolves references; nothing to copy" >&2
+  echo '{"pr":'"$PR"',"issues":[],"labels_added":[]}'
+  exit "$ORC_OK"
+fi
+
+# --- Copy process labels, issue by issue ---------------------------------------
+# Per-issue reads ride the routed transport (same route as the mutating
+# calls); a failing issue read is non-fatal — the remaining issues still
+# contribute their labels.
+declare -A TO_ADD=()
+for issue in "${ISSUE_NUMBERS[@]}"; do
+  issue_labels=""
+  if ! issue_labels="$(orc_lib_gh api "repos/$REPO/issues/$issue" --jq '[.labels[].name] | join(",")' 2>/dev/null)"; then
+    echo "warning: could not read labels of issue #$issue (skipped; remaining references unaffected)" >&2
+    continue
+  fi
+  if [ -z "$issue_labels" ]; then
+    echo "note: issue #$issue has no labels; nothing to copy from it" >&2
+    continue
+  fi
+  IFS=',' read -r -a issue_label_array <<< "$issue_labels"
+  for label in "${issue_label_array[@]}"; do
+    for allowed in "${PROCESS_LABELS[@]}"; do
+      if [ "$label" = "$allowed" ]; then
+        TO_ADD["$label"]=1
+        break
+      fi
+    done
+  done
+done
+
+if [ "${#TO_ADD[@]}" -eq 0 ]; then
+  echo "note: no allowlisted process labels found on the linked issues; nothing to add" >&2
+  echo '{"pr":'"$PR"',"issues":['"${ISSUE_NUMBERS[*]}"'],"labels_added":[]}'
+  exit "$ORC_OK"
+fi
+
+EXISTING="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')" ||
+  { echo "error: cannot read PR #$PR labels" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+IFS=',' read -r -a existing_array <<< "$EXISTING"
+
+# Idempotency: a label already present on the PR (in any case GitHub stored
+# it) is not re-added.
+declare -A EXISTING_SET=()
+for label in "${existing_array[@]}"; do
+  [ -z "$label" ] && continue
+  EXISTING_SET["$label"]=1
+done
+
+ADD=()
+for label in "${!TO_ADD[@]}"; do
+  if [ -z "${EXISTING_SET[$label]+x}" ]; then
+    ADD+=("$label")
+  fi
+done
+
+ADDED_JSON='['
+first=true
+for label in "${ADD[@]}"; do
+  $first || ADDED_JSON+=','
+  first=false
+  ADDED_JSON+='"'"$label"'"'
+done
+ADDED_JSON+=']'
+
+if [ "${#ADD[@]}" -eq 0 ]; then
+  echo "note: all process labels already present on PR #$PR; nothing to add (idempotent)" >&2
+  echo '{"pr":'"$PR"',"labels_added":[]}'
+  exit "$ORC_OK"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr edit $PR --repo $REPO --add-label ${ADD[*]}" >&2
+  echo "$ADDED_JSON"
+  exit "$ORC_OK"
+fi
+
+ADD_ARGS=()
+for label in "${ADD[@]}"; do
+  ADD_ARGS+=(--add-label "$label")
+done
+orc_lib_gh_service pr edit "$PR" --repo "$REPO" "${ADD_ARGS[@]}" >/dev/null
+
+echo '{"pr":'"$PR"',"labels_added":'"$ADDED_JSON"'}'
