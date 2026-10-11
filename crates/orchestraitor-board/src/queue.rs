@@ -115,6 +115,8 @@ pub fn ready_queue(facts: &[ItemFacts], config: &BoardProjectConfig) -> Vec<Read
 /// Leaf + `Target` + `Status` parts of the ready predicate, without the
 /// blocker clause — the campaign pass uses this to classify open items that
 /// are eligible except for unresolved blockers (spec §9.35 "all-blocked").
+/// The Target check applies only when `[mvp].require_target` is true; the
+/// Status gate is unconditional.
 fn matches_leaf_mvp_ready(facts: &ItemFacts, config: &BoardProjectConfig) -> bool {
     let leaf = match &facts.issue_type {
         Some(native) => config.leaf_types.iter().any(|leaf| leaf == native),
@@ -124,7 +126,8 @@ fn matches_leaf_mvp_ready(facts: &ItemFacts, config: &BoardProjectConfig) -> boo
                 .any(|fallback| label == fallback)
         }),
     };
-    leaf && facts.target.as_deref() == Some(config.target_value.as_str())
+    leaf && (!config.require_target
+        || facts.target.as_deref() == Some(config.target_value.as_str()))
         && facts.status.as_deref() == Some(config.ready_value.as_str())
 }
 
@@ -172,6 +175,7 @@ mod tests {
             ready_value: "Ready".to_string(),
             token_uri: None,
             priority_field: "Priority".to_string(),
+            require_target: true,
         }
     }
 
@@ -242,5 +246,58 @@ mod tests {
         let ready = ready_queue(&[facts(30), facts(10), facts(20)], &config());
         let numbers: Vec<u64> = ready.iter().map(|item| item.number).collect();
         assert_eq!(numbers, [10, 20, 30]);
+    }
+
+    fn config_without_target_gate() -> BoardProjectConfig {
+        let mut config = config();
+        config.require_target = false;
+        config
+    }
+
+    #[test]
+    fn require_target_false_admits_leaf_ready_without_target() {
+        let mut missing_target = facts(40);
+        missing_target.target = None;
+        let mut unset_target = facts(41);
+        unset_target.target = Some("Next".to_string());
+        for facts_item in [&missing_target, &unset_target] {
+            let ready = ready_queue(
+                std::slice::from_ref(facts_item),
+                &config_without_target_gate(),
+            );
+            assert_eq!(
+                ready.len(),
+                1,
+                "item {} must be admitted",
+                facts_item.number
+            );
+            assert_eq!(ready[0].number, facts_item.number);
+            let blocked = blocked_candidates(
+                std::slice::from_ref(facts_item),
+                &config_without_target_gate(),
+            );
+            assert!(blocked.is_empty());
+        }
+    }
+
+    #[test]
+    fn require_target_false_still_enforces_status_gate() {
+        let mut wrong_status = facts(42);
+        wrong_status.status = Some("In Progress".to_string());
+        let mut missing_status = facts(43);
+        missing_status.status = None;
+        let ready = ready_queue(
+            &[wrong_status, missing_status],
+            &config_without_target_gate(),
+        );
+        assert_eq!(ready, [] as [ReadyItem; 0]);
+    }
+
+    #[test]
+    fn require_target_true_is_the_default_gate() {
+        let mut missing_target = facts(44);
+        missing_target.target = None;
+        let ready = ready_queue(&[missing_target], &config());
+        assert_eq!(ready, [] as [ReadyItem; 0]);
     }
 }

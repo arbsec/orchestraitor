@@ -223,6 +223,7 @@ fn config_fixture() -> BoardProjectConfig {
         ready_value: "Ready".to_string(),
         token_uri: None,
         priority_field: "Priority".to_string(),
+        require_target: true,
     }
 }
 

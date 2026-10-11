@@ -42,6 +42,9 @@ pub struct BoardProjectConfig {
     /// to `Priority` when unset. Values are read-only inputs — the board
     /// crate never writes this field.
     pub priority_field: String,
+    /// When false, the ready-queue predicate skips the Target option check;
+    /// Status gate always applies. Defaults to `true` when the key is absent.
+    pub require_target: bool,
 }
 
 impl BoardProjectConfig {
@@ -134,6 +137,7 @@ struct RawMvp {
     ready_field: Option<String>,
     ready_value: Option<String>,
     priority_field: Option<String>,
+    require_target: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +217,7 @@ impl RawConfig {
                 .priority_field
                 .filter(|field| !field.trim().is_empty())
                 .unwrap_or_else(|| "Priority".to_string()),
+            require_target: mvp.require_target.unwrap_or(true),
         })
     }
 }
@@ -241,6 +246,43 @@ mod tests {
         assert_eq!(config.ready_field, "Status");
         assert_eq!(config.ready_value, "Ready");
         assert!(config.token_uri.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn require_target_defaults_to_true_when_absent() -> Result<(), BoardError> {
+        let text = concat!(
+            "[project]\norganization = \"arbsec\"\nnumber = 1\n",
+            "repos = [\"arbsec/orchestraitor\"]\n\n[issue_types]\n",
+            "leaf_implementable = [\"Task\"]\n\n[mvp]\n",
+            "target_field = \"Target\"\ntarget_value = \"MVP\"\n",
+            "ready_field = \"Status\"\nready_value = \"Ready\"\n"
+        );
+        let raw: RawConfig = toml::from_str(text).map_err(|source| BoardError::ConfigParse {
+            path: PathBuf::from("test.toml"),
+            source: Box::new(source),
+        })?;
+        let config = raw.into_config(Path::new("test.toml"))?;
+        assert!(config.require_target);
+        Ok(())
+    }
+
+    #[test]
+    fn require_target_false_parses() -> Result<(), BoardError> {
+        let text = concat!(
+            "[project]\norganization = \"arbsec\"\nnumber = 1\n",
+            "repos = [\"arbsec/orchestraitor\"]\n\n[issue_types]\n",
+            "leaf_implementable = [\"Task\"]\n\n[mvp]\n",
+            "target_field = \"Target\"\ntarget_value = \"MVP\"\n",
+            "ready_field = \"Status\"\nready_value = \"Ready\"\n",
+            "require_target = false\n"
+        );
+        let raw: RawConfig = toml::from_str(text).map_err(|source| BoardError::ConfigParse {
+            path: PathBuf::from("test.toml"),
+            source: Box::new(source),
+        })?;
+        let config = raw.into_config(Path::new("test.toml"))?;
+        assert!(!config.require_target);
         Ok(())
     }
 
