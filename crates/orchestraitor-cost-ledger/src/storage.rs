@@ -22,9 +22,13 @@ impl CostLedger {
     /// # Errors
     /// Returns [`LedgerError`] when `SQLite` cannot open or initialize the database.
     pub fn open(path: &Path) -> LedgerResult<Self> {
-        let ledger = Self {
-            conn: Connection::open(path)?,
-        };
+        let conn = Connection::open(path)?;
+        // A migration (below) serializes against any concurrent opener;
+        // a five-second wait is the documented rusqlite default, stated
+        // explicitly so the budget survives a future default change
+        // (a PR #565 gen-5 review finding).
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let ledger = Self { conn };
         ledger.init_schema()?;
         Ok(ledger)
     }
@@ -64,20 +68,11 @@ impl CostLedger {
         // The probe reads the schema (no writes): a legacy ledger fails
         // closed here instead of migrating in place under a reporting
         // command.
-        let profile_columns: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
-            [],
-            |row| row.get(0),
-        )?;
-        let receipt_tables: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'context_receipts'",
-            [],
-            |row| row.get(0),
-        )?;
-        if profile_columns == 0 || receipt_tables == 0 {
+        let ledger = Self { conn };
+        if ledger.reporting_schema_missing()? {
             return Err(LedgerError::MigrationRequired);
         }
-        Ok(Self { conn })
+        Ok(ledger)
     }
 
     /// Returns the separate API spend table facade.
@@ -186,6 +181,16 @@ impl CostLedger {
     }
 
     fn init_schema(&self) -> LedgerResult<()> {
+        // Probe the schema READ-ONLY first: an up-to-date ledger — the
+        // common case — never takes the write lock, so opening the ledger
+        // cannot contend with a concurrent writer's BEGIN IMMEDIATE and
+        // fail the run's cost attribution (a PR #565 gen-5 review
+        // finding: the unconditional BEGIN IMMEDIATE turned a benign open
+        // into a SQLITE_BUSY risk).
+        let migration_required = self.reporting_schema_missing()?;
+        if !migration_required {
+            return Ok(());
+        }
         // Hold one write transaction across schema creation, the column
         // check, and the alteration: two processes opening a legacy
         // ledger concurrently would otherwise both observe `profile` as
@@ -202,6 +207,23 @@ impl CostLedger {
             }
         }
         Ok(())
+    }
+
+    /// Reports whether the ledger lacks any part of the reporting schema
+    /// (`profile` column or `context_receipts` table). Read-only: the
+    /// same probe `open_read_only` uses for its fail-closed check.
+    fn reporting_schema_missing(&self) -> LedgerResult<bool> {
+        let profile_columns: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
+            [],
+            |row| row.get(0),
+        )?;
+        let receipt_tables: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'context_receipts'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(profile_columns == 0 || receipt_tables == 0)
     }
 
     fn migrate_schema_locked(&self) -> LedgerResult<()> {
