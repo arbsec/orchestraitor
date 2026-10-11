@@ -239,6 +239,10 @@ async fn watch_cycle() -> Result<ExitCode> {
     // The prune inside the invocation loop needs the project dir after the
     // starter owns its clone.
     let prune_project_dir = project_dir.clone();
+    // The spend-cap comparison in the invocation loop reads the SAME
+    // pinned cap the runner enforces — cloned before the starter takes
+    // its owned copy, so the two layers cannot drift.
+    let daily_spend_cap_usd = budgets.daily_spend_soft_cap_usd;
     let starter = DirectWatchStarter::new(
         project_dir,
         config_dir.clone(),
@@ -347,33 +351,56 @@ async fn watch_cycle() -> Result<ExitCode> {
                     .map(|duration| duration.as_secs())
                     .into_diagnostic()
                     .wrap_err("system clock is before the Unix epoch")?;
-                let wait = std::time::Duration::from_secs(86_400 - (now_unix_secs % 86_400));
-                tracing::info!(
-                    wait_secs = wait.as_secs(),
-                    "orcd watch: daily spend cap reached; waiting for the next \
-                     UTC day boundary (the §9.19.6 budget window reset) before \
-                     the next invocation"
-                );
-                let mut wait_rx = signal_rx.clone();
-                tokio::select! {
-                    () = tokio::time::sleep(wait) => {
-                        // The window reset: start the next invocation.
-                    }
-                    changed = wait_rx.changed() => {
-                        // The operator signalled shutdown during the wait:
-                        // a signal during a budget drain preempts the drain
-                        // but the summary keeps the budget cause; the
-                        // OPERATOR asked for shutdown, so exit SUCCESS
-                        // below (the same rule as a signal during a drain).
-                        if changed.is_ok() {
+                // The spend-cap drain is unbounded (in-flight runs finish
+                // naturally), so it CAN cross midnight UTC: when it does,
+                // the §9.19.6 window has already reset and the recorded
+                // daily spend (new UTC day = empty window) is below the
+                // cap — restart at once instead of idling for up to a
+                // full extra day (a gen-6 review finding). Wait for the
+                // next boundary only when the spend is still at or above
+                // the cap.
+                let daily_spend = runs
+                    .daily_spend(now_unix_secs)
+                    .map_err(|error| miette::miette!("daily spend read failed: {error}"))?;
+                if daily_spend < daily_spend_cap_usd {
+                    tracing::info!(
+                        daily_spend,
+                        "orcd watch: spend-cap drain crossed the UTC day \
+                         boundary and the new window is below the cap; \
+                         starting the next invocation"
+                    );
+                } else {
+                    let wait = std::time::Duration::from_secs(86_400 - (now_unix_secs % 86_400));
+                    tracing::info!(
+                        wait_secs = wait.as_secs(),
+                        daily_spend,
+                        "orcd watch: daily spend cap reached; waiting for the next \
+                         UTC day boundary (the §9.19.6 budget window reset) before \
+                         the next invocation"
+                    );
+                    let mut wait_rx = signal_rx.clone();
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {
+                            // The window reset: start the next invocation.
+                        }
+                        changed = wait_rx.changed() => {
+                            // The operator signalled shutdown during the
+                            // wait: a signal during a budget drain
+                            // preempts the drain but the summary keeps the
+                            // budget cause; the OPERATOR asked for
+                            // shutdown, so exit SUCCESS below (the same
+                            // rule as a signal during a drain).
+                            if changed.is_ok() {
+                                signalled = true;
+                                break summary;
+                            }
+                            // Sender gone without a signal cannot happen
+                            // here (the signal task owns the sender for
+                            // the process's lifetime); treat it as
+                            // shutdown.
                             signalled = true;
                             break summary;
                         }
-                        // Sender gone without a signal cannot happen here
-                        // (the signal task owns the sender for the
-                        // process's lifetime); treat it as shutdown.
-                        signalled = true;
-                        break summary;
                     }
                 }
             }
