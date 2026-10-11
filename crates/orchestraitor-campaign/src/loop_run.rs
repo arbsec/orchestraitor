@@ -1419,7 +1419,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         events.push(LoopEvent::PassPlanned {
             decision_id: stored.id,
             selected: false,
-            no_op_reason: Some(NoOpReason::EmptyQueue),
+            no_op_reason: Some(NoOpReason::KickoffGate),
             task_id: None,
         });
         events.push(LoopEvent::KickoffSkipped {
@@ -1537,6 +1537,15 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                         task_id: selected.task_id.clone(),
                         completed: false,
                     });
+                    // The attempted task IS this pass's kick-off: the
+                    // gate fired and the spawn path ran for IT. The
+                    // previous-ready set shrinks to the ATTEMPTED task —
+                    // unselected ready siblings were never attempted, so
+                    // they stay fresh for the next pass's kick-off
+                    // evaluation (a gen-3 review finding: otherwise a
+                    // sibling waits for an outside event the failed
+                    // sibling's backoff cannot provide).
+                    self.previous_ready_ids = [selected.task_id.clone()].into_iter().collect();
                     self.pace_no_spawn(events, self.elapsed());
                     return Ok(false);
                 }

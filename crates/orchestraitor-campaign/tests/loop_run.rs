@@ -2612,3 +2612,36 @@ async fn a_skipped_pass_rationale_carries_the_budget_skips() {
             .collect::<Vec<_>>()
     );
 }
+
+/// Gen-3 review remediation: when a pass's spawn FAILS, the unselected
+/// ready siblings stay fresh — the next pass kicks off the sibling
+/// instead of waiting for an outside event (the failed task's backoff
+/// cannot provide one).
+#[tokio::test(start_paused = true)]
+async fn a_failed_spawn_keeps_unstarted_siblings_fresh() {
+    // Two ready tasks; the first spawn fails, the second completes.
+    let starter = FakeStarter::with_behaviors(vec![
+        Behavior::SpawnFail,
+        Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        },
+    ]);
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(4),
+    )
+    .unwrap();
+    let summary = run_kickoff_loop(config, snapshot_with(&[1, 2]), starter).await;
+
+    assert_eq!(
+        summary.spawns, 1,
+        "the sibling task is attempted after the failed sibling"
+    );
+    assert_eq!(
+        summary.failed, 1,
+        "the failed spawn is the first task's outcome"
+    );
+    assert_eq!(summary.completed, 1, "the sibling completes");
+}
