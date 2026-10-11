@@ -628,15 +628,13 @@ async fn failed_provider_write_never_touches_cache() {
         .expect("re-read after failure");
     // `cached_item` re-stamps `last_synced_ms` on every read
     // (refresh-on-read), so the ms stamp may legitimately tick between the
-    // seed and the re-read; assert the write touched no item state and the
-    // stamp stays monotonically comparable.
+    // seed and the re-read; assert the write touched no item state. The
+    // stamp itself is a raw wall-clock value (`SystemTime::now`, no
+    // monotonic-clock clamping), so it carries no ordering guarantee and is
+    // deliberately not asserted here.
     assert_eq!(
         after.item, seeded.item,
         "failed write must leave the cached item state untouched"
-    );
-    assert!(
-        after.last_synced_ms >= seeded.last_synced_ms,
-        "re-read stamp must be monotonically comparable to the seeded stamp"
     );
     let events = cache.drain_events().expect("drain events after failure");
     assert!(
