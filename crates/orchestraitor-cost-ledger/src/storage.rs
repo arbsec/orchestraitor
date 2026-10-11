@@ -65,6 +65,11 @@ impl CostLedger {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        // The same explicit busy timeout as `open`: a reader cannot read
+        // while a writer holds the PENDING or EXCLUSIVE lock (the commit
+        // window), so a contended open must wait out the writer instead
+        // of failing the report (a PR #565 gen-6 review finding).
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // The probe reads the schema (no writes): a legacy ledger fails
         // closed here instead of migrating in place under a reporting
         // command.
