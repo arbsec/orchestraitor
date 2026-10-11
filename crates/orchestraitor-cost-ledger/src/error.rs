@@ -24,6 +24,24 @@ pub enum LedgerError {
     /// Numeric text failed to parse.
     #[error("cost ledger numeric value is invalid")]
     Float(#[from] std::num::ParseFloatError),
+    /// A session's cost entries would carry two different profile labels
+    /// (spec §13.5.1: one session = one run = one profile; a mixed session
+    /// would double-count its receipts across profile groups).
+    #[error(
+        "cost entry profile label conflicts with the session's existing label: session {session}"
+    )]
+    ProfileConflict {
+        /// The session whose entries would mix profile labels.
+        session: String,
+    },
+    /// The ledger predates the reporting schema (`profile` column or
+    /// `context_receipts` table). A read-only reporting command refuses
+    /// to migrate in place — run `orc loop` once (or any writer) to
+    /// migrate, then re-run the report.
+    #[error(
+        "cost ledger predates the reporting schema and needs migration (run a writer such as `orc loop` once, then retry)"
+    )]
+    MigrationRequired,
 }
 
 impl LedgerError {
@@ -35,7 +53,9 @@ impl LedgerError {
             | Self::Timestamp(_)
             | Self::IntegerRange
             | Self::InvalidStoredValue(_)
-            | Self::Float(_) => Retryability::NotRetriable,
+            | Self::Float(_)
+            | Self::ProfileConflict { .. }
+            | Self::MigrationRequired => Retryability::NotRetriable,
         }
     }
 }

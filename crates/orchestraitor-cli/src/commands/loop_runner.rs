@@ -138,6 +138,11 @@ struct DirectLoopStarter {
     /// Loop invocation id, minted once per `orc loop` run; names each
     /// worker run's cost-attribution session.
     invocation_id: String,
+    /// The §13.5.1 profile label (spec §9.22.5) resolved from
+    /// `roles.<role>.routing.profile`; recorded on every cost entry the
+    /// spawned run writes so `orc stats efficiency --group-by-profile`
+    /// can compare with/without-compaction profiles. `None` = unprofiled.
+    profile: Option<String>,
     /// Declared-tool surface built ONCE at startup (the layer-trust gate,
     /// role routing, and sub-role provider gate all run before the loop
     /// accepts work): a broken tool definition is a typed startup error,
@@ -420,6 +425,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
             },
         );
         let config = self.with_cost_tracking(config, selected, routing);
+        let config = config.with_profile(self.profile.clone());
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
             run_worker(
@@ -640,6 +646,26 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     let routing = RoleRouter::new(&layers.resolver)
         .resolve(WORKER_ROLE)
         .map_err(|error| miette!("{error}"))?;
+    // The §13.5.1 A/B grouping label: the profile named on the role's
+    // routing entry (spec §9.22.5), if any. Absent = unprofiled rows.
+    // A config resolution failure is a WARNING with no profile label,
+    // never a startup abort: the label is optional bookkeeping and
+    // "bookkeeping must never block delivery" (a PR #565 gen-3 review
+    // finding — the `?` here made the same error fatal that
+    // `resolve_guardrails` treats as a warning).
+    let routing_profile = match layers.resolver.resolve_config() {
+        Ok(effective) => effective
+            .roles
+            .and_then(|roles| roles.get(WORKER_ROLE).cloned())
+            .and_then(|role| role.routing)
+            .and_then(|routing| routing.profile),
+        Err(error) => {
+            report_loop_warning(&format!(
+                "profile label unresolved ({error}); runs record no profile"
+            ));
+            None
+        }
+    };
 
     // Decision-provider consultation (spec `30-model-routing.md` §9.45, default off): when the
     // `routing.provider` flag names an implementation, each pass consults it
@@ -717,6 +743,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             guardrails: loop_config.guardrails.worker_guardrails(),
             cost_ledger: cost_ledger.clone(),
             invocation_id: invocation_id.clone(),
+            profile: routing_profile.clone(),
             // Gated once, above: never re-validated per spawn.
             declared_tools: surface.tools,
             subsession_routing: surface.subsession_routing,
