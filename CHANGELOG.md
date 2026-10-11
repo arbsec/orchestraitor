@@ -24,10 +24,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   operator-configurable through the new `[watch.kickoff]` layered config
   block; built-in defaults ship as TOML data (§9.22.1). Disabling every
   condition yields an idle-but-healthy daemon: the tick keeps polling
-  and supervising, and every skipped pass is journaled as a typed
+  and supervising, every skipped pass persists a typed no-op decision
+  record (rationale carries the kick-off verdict) and journals a
   `kickoff-skipped` event — never a silent drop. A budget stop stays the
   explicit `blocked`/`needs-human` state (§9.33.4); kick-off never
-  bypasses a budget. Documented in
+  bypasses a budget, and the daily-spend soft cap now ends one daemon
+  invocation until its per-day budget window resets (§9.19.6) — the
+  daemon restarts and observes the reset, instead of staying down until
+  the operator intervenes. Documented in
   [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
 - **Token-efficiency statistics** (`orc stats efficiency`): reporting
   over the cost ledger showing, per session or per configuration

@@ -2435,3 +2435,127 @@ async fn a_budget_stop_precedes_kick_off_and_is_explicit() {
         "the soft cap never aborts in-flight work"
     );
 }
+
+/// Gen-1 review remediation 1: a kick-off-skipped pass persists exactly
+/// one durable decision record (§9.35 — one record per pass), with the
+/// verdict in the rationale, so the durable history shows why the poll
+/// produced no work.
+#[tokio::test(start_paused = true)]
+async fn a_skipped_pass_persists_a_decision_record() {
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        new_eligible_work: false,
+        ..KickoffSettings::builtin_defaults()
+    });
+    let (summary, decisions, _runs) = run_loop(
+        config,
+        snapshot_with(&[1]),
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        "inv",
+        never(),
+    )
+    .await;
+
+    assert_eq!(summary.spawns, 0);
+    let records = decisions.list().unwrap();
+    assert_eq!(
+        records.len() as u64,
+        summary.cycles,
+        "exactly one decision record per pass, including skipped passes"
+    );
+    for record in &records {
+        assert_eq!(
+            record.decision.kind,
+            orchestraitor_campaign::DecisionKind::NoOp
+        );
+        assert!(
+            record.decision.rationale.contains("kick-off gate"),
+            "the rationale carries the kick-off verdict: {}",
+            record.decision.rationale
+        );
+    }
+}
+
+/// Gen-1 review remediation 2: a ready task under a cross-invocation
+/// backoff window is NOT new eligible work, and when the window elapses
+/// the SAME task still kicks off (it was never recorded as
+/// previously-ready, so its later appearance is fresh).
+#[tokio::test(start_paused = true)]
+async fn a_backed_off_task_kicks_off_after_its_window_elapses() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    // Backoff window ending 1h out: the task is excluded on the first
+    // invocation.
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "provider-error",
+        false,
+        Some(START_UNIX + 3600),
+    )
+    .unwrap();
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary, _decisions, _runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    assert_eq!(
+        summary.spawns, 0,
+        "the backed-off task is not a kick-off candidate"
+    );
+
+    // Fresh invocation with the window elapsed: the SAME task kicks off —
+    // the forbidden effect would be an empty kick-off because the task
+    // was recorded as previously-ready while excluded.
+    let decisions2 = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs2 = LoopRunStore::open_in_memory().unwrap();
+    runs2
+        .record_task_failure(
+            "board-arbsec_orchestraitor-1",
+            "provider-error",
+            false,
+            Some(START_UNIX - 10),
+        )
+        .unwrap();
+    let config2 = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter2 = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary2, _decisions, _runs) = run_loop_with_stores(
+        config2,
+        snapshot_with(&[1]),
+        starter2,
+        "inv-2",
+        decisions2,
+        runs2,
+    )
+    .await;
+    assert_eq!(
+        summary2.spawns, 1,
+        "the same task kicks off once its window elapses"
+    );
+}

@@ -302,15 +302,27 @@ async fn watch_cycle() -> Result<ExitCode> {
         .await
         .into_diagnostic()?;
         match summary.stop_reason {
+            // Both budget stops restart the ALWAYS-ON daemon (§9.36): the
+            // run budget ends one invocation, and the daily-spend soft cap
+            // ends one invocation UNTIL ITS WINDOW RESETS (§9.19.6 — the
+            // per-day budget window). Without the restart the next UTC day
+            // could never reach the kick-off evaluation's budget-window-
+            // reset condition in this process (a gen-1 review finding) —
+            // the daemon would be down exactly when the window that
+            // stopped it expires. Restart only when no signal arrived
+            // during this invocation (baseline comparison above); a
+            // non-shutdown stop still exits non-zero when the restart
+            // bound is exhausted by a signal race, keeping the supervisor
+            // visible.
             orchestraitor_campaign::StopReason::RunBudgetExhausted
-                // Restart only when no signal arrived during this
-                // invocation (baseline comparison above).
+            | orchestraitor_campaign::StopReason::SpendSoftCap
                 if *signal_rx.borrow() == signal_baseline =>
             {
                 tracing::info!(
                     cycles = summary.cycles,
                     spawns = summary.spawns,
-                    "orcd watch: run budget exhausted; starting the next invocation"
+                    stop = ?summary.stop_reason,
+                    "orcd watch: budget stop; starting the next invocation"
                 );
             }
             _ => {
@@ -334,10 +346,14 @@ async fn watch_cycle() -> Result<ExitCode> {
         "orcd watch: stopped ({:?})",
         summary.stop_reason
     );
-    // A non-shutdown terminal stop (spend soft cap, guardrails exhausted)
-    // must be VISIBLE to the supervisor: exit non-zero so `Restart=on-
-    // failure` restarts the daemon (e.g. the next UTC day after a spend
-    // cap) instead of silently staying down (a PR #555 review finding).
+    // A non-shutdown terminal stop (guardrails exhausted) must be VISIBLE
+    // to the supervisor: exit non-zero so `Restart=on-failure` restarts
+    // the daemon instead of silently staying down (a PR #555 review
+    // finding). The spend soft cap and the run budget are NOT in this
+    // class anymore: the invocation loop above restarts them itself (the
+    // run budget ends one invocation; the spend cap ends one until its
+    // §9.19.6 per-day window resets), so they only reach this line when a
+    // signal raced the budget stop.
     // EXCEPT when the operator signalled shutdown during the drain: then
     // the exit is a clean shutdown (the audit rows keep the budget cause).
     if signalled || summary.stop_reason == orchestraitor_campaign::StopReason::Shutdown {

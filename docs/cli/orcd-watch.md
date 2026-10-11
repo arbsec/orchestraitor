@@ -81,12 +81,20 @@ Notes:
 - **Disabling every condition yields an idle-but-healthy daemon**: the
   tick keeps polling and supervising, run state stays durable and
   reconciled — but no campaign session is ever kicked off. Every skipped
-  pass is journaled as a typed `kickoff-skipped` event in the run
-  summary, never a silent drop.
+  pass persists exactly one typed no-op decision record (the rationale
+  carries the kick-off verdict) and journals a `kickoff-skipped` event in
+  the run summary — never a silent drop.
 - **Budget stops are not a condition.** The budget gates (daily spend
   soft cap, whole-run budget) run before any kick-off evaluation and
   produce the explicit `blocked`/`needs-human` state (§9.33.4) — kick-off
-  never bypasses a budget to keep the loop moving.
+  never bypasses a budget to keep the loop moving. Both budget stops end
+  one daemon invocation, not the daemon: the invocation loop restarts on
+  `RunBudgetExhausted` and on `SpendSoftCap` (the spend cap ends one
+  invocation until its §9.19.6 per-day window resets — the next UTC day's
+  first invocation observes the budget-window-reset condition), so the
+  always-on daemon is available again when the window that stopped it
+  expires. Only a shutdown signal (or a signal racing the budget stop)
+  ends the process.
 - While a campaign is in flight with free capacity, the active session's
   scheduling continues under the concurrency cap; the kick-off evaluation
   gates starting a session from idle, not the in-flight session's own
