@@ -626,9 +626,12 @@ async fn failed_provider_write_never_touches_cache() {
         .cached_item(&item)
         .await
         .expect("re-read after failure");
-    // Compare item content, not the whole record: `cached_item` is
-    // refresh-on-read and stamps `last_synced_ms` at read time, so a
-    // millisecond tick between the seed and this re-read is legitimate.
+    // `cached_item` re-stamps `last_synced_ms` on every read
+    // (refresh-on-read), so the ms stamp may legitimately tick between the
+    // seed and the re-read; assert the write touched no item state. The
+    // stamp itself is a raw wall-clock value (`SystemTime::now`, no
+    // monotonic-clock clamping), so it carries no ordering guarantee and is
+    // deliberately not asserted here.
     assert_eq!(
         after.item, seeded.item,
         "failed write must leave the cached item state untouched"
