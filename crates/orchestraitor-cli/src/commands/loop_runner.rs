@@ -648,14 +648,24 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
         .map_err(|error| miette!("{error}"))?;
     // The §13.5.1 A/B grouping label: the profile named on the role's
     // routing entry (spec §9.22.5), if any. Absent = unprofiled rows.
-    let routing_profile = layers
-        .resolver
-        .resolve_config()
-        .map_err(|error| miette!("{error}"))?
-        .roles
-        .and_then(|roles| roles.get(WORKER_ROLE).cloned())
-        .and_then(|role| role.routing)
-        .and_then(|routing| routing.profile);
+    // A config resolution failure is a WARNING with no profile label,
+    // never a startup abort: the label is optional bookkeeping and
+    // "bookkeeping must never block delivery" (a PR #565 gen-3 review
+    // finding — the `?` here made the same error fatal that
+    // `resolve_guardrails` treats as a warning).
+    let routing_profile = match layers.resolver.resolve_config() {
+        Ok(effective) => effective
+            .roles
+            .and_then(|roles| roles.get(WORKER_ROLE).cloned())
+            .and_then(|role| role.routing)
+            .and_then(|routing| routing.profile),
+        Err(error) => {
+            report_loop_warning(&format!(
+                "profile label unresolved ({error}); runs record no profile"
+            ));
+            None
+        }
+    };
 
     // Decision-provider consultation (spec `30-model-routing.md` §9.45, default off): when the
     // `routing.provider` flag names an implementation, each pass consults it

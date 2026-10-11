@@ -23,7 +23,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   labels, the A/B mechanism for verifying that the token-saving features
   actually save; `--json` emits the same rollups as stable JSON. Cost
   entries now carry the run's profile label (`roles.<role>.routing.profile`);
-  existing ledgers migrate in place on open.
+  existing ledgers migrate in place the next time a writer (`orc loop`)
+  opens them; `orc stats` never migrates and reports a migration-required
+  error on a legacy ledger.
 - `orcd watch`: the watch daemon's running mode (spec `10-orchestrator.md`
   §9.36 thin slice; #503) — the `orc loop` poll/supervise cycle as the
   daemon's always-on mode, on a fixed default 60s poll cadence
@@ -52,7 +54,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   labels, the A/B mechanism for verifying that the token-saving features
   actually save; `--json` emits the same rollups as stable JSON. Cost
   entries now carry the run's profile label (`roles.<role>.routing.profile`);
-  existing ledgers migrate in place on open.
+  existing ledgers migrate in place the next time a writer (`orc loop`)
+  opens them; `orc stats` never migrates and reports a migration-required
+  error on a legacy ledger.
 - **Optional `Target` gate in the ready-queue predicate**: the board config
   (`.agents/project/github-project.local.toml`) accepts a new optional
   `[mvp].require_target` key. When set to `false`, `orc loop`, `orc campaign`, and

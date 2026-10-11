@@ -356,19 +356,22 @@ impl CostLedger {
         &self,
         rollups: &mut [TokenEfficiencyRollup],
     ) -> LedgerResult<()> {
-        // A receipt may be recorded before its session has any cost
-        // entry; that session carries no profile label, so the receipt is
-        // SKIPPED entirely (not folded into the unprofiled group — it
-        // would skew that group's median). The LEFT JOIN + `WHERE
-        // profile IS NOT NULL`-style filter expresses the same skip in
-        // one query: sessions with no cost entry produce no row.
+        // A receipt recorded before its session has any cost entry is
+        // SKIPPED (the inner JOIN on the cost_entries aggregate produces
+        // no row for it) — NOT folded into the unprofiled group, where it
+        // would skew that group's median. A session whose entries all
+        // carry a NULL profile joins with label `''` and DOES produce a
+        // ratio for the `(unprofiled)` group: the A/B baseline must keep
+        // its median (a PR #565 gen-3 review finding — the previous
+        // gen-2 query's `WHERE profile IS NOT NULL` filter dropped those
+        // sessions).
         let sql = "SELECT r.session, \
                    SUM(r.candidate_tokens), SUM(r.selected_tokens), \
                    SUM(r.raw_tool_output_tokens), SUM(r.compacted_tool_output_tokens), \
                    COALESCE(c.profile, '') AS label \
                    FROM context_receipts r \
                    JOIN (SELECT session, MAX(profile) AS profile FROM cost_entries \
-                         WHERE profile IS NOT NULL GROUP BY session) c \
+                         GROUP BY session) c \
                    ON c.session = r.session \
                    GROUP BY r.session, label \
                    ORDER BY r.session";
