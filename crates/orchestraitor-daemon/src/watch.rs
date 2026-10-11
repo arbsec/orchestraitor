@@ -20,12 +20,13 @@
 //! poller and records `board-diverged` events plus newly unblocked-task
 //! promotions (§9.40) into the daemon event store on every snapshot.
 //!
-//! Lease/heartbeat orphan detection (§9.36): the loop's beat-staleness
+//! Lease/heartbeat detection (§9.36): the loop's beat-staleness
 //! machinery IS the lease check — a campaign run whose worker produces no
 //! decision progress (no beat) inside the stall window is killed and
-//! recorded; a row the supervisor never reached a terminal status for is
-//! `orphaned` by restart recovery. A lease-expired row is never `failed`
-//! directly.
+//! recorded `stalled` (it counts against the task retry budget, as in
+//! `orc loop`); a row the supervisor never reached a terminal status for
+//! is `orphaned` by restart recovery. A lease-expired row is never
+//! `failed` directly.
 //!
 //! This crate implements no security primitive: killing, capping, and
 //! pacing are orchestration limits (spec §9.27.3); the sandbox boundary
@@ -206,7 +207,6 @@ impl BoardPoller for BoardSnapshotPoller {
 #[derive(Clone)]
 pub struct ReconcilePoller<P: BoardPoller> {
     inner: P,
-    runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
     events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
     sink: Arc<dyn ReconcileSink>,
     /// The previous tick's blocked candidates (§9.40): a candidate that
@@ -218,32 +218,33 @@ pub struct ReconcilePoller<P: BoardPoller> {
     /// stays absent from the open set must not produce an envelope every
     /// cadence tick).
     diverged_seen: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// The current watch invocation id, set by [`Self::set_invocation`]
-    /// before the runner starts. Rows from THIS invocation are the
-    /// runner's own live slots — the worker may legitimately move or close
-    /// the board item while the run finishes, which is normal supervision,
-    /// never a divergence. Earlier invocations' rows are recovery surface.
-    current_invocation: Arc<std::sync::Mutex<Option<String>>>,
+    /// The rows this invocation's restart recovery reaped (`running` →
+    /// `orphaned`, §9.24.2), set by [`Self::set_recovered`] before the
+    /// runner starts. These are the crashed-run rows whose liveness claim
+    /// the board may have overruled while the daemon was down — the
+    /// reconcile's divergence scope (a PR #564 review finding).
+    recovered_orphaned: Arc<std::sync::Mutex<Vec<orchestraitor_campaign::RunRow>>>,
 }
 
 /// The reconcile-poller seam `run_watch` needs beyond reading snapshots:
-/// handing the poller the runner's invocation identity so live slots are
-/// excluded from the divergence scan. Blanket-implemented for
-/// [`ReconcilePoller`]; tests with plain pollers implement it as a no-op.
+/// handing the poller the recovery outcome and the runner's invocation
+/// identity. Blanket-implemented for [`ReconcilePoller`]; tests with
+/// plain pollers implement both as no-ops.
 pub trait SetWatchInvocation {
-    /// Begins a new watch invocation (id + dedup reset; `previous_blocked`
+    /// Begins a new watch invocation (dedup reset; `previous_blocked`
     /// carried).
     fn begin_invocation(&mut self, invocation_id: &str);
-    /// Sets the current watch invocation id without touching state.
-    fn set_invocation(&mut self, invocation_id: &str);
+    /// Supplies this invocation's recovered rows (the restart recovery's
+    /// outcome) as the reconcile divergence scope.
+    fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>);
 }
 
 impl<P: BoardPoller> SetWatchInvocation for ReconcilePoller<P> {
     fn begin_invocation(&mut self, invocation_id: &str) {
         ReconcilePoller::begin_invocation(self, invocation_id);
     }
-    fn set_invocation(&mut self, invocation_id: &str) {
-        ReconcilePoller::set_invocation(self, invocation_id);
+    fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>) {
+        ReconcilePoller::set_recovered(self, recovered);
     }
 }
 
@@ -271,52 +272,31 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
         // per cadence tick. Promotion: the previous tick's blocked
         // candidates feed this tick's reconcile, so a candidate that
         // reaches the ready queue records `unblocked-task-promoted`.
-        // The runner's live slots: rows of the CURRENT invocation. The worker
-        // may legitimately move or close the board item while its run is
-        // still finishing — that is normal supervision, never a divergence
-        // (a PR #555 review finding). Earlier invocations' rows stay in
-        // scope: the recovery pass at each invocation start orphans the
-        // rows it can reach, but the loop's fatal-exit sweep is best-effort
-        // and can leave a row `running`, so an earlier-invocation row seen
-        // here is reported rather than assumed-live.
-        // The supervised set and the reconcile input read under one
-        // `runs` lock so both see the same store snapshot (a PR #555
-        // review thread): the runner writes through its own connection,
-        // and a torn read across two locks could misclassify a row the
-        // runner just started.
-        let (previous_blocked, supervised_task_ids) = {
-            let invocation = self
-                .current_invocation
-                .lock()
-                .map_err(|_| CampaignError::Loop("reconcile state lock poisoned".to_string()))?;
-            let mut supervised = Vec::new();
-            if let Some(current) = invocation.as_deref() {
-                let runs = self.runs.lock().map_err(|_| {
-                    CampaignError::Loop("run-state store lock poisoned".to_string())
-                })?;
-                supervised = runs
-                    .runs_for_invocation(current)?
-                    .into_iter()
-                    .filter(|row| row.status == orchestraitor_campaign::RunRowStatus::Running)
-                    .map(|row| row.task_id)
-                    .collect();
-            }
+        // The divergence scope: this invocation's RECOVERED rows (set by
+        // `set_recovered` from the §9.24.2 restart recovery). A live slot
+        // of the CURRENT invocation is never in scope — the worker may
+        // legitimately move or close the board item while its run is
+        // still finishing, which is normal supervision, never a
+        // divergence (a PR #555 review finding; a PR #564 review finding
+        // re-scoped the check after the old supervised-exclusion scan
+        // proved unreachable in production).
+        let (previous_blocked, recovered_orphaned) = {
             let previous_blocked = {
                 let previous = self.previous_blocked.lock().map_err(|_| {
                     CampaignError::Loop("reconcile state lock poisoned".to_string())
                 })?;
                 previous.clone()
             };
-            (previous_blocked, supervised)
+            let recovered = {
+                let recovered = self.recovered_orphaned.lock().map_err(|_| {
+                    CampaignError::Loop("reconcile state lock poisoned".to_string())
+                })?;
+                recovered.clone()
+            };
+            (previous_blocked, recovered)
         };
-        let outcome = {
-            let runs = self
-                .runs
-                .lock()
-                .map_err(|_| CampaignError::Loop("run-state store lock poisoned".to_string()))?;
-            reconcile(&snapshot, &previous_blocked, &supervised_task_ids, &runs)
-        }
-        .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
+        let outcome = reconcile(&snapshot, &previous_blocked, &recovered_orphaned)
+            .map_err(|error| CampaignError::Loop(format!("reconcile scan failed: {error}")))?;
         // Dedup the divergence events against `seen` (a task that stays
         // absent from the open set is recorded ONCE, not once per tick),
         // then update the reconcile state AFTER a successful pass: the
@@ -352,11 +332,27 @@ impl<P: BoardPoller> BoardPoller for ReconcilePoller<P> {
                     ready_task_ids: outcome.ready_task_ids.clone(),
                 };
                 self.record_events(&single)?;
-                if let ReconcileEvent::BoardDiverged { task_id, .. } = event {
-                    let mut seen = self.diverged_seen.lock().map_err(|_| {
-                        CampaignError::Loop("reconcile state lock poisoned".to_string())
-                    })?;
-                    seen.insert(task_id.clone());
+                match event {
+                    ReconcileEvent::BoardDiverged { task_id, .. } => {
+                        let mut seen = self.diverged_seen.lock().map_err(|_| {
+                            CampaignError::Loop("reconcile state lock poisoned".to_string())
+                        })?;
+                        seen.insert(task_id.clone());
+                    }
+                    // A recorded promotion leaves the previous_blocked set
+                    // BEFORE the next event is recorded: a mid-batch failure
+                    // then re-observes only the UNRECORDED suffix on the
+                    // retry tick — the recorded promotion can never re-fire
+                    // (a PR #564 review finding; BoardDiverged is covered by
+                    // the `diverged_seen` dedup).
+                    ReconcileEvent::UnblockedTaskPromoted { repo, number, .. } => {
+                        let mut previous = self.previous_blocked.lock().map_err(|_| {
+                            CampaignError::Loop("reconcile state lock poisoned".to_string())
+                        })?;
+                        previous.retain(|candidate| {
+                            !(candidate.repo == *repo && candidate.number == *number)
+                        });
+                    }
                 }
                 recorded.push(event.clone());
             }
@@ -388,18 +384,35 @@ impl<P: BoardPoller> ReconcilePoller<P> {
     #[must_use]
     pub fn new(
         inner: P,
-        runs: Arc<std::sync::Mutex<orchestraitor_campaign::LoopRunStore>>,
         events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
         sink: Arc<dyn ReconcileSink>,
     ) -> Self {
         Self {
             inner,
-            runs,
             events,
             sink,
             previous_blocked: Arc::new(std::sync::Mutex::new(Vec::new())),
             diverged_seen: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            current_invocation: Arc::new(std::sync::Mutex::new(None)),
+            recovered_orphaned: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Supplies this invocation's recovered rows (the §9.24.2 restart
+    /// recovery's outcome) as the reconcile divergence scope. Called by
+    /// [`run_watch`] after recovery, before the first poll. The scope
+    /// persists for the whole invocation: the recovered rows are fixed at
+    /// recovery time, and the per-task `diverged_seen` dedup keeps the
+    /// event at one record per task even across cadence ticks.
+    pub fn set_recovered(&mut self, recovered: Vec<orchestraitor_campaign::RunRow>) {
+        match self.recovered_orphaned.lock() {
+            Ok(mut slot) => *slot = recovered,
+            // A poisoned lock means a previous reconcile panicked mid-scan.
+            // This path RECOVERS the guard via into_inner() (not fail-loud):
+            // the setter runs at invocation start, before any reconcile scan,
+            // so a poisoned guard here cannot reflect this invocation's own
+            // panic — overwriting the stale value is safe and the next
+            // poll's poison handling still surfaces any real corruption.
+            Err(poisoned) => *poisoned.into_inner() = recovered,
         }
     }
 
@@ -412,28 +425,10 @@ impl<P: BoardPoller> ReconcilePoller<P> {
     /// Called by [`run_watch`] once the runner's invocation identity
     /// exists; MUST run before the first poll.
     pub fn begin_invocation(&mut self, invocation_id: &str) {
-        match self.current_invocation.lock() {
-            Ok(mut slot) => *slot = Some(invocation_id.to_string()),
-            // A poisoned lock means a previous reconcile panicked mid-scan.
-            // This path RECOVERS the guard via into_inner() (not fail-loud):
-            // the setter runs at invocation start, before any reconcile scan,
-            // so a poisoned guard here cannot reflect this invocation's own
-            // panic — overwriting the stale value is safe and the next
-            // poll's poison handling still surfaces any real corruption.
-            Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
-        }
+        let _ = invocation_id;
         match self.diverged_seen.lock() {
             Ok(mut seen) => seen.clear(),
             Err(poisoned) => poisoned.into_inner().clear(),
-        }
-    }
-
-    /// Sets the current watch invocation id without touching reconcile
-    /// state (test convenience).
-    pub fn set_invocation(&mut self, invocation_id: &str) {
-        match self.current_invocation.lock() {
-            Ok(mut slot) => *slot = Some(invocation_id.to_string()),
-            Err(poisoned) => *poisoned.into_inner() = Some(invocation_id.to_string()),
         }
     }
 
@@ -514,6 +509,11 @@ pub struct DirectWatchStarter {
     config_dir: PathBuf,
     provider_endpoint: Option<String>,
     budgets: WorkerBudgets,
+    /// The worker-side anti-stuck guardrail thresholds resolved from
+    /// `[loop]` — the SAME settings the runner validates, so the daemon
+    /// cannot drift from the foreground loop's enforcement (a PR #564
+    /// review finding: the worker config never received them).
+    guardrails: orchestraitor_worker::GuardrailsConfig,
 }
 
 impl DirectWatchStarter {
@@ -524,12 +524,14 @@ impl DirectWatchStarter {
         config_dir: PathBuf,
         provider_endpoint: Option<String>,
         budgets: WorkerBudgets,
+        guardrails: orchestraitor_worker::GuardrailsConfig,
     ) -> Self {
         Self {
             project_dir,
             config_dir,
             provider_endpoint,
             budgets,
+            guardrails,
         }
     }
 
@@ -576,6 +578,16 @@ impl DirectWatchStarter {
         Ok(worktree)
     }
 
+    /// Test-only wrapper over the private [`Self::prepare_worktree`]: the
+    /// worktree-reuse regression test exercises the exact spawn path.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare_worktree`].
+    pub fn prepare_worktree_for_test(&self, task_id: &str) -> Result<PathBuf, CampaignError> {
+        self.prepare_worktree(task_id)
+    }
+
     /// A `git` invocation anchored at `dir` with repository-location
     /// environment variables scrubbed (the same hygiene `orc loop`
     /// applies): a `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` inherited
@@ -591,9 +603,14 @@ impl DirectWatchStarter {
     }
 
     /// Removes every leftover worktree from previous invocations (of
-    /// either `orc loop` or earlier watch runs). Called once at startup,
-    /// before any spawn. Removal failures are logged — never fatal, never
-    /// silent.
+    /// either `orc loop` or earlier watch runs). Called once at process
+    /// start AND before every subsequent invocation in the run loop: a
+    /// task that ran in invocation N keeps its worktree (worktrees are
+    /// never removed on run completion), and `git worktree add` into an
+    /// already-registered path fails — without the per-invocation prune a
+    /// retried task would count as a spawn failure and could strand as
+    /// `stuck` without ever running (a PR #564 review finding). Removal
+    /// failures are logged — never fatal, never silent.
     pub fn prune_worktrees(config_dir: &Path, project_dir: &Path) {
         let base = config_dir.join("loop-worktrees");
         // Clear stale registrations FIRST (a removed directory, an
@@ -654,6 +671,23 @@ impl LoopWorkerStarter for DirectWatchStarter {
         routing: &RoleRoutingDecision,
         prior_daily_spend_usd: f64,
     ) -> Result<WorkerProcess, CampaignError> {
+        // The same bootstrap-only gate the foreground `DirectLoopStarter`
+        // enforces (spec §10.3): the direct-path worker runs the bootstrap
+        // provider exclusively, so a routing misconfiguration must fail
+        // the spawn — never silently run a non-bootstrap provider behind
+        // the daemon's pinned budget set (a PR #564 review finding).
+        if routing.provider != orchestraitor_agent_catalog::BOOTSTRAP_PROVIDER {
+            return Err(CampaignError::Spawn {
+                task_id: selected.task_id.clone(),
+                message: format!(
+                    "bootstrap worker supports only the `{}` provider (spec §10.3); \
+                     roles.{}.routing.provider resolved to `{}`",
+                    orchestraitor_agent_catalog::BOOTSTRAP_PROVIDER,
+                    routing.role,
+                    routing.provider
+                ),
+            });
+        }
         let tasks_dir = self.config_dir.join("worker-tasks");
         std::fs::create_dir_all(&tasks_dir).map_err(|error| CampaignError::Spawn {
             task_id: selected.task_id.clone(),
@@ -702,6 +736,7 @@ impl LoopWorkerStarter for DirectWatchStarter {
             ModelId::from_string(routing.model.clone()),
             self.budgets.clone(),
         );
+        config.guardrails = self.guardrails.clone();
         config.prior_daily_spend_usd = prior_daily_spend_usd;
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
@@ -769,9 +804,12 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
 
     // Single source for the invocation id: the caller derives it ONCE and
     // this function hands the same string to the reconcile poller and the
-    // runner, so the live-slot exclusion and the runner's identity can
-    // never drift. begin_invocation resets the dedup set (invocation-
-    // scoped) while carrying previous_blocked across the boundary.
+    // runner, so the runner's identity and the reconcile bookkeeping can
+    // never drift. The recovered rows are the reconcile divergence scope
+    // (board-wins over the crashed run's liveness claim, §9.43/§9.36);
+    // begin_invocation resets the per-invocation dedup set while carrying
+    // `previous_blocked` across the boundary.
+    poller.set_recovered(recovered);
     poller.begin_invocation(invocation_id);
     let runner = LoopRunner::new(
         loop_config,

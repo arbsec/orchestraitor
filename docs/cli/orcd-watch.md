@@ -71,11 +71,10 @@ rows all behave exactly as documented for
 
 - **Restart recovery.** A row the supervisor never reached a terminal
   status for reads `orphaned` after restart (detail
-  `restart-recovery: supervisor did not reach a terminal status`). Lease
-  expiry and crashes transition to `orphaned` — never directly `failed`
-  (§9.24.2: the operator can extend; the next tick re-runs the work
-  fresh). Rows killed mid-run by the beat-staleness machinery keep the
-  loop's own typed statuses.
+  `restart-recovery: supervisor did not reach a terminal status`). Crashes
+  transition to `orphaned` — never directly `failed` (§9.24.2). A lease
+  expiry detected mid-run (beat staleness) is recorded `stalled` and
+  counts against the task retry budget, as in `orc loop`.
 - **Failed polls and no-op passes cost time.** The next poll waits for
   the LATER of the cadence and the no-spawn backoff: a transient poll
   failure (network blip, rate limit) waits the full interval before the

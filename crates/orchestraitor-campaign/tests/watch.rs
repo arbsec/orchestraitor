@@ -129,22 +129,31 @@ fn paused_status_is_non_terminal_and_untouched_by_recovery() {
     assert!(recovered.is_empty(), "a paused row is never recovered");
 }
 
-/// §9.36 reconcile: a running row whose task vanished from the board's
-/// open set records a `board-diverged` event (board wins, §9.43).
+/// §9.36/§9.43 reconcile: a RECOVERED row (crashed-run liveness the
+/// restart recovery reaped) whose task vanished from the board's open
+/// set records a `board-diverged` event — the board moved/cancelled the
+/// item out from under the crashed run.
 #[test]
-fn reconcile_records_board_diverged_for_vanished_running_task() {
+fn reconcile_records_board_diverged_for_vanished_recovered_row() {
     let runs = LoopRunStore::open_in_memory().expect("store");
     start_row(&runs, "board-arbsec_orchestraitor-42", 42);
+    // Simulate the §9.24.2 restart recovery the daemon runs before the
+    // first tick: the row is `orphaned` when it reaches reconcile.
+    let recovered = runs
+        .recover_running_rows(START_UNIX + 60)
+        .expect("recovery");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, RunRowStatus::Orphaned);
 
     // Fresh snapshot: task 42 is GONE from the open set (moved/cancelled
-    // on the board).
+    // on the board while the run was down).
     let snapshot = BoardSnapshot {
         open: Vec::new(),
         ready: Vec::new(),
         blocked_candidates: Vec::new(),
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[], &[], &runs).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[], &recovered).expect("reconcile");
     assert_eq!(outcome.events.len(), 1, "one divergence recorded");
     match &outcome.events[0] {
         orchestraitor_campaign::ReconcileEvent::BoardDiverged {
@@ -152,7 +161,7 @@ fn reconcile_records_board_diverged_for_vanished_running_task() {
             local_status,
         } => {
             assert_eq!(task_id, "board-arbsec_orchestraitor-42");
-            assert_eq!(*local_status, RunRowStatus::Running);
+            assert_eq!(*local_status, RunRowStatus::Orphaned);
         }
         other @ orchestraitor_campaign::ReconcileEvent::UnblockedTaskPromoted { .. } => {
             panic!("expected BoardDiverged, got {other:?}")
@@ -160,12 +169,17 @@ fn reconcile_records_board_diverged_for_vanished_running_task() {
     }
 }
 
-/// §9.36 reconcile: a running row whose task is still open on the board is
-/// normal supervision, not a divergence.
+/// §9.36 reconcile: a recovered row whose task is STILL open on the board
+/// is normal recovery (the next tick's kick-off re-runs the work), not a
+/// divergence. Forbidden effect: a divergence for ordinary restart
+/// recovery.
 #[test]
-fn reconcile_ignores_running_rows_still_open_on_the_board() {
+fn reconcile_ignores_recovered_rows_still_open_on_the_board() {
     let runs = LoopRunStore::open_in_memory().expect("store");
     start_row(&runs, "board-arbsec_orchestraitor-42", 42);
+    let recovered = runs
+        .recover_running_rows(START_UNIX + 60)
+        .expect("recovery");
 
     let snapshot = BoardSnapshot {
         open: vec![orchestraitor_board::ItemFacts {
@@ -185,10 +199,32 @@ fn reconcile_ignores_running_rows_still_open_on_the_board() {
         blocked_candidates: Vec::new(),
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[], &[], &runs).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[], &recovered).expect("reconcile");
     assert!(
         outcome.events.is_empty(),
-        "an open running task is not a divergence, got {:?}",
+        "an open recovered task is not a divergence, got {:?}",
+        outcome.events
+    );
+}
+
+/// §9.36 reconcile: live slots (current-invocation `running` rows) are
+/// NEVER in the divergence scope — a worker legitimately closing its own
+/// item while finishing is normal supervision, not a board overrule.
+#[test]
+fn reconcile_never_flags_live_slots() {
+    let runs = LoopRunStore::open_in_memory().expect("store");
+    start_row(&runs, "board-arbsec_orchestraitor-42", 42);
+    // Live slot: still `running`, NOT recovered.
+    let snapshot = BoardSnapshot {
+        open: Vec::new(),
+        ready: Vec::new(),
+        blocked_candidates: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let outcome = reconcile(&snapshot, &[], &[]).expect("reconcile");
+    assert!(
+        outcome.events.is_empty(),
+        "a live slot is never a divergence, got {:?}",
         outcome.events
     );
 }
@@ -197,7 +233,6 @@ fn reconcile_ignores_running_rows_still_open_on_the_board() {
 /// records an unblocked-task promotion event.
 #[test]
 fn reconcile_records_unblocked_task_promotion() {
-    let runs = LoopRunStore::open_in_memory().expect("store");
     let snapshot = BoardSnapshot {
         open: Vec::new(),
         ready: vec![ready_item(42)],
@@ -205,7 +240,7 @@ fn reconcile_records_unblocked_task_promotion() {
         warnings: Vec::new(),
     };
     // Previous pass: task 42 was a blocked candidate.
-    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[ready_item(42)], &[]).expect("reconcile");
     assert_eq!(outcome.events.len(), 1, "one promotion recorded");
     match &outcome.events[0] {
         orchestraitor_campaign::ReconcileEvent::UnblockedTaskPromoted {
@@ -230,14 +265,13 @@ fn reconcile_records_unblocked_task_promotion() {
 /// §9.40: a candidate still blocked is NOT a promotion.
 #[test]
 fn reconcile_ignores_still_blocked_candidates() {
-    let runs = LoopRunStore::open_in_memory().expect("store");
     let snapshot = BoardSnapshot {
         open: Vec::new(),
         ready: Vec::new(),
         blocked_candidates: vec![ready_item(42)],
         warnings: Vec::new(),
     };
-    let outcome = reconcile(&snapshot, &[ready_item(42)], &[], &runs).expect("reconcile");
+    let outcome = reconcile(&snapshot, &[ready_item(42)], &[]).expect("reconcile");
     assert!(
         outcome.events.is_empty(),
         "still-blocked is not a promotion"

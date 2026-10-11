@@ -20,7 +20,7 @@
 use orchestraitor_board::ReadyItem;
 
 use crate::error::CampaignError;
-use crate::run_state::{LoopRunStore, RunRow, RunRowStatus};
+use crate::run_state::{RunRow, RunRowStatus};
 use crate::session::{BoardSnapshot, task_id_for};
 
 /// One reconcile observation. Events carry identifiers only — never board
@@ -66,12 +66,17 @@ pub struct ReconcileOutcome {
 ///
 /// Divergence: a terminal local row for a task the board no longer lists
 /// as open work is expected history — a completed row is the happy path,
-/// not a divergence. A divergence is a row the board contradicts while it
-/// still claims liveness: a `running` row whose task is absent from the
-/// fresh snapshot's open items (the board moved/cancelled the item out
-/// from under the supervisor). `running` rows that survive a reconcile
-/// belong to this daemon's supervised slots and are skipped by the
-/// caller-supplied exclusion — the slot owner reaps them.
+/// not a divergence. A divergence is a row the board contradicted out
+/// from under a run that can no longer speak for itself: the recovered
+/// rows of this invocation's restart (`recovered` — rows the supervisor
+/// never reached a terminal status for, now `orphaned`) whose task is
+/// absent from the fresh snapshot's open items. The board cancelled,
+/// completed, or moved the item while the crashed run was down; the
+/// event records the overrule so the operator sees the work was
+/// superseded, not silently dropped. Live slots are never in scope: the
+/// current invocation's supervised rows are owned by the reaper, and a
+/// worker legitimately closing its own item must not false-positive
+/// (a PR #564 review finding).
 ///
 /// Promotion: a task on the ready queue this pass that the previous pass
 /// saw only as a blocked candidate is a newly unblocked promotion. The
@@ -80,25 +85,27 @@ pub struct ReconcileOutcome {
 ///
 /// # Errors
 ///
-/// Returns [`CampaignError::Store`] when the run-state scan fails.
+/// Always `Ok` today: the pass reads only its arguments and never
+/// touches the store. The `Result` keeps the signature stable for a
+/// future store-reading pass without churning every caller.
 pub fn reconcile(
     snapshot: &BoardSnapshot,
     previous_blocked: &[ReadyItem],
-    supervised_task_ids: &[String],
-    runs: &LoopRunStore,
+    recovered_orphaned: &[RunRow],
 ) -> Result<ReconcileOutcome, CampaignError> {
     let mut events = Vec::new();
 
-    // Board-wins divergence (§9.43): local `running` rows whose task is
-    // gone from the board's open set. The snapshot's open items are the
-    // authority; the row keeps its status (the reaper/slots own it) and
-    // the event records the overrule.
+    // Board-wins divergence (§9.43): this invocation's recovered rows
+    // (crashed-run liveness the restart recovery reaped) whose task the
+    // board no longer lists as open. The snapshot's open items are the
+    // authority; the row keeps its `orphaned` status (restart recovery
+    // owns it) and the event records the overrule.
     let open_task_ids: std::collections::HashSet<String> = snapshot
         .open
         .iter()
         .map(|facts| task_id_for(&facts.repo, facts.number))
         .collect();
-    for row in running_rows_not_supervised(supervised_task_ids, runs)? {
+    for row in recovered_orphaned {
         if !open_task_ids.contains(&row.task_id) {
             events.push(ReconcileEvent::BoardDiverged {
                 task_id: row.task_id.clone(),
@@ -133,21 +140,4 @@ pub fn reconcile(
             .collect(),
         events,
     })
-}
-
-/// Scans the local `running` rows outside the supervised set.
-///
-/// The caller's recovery pass orphans the `running` rows it can reach at
-/// invocation start, but the loop's fatal-exit sweep is best-effort, so an
-/// earlier invocation's row can still be `running` here and IS reported —
-/// this daemon's live slots are excluded via `supervised_task_ids`.
-fn running_rows_not_supervised(
-    supervised_task_ids: &[String],
-    runs: &LoopRunStore,
-) -> Result<Vec<RunRow>, CampaignError> {
-    Ok(runs
-        .running_rows()?
-        .into_iter()
-        .filter(|row| !supervised_task_ids.contains(&row.task_id))
-        .collect())
 }

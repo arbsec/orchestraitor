@@ -204,8 +204,6 @@ async fn watch_cycle() -> Result<ExitCode> {
         }
     });
 
-    let starter = DirectWatchStarter::new(project_dir, config_dir.clone(), None, budgets);
-
     // The daemon is ALWAYS-RUNNING (§9.36): the 4h whole-run budget ends one
     // runner invocation, not the daemon — on RunBudgetExhausted a fresh
     // invocation (NEW id and clock origin, derived inside the loop: a reused
@@ -225,27 +223,49 @@ async fn watch_cycle() -> Result<ExitCode> {
     )
     .into_diagnostic()
     .wrap_err("board client construction failed")?;
-    let poller_runs = orchestraitor_campaign::LoopRunStore::open(&config_dir.join("loop.db"))
-        .into_diagnostic()
-        .wrap_err("loop run-state store open failed (reconcile handle)")?;
     let events = orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
         .into_diagnostic()
         .wrap_err("watch event store open failed")?;
     let poller = ReconcilePoller::new(
         orchestraitor_daemon::BoardSnapshotPoller::new(Arc::new(client), board_config_template),
-        // The poller's dedicated connection (see the comment above): opening a
-        // second handle on the same WAL database is safe — the reconcile scan
-        // only reads, and WAL readers never block the runner's writes.
-        Arc::new(std::sync::Mutex::new(poller_runs)),
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
+    // The worker starter carries the SAME worker-side guardrail thresholds
+    // the runner validates (from the loop config just built) — the daemon's
+    // enforcement layers cannot drift from the foreground loop's (a PR #564
+    // review finding: the worker config never received them).
+    // The prune inside the invocation loop needs the project dir after the
+    // starter owns its clone.
+    let prune_project_dir = project_dir.clone();
+    let starter = DirectWatchStarter::new(
+        project_dir,
+        config_dir.clone(),
+        None,
+        budgets,
+        loop_config.guardrails.worker_guardrails(),
+    );
     let mut run_ordinal = 0_u64;
+    // Whether the operator signalled shutdown during the FINAL invocation
+    // (a signal during a budget drain preempts the drain but the summary
+    // keeps the budget cause — the exit code must still be a clean
+    // shutdown, a PR #564 review finding).
+    let signalled: bool;
     let summary = loop {
         // The run ordinal disambiguates invocation ids even if two restarts
         // land in the same second (a PR #555 review thread): a repeated id
         // would merge the exclusion scopes of two invocations.
         run_ordinal = run_ordinal.wrapping_add(1);
+        // Prune leftover worktrees before EVERY invocation, not only at
+        // process start: a task that ran in invocation N keeps its
+        // worktree at `<config-dir>/loop-worktrees/<task-id>` (worktrees
+        // are never removed on run completion), and `git worktree add`
+        // into an already-registered path fails — a retry in invocation
+        // N+1 would then count as a task failure and could strand the
+        // task as `stuck` without ever running (a PR #564 review
+        // finding). The previous invocation drained all its slots before
+        // returning, so no live worktree is affected here.
+        DirectWatchStarter::prune_worktrees(&config_dir, &prune_project_dir);
         // The signal count observed when this invocation started: a signal
         // DURING the invocation preempts the budget drain and keeps
         // RunBudgetExhausted as the summary reason, but the operator asked
@@ -292,7 +312,16 @@ async fn watch_cycle() -> Result<ExitCode> {
                     "orcd watch: run budget exhausted; starting the next invocation"
                 );
             }
-            _ => break summary,
+            _ => {
+                // A signal during a budget drain preempts the drain but the
+                // summary keeps the budget cause (the audit trail's reason);
+                // the OPERATOR asked for shutdown, so remember that here and
+                // exit SUCCESS below (a PR #564 review finding: a non-zero
+                // exit after SIGTERM makes `Restart=on-failure` restart the
+                // daemon against the operator's shutdown).
+                signalled = *signal_rx.borrow() != signal_baseline;
+                break summary;
+            }
         }
     };
 
@@ -308,15 +337,18 @@ async fn watch_cycle() -> Result<ExitCode> {
     // must be VISIBLE to the supervisor: exit non-zero so `Restart=on-
     // failure` restarts the daemon (e.g. the next UTC day after a spend
     // cap) instead of silently staying down (a PR #555 review finding).
-    match summary.stop_reason {
-        orchestraitor_campaign::StopReason::Shutdown => Ok(ExitCode::SUCCESS),
-        _ => Err(miette::miette!(
+    // EXCEPT when the operator signalled shutdown during the drain: then
+    // the exit is a clean shutdown (the audit rows keep the budget cause).
+    if signalled || summary.stop_reason == orchestraitor_campaign::StopReason::Shutdown {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Err(miette::miette!(
             "orcd watch stopped: {:?} ({} cycles, {} spawns, {} completed)",
             summary.stop_reason,
             summary.cycles,
             summary.spawns,
             summary.completed
-        )),
+        ))
     }
 }
 

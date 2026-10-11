@@ -292,8 +292,12 @@ async fn poller_promotes_unblocked_tasks_and_deduplicates_divergences()
         number: 42,
         started_at_secs: START_UNIX,
     })?;
-    // Task 42: running locally but absent from the board's open set on every
-    // tick (the divergence). Task 43: blocked on tick 1, promoted on tick 2.
+    // Task 42: the crashed run's row, reaped by THIS invocation's restart
+    // recovery (running → orphaned) and absent from the board's open set on
+    // every tick — the divergence scope. Task 43: blocked on tick 1,
+    // promoted on tick 2.
+    let recovered = runs.recover_running_rows(START_UNIX + 60)?;
+    assert_eq!(recovered.len(), 1);
 
     let tick1 = BoardSnapshot {
         open: Vec::new(),
@@ -316,10 +320,12 @@ async fn poller_promotes_unblocked_tasks_and_deduplicates_divergences()
         ScriptedPoller {
             snapshots: std::sync::Mutex::new(vec![tick1, tick2, tick3]),
         },
-        Arc::new(std::sync::Mutex::new(runs)),
         Arc::new(std::sync::Mutex::new(events_store)),
         Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
     );
+
+    let mut poller = poller;
+    poller.set_recovered(recovered);
 
     // Three ticks: blocked → promoted → steady state.
     poller.poll().await?;
@@ -389,13 +395,12 @@ async fn live_slots_of_the_current_invocation_are_not_divergences()
         ScriptedPoller {
             snapshots: std::sync::Mutex::new(vec![tick.clone(), tick]),
         },
-        Arc::new(std::sync::Mutex::new(runs)),
         Arc::new(std::sync::Mutex::new(
             orchestraitor_events::SqliteAuditStore::open(dir.path().join("watch-events.db"))?,
         )),
         Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
     );
-    poller.set_invocation("watch-current");
+    poller.set_recovered(Vec::new()); // no recovered rows: live slots are never in scope
 
     poller.poll().await?;
     poller.poll().await?;
@@ -467,13 +472,12 @@ async fn promotion_fires_without_a_preceding_event() -> Result<(), Box<dyn std::
         ScriptedPoller {
             snapshots: std::sync::Mutex::new(vec![tick1, tick2]),
         },
-        Arc::new(std::sync::Mutex::new(runs)),
         Arc::new(std::sync::Mutex::new(
             orchestraitor_events::SqliteAuditStore::open(dir.path().join("watch-events.db"))?,
         )),
         Arc::clone(&sink) as Arc<dyn orchestraitor_daemon::ReconcileSink>,
     );
-    poller.set_invocation("watch-promo-test");
+    poller.set_recovered(Vec::new());
 
     poller.poll().await?;
     poller.poll().await?;
@@ -492,5 +496,81 @@ async fn promotion_fires_without_a_preceding_event() -> Result<(), Box<dyn std::
         vec!["board-arbsec_orchestraitor-43"],
         "the promotion must fire on the quiet path (no divergence on the earlier tick)"
     );
+    Ok(())
+}
+
+/// A retried task's worktree path is reused cleanly across a simulated
+/// run-budget restart: the per-invocation `prune_worktrees` (a PR #564
+/// review finding — the prune used to run only at process start, so a
+/// task that ran in invocation N kept its registered worktree and
+/// `git worktree add` into the same path failed in invocation N+1,
+/// counting as a spawn failure that could strand the task as `stuck`
+/// without ever running). Forbidden effect asserted absent: a second
+/// `worktree add` onto the same task path failing after a prune.
+#[test]
+fn a_retried_task_worktree_is_reusable_after_a_prune() -> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_daemon::DirectWatchStarter;
+
+    let dir = tempfile::tempdir()?;
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir)?;
+    run_git(&project_dir, &["init", "--quiet"])?;
+    run_git(&project_dir, &["config", "user.email", "test@example.com"])?;
+    run_git(&project_dir, &["config", "user.name", "test"])?;
+    std::fs::write(project_dir.join("README.md"), "seed")?;
+    run_git(&project_dir, &["add", "."])?;
+    run_git(&project_dir, &["commit", "--quiet", "-m", "seed"])?;
+
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir)?;
+    let task_id = "board-arbsec_orchestraitor-42";
+
+    // Invocation N: the worktree is created for the task's run.
+    let starter = DirectWatchStarter::new(
+        project_dir.clone(),
+        config_dir.clone(),
+        None,
+        orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
+        orchestraitor_worker::GuardrailsConfig::bootstrap_defaults(),
+    );
+    let worktree = starter.prepare_worktree_for_test(task_id)?;
+    assert!(worktree.exists(), "invocation N created the worktree");
+
+    // The run finishes but the worktree is never removed on completion
+    // (the documented lifecycle): the path stays registered.
+    assert!(worktree.exists());
+
+    // Invocation N+1 (run-budget restart): the per-invocation prune runs
+    // before any spawn.
+    DirectWatchStarter::prune_worktrees(&config_dir, &project_dir);
+    assert!(
+        !worktree.exists(),
+        "the prune removed the stale worktree registration"
+    );
+
+    // The retry: `worktree add` into the SAME path must now succeed —
+    // the forbidden effect (a spawn failure on the retried task) did NOT
+    // happen.
+    let worktree2 = starter.prepare_worktree_for_test(task_id)?;
+    assert!(
+        worktree2.exists(),
+        "the retried task's worktree was recreated cleanly"
+    );
+    Ok(())
+}
+
+/// Runs `git` in `dir`, failing the test on a non-zero exit.
+fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
     Ok(())
 }

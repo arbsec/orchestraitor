@@ -136,6 +136,9 @@ fn is_known_key(key: &str) -> bool {
                 | "loop.max_task_attempts"
                 | "loop.task_retry_backoff_secs"
         )
+        // The §9.36 watch-daemon block (a PR #564 review finding: a valid
+        // `[watch]` table must not surface as `unknown config keys`).
+        || key == "watch.poll_interval_secs"
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {
@@ -241,6 +244,20 @@ backoff_ms = 250
     fn unknown_keys_are_reported() -> Result<(), OrchestraitorError> {
         let report = parse_toml_config("[retry]\nmax_attempts = 1\nunknown = true\n")?;
         assert_eq!(report.unknown_keys, vec!["retry.unknown".to_string()]);
+        Ok(())
+    }
+
+    /// The §9.36 watch block is a known key (a PR #564 review finding):
+    /// a valid `[watch]` table must not surface as `unknown config keys`
+    /// or fail `orc config validate`.
+    #[test]
+    fn watch_poll_interval_key_is_known() -> Result<(), OrchestraitorError> {
+        let report = parse_toml_config("[watch]\npoll_interval_secs = 60\n")?;
+        assert_eq!(
+            report.unknown_keys,
+            [] as [String; 0],
+            "watch.poll_interval_secs must be a known key"
+        );
         Ok(())
     }
 
