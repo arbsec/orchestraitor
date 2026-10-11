@@ -119,6 +119,7 @@ Ledger entry attributes (per call):
 - monetary_cost_measured, monetary_cost_estimated, monetary_cost_basis
 - subscription_attribution_id (link to subscription ledger if applicable)
 - routing_decision (precedence step that matched; see §9.19.2)
+- profile (named configuration profile the run resolved through, §9.22.5; enables the §13.5.1 A/B comparison)
 
 Two ledger categories are kept SEPARATE, not merged:
 

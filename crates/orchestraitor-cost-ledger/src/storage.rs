@@ -3,11 +3,12 @@
 use crate::budget::{BudgetScope, CapKind, CapMetric, StoredCap};
 use crate::error::{LedgerError, LedgerResult};
 use crate::model::{
-    CostEntry, DomainCostRollup, MonetaryCostBasis, Subscription, SubscriptionId,
-    SubscriptionUtilizationEntry, UtilizationLabel,
+    CostEntry, DomainCostRollup, EfficiencyGrouping, MonetaryCostBasis, ReceiptRecord,
+    Subscription, SubscriptionId, SubscriptionUtilizationEntry, TokenEfficiencyRollup,
+    UtilizationLabel,
 };
 use orchestraitor_model::AgentId;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::path::Path;
 
 /// SQLite-backed cost ledger.
@@ -21,9 +22,13 @@ impl CostLedger {
     /// # Errors
     /// Returns [`LedgerError`] when `SQLite` cannot open or initialize the database.
     pub fn open(path: &Path) -> LedgerResult<Self> {
-        let ledger = Self {
-            conn: Connection::open(path)?,
-        };
+        let conn = Connection::open(path)?;
+        // A migration (below) serializes against any concurrent opener;
+        // a five-second wait is the documented rusqlite default, stated
+        // explicitly so the budget survives a future default change
+        // (a PR #565 gen-5 review finding).
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let ledger = Self { conn };
         ledger.init_schema()?;
         Ok(ledger)
     }
@@ -37,6 +42,41 @@ impl CostLedger {
             conn: Connection::open_in_memory()?,
         };
         ledger.init_schema()?;
+        Ok(ledger)
+    }
+
+    /// Opens a ledger READ-ONLY for reporting (`orc stats efficiency`):
+    /// no schema creation, no migration, no write lock — the command must
+    /// not write to disk (its own contract), and a `BEGIN IMMEDIATE` here
+    /// would contend with a running `orc loop`'s write transaction (a
+    /// PR #565 review finding).
+    ///
+    /// A legacy ledger that predates the reporting schema (`profile`
+    /// column or `context_receipts` table) is rejected with a typed
+    /// migration-required error — the report is never silently degraded
+    /// and the ledger is never mutated as a side effect of reading it.
+    ///
+    /// # Errors
+    /// Returns [`LedgerError::MigrationRequired`] when the ledger lacks
+    /// the reporting schema, and [`LedgerError::Sqlite`] when `SQLite`
+    /// cannot open the file read-only or the schema probe fails.
+    pub fn open_read_only(path: &Path) -> LedgerResult<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // The same explicit busy timeout as `open`: a reader cannot read
+        // while a writer holds the PENDING or EXCLUSIVE lock (the commit
+        // window), so a contended open must wait out the writer instead
+        // of failing the report (a PR #565 gen-6 review finding).
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // The probe reads the schema (no writes): a legacy ledger fails
+        // closed here instead of migrating in place under a reporting
+        // command.
+        let ledger = Self { conn };
+        if ledger.reporting_schema_missing()? {
+            return Err(LedgerError::MigrationRequired);
+        }
         Ok(ledger)
     }
 
@@ -146,7 +186,253 @@ impl CostLedger {
     }
 
     fn init_schema(&self) -> LedgerResult<()> {
+        // Probe the schema READ-ONLY first: an up-to-date ledger — the
+        // common case — never takes the write lock, so opening the ledger
+        // cannot contend with a concurrent writer's BEGIN IMMEDIATE and
+        // fail the run's cost attribution (a PR #565 gen-5 review
+        // finding: the unconditional BEGIN IMMEDIATE turned a benign open
+        // into a SQLITE_BUSY risk).
+        let migration_required = self.reporting_schema_missing()?;
+        if !migration_required {
+            return Ok(());
+        }
+        // Hold one write transaction across schema creation, the column
+        // check, and the alteration: two processes opening a legacy
+        // ledger concurrently would otherwise both observe `profile` as
+        // missing, and the second `ALTER TABLE` would fail (the failure
+        // could disable cost attribution for a loop run). Serialized
+        // here, the loser's check re-reads after the winner commits.
+        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = self.migrate_schema_locked();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT;")?,
+            Err(error) => {
+                let _ignore = self.conn.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reports whether the ledger lacks any part of the reporting schema
+    /// (`profile` column or `context_receipts` table). Read-only: the
+    /// same probe `open_read_only` uses for its fail-closed check.
+    fn reporting_schema_missing(&self) -> LedgerResult<bool> {
+        let profile_columns: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
+            [],
+            |row| row.get(0),
+        )?;
+        let receipt_tables: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'context_receipts'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(profile_columns == 0 || receipt_tables == 0)
+    }
+
+    fn migrate_schema_locked(&self) -> LedgerResult<()> {
         self.conn.execute_batch(SCHEMA)?;
+        // Existing ledgers predate the `profile` column (spec §13.5.1 A/B
+        // grouping): add it in place, defaulting to NULL (= no profile
+        // label recorded). `CREATE TABLE IF NOT EXISTS` above cannot alter
+        // an already-created table.
+        let missing_profile = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cost_entries') WHERE name = 'profile'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? == 0;
+        if missing_profile {
+            self.conn
+                .execute("ALTER TABLE cost_entries ADD COLUMN profile TEXT", [])?;
+        }
+        Ok(())
+    }
+
+    /// Records one context receipt keyed by its session id (spec §13.5.1:
+    /// the receipt-to-session link the efficiency rollups join on). The
+    /// `recorded_at` timestamp is minted here, not carried on the receipt.
+    ///
+    /// # Errors
+    /// Returns [`LedgerError`] when `SQLite` insertion fails or integer
+    /// conversion overflows.
+    pub fn insert_context_receipt(&self, receipt: &ReceiptRecord) -> LedgerResult<()> {
+        self.conn.execute(
+            "INSERT INTO context_receipts (request_id, session, task_class, budget_tokens, candidate_tokens, selected_tokens, omitted_count, raw_tool_output_tokens, compacted_tool_output_tokens, repeated_tokens_avoided, prompt_cache_eligible_tokens, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                receipt.request_id,
+                receipt.session.as_str(),
+                receipt.task_class,
+                i64_from_u64(receipt.budget_tokens)?,
+                i64_from_u64(receipt.candidate_tokens)?,
+                i64_from_u64(receipt.selected_tokens)?,
+                i64_from_u64(receipt.omitted_count)?,
+                i64_from_u64(receipt.raw_tool_output_tokens)?,
+                i64_from_u64(receipt.compacted_tool_output_tokens)?,
+                i64_from_u64(receipt.repeated_tokens_avoided)?,
+                i64_from_u64(receipt.prompt_cache_eligible_tokens)?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the token-efficiency summaries for the requested grouping
+    /// (spec §13.5.1): cost-entry token sums joined with receipt deltas on
+    /// the session id. Groups without receipts report `None` savings —
+    /// never an estimated number.
+    ///
+    /// # Errors
+    /// Returns [`LedgerError`] when `SQLite` query or integer conversion
+    /// fails.
+    pub fn token_efficiency_rollups(
+        &self,
+        grouping: EfficiencyGrouping,
+    ) -> LedgerResult<Vec<TokenEfficiencyRollup>> {
+        let (group_sql, select_session, select_agent, select_profile) = match grouping {
+            EfficiencyGrouping::Session => (
+                "c.session",
+                "c.session AS session",
+                "NULL AS agent",
+                "NULL AS profile",
+            ),
+            EfficiencyGrouping::Profile => (
+                "COALESCE(c.profile, '')",
+                "NULL AS session",
+                "NULL AS agent",
+                "c.profile AS profile",
+            ),
+        };
+        // Receipts join on session. One session = one profile label: a
+        // run's id is per-run and the run resolves one profile, and
+        // `insert_cost_entry` enforces this at write time (typed conflict
+        // on a mixed-profile session), so the join cannot duplicate a
+        // session's receipt totals into another profile's row.
+        let sql = format!(
+            "SELECT {select_session}, {select_agent}, {select_profile}, \
+             SUM(c.input_tokens), SUM(c.output_tokens), SUM(c.cache_read_tokens), SUM(c.cache_write_tokens), \
+             SUM(r.candidate_tokens), SUM(r.selected_tokens), SUM(r.raw_tool_output_tokens), \
+             SUM(r.compacted_tool_output_tokens) \
+             FROM (SELECT session, profile AS profile, \
+                          SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, \
+                          SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens \
+                   FROM cost_entries GROUP BY session, COALESCE(profile, '')) c \
+             LEFT JOIN (SELECT session, \
+                        SUM(candidate_tokens) AS candidate_tokens, SUM(selected_tokens) AS selected_tokens, \
+                        SUM(raw_tool_output_tokens) AS raw_tool_output_tokens, \
+                        SUM(compacted_tool_output_tokens) AS compacted_tool_output_tokens \
+                        FROM context_receipts GROUP BY session) r ON r.session = c.session \
+             GROUP BY {group_sql} ORDER BY {group_sql}"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| {
+            let session: Option<String> = row.get(0)?;
+            let agent: Option<String> = row.get(1)?;
+            let profile: Option<String> = row.get(2)?;
+            let candidate: Option<u64> = opt_u64_from_sql(row, 7)?;
+            let selected: Option<u64> = opt_u64_from_sql(row, 8)?;
+            let raw_tool: Option<u64> = opt_u64_from_sql(row, 9)?;
+            let compacted: Option<u64> = opt_u64_from_sql(row, 10)?;
+            let savings = candidate
+                .zip(selected)
+                .zip(raw_tool)
+                .zip(compacted)
+                .and_then(|(((candidate, selected), raw_tool), compacted)| {
+                    TokenEfficiencyRollup::savings_from_receipt(
+                        candidate, selected, raw_tool, compacted,
+                    )
+                });
+            Ok(TokenEfficiencyRollup {
+                session,
+                agent_domain_id: agent,
+                profile,
+                input_tokens: u64_from_sql(row, 3)?,
+                output_tokens: u64_from_sql(row, 4)?,
+                cache_read_tokens: u64_from_sql(row, 5)?,
+                cache_write_tokens: u64_from_sql(row, 6)?,
+                candidate_tokens: candidate,
+                selected_tokens: selected,
+                raw_tool_output_tokens: raw_tool,
+                compacted_tool_output_tokens: compacted,
+                savings_ratio: savings,
+                session_savings_ratios: None,
+                median_savings_ratio: None,
+            })
+        })?;
+        let mut rollups = Vec::new();
+        for row in rows {
+            rollups.push(row?);
+        }
+        if matches!(grouping, EfficiencyGrouping::Profile) {
+            self.attach_session_savings_ratios(&mut rollups)?;
+        }
+        Ok(rollups)
+    }
+
+    /// Attaches per-session savings ratios to profile-grouped rollups
+    /// (spec §13.5.1: the A/B comparison is over the MEDIAN of per-session
+    /// ratios — a ratio of group sums would weight sessions by their
+    /// baseline). One session = one profile label (enforced at insert), so
+    /// each session's receipt sums unambiguously belong to one group.
+    ///
+    /// The label lookup is ONE joined query, not a `query_row` per
+    /// receipt session (a PR #565 gen-2 review finding: per-session
+    /// lookups made the profile report an N+1 over a ledger that grows
+    /// with every loop run).
+    fn attach_session_savings_ratios(
+        &self,
+        rollups: &mut [TokenEfficiencyRollup],
+    ) -> LedgerResult<()> {
+        // A receipt recorded before its session has any cost entry is
+        // SKIPPED (the inner JOIN on the cost_entries aggregate produces
+        // no row for it) — NOT folded into the unprofiled group, where it
+        // would skew that group's median. A session whose entries all
+        // carry a NULL profile joins with label `''` and DOES produce a
+        // ratio for the `(unprofiled)` group: the A/B baseline must keep
+        // its median (a PR #565 gen-3 review finding — the previous
+        // gen-2 query's `WHERE profile IS NOT NULL` filter dropped those
+        // sessions).
+        let sql = "SELECT r.session, \
+                   SUM(r.candidate_tokens), SUM(r.selected_tokens), \
+                   SUM(r.raw_tool_output_tokens), SUM(r.compacted_tool_output_tokens), \
+                   COALESCE(c.profile, '') AS label \
+                   FROM context_receipts r \
+                   JOIN (SELECT session, MAX(profile) AS profile FROM cost_entries \
+                         GROUP BY session) c \
+                   ON c.session = r.session \
+                   GROUP BY r.session, label \
+                   ORDER BY r.session";
+        let mut statement = self.conn.prepare(sql)?;
+        let sessions = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                u64_from_sql(row, 1)?,
+                u64_from_sql(row, 2)?,
+                u64_from_sql(row, 3)?,
+                u64_from_sql(row, 4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut session_savings: Vec<(String, String, f64)> = Vec::new();
+        for row in sessions {
+            let (session, candidate, selected, raw_tool, compacted, label) = row?;
+            if let Some(ratio) = TokenEfficiencyRollup::savings_from_receipt(
+                candidate, selected, raw_tool, compacted,
+            ) {
+                session_savings.push((label, session, ratio));
+            }
+        }
+        for rollup in rollups {
+            let key = rollup.profile.as_deref().unwrap_or_default();
+            let mut ratios: Vec<(String, f64)> = session_savings
+                .iter()
+                .filter(|(label, _, _)| label == key)
+                .map(|(_, session, ratio)| (session.clone(), *ratio))
+                .collect();
+            ratios.sort_by(|a, b| a.0.cmp(&b.0));
+            rollup.session_savings_ratios = Some(ratios);
+            rollup.median_savings_ratio = rollup.median_session_savings_ratio();
+        }
         Ok(())
     }
 }
@@ -245,18 +531,59 @@ CREATE TABLE IF NOT EXISTS cost_entries (
   request_id TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, agent_domain_id TEXT NOT NULL, role TEXT NOT NULL, project TEXT NOT NULL, session TEXT NOT NULL, repository TEXT NOT NULL,
   input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, request_count INTEGER NOT NULL,
   parent_request_id TEXT, started_at TEXT NOT NULL, completed_at TEXT NOT NULL, wall_ms INTEGER NOT NULL, monetary_cost_measured REAL, monetary_cost_estimated REAL, monetary_cost_basis TEXT NOT NULL,
-  subscription_attribution_id TEXT, routing_decision TEXT NOT NULL
+  subscription_attribution_id TEXT, routing_decision TEXT NOT NULL, profile TEXT
 );
 CREATE TABLE IF NOT EXISTS subscription_utilization (id INTEGER PRIMARY KEY, subscription_id TEXT NOT NULL, request_id TEXT NOT NULL, label TEXT NOT NULL, consumed_tokens INTEGER NOT NULL, quota_tokens INTEGER, monthly_price_usd REAL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, billing_period TEXT NOT NULL, monthly_price_usd REAL, included_tokens INTEGER, soft_cap_tokens INTEGER, hard_cap_tokens INTEGER, active_time_cap_minutes_per_day INTEGER, reset_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS budgets (id INTEGER PRIMARY KEY, scope TEXT NOT NULL, scope_id TEXT NOT NULL, currency TEXT, monthly_amount REAL, per_day_amount REAL, per_session_token_cap INTEGER, per_agent_token_cap INTEGER, per_session_cost_cap REAL);
 CREATE TABLE IF NOT EXISTS caps (id INTEGER PRIMARY KEY, budget_id INTEGER NOT NULL REFERENCES budgets(id), metric TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS context_receipts (
+  request_id TEXT PRIMARY KEY, session TEXT NOT NULL, task_class TEXT NOT NULL, budget_tokens INTEGER NOT NULL, candidate_tokens INTEGER NOT NULL, selected_tokens INTEGER NOT NULL,
+  omitted_count INTEGER NOT NULL, raw_tool_output_tokens INTEGER NOT NULL DEFAULT 0, compacted_tool_output_tokens INTEGER NOT NULL DEFAULT 0, repeated_tokens_avoided INTEGER NOT NULL DEFAULT 0, prompt_cache_eligible_tokens INTEGER NOT NULL DEFAULT 0, recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_entries_session ON cost_entries(session);
+CREATE INDEX IF NOT EXISTS idx_context_receipts_session ON context_receipts(session);
 ";
 
 const ROLLUP_SQL: &str = "SELECT agent_domain_id, SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(request_count), COALESCE(SUM(monetary_cost_measured), 0), COALESCE(SUM(monetary_cost_estimated), 0) FROM cost_entries WHERE agent_domain_id = ?1 GROUP BY agent_domain_id";
 
 fn insert_entry(conn: &Connection, entry: &CostEntry) -> LedgerResult<()> {
-    conn.execute("INSERT INTO cost_entries (request_id, model, provider, agent_domain_id, role, project, session, repository, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, request_count, parent_request_id, started_at, completed_at, wall_ms, monetary_cost_measured, monetary_cost_estimated, monetary_cost_basis, subscription_attribution_id, routing_decision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)", params![entry.request_id, entry.model.as_str(), entry.provider.as_str(), entry.agent_domain_id.as_str(), entry.role, entry.project, entry.session.as_str(), entry.repository.as_str(), i64_from_u64(entry.input_tokens)?, i64_from_u64(entry.output_tokens)?, i64_from_u64(entry.reasoning_tokens)?, i64_from_u64(entry.cache_read_tokens)?, i64_from_u64(entry.cache_write_tokens)?, i64_from_u64(entry.request_count)?, entry.parent_request_id, entry.started_at.to_rfc3339(), entry.completed_at.to_rfc3339(), i64_from_u64(entry.wall_ms)?, entry.monetary_cost_measured, entry.monetary_cost_estimated, basis_text(entry.monetary_cost_basis), entry.subscription_attribution_id.as_ref().map(SubscriptionId::as_str), entry.routing_decision])?;
+    // One session = one profile label (spec §13.5.1): a session whose
+    // entries mix labels would double-count its receipts across profile
+    // groups in `token_efficiency_rollups`. The NULL-vs-label mix is also
+    // refused: NULL means "no profile recorded", not a second group.
+    // The check and the INSERT share one write transaction so two
+    // connections inserting different profiles for the same NEW session
+    // serialize: the loser re-reads the committed label and fails typed
+    // instead of both succeeding.
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = insert_entry_locked(conn, entry);
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;")?,
+        Err(error) => {
+            let _ignore = conn.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn insert_entry_locked(conn: &Connection, entry: &CostEntry) -> LedgerResult<()> {
+    let existing: Option<Option<String>> = conn
+        .query_row(
+            "SELECT profile FROM cost_entries WHERE session = ?1 LIMIT 1",
+            params![entry.session.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing
+        && existing.as_deref() != entry.profile.as_deref()
+    {
+        return Err(LedgerError::ProfileConflict {
+            session: entry.session.as_str().to_owned(),
+        });
+    }
+    conn.execute("INSERT INTO cost_entries (request_id, model, provider, agent_domain_id, role, project, session, repository, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, request_count, parent_request_id, started_at, completed_at, wall_ms, monetary_cost_measured, monetary_cost_estimated, monetary_cost_basis, subscription_attribution_id, routing_decision, profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)", params![entry.request_id, entry.model.as_str(), entry.provider.as_str(), entry.agent_domain_id.as_str(), entry.role, entry.project, entry.session.as_str(), entry.repository.as_str(), i64_from_u64(entry.input_tokens)?, i64_from_u64(entry.output_tokens)?, i64_from_u64(entry.reasoning_tokens)?, i64_from_u64(entry.cache_read_tokens)?, i64_from_u64(entry.cache_write_tokens)?, i64_from_u64(entry.request_count)?, entry.parent_request_id, entry.started_at.to_rfc3339(), entry.completed_at.to_rfc3339(), i64_from_u64(entry.wall_ms)?, entry.monetary_cost_measured, entry.monetary_cost_estimated, basis_text(entry.monetary_cost_basis), entry.subscription_attribution_id.as_ref().map(SubscriptionId::as_str), entry.routing_decision, entry.profile])?;
     Ok(())
 }
 
@@ -285,6 +612,17 @@ fn cap_from_row(row: &Row<'_>) -> Result<StoredCap, rusqlite::Error> {
 fn u64_from_sql(row: &Row<'_>, index: usize) -> Result<u64, rusqlite::Error> {
     let value = row.get::<_, i64>(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+/// Reads a nullable counter column: `None` for SQL `NULL` (a group with no
+/// receipt rows), range-checked otherwise.
+fn opt_u64_from_sql(row: &Row<'_>, index: usize) -> Result<Option<u64>, rusqlite::Error> {
+    let value: Option<i64> = row.get(index)?;
+    value
+        .map(|value| {
+            u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+        })
+        .transpose()
 }
 
 fn i64_from_u64(value: u64) -> LedgerResult<i64> {

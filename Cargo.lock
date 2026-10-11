@@ -4578,6 +4578,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "chrono",
  "clap",
  "miette",
  "orchestraitor-agent-catalog",
@@ -4661,6 +4662,8 @@ dependencies = [
  "orchestraitor-model",
  "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

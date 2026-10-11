@@ -77,6 +77,30 @@ pub struct ContextReceipt {
     pub index_digest: Digest,
     /// Digest of the policy that governed the selection.
     pub selection_policy_digest: Digest,
+    /// Tokens of raw tool output included in the compiled context, before
+    /// any compaction (spec §13.5). `0` when no compaction ran or no tool
+    /// output entered the build. Backward compatibility: receipts written
+    /// before §13.5.1 lack this field; readers deserialize it with a
+    /// default of `0` (`#[serde(default)]`) — never rejected, never
+    /// migrated in place.
+    #[serde(default)]
+    pub raw_tool_output_tokens: u64,
+    /// Tokens of tool output after compaction, summed over the same build
+    /// as [`ContextReceipt::raw_tool_output_tokens`] (spec §13.5). Equal to
+    /// the raw count when no compaction ran.
+    #[serde(default)]
+    pub compacted_tool_output_tokens: u64,
+    /// Tokens avoided by deduplication and prompt-cache reuse during the
+    /// build (spec §13.5). No producer exists yet; receipts carry `0`
+    /// until the dedup lane reports (honest telemetry: never estimated).
+    #[serde(default)]
+    pub repeated_tokens_avoided: u64,
+    /// Tokens in the compiled prompt that are eligible for provider
+    /// prompt-cache reuse (spec §13.5). No producer exists yet; receipts
+    /// carry `0` until the stable-prefix lane reports (honest telemetry:
+    /// never estimated).
+    #[serde(default)]
+    pub prompt_cache_eligible_tokens: u64,
 }
 
 #[cfg(test)]
@@ -104,11 +128,36 @@ mod tests {
                 token_estimate: 500,
             }],
             omitted_count: 42,
+            raw_tool_output_tokens: 0,
+            compacted_tool_output_tokens: 0,
+            repeated_tokens_avoided: 0,
+            prompt_cache_eligible_tokens: 0,
             index_digest: Digest::new("e".repeat(64)),
             selection_policy_digest: Digest::new("f".repeat(64)),
         };
         let json = serde_json::to_string(&receipt).unwrap();
         let back: ContextReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(receipt, back);
+    }
+
+    /// A receipt written before §13.5.1 (no telemetry fields) must
+    /// deserialize with the documented defaults — never rejected, never
+    /// migrated in place (spec §18.4 back-compat rule, `memory_elisions`
+    /// precedent).
+    #[test]
+    fn pre_telemetry_receipt_deserializes_with_defaults() {
+        let old = format!(
+            "{{\"request_id\":{},\"task_class\":\"backend\",\"budget_tokens\":1000,\
+             \"candidate_tokens\":2000,\"selected_tokens\":800,\"selected_items\":[],\
+             \"omitted_count\":3,\"index_digest\":\"{}\",\"selection_policy_digest\":\"{}\"}}",
+            serde_json::to_string(&ContextRequestId::new()).unwrap(),
+            "0".repeat(64),
+            "1".repeat(64),
+        );
+        let receipt: ContextReceipt = serde_json::from_str(&old).unwrap();
+        assert_eq!(receipt.raw_tool_output_tokens, 0);
+        assert_eq!(receipt.compacted_tool_output_tokens, 0);
+        assert_eq!(receipt.repeated_tokens_avoided, 0);
+        assert_eq!(receipt.prompt_cache_eligible_tokens, 0);
     }
 }

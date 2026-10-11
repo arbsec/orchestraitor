@@ -108,6 +108,11 @@ pub enum Commands {
     /// one campaign pass, supervise the in-flight workers, repeat (issue
     /// #314; the §9.36 watch daemon deepens this in E8).
     Loop(LoopArgs),
+    /// Show token-efficiency statistics from the cost ledger (spec
+    /// §13.5.1): per-session or per-profile savings against the
+    /// compiler-candidate counterfactual baseline.
+    #[command(subcommand)]
+    Stats(StatsCommand),
     /// Run the rule-driven pre-landing simplify pass (fail-open quality
     /// tooling; spec §9.5 normalization classes).
     #[command(subcommand)]
@@ -131,6 +136,28 @@ pub struct LoopArgs {
     /// Alternate provider base URL for simulator-backed tests.
     #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
     pub worker_provider_endpoint: Option<String>,
+}
+
+/// `orc stats` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum StatsCommand {
+    /// Print per-session token-efficiency rollups (spec §13.5.1): cost
+    /// tokens plus context-compiler savings against the counterfactual
+    /// baseline, when receipts exist.
+    Efficiency(StatsEfficiencyArgs),
+}
+
+/// Arguments for `orc stats efficiency`.
+#[derive(Debug, Clone, Args)]
+pub struct StatsEfficiencyArgs {
+    /// Group rollups by the profile label instead of by session (spec
+    /// §9.22.5, §13.5.1 A/B comparison): run suites WITH and WITHOUT the
+    /// token-saving features under different profile labels, then compare.
+    #[arg(long)]
+    pub group_by_profile: bool,
+    /// Emit stable JSON instead of a markdown table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `orc campaign` subcommands.

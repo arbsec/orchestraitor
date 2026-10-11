@@ -452,6 +452,7 @@ fn record_call_cost(
         monetary_cost_basis: MonetaryCostBasis::UtilizationOnly,
         subscription_attribution_id: None,
         routing_decision: outcome.label().to_owned(),
+        profile: config.profile.clone(),
     };
     if let Err(error) = orchestraitor_provider_neuralwatt::CostSink::record(sink.as_ref(), &entry) {
         debug!(%error, "cost sink write failed; entry dropped");
