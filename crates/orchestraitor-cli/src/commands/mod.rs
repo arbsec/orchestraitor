@@ -8,6 +8,7 @@ pub mod loop_runner;
 pub mod models;
 pub mod routing;
 pub mod simplify;
+pub mod stats;
 pub mod worker;
 
 use miette::miette;

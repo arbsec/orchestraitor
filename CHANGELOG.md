@@ -13,6 +13,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Token-efficiency statistics** (`orc stats efficiency`): reporting
+  over the cost ledger showing, per session or per configuration
+  profile, provider-reported input/output/cache tokens alongside
+  context-compiler receipt deltas (candidate vs selected tokens, tool-output
+  compaction) and the derived savings ratio. Sessions without receipts
+  report no savings value — never a fabricated number (spec §13.5.1).
+  `--group-by-profile` compares runs recorded under different profile
+  labels, the A/B mechanism for verifying that the token-saving features
+  actually save; `--json` emits the same rollups as stable JSON. Cost
+  entries now carry the run's profile label (`roles.<role>.routing.profile`);
+  existing ledgers migrate in place on open.
 - `orcd watch`: the watch daemon's running mode (spec `10-orchestrator.md`
   §9.36 thin slice; #503) — the `orc loop` poll/supervise cycle as the
   daemon's always-on mode, on a fixed default 60s poll cadence

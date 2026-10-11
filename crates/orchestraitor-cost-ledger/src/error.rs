@@ -24,6 +24,16 @@ pub enum LedgerError {
     /// Numeric text failed to parse.
     #[error("cost ledger numeric value is invalid")]
     Float(#[from] std::num::ParseFloatError),
+    /// A session's cost entries would carry two different profile labels
+    /// (spec §13.5.1: one session = one run = one profile; a mixed session
+    /// would double-count its receipts across profile groups).
+    #[error(
+        "cost entry profile label conflicts with the session's existing label: session {session}"
+    )]
+    ProfileConflict {
+        /// The session whose entries would mix profile labels.
+        session: String,
+    },
 }
 
 impl LedgerError {
@@ -35,7 +45,8 @@ impl LedgerError {
             | Self::Timestamp(_)
             | Self::IntegerRange
             | Self::InvalidStoredValue(_)
-            | Self::Float(_) => Retryability::NotRetriable,
+            | Self::Float(_)
+            | Self::ProfileConflict { .. } => Retryability::NotRetriable,
         }
     }
 }

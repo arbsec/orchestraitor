@@ -17,7 +17,8 @@ pub use budget::{
 };
 pub use error::{LedgerError, LedgerResult};
 pub use model::{
-    ApiSpendRecord, CostEntry, DomainCostRollup, MonetaryCostBasis, Subscription, SubscriptionId,
-    SubscriptionUtilizationEntry, UtilizationLabel,
+    ApiSpendRecord, CostEntry, DomainCostRollup, EfficiencyGrouping, MonetaryCostBasis,
+    ReceiptRecord, Subscription, SubscriptionId, SubscriptionUtilizationEntry,
+    TokenEfficiencyRollup, UtilizationLabel,
 };
 pub use storage::{ApiSpendTable, CostLedger, SubscriptionUtilizationTable};

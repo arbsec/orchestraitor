@@ -66,6 +66,8 @@ toml_edit = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+# chrono (MIT OR Apache-2.0): CostEntry timestamps in stats fixtures.
+chrono = { version = "0.4", features = ["serde"] }
 # rusqlite (MIT): asserting the persisted decision rows in the campaign.db.
 rusqlite = { workspace = true }
 orchestraitor-testkit = { path = "../orchestraitor-testkit" }
