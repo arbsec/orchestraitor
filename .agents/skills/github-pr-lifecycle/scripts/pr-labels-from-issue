@@ -77,7 +77,7 @@ while IFS= read -r num; do
   if printf '%s' "$seen_numbers" | grep -qxF "$num"; then continue; fi
   seen_numbers="${seen_numbers}${num}"$'\n'
   ISSUE_NUMBERS+=("$num")
-done < <( { grep -ioE '\b(closes|fixes|resolves)\s+#[0-9]+' "$BODY_FILE" || true; } |
+done < <( { grep -ioE '(^|[^[:alnum:]_])(closes?|closed|fixes?|fixed|resolves?|resolved)[[:space:]]+#[0-9]+' "$BODY_FILE" || true; } |
   { grep -ioE '#[0-9]+' || true; } | tr -d '#')
 
 if [ "${#ISSUE_NUMBERS[@]}" -eq 0 ]; then
@@ -190,4 +190,4 @@ for label in "${ADD[@]}"; do
 done
 orc_lib_gh_service pr edit "$PR" --repo "$REPO" "${ADD_ARGS[@]}" >/dev/null
 
-echo '{"pr":'"$PR"',"labels_added":'"$ADDED_JSON"'}'
+echo '{"pr":'"$PR"',"issues":'"$ISSUES_JSON"',"labels_added":'"$ADDED_JSON"'}'
