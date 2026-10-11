@@ -44,10 +44,20 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `orc_lib_gh_service`; never call `gh pr create` directly).
                   The managed checklist (<!-- orc:* --> markers) starts
                   unchecked — checkboxes are verified facts, not intentions.
-                  Then apply attribution labels with `pr-labels <pr>`:
-                  `agent-created` (service-identity author) and
-                  `needs-human-review` (diff touches a §21.1
-                  security-sensitive class by path/content). Labels derive
+                  Labeling is AUTOMATIC at creation: `pr-create` chains
+                  `pr-labels` (attribution: `agent-created` for the
+                  service-identity author, `needs-human-review` when the
+                  diff touches a §21.1 security-sensitive class) and
+                  `pr-labels-from-issue` (copies the process-label allowlist
+                  — MVP, task, epic, spike, bug, documentation, test,
+                  dependencies, github-actions, spec, blocked:arbitraitor,
+                  blocked:orchestraitor; `needs-human-review` is never
+                  copied from issues, it is diff-derived — from the PR's
+                  Closes/Fixes/Resolves issues, #469) immediately after the
+                  PR exists; both steps are non-fatal and print the exact
+                  manual command on failure.
+                  `pr-labels <pr>` remains the manual fallback/reconcile
+                  step (step 9) — never the primary mechanism. Labels derive
                   from launch facts only, applied idempotently.
                   Human attention rides the labels:
                     - `needs-human-review` ⇒ request the required-domain
@@ -206,9 +216,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   see Safety conditions).
                   Never use --admin to bypass a red gate (spec `50-contracts-data.md` §21.10, AGENTS.md).
 
-9. RECONCILE      After merge: re-run `pr-labels <pr>` (labels can drift as the
-                  diff changed during the review loop — the audit is cheap and
-                  idempotent; it never removes labels). Then close the linked
+9. RECONCILE      After merge: re-run `pr-labels <pr>` and
+                  `pr-labels-from-issue <pr>` (labels can drift as the
+                  diff changed during the review loop — the audit is cheap
+                  and idempotent; it never removes labels). Then close the linked
                   issue (or confirm the PR's "Closes #N" did), delete the
                   branch, remove the worktree. Move the issue to
                   "Done" on the project (github-project-workflow skill owns that).
