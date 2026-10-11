@@ -598,6 +598,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc github gh-env` passes every argument after `--` to the child command
+  verbatim — including quoted URLs that carry query parameters (`?since=…`,
+  `?per_page=100`). Arguments are forwarded unchanged and in order; the
+  wrapper never rewrites or filters child input. (Agents filtering GitHub
+  API responses by a time window had suspected the wrapper of silently
+  dropping the `since` parameter; the API itself filters `since` by
+  `updated_at`, not `created_at`, so responses include comments created
+  before the window even when the parameter is honored.)
 - Simplify: an empty staged index drops the staged filter instead of hiding
   every file-scoped finding; timed-out tools have their process group (or
   Windows process tree) terminated and their output readers joined; applied
