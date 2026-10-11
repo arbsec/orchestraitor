@@ -305,25 +305,64 @@ async fn watch_cycle() -> Result<ExitCode> {
             // Both budget stops restart the ALWAYS-ON daemon (§9.36): the
             // run budget ends one invocation, and the daily-spend soft cap
             // ends one invocation UNTIL ITS WINDOW RESETS (§9.19.6 — the
-            // per-day budget window). Without the restart the next UTC day
-            // could never reach the kick-off evaluation's budget-window-
-            // reset condition in this process (a gen-1 review finding) —
-            // the daemon would be down exactly when the window that
-            // stopped it expires. Restart only when no signal arrived
-            // during this invocation (baseline comparison above); a
-            // non-shutdown stop still exits non-zero when the restart
-            // bound is exhausted by a signal race, keeping the supervisor
-            // visible.
+            // per-day budget window). A restart before the window resets
+            // would spin: the spend stays at/above the cap for the rest of
+            // the UTC day, so every restart would immediately re-stop.
+            // After a spend-cap stop the loop therefore WAITS for the next
+            // UTC day boundary before the restart — racing the operator's
+            // shutdown signal, which ends the wait (and the daemon) at
+            // once. Only then can the fresh invocation's first pass
+            // observe the §9.19.6 budget-window-reset kick-off condition.
+            // Restart only when no signal arrived during this invocation
+            // (baseline comparison above); a non-shutdown stop still exits
+            // non-zero when the restart bound is exhausted by a signal
+            // race, keeping the supervisor visible.
             orchestraitor_campaign::StopReason::RunBudgetExhausted
-            | orchestraitor_campaign::StopReason::SpendSoftCap
                 if *signal_rx.borrow() == signal_baseline =>
             {
                 tracing::info!(
                     cycles = summary.cycles,
                     spawns = summary.spawns,
-                    stop = ?summary.stop_reason,
-                    "orcd watch: budget stop; starting the next invocation"
+                    "orcd watch: run budget exhausted; starting the next invocation"
                 );
+            }
+            orchestraitor_campaign::StopReason::SpendSoftCap
+                if *signal_rx.borrow() == signal_baseline =>
+            {
+                let now_unix_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .into_diagnostic()
+                    .wrap_err("system clock is before the Unix epoch")?;
+                let wait = std::time::Duration::from_secs(86_400 - (now_unix_secs % 86_400));
+                tracing::info!(
+                    wait_secs = wait.as_secs(),
+                    "orcd watch: daily spend cap reached; waiting for the next \
+                     UTC day boundary (the §9.19.6 budget window reset) before \
+                     the next invocation"
+                );
+                let mut wait_rx = signal_rx.clone();
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {
+                        // The window reset: start the next invocation.
+                    }
+                    changed = wait_rx.changed() => {
+                        // The operator signalled shutdown during the wait:
+                        // a signal during a budget drain preempts the drain
+                        // but the summary keeps the budget cause; the
+                        // OPERATOR asked for shutdown, so exit SUCCESS
+                        // below (the same rule as a signal during a drain).
+                        if changed.is_ok() {
+                            signalled = true;
+                            break summary;
+                        }
+                        // Sender gone without a signal cannot happen here
+                        // (the signal task owns the sender for the
+                        // process's lifetime); treat it as shutdown.
+                        signalled = true;
+                        break summary;
+                    }
+                }
             }
             _ => {
                 // A signal during a budget drain preempts the drain but the

@@ -89,12 +89,12 @@ Notes:
   produce the explicit `blocked`/`needs-human` state (§9.33.4) — kick-off
   never bypasses a budget to keep the loop moving. Both budget stops end
   one daemon invocation, not the daemon: the invocation loop restarts on
-  `RunBudgetExhausted` and on `SpendSoftCap` (the spend cap ends one
-  invocation until its §9.19.6 per-day window resets — the next UTC day's
-  first invocation observes the budget-window-reset condition), so the
-  always-on daemon is available again when the window that stopped it
-  expires. Only a shutdown signal (or a signal racing the budget stop)
-  ends the process.
+  `RunBudgetExhausted` immediately, and on `SpendSoftCap` only after
+  waiting for the next UTC day boundary (racing the operator's shutdown
+  signal) — the spend stays at/above the cap for the rest of the day, so
+  an immediate restart would spin, and only a post-boundary invocation's
+  first pass can observe the §9.19.6 budget-window-reset condition. Only
+  a shutdown signal (or a signal racing the wait) ends the process.
 - While a campaign is in flight with free capacity, the active session's
   scheduling continues under the concurrency cap; the kick-off evaluation
   gates starting a session from idle, not the in-flight session's own

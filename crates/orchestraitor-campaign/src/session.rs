@@ -297,13 +297,27 @@ pub async fn plan_pass_with_skips_async(
 }
 
 /// Appends the guardrail skip note to a decision record's rationale. Shared
-/// by the sync and async planners so the two consumers can never drift.
-fn append_budget_skips(
+/// by the sync and async planners (and the §9.36 kick-off skip path) so the
+/// consumers can never drift.
+pub(crate) fn append_budget_skips(
     decision: &mut CampaignDecision,
     budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
 ) {
     if budget_skips.is_empty() {
         return;
+    }
+    decision.rationale = append_budget_skips_str(&decision.rationale, budget_skips);
+}
+
+/// The string-level form of [`append_budget_skips`]: appends the typed
+/// guardrail-skip note to one rationale string. Shared so the rationale
+/// format cannot drift between the planners and the kick-off skip path.
+pub(crate) fn append_budget_skips_str(
+    rationale: &str,
+    budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
+) -> String {
+    if budget_skips.is_empty() {
+        return rationale.to_string();
     }
     let mut note = String::from("task budget skips:");
     for (task_id, reason) in budget_skips {
@@ -313,7 +327,7 @@ fn append_budget_skips(
         note.push_str(reason.to_string().as_str());
         note.push_str(");");
     }
-    decision.rationale = format!("{} [{}]", decision.rationale, note);
+    format!("{rationale} [{note}]")
 }
 
 /// Constructs the exactly-one §9.35 decision record for a pass: the

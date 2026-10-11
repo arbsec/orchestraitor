@@ -29,10 +29,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `kickoff-skipped` event — never a silent drop. A budget stop stays the
   explicit `blocked`/`needs-human` state (§9.33.4); kick-off never
   bypasses a budget, and the daily-spend soft cap now ends one daemon
-  invocation until its per-day budget window resets (§9.19.6) — the
-  daemon restarts and observes the reset, instead of staying down until
-  the operator intervenes. Documented in
-  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
+  invocation until its per-day budget window resets (§9.19.6): the
+  daemon waits for the next UTC day boundary (shutdown-interruptible)
+  and restarts, observing the reset — instead of spinning on
+  immediate restarts or staying down until the operator intervenes.
+  Documented in [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
 - **Token-efficiency statistics** (`orc stats efficiency`): reporting
   over the cost ledger showing, per session or per configuration
   profile, provider-reported input/output/cache tokens alongside

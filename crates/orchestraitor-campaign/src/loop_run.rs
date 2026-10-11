@@ -1394,12 +1394,16 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         events: &mut Vec<LoopEvent>,
         elapsed: Duration,
         observation: &KickoffObservation,
+        budget_skips: &[(String, crate::guardrails::TaskSkipReason)],
     ) -> Result<(), CampaignError> {
         let verdict = crate::kickoff::evaluate(&self.config.kickoff, observation);
-        let rationale = kick_off_rationale(&verdict, observation);
+        let rationale = crate::session::append_budget_skips_str(
+            &kick_off_rationale(&verdict, observation),
+            budget_skips,
+        );
         let stored = self.decisions.record(&crate::decision::CampaignDecision {
             kind: crate::decision::DecisionKind::NoOp,
-            no_op_reason: Some(NoOpReason::EmptyQueue),
+            no_op_reason: Some(NoOpReason::KickoffGate),
             selected: None,
             role: self.routing.role.clone(),
             provider: self.routing.provider.clone(),
@@ -1446,7 +1450,12 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         }
         match self.kickoff_gate(now, &snapshot, &task_exclusions.excluded) {
             KickoffGate::Skipped(observation) => {
-                self.record_kickoff_skip(events, elapsed, &observation)?;
+                self.record_kickoff_skip(
+                    events,
+                    elapsed,
+                    &observation,
+                    &task_exclusions.budget_skips,
+                )?;
                 return Ok(false);
             }
             KickoffGate::Proceed => {}

@@ -108,6 +108,10 @@ pub enum DecisionRecordNoOpReason {
     AllBlocked,
     /// The active epic has no remaining schedulable work.
     EpicExhausted,
+    /// The §9.36 kick-off gate skipped the pass (issue #505): no campaign
+    /// was in flight and no armed kick-off condition held; the gate's
+    /// verdict is in the record's rationale.
+    KickoffGate,
 }
 
 /// The tool-boundary selected-task shape (mirrors the campaign crate's
@@ -306,6 +310,7 @@ pub fn validate_decision(
             DecisionRecordNoOpReason::EmptyQueue => NoOpReason::EmptyQueue,
             DecisionRecordNoOpReason::AllBlocked => NoOpReason::AllBlocked,
             DecisionRecordNoOpReason::EpicExhausted => NoOpReason::EpicExhausted,
+            DecisionRecordNoOpReason::KickoffGate => NoOpReason::KickoffGate,
         }),
         (DecisionRecordKind::NoOp, None) => return Err(DecisionRecordError::NoOpWithoutReason),
     };

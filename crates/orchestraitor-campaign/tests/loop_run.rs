@@ -2476,6 +2476,12 @@ async fn a_skipped_pass_persists_a_decision_record() {
             record.decision.kind,
             orchestraitor_campaign::DecisionKind::NoOp
         );
+        assert_eq!(
+            record.decision.no_op_reason,
+            Some(orchestraitor_campaign::NoOpReason::KickoffGate),
+            "a gate skip carries the typed KickoffGate reason, never a \
+             misleading EmptyQueue"
+        );
         assert!(
             record.decision.rationale.contains("kick-off gate"),
             "the rationale carries the kick-off verdict: {}",
@@ -2557,5 +2563,52 @@ async fn a_backed_off_task_kicks_off_after_its_window_elapses() {
     assert_eq!(
         summary2.spawns, 1,
         "the same task kicks off once its window elapses"
+    );
+}
+
+/// Gen-2 review remediation: a gate-skipped pass whose ready candidate is
+/// under a retry-backoff window carries the typed budget-skip note in the
+/// skipped pass's decision rationale — never a silent suppression.
+#[tokio::test(start_paused = true)]
+async fn a_skipped_pass_rationale_carries_the_budget_skips() {
+    use orchestraitor_campaign::GuardrailsSettings;
+
+    // Backoff window ending 1h out: the task is excluded on the first
+    // invocation and the gate skips the (otherwise empty) pass.
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    runs.record_task_failure(
+        "board-arbsec_orchestraitor-1",
+        "provider-error",
+        false,
+        Some(START_UNIX + 3600),
+    )
+    .unwrap();
+    let config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(1),
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    let starter = FakeStarter::new(Behavior::Complete {
+        turns: 1,
+        tokens: 10,
+    });
+    let (summary, decisions, _runs) =
+        run_loop_with_stores(config, snapshot_with(&[1]), starter, "inv", decisions, runs).await;
+    assert_eq!(summary.spawns, 0);
+    assert_eq!(summary.task_budget_skips, 1, "the skip is counted");
+    let records = decisions.list().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.decision.rationale.contains("task budget skips")),
+        "the skipped pass's rationale carries the typed budget-skip note: \
+         {:?}",
+        records
+            .iter()
+            .map(|record| &record.decision.rationale)
+            .collect::<Vec<_>>()
     );
 }
