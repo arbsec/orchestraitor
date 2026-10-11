@@ -30,9 +30,12 @@ use crate::session::{BoardSnapshot, task_id_for};
 #[serde(rename_all = "kebab-case")]
 pub enum ReconcileEvent {
     /// Local run state disagreed with the board: the board wins (§9.43).
-    /// A locally `running` task is no longer in the board's open set —
-    /// it was completed, cancelled, or moved out of scope elsewhere. The
-    /// local row keeps its status; the divergence is the record.
+    /// A restart-recovered (`orphaned`) task — crashed-run liveness the
+    /// §9.24.2 recovery reaped — is no longer in the board's open set:
+    /// it was completed, cancelled, or moved out of scope elsewhere while
+    /// the run was down. The local row keeps its status; the divergence
+    /// is the record. Live `running` slots are excluded on purpose (a
+    /// worker closing its own item mid-run is normal supervision).
     BoardDiverged {
         /// Worker task id whose local state the board overruled.
         task_id: String,

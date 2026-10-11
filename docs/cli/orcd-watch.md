@@ -84,11 +84,13 @@ rows all behave exactly as documented for
   so in-flight workers are unaffected.
 - **Reconcile events.** Every tick's reconcile records its NEW observations
   once per invocation (duplicates within an invocation are suppressed):
-  `board-diverged` when a locally-`running` task is no longer open on the
-  board (board wins), `unblocked-task-promoted` when a previously blocked
-  candidate appears on the ready queue. A tick with no new observations
-  records nothing; a record failure surfaces as a poll failure and the
-  pass does not plan. Events carry identifiers only — never board content.
+  `board-diverged` when a row orphaned by this invocation's restart
+  recovery is no longer open on the board (board wins over a crashed
+  run; live slots are never flagged), `unblocked-task-promoted` when a
+  previously blocked candidate appears on the ready queue. A tick with
+  no new observations records nothing; a record failure surfaces as a
+  poll failure and the pass does not plan. Events carry identifiers
+  only — never board content.
 
 ## State
 
@@ -101,4 +103,6 @@ rows all behave exactly as documented for
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme
-  (`orc-loop/<task-id>`) as the foreground loop, pruned at startup.
+  (`orc-loop/<task-id>`) as the foreground loop, pruned at process start
+  and before every subsequent run-budget invocation (so a retried task's
+  worktree path is always free).
