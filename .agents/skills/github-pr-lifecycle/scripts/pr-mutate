@@ -99,7 +99,11 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
   done
   CHECKS_JSON="$(mktemp)"
   PR_CHECKS_ERR="$(mktemp)"
-  if ! "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>"$PR_CHECKS_ERR"; then
+  # `bash`-invoke (not direct exec): the callee's executable bit is not
+  # guaranteed in every checkout — the App-signed landing path
+  # (createCommitOnBranch) cannot represent 100755 (issue #556), so a
+  # flattened checkout must still work. Read-only script, safe to run via bash.
+  if ! bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>"$PR_CHECKS_ERR"; then
     # Surface WHY classification failed (e.g. CI-only stub/gh differences):
     # the stderr is bounded diagnostic text, safe to echo into the reason.
     PR_CHECKS_DETAIL="$(head -c 300 "$PR_CHECKS_ERR" | tr '\n' ' ')"

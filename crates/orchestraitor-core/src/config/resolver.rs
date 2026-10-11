@@ -11,7 +11,7 @@ use crate::config::{
     DataGovernanceConfig, DomainConfig, GitHubAppConfig, NormalizationConfig, OrchestraitorConfig,
     ProviderConfig, ResolvedValue, ResourceLimitConfig, RetryConfig, RoleConfig, RoutingConfig,
     RoutingDecisionProviderConfig, SubscriptionConfig, ToolBudgetConfig, ToolConfig,
-    parse_toml_config,
+    WatchConfigBlock, parse_toml_config,
 };
 use crate::error::ConfigError;
 
@@ -191,6 +191,13 @@ impl OrchestraitorConfig {
         );
         merge_scalar(&mut self.service_identities, next.service_identities);
         merge_option(&mut self.r#loop, next.r#loop, LoopGuardrailsConfig::merge);
+        merge_option(&mut self.watch, next.watch, WatchConfigBlock::merge);
+    }
+}
+
+impl WatchConfigBlock {
+    fn merge(&mut self, next: Self) {
+        merge_scalar(&mut self.poll_interval_secs, next.poll_interval_secs);
     }
 }
 

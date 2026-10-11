@@ -10,7 +10,10 @@
 //! every beat the supervisor observes is persisted via
 //! [`LoopRunStore::heartbeat`], so `loop.db` shows how far each run got
 //! even after a crash or kill. Rows from earlier invocations are historical
-//! records; restart recovery is deferred to the E8 watch daemon.
+//! records; the watch daemon's startup performs restart recovery (spec
+//! §9.24.2, issue #503): every row still `running` transitions to
+//! [`RunRowStatus::Orphaned`] — never directly `failed` — and a `paused`
+//! row stays paused.
 //!
 //! Rows reference the append-only campaign decision store by plain integer
 //! id (`decision_id`); the two stores live in separate files, so there is no
@@ -51,13 +54,26 @@ pub enum RunRowStatus {
     /// typed rows and the skip reason in the decision record are the
     /// needs-human signal.
     Stuck,
+    /// The supervisor died (crash, kill -9) with the row still `running`;
+    /// restart recovery transitioned it per §9.24.2. Never a direct
+    /// `failed`: the next tick may re-select the work fresh.
+    Orphaned,
+    /// Explicit operator pause (§9.24.1 `paused`; the pause control itself
+    /// is a later slice). Non-terminal and lease-protected: restart
+    /// recovery leaves a paused row exactly where it is (§9.24.2 —
+    /// `paused` stays paused), and it never transitions to `orphaned`.
+    /// Gap to close WITH the future pause control: `finish` only updates
+    /// `running` rows, so no current API can move a paused row to a
+    /// terminal state — a stranded paused row needs the pause control's
+    /// own resume/cancel path (issue #503 slice note).
+    Paused,
 }
 
 impl RunRowStatus {
     /// Whether the status is terminal (no further mutation allowed).
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Running)
+        !matches!(self, Self::Running | Self::Paused)
     }
 
     /// Canonical store spelling.
@@ -71,6 +87,8 @@ impl RunRowStatus {
             Self::TimedOut => "timed-out",
             Self::AbortedShutdown => "aborted-shutdown",
             Self::Stuck => "stuck",
+            Self::Orphaned => "orphaned",
+            Self::Paused => "paused",
         }
     }
 
@@ -84,6 +102,8 @@ impl RunRowStatus {
             "timed-out" => Some(Self::TimedOut),
             "aborted-shutdown" => Some(Self::AbortedShutdown),
             "stuck" => Some(Self::Stuck),
+            "orphaned" => Some(Self::Orphaned),
+            "paused" => Some(Self::Paused),
             _ => None,
         }
     }
@@ -353,6 +373,21 @@ impl LoopRunStore {
         self.query_rows(&sql, rusqlite::params![invocation_id])
     }
 
+    /// Lists every row currently in the `running` status (insertion order) —
+    /// the reconcile and recovery scans.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the query fails.
+    pub fn running_rows(&self) -> Result<Vec<RunRow>, CampaignError> {
+        self.query_rows(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE status = 'running' ORDER BY id"
+            ),
+            [],
+        )
+    }
+
     /// Sums the recorded spend of runs that STARTED on the UTC day of
     /// `now_secs` (the spend soft cap is daily; the day boundary is derived
     /// from the explicit clock parameter, never a real clock).
@@ -371,6 +406,66 @@ impl LoopRunStore {
                 |row| row.get::<_, f64>(0),
             )
             .map_err(|source| self.err(source))
+    }
+
+    /// Restart recovery (spec §9.24.2, issue #503): transitions every row
+    /// still in the `running` status to `orphaned` — never directly
+    /// `failed` — and returns the recovered rows. A crashed or killed
+    /// supervisor leaves `running` rows behind; a fresh daemon startup
+    /// reconciles them before the first tick so no row can outlive its
+    /// process. A `paused` row stays paused (§9.24.2: `paused` tasks stay
+    /// paused across a restart) and is never touched here. Idempotent: a
+    /// second call over recovered rows returns an empty vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CampaignError::Store`] when the scan, an update, or the
+    /// commit fails. The whole recovery runs in ONE transaction: a failure
+    /// rolls back every transition, leaving the store exactly as before the
+    /// call — never half-orphaned.
+    pub fn recover_running_rows(&self, now_secs: u64) -> Result<Vec<RunRow>, CampaignError> {
+        // Atomic: the scan and every transition run in one transaction, so
+        // a mid-recovery failure leaves the store exactly as before the
+        // call — never half-orphaned (a PR #555 review finding). The rows
+        // are decoded inside the transaction and re-read after commit.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|source| self.err(source))?;
+        let mut ids = Vec::new();
+        {
+            let mut statement = tx
+                .prepare(&format!(
+                    "SELECT {RUN_COLUMNS} FROM loop_worker_runs WHERE status = 'running' ORDER BY id"
+                ))
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map([], decode_row)
+                .map_err(|source| self.err(source))?;
+            for row in rows {
+                ids.push(row.map_err(|source| self.err(source))?.id);
+            }
+        }
+        for id in &ids {
+            tx.execute(
+                "UPDATE loop_worker_runs
+                 SET status = ?2, finished_at_secs = ?3, spend_usd = 0.0, detail = ?4
+                 WHERE id = ?1 AND status = 'running'",
+                rusqlite::params![
+                    id,
+                    RunRowStatus::Orphaned.as_str(),
+                    secs_i64(now_secs, &self.path_label)?,
+                    "restart-recovery: supervisor did not reach a terminal status",
+                ],
+            )
+            .map_err(|source| self.err(source))?;
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        let mut recovered = Vec::new();
+        for id in ids {
+            recovered.push(self.by_id(id)?);
+        }
+        Ok(recovered)
     }
 
     /// Reads the durable retry state for one task; `None` when the task has
