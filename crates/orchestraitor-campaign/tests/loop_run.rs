@@ -2193,3 +2193,245 @@ async fn zeroed_backoff_overrides_a_stored_window() {
     assert_eq!(summary.spawns, 1, "disabled backoff re-selects");
     assert_eq!(summary.task_budget_skips, 0);
 }
+
+// -- §9.36 kick-off condition evaluation (issue #505) ----------------------
+//
+// The kick-off evaluation replaces the implicit "ready queue non-empty →
+// spawn" trigger: when no campaign is in flight, a pass spawns only when
+// at least one ARMED condition holds. Every test below asserts outcomes,
+// not just errors (spec §21.4).
+
+use orchestraitor_campaign::{KickoffSettings, LoopEvent};
+
+/// Runs a loop and returns the summary plus the decision records (the
+/// kick-off tests assert on the journal and the spawn count).
+async fn run_kickoff_loop(
+    config: LoopConfig,
+    snapshot: BoardSnapshot,
+    starter: FakeStarter,
+) -> orchestraitor_campaign::LoopSummary {
+    let (summary, _decisions, _runs) = run_loop(config, snapshot, starter, "inv", never()).await;
+    summary
+}
+
+/// Idle-but-healthy (§9.36 via §21.4): with EVERY condition disabled, an
+/// idle daemon with ready work on the board never spawns — but the loop
+/// stays alive (passes keep cycling, decisions keep being recorded), so
+/// the operator's shutdown still lands promptly.
+#[tokio::test(start_paused = true)]
+async fn all_conditions_disabled_yields_an_idle_but_healthy_daemon() {
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(3),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        new_eligible_work: false,
+        unblocked_promotion: false,
+        slot_released: false,
+        budget_window_reset: false,
+        external_event: false,
+    });
+    let summary = run_kickoff_loop(
+        config,
+        snapshot_with(&[1]),
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(summary.spawns, 0, "no condition armed: nothing spawns");
+    assert_eq!(
+        summary.stop_reason,
+        StopReason::CycleBudget,
+        "the daemon stays healthy: it cycles to the bound, never wedges"
+    );
+    // Typed, never silent: every skipped pass carries the verdict.
+    let skips = summary
+        .events
+        .iter()
+        .filter(|event| matches!(event, LoopEvent::KickoffSkipped { .. }))
+        .count();
+    assert_eq!(
+        skips as u64, summary.cycles,
+        "every pass skipped by the kick-off evaluation is journaled"
+    );
+}
+
+/// The shipped defaults (every board/reconcile condition armed) reproduce
+/// the pre-#505 behavior for the fresh-work case: ready work kicks off.
+#[tokio::test(start_paused = true)]
+async fn default_settings_spawn_on_fresh_ready_work() {
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+    )
+    .unwrap();
+    let summary = run_kickoff_loop(
+        config,
+        snapshot_with(&[1]),
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(summary.spawns, 1, "fresh work kicks off under defaults");
+}
+
+/// Condition 1, trigger: the FIRST pass of an invocation sees an empty
+/// previous queue, so ready work is new eligible work — the kick-off
+/// evaluation attempts the spawn even though the fixture starter then
+/// fails it (a failed spawn is a per-task outcome, not a kick-off skip).
+#[tokio::test(start_paused = true)]
+async fn the_first_pass_treats_ready_work_as_new() {
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(3),
+    )
+    .unwrap();
+    let summary = run_kickoff_loop(
+        config,
+        snapshot_with(&[7]),
+        FakeStarter::new(Behavior::SpawnFail),
+    )
+    .await;
+
+    assert_eq!(summary.spawns, 0, "the fixture spawn fails");
+    // The kick-off evaluation FIRED on the first pass (fresh ready work):
+    // the spawn path was attempted — the pass was never a skip. Later
+    // passes (empty queue after the failed spawn's exclusion) correctly
+    // skip, but the FIRST pass must not be among them. The journal is in
+    // observation order, so the first skip cannot precede the first
+    // WorkerFinished (the spawn-failure outcome).
+    let first_skip_index = summary
+        .events
+        .iter()
+        .position(|event| matches!(event, LoopEvent::KickoffSkipped { .. }));
+    let outcome_index = summary
+        .events
+        .iter()
+        .position(|event| matches!(event, LoopEvent::WorkerFinished { .. }));
+    assert_eq!(
+        summary.failed, 1,
+        "the spawn attempt is recorded as the task's outcome"
+    );
+    let outcome_index = outcome_index.unwrap_or(usize::MAX);
+    if let Some(skip) = first_skip_index {
+        assert!(
+            skip > outcome_index,
+            "the FIRST pass fired (its outcome precedes any skip), not skipped"
+        );
+    }
+}
+
+/// Condition 1, non-trigger under the runner: a pass whose ready queue is
+/// IDENTICAL to the previous pass's queue does not re-kick-off (§21.4:
+/// a stale queue must not re-arm the trigger every tick).
+#[tokio::test(start_paused = true)]
+async fn a_stale_ready_queue_does_not_re_kick_off() {
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(3),
+    )
+    .unwrap();
+    let (summary, _decisions, _runs) = run_loop(
+        config,
+        snapshot_with(&[1]),
+        FakeStarter::new(Behavior::SilentHang),
+        "inv",
+        never(),
+    )
+    .await;
+
+    // Task 1 is in flight (the cap holds the rest back; the snapshot has
+    // one item). The point: no pass after the spawn re-kicks off on the
+    // same queue.
+    assert_eq!(summary.spawns, 1);
+    // Exactly one pass ran (the spawn pass); later passes are gated by
+    // the concurrency cap, so the spawn count stays one for the window.
+    assert_eq!(
+        summary
+            .events
+            .iter()
+            .filter(|event| matches!(event, LoopEvent::WorkerSpawned { .. }))
+            .count(),
+        1
+    );
+}
+
+/// The kick-off evaluation never bypasses a budget (§9.33.4): with the
+/// daily spend at the soft cap, the spend gate stops the loop BEFORE any
+/// kick-off evaluation — the stop is the explicit `SpendSoftCap` budget
+/// state, never a silent skip.
+#[tokio::test(start_paused = true)]
+async fn a_budget_stop_precedes_kick_off_and_is_explicit() {
+    // $5 of prior spend today + one $6 run crosses the $10 soft cap.
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let prior = runs
+        .start(&orchestraitor_campaign::StartRun {
+            invocation_id: "inv-prior".to_string(),
+            decision_id: 1,
+            task_id: "prior-task".to_string(),
+            repo: REPO.to_string(),
+            number: 0,
+            started_at_secs: START_UNIX,
+        })
+        .unwrap();
+    runs.finish(
+        prior.id,
+        orchestraitor_campaign::RunRowStatus::Completed,
+        START_UNIX + 1,
+        5.0,
+        "prior",
+    )
+    .unwrap();
+    let budgets = WorkerBudgets {
+        usd_per_token_estimate: 2e-6,
+        ..WorkerBudgets::bootstrap_defaults()
+    };
+    let config = LoopConfig::new(budgets, Duration::from_secs(5), None).unwrap();
+    let starter = FakeStarter::with_behaviors(vec![
+        Behavior::BeatEvery(Duration::from_mins(1)),
+        Behavior::Complete {
+            turns: 1,
+            tokens: 3_000_000,
+        },
+    ]);
+    let (summary, _decisions, _runs) = run_loop_with_stores(
+        config,
+        snapshot_with(&[1, 2]),
+        starter,
+        "inv",
+        decisions,
+        runs,
+    )
+    .await;
+
+    assert_eq!(
+        summary.stop_reason,
+        StopReason::SpendSoftCap,
+        "the budget stop is the explicit state, never a silent kick-off skip"
+    );
+    // Run 2 spawned because a campaign was ALREADY in flight with free
+    // capacity (that is the active session's scheduling under the cap,
+    // not a new kick-off); the CAP then sealed the intake — no further
+    // pass spawns after the budget stop, though work remained on the
+    // board (issue 2 was never started). No shutdown signal is sent in
+    // this fixture, so the in-flight run drains naturally (the soft cap
+    // never aborts — the same behavior the existing spend-cap tests
+    // pin).
+    assert_eq!(summary.spawns, 2, "the cap seals the intake after run 2");
+    assert_eq!(
+        summary.aborted_on_stop, 0,
+        "the soft cap never aborts in-flight work"
+    );
+}

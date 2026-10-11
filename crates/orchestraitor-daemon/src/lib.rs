@@ -43,6 +43,7 @@ pub use supervision::{
 };
 pub use watch::{
     BoardSnapshotPoller, DEFAULT_POLL_INTERVAL_SECS, DirectWatchStarter, InstanceLock,
-    JournallessSink, POLL_INTERVAL_CONFIG_KEY, ReconcilePoller, ReconcileSink, SetWatchInvocation,
-    WatchConfig, acquire_instance_lock, run_watch,
+    JournallessSink, KICKOFF_CONFIG_KEY_PREFIX, POLL_INTERVAL_CONFIG_KEY, ReconcilePoller,
+    ReconcileSink, SetWatchInvocation, WATCH_BUILT_IN_DEFAULTS_TOML, WatchConfig,
+    acquire_instance_lock, run_watch,
 };

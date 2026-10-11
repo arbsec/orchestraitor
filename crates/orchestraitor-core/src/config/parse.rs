@@ -137,8 +137,17 @@ fn is_known_key(key: &str) -> bool {
                 | "loop.task_retry_backoff_secs"
         )
         // The §9.36 watch-daemon block (a PR #564 review finding: a valid
-        // `[watch]` table must not surface as `unknown config keys`).
+        // `[watch]` table must not surface as `unknown config keys`) and
+        // its kick-off condition enables (issue #505, `[watch.kickoff]`).
         || key == "watch.poll_interval_secs"
+        || matches!(
+            key,
+            "watch.kickoff.new_eligible_work"
+                | "watch.kickoff.unblocked_promotion"
+                | "watch.kickoff.slot_released"
+                | "watch.kickoff.budget_window_reset"
+                | "watch.kickoff.external_event"
+        )
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {
@@ -207,6 +216,10 @@ fn matches_dynamic_key(key: &str, prefix: &str, fields: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // Test-only allowances mirror the resolver/tool test modules: a failed
+    // assertion must fail the test loudly.
+
     use super::*;
 
     #[test]
@@ -258,6 +271,44 @@ backoff_ms = 250
             [] as [String; 0],
             "watch.poll_interval_secs must be a known key"
         );
+        Ok(())
+    }
+
+    /// The §9.36 kick-off condition enables (issue #505,
+    /// `[watch.kickoff]`) are known keys that round-trip through the
+    /// schema.
+    #[test]
+    fn watch_kickoff_keys_are_known_and_roundtrip() -> Result<(), OrchestraitorError> {
+        let toml = "
+[watch.kickoff]
+new_eligible_work = true
+unblocked_promotion = false
+slot_released = true
+budget_window_reset = false
+external_event = true
+";
+        let report = parse_toml_config(toml)?;
+        assert_eq!(
+            report.unknown_keys,
+            [] as [String; 0],
+            "watch.kickoff.* must be known keys"
+        );
+        let kickoff = report
+            .config
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.kickoff.as_ref());
+        let kickoff = kickoff.unwrap_or_else(|| panic!("kickoff block parsed"));
+        assert_eq!(kickoff.new_eligible_work, Some(true));
+        assert_eq!(kickoff.unblocked_promotion, Some(false));
+        assert_eq!(kickoff.slot_released, Some(true));
+        assert_eq!(kickoff.budget_window_reset, Some(false));
+        assert_eq!(kickoff.external_event, Some(true));
+        let rendered = toml::to_string(&report.config)
+            .map_err(|error| ConfigError::TomlSerialize(Box::new(error)))?;
+        let reparsed = toml::from_str::<OrchestraitorConfig>(&rendered)
+            .map_err(|error| ConfigError::Toml(Box::new(error)))?;
+        assert_eq!(report.config, reparsed);
         Ok(())
     }
 

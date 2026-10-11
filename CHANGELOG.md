@@ -13,6 +13,22 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **Configurable kick-off conditions for `orcd watch`** (spec
+  `10-orchestrator.md` §9.36; #505): the daemon now spawns a campaign
+  session only when none is in flight and at least one kick-off
+  condition holds — new eligible work appeared, a blocked task became
+  unblocked (§9.40 promotion), a lease or worker slot was released, a
+  per-day budget window reset (§9.19.6), or an external GitHub event
+  arrived (§9.47; the event source lands with #504, so its condition
+  ships disarmed and can never fire yet). Conditions are
+  operator-configurable through the new `[watch.kickoff]` layered config
+  block; built-in defaults ship as TOML data (§9.22.1). Disabling every
+  condition yields an idle-but-healthy daemon: the tick keeps polling
+  and supervising, and every skipped pass is journaled as a typed
+  `kickoff-skipped` event — never a silent drop. A budget stop stays the
+  explicit `blocked`/`needs-human` state (§9.33.4); kick-off never
+  bypasses a budget. Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
 - **Token-efficiency statistics** (`orc stats efficiency`): reporting
   over the cost ledger showing, per session or per configuration
   profile, provider-reported input/output/cache tokens alongside

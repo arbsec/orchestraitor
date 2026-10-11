@@ -149,7 +149,8 @@ async fn watch_cycle() -> Result<ExitCode> {
     )
     .into_diagnostic()
     .wrap_err("watch loop configuration rejected")?
-    .with_min_poll_interval(Some(Duration::from_secs(watch_config.poll_interval_secs)));
+    .with_min_poll_interval(Some(Duration::from_secs(watch_config.poll_interval_secs)))
+    .with_kickoff(watch_config.kickoff);
 
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(0_u64);
     // SIGTERM/SIGINT fan-in: one channel increment per signal. The loop
@@ -399,6 +400,9 @@ provider = "neuralwatt"
 model = "glm-5.3-flash"
 "#;
 
+    // The §9.36 kick-off condition enables ship as TOML data (§9.22.1:
+    // built-in defaults are data, never compiled constants), layered so
+    // every enable is overridable at any higher layer.
     let mut resolver = ConfigResolver::new()
         .with_toml(
             ConfigSource {
@@ -406,6 +410,14 @@ model = "glm-5.3-flash"
                 name: "built-in defaults".to_string(),
             },
             BUILT_IN_DEFAULTS,
+        )
+        .map_err(|error| miette::miette!("configuration parse failed: {error}"))?
+        .with_toml(
+            ConfigSource {
+                layer: ConfigLayer::BuiltInDefaults,
+                name: "built-in watch defaults".to_string(),
+            },
+            orchestraitor_daemon::WATCH_BUILT_IN_DEFAULTS_TOML,
         )
         .map_err(|error| miette::miette!("configuration parse failed: {error}"))?;
 
