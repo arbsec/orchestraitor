@@ -17,8 +17,10 @@
      itself also accepts `Fixes`/`Resolves` forms.) Bare #N mentions are
      invisible to auto-close and to pr-labels-from-issue. For partial
      landings, keep the closing line bare (`Closes #469`) and put the scope
-     note on the next line, e.g. `(worker path; loop path remains tracked in
-     #N)`. -->
+     note on the NEXT line — a scope note ON the closing line still
+     triggers auto-close, so only close the issue when the whole tracked
+     scope lands in this PR (else use a bare `Refs #469` and a follow-up
+     issue). -->
 
 ## Specification references
 
