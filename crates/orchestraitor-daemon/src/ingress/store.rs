@@ -90,10 +90,12 @@ impl IngressStore {
 
     /// Configures the connection and creates the schema.
     fn init(conn: Connection, path_label: String) -> Result<Self, DaemonError> {
-        // Schema migration for stores created before the ever_baselined
-        // column: ALTER TABLE fails harmlessly when the column exists.
+        // Schema migrations for stores created before the ever_baselined
+        // and last_seen_raw_id columns: ALTER TABLE fails harmlessly when
+        // the column exists.
         let _ignore = conn.execute_batch(
-            "ALTER TABLE ingress_etags ADD COLUMN ever_baselined INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE ingress_etags ADD COLUMN ever_baselined INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE ingress_etags ADD COLUMN last_seen_raw_id INTEGER NOT NULL DEFAULT 0;",
         );
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -109,7 +111,8 @@ impl IngressStore {
                  etag            TEXT,
                  poll_after_secs INTEGER NOT NULL DEFAULT 0,
                  not_modified    INTEGER NOT NULL DEFAULT 0,
-                 ever_baselined  INTEGER NOT NULL DEFAULT 0
+                 ever_baselined  INTEGER NOT NULL DEFAULT 0,
+                 last_seen_raw_id INTEGER NOT NULL DEFAULT 0
              );",
         )
         .map_err(|error| DaemonError::IngressStore {
@@ -238,6 +241,55 @@ impl IngressStore {
                 }),
             })?;
         Ok(seen.is_some())
+    }
+
+    /// Persists the maximum raw platform event id seen on a successful
+    /// response for the endpoint: the pagination boundary — a page whose
+    /// raw ids are all at or below it is already-processed history
+    /// (whatever the event type; untracked types dominate busy feeds,
+    /// a gen-17 review finding).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn record_max_raw_id(&self, endpoint: &str, raw_id: u64) -> Result<(), DaemonError> {
+        self.conn
+            .execute(
+                "INSERT INTO ingress_etags (endpoint, last_seen_raw_id) VALUES (?1, ?2)
+                 ON CONFLICT(endpoint) DO UPDATE SET
+                     last_seen_raw_id = MAX(last_seen_raw_id, excluded.last_seen_raw_id)",
+                rusqlite::params![endpoint, i64::try_from(raw_id).unwrap_or(i64::MAX)],
+            )
+            .map_err(|error| DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: format!("raw-id record failed: {error}"),
+            })?;
+        Ok(())
+    }
+
+    /// The persisted maximum raw platform event id for the endpoint
+    /// (`None` before the first successful response).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn max_raw_id(&self, endpoint: &str) -> Result<Option<u64>, DaemonError> {
+        let stored: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT last_seen_raw_id FROM ingress_etags WHERE endpoint = ?1",
+                [endpoint],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(DaemonError::IngressStore {
+                    path: self.path_label.clone(),
+                    reason: format!("raw-id read failed: {other}"),
+                }),
+            })?;
+        Ok(stored.and_then(|secs| u64::try_from(secs).ok()).filter(|id| *id > 0))
     }
 
     /// Marks the endpoint as first-enable-baselined (its first page-1

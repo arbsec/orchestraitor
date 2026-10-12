@@ -1410,14 +1410,13 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         // external-event condition AND no campaign is in flight — when
         // a campaign IS in flight the gate proceeds on other grounds
         // anyway, so consulting there would waste work (a gen-3 review
-        // finding). The drain is DEFERRED: the events stay pending
-        // until the pass's planner actually selects a task (a gen-6
-        // cloud review finding — draining before selection would
-        // consume an event whose board item was not yet visible,
-        // wasting the acceleration when `new_eligible_work` is
-        // disarmed). The bounded queue holds events until then; its
-        // own §7.3 bound (drop + `degraded`) covers sustained flooding
-        // while parked, and the §9.43 reconcile poll stays the
+        // finding). The lifecycle lasts ONE pass: the returned ids are
+        // drained right after the pass plans (selection or typed no-op,
+        // see plan_and_spawn) — either way the board state was
+        // evaluated and the event must not re-arm (a gen-14 review
+        // correction). The bounded queue's own §7.3 bound (drop +
+        // `degraded`) covers sustained flooding while events sit
+        // un-actioned, and the §9.43 reconcile poll stays the
         // completeness authority.
         let peeked_events = match (&self.event_source, self.config.kickoff.external_event) {
             (Some(source), true) if !campaign_in_flight => source.pending(),

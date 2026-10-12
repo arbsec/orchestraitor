@@ -437,7 +437,18 @@ impl EventPoller {
             .is_baselined(&target.key)
             .map_err(|_| PollError::Failed)?;
         let mut items: Vec<RestEventItem> = Vec::new();
-        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // The durable boundary: the maximum raw platform id already
+        // processed for this endpoint. A page whose EVERY raw id is at
+        // or below it is already-processed history — whatever the event
+        // type (untracked types dominate busy feeds; keying the boundary
+        // on tracked delivery keys alone never matched durable history,
+        // a gen-17 review finding).
+        let last_seen_raw_id = self
+            .lock_store()
+            .map_err(|_| PollError::Failed)?
+            .max_raw_id(&target.key)
+            .map_err(|_| PollError::Failed)?;
+        let mut max_raw_id_this_poll = last_seen_raw_id;
         let mut page = Some(response);
         let mut pages = 0_usize;
         while let Some(current) = page {
@@ -459,42 +470,31 @@ impl EventPoller {
             }
             let mut page_items: Vec<RestEventItem> =
                 serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
-            // Stop when this page adds nothing new: its keys are all
-            // already seen (newest-first ordering makes the page head
-            // the newest entry, so a fully-seen page means the rest is
-            // history).
-            let page_keys: Vec<String> = page_items
-                .iter()
-                .filter_map(|item| item_delivery_key_with_number(item, target).map(|(key, _)| key))
-                .collect();
-            // The stop condition consults the DURABLE dedup table (any
-            // key recorded inside the redelivery window — including
-            // from earlier polls), not just this poll's own pages: the
-            // feed lists newest-first, so a page whose keys the table
-            // already judged is the boundary into already-processed
-            // history (a gen-8 cloud review finding — a per-poll key
-            // set alone never matches durable history, so every 200
-            // response would replay the full page cap). The guard is
-            // scoped to the synchronous lookups; it must never span
-            // the await below.
-            let page_all_seen = {
-                let store = self.lock_store().map_err(|_| PollError::Failed)?;
-                let mut all_seen = !page_keys.is_empty();
-                for key in &page_keys {
-                    match store.delivery_seen_within_window(key, now_secs) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            all_seen = false;
-                            break;
-                        }
-                        Err(_) => return Err(PollError::Failed),
-                    }
-                }
-                all_seen
-            };
-            seen_keys.extend(page_keys.iter().cloned());
+            // Boundary detection uses EVERY item's raw platform id, not
+            // only tracked ones: an all-untracked page must still end
+            // the chain once it reaches already-processed history (the
+            // feed lists newest-first). A page cap hit is a successful
+            // partial poll, never an error — the §9.43 reconcile poll
+            // stays the completeness authority for anything left.
+            let page_reached_boundary = !page_items.is_empty()
+                && page_items.iter().all(|item| {
+                    item.id
+                        .as_ref()
+                        .and_then(value_to_id)
+                        .and_then(|id| id.parse::<u64>().ok())
+                        .is_some_and(|id| {
+                            last_seen_raw_id.is_some_and(|last| id <= last)
+                        })
+                });
+            for raw_id in page_items.iter().filter_map(|item| {
+                item.id.as_ref().and_then(value_to_id).and_then(|id| id.parse::<u64>().ok())
+            }) {
+                max_raw_id_this_poll = max_raw_id_this_poll.map_or(Some(raw_id), |last| {
+                    Some(last.max(raw_id))
+                });
+            }
             items.append(&mut page_items);
-            if page_all_seen {
+            if page_reached_boundary {
                 break;
             }
             if pages >= MAX_PAGES_PER_POLL {
@@ -545,7 +545,7 @@ impl EventPoller {
             let mut store = self.lock_store().map_err(|_| PollError::Failed)?;
             for key in items
                 .iter()
-                .filter_map(|item| item_delivery_key_with_number(item, target).map(|(key, _)| key))
+                .filter_map(|item| item_derived(item, target).map(|derived| derived.delivery_key))
             {
                 let _ignore = store.record_delivery(&key, now_secs);
             }
@@ -563,6 +563,12 @@ impl EventPoller {
             });
         }
         let (accepted, duplicates, dropped) = self.process_items(&items, target, now_secs)?;
+        if let Some(max_id) = max_raw_id_this_poll {
+            self.lock_store()
+                .map_err(|_| PollError::Failed)?
+                .record_max_raw_id(&target.key, max_id)
+                .map_err(|_| PollError::Failed)?;
+        }
         self.record_conditional(&target.key, new_etag.as_deref(), poll_after, false)
             .map_err(|_| PollError::Failed)?;
         Ok(PollOutcome {
@@ -585,76 +591,31 @@ impl EventPoller {
         let mut duplicates = 0_usize;
         let mut dropped = 0_usize;
         for item in items {
-            // PRs appear as issues carrying `payload.issue.pull_request`;
-            // PR-specific activity (PullRequestEvent) carries
-            // `payload.pull_request` directly.
-            let is_pull = item.payload.as_ref().is_some_and(|payload| {
-                payload.pull_request.is_some()
-                    || payload
-                        .issue
-                        .as_ref()
-                        .is_some_and(|issue| issue.pull_request.is_some())
-            });
-            let action = item
-                .payload
-                .as_ref()
-                .and_then(|payload| payload.action.as_deref());
-            let Some(event_type) = normalize_event_type(&item.kind, is_pull, action) else {
-                continue; // outside the operator's §9.47 event filter
+            // The full derivation (filter, shape, action) is shared with
+            // the pagination boundary via `item_derived` — one copy, so
+            // the stop check and the dedup table can never diverge (a
+            // gen-17 review finding).
+            let Some(derived) = item_derived(item, target) else {
+                continue; // outside the operator's §9.47 event filter or unshaped
             };
-            let number = if is_pull {
-                item.payload
-                    .as_ref()
-                    .and_then(|payload| payload.pull_request.as_ref().map(|pr| pr.number))
-                    .or_else(|| {
-                        item.payload
-                            .as_ref()
-                            .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
-                    })
-            } else {
-                item.payload
-                    .as_ref()
-                    .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
-            };
-            let Some(number) = number else {
-                continue; // unshaped payload: skip, never guess
-            };
-            let Some(delivery_id) = item.id.as_ref().and_then(value_to_id) else {
-                continue; // no platform delivery id: skip, never share a key
-            };
-            let head_sha = if is_pull {
-                item.payload
-                    .as_ref()
-                    .and_then(|payload| payload.pull_request.as_ref())
-                    .and_then(|pr| pr.head.as_ref())
-                    .and_then(|head| head.sha.clone())
-            } else {
-                None
-            };
-            let delivery_key = IngressStore::delivery_key(
-                &delivery_id,
-                &target.repo,
-                &event_type,
-                head_sha.as_deref(),
-            );
             // Dedup is DURABLE (the store), before the queue: a redelivery
             // never consumes queue capacity and never produces a second
             // kick-off (§9.26.3 via §9.47).
             let is_new = self
                 .lock_store()
                 .map_err(|_| PollError::Failed)?
-                .record_delivery(&delivery_key, now_secs)
+                .record_delivery(&derived.delivery_key, now_secs)
                 .map_err(|_| PollError::Failed)?;
             if !is_new {
                 duplicates += 1;
                 continue;
             }
             let event = IngressEvent {
-                delivery_key,
+                delivery_key: derived.delivery_key,
                 repo: target.repo.clone(),
-                event_type,
-                head_sha,
-                number,
+                event_type: derived.event_type,
+                head_sha: derived.head_sha,
+                number: derived.number,
                 accepted_at_secs: now_secs,
             };
             match self.queue.push(event, now_secs) {
@@ -712,13 +673,25 @@ impl EventPoller {
 
 use reqwest::header::ETAG;
 
-/// The item's full delivery key PLUS the issue/PR number it is about
-/// (None when the item would be filtered or skipped later — it never
-/// enters the seen set or the queue).
-fn item_delivery_key_with_number(
-    item: &RestEventItem,
-    target: &PollTarget,
-) -> Option<(String, u64)> {
+/// Everything the pipeline needs from one item — derived ONCE and shared
+/// by the pagination boundary and `process_items` (a gen-17 review finding:
+/// duplicate derivations can diverge, deduplicating an event under a
+/// different key than the stop check judged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DerivedItem {
+    /// The durable delivery key (id + repo + event type + head SHA).
+    delivery_key: String,
+    /// The normalized event type.
+    event_type: String,
+    /// The head SHA for PR events, when present.
+    head_sha: Option<String>,
+    /// The issue or PR number the event is about.
+    number: u64,
+}
+
+/// Derives [`DerivedItem`] (None when the item would be filtered or
+/// skipped later — it never enters the seen set or the queue).
+fn item_derived(item: &RestEventItem, target: &PollTarget) -> Option<DerivedItem> {
     let is_pull = item.payload.as_ref().is_some_and(|payload| {
         payload.pull_request.is_some()
             || payload
@@ -755,10 +728,17 @@ fn item_delivery_key_with_number(
             .as_ref()
             .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
     }?;
-    Some((
-        IngressStore::delivery_key(&delivery_id, &target.repo, &event_type, head_sha.as_deref()),
+    Some(DerivedItem {
+        delivery_key: IngressStore::delivery_key(
+            &delivery_id,
+            &target.repo,
+            &event_type,
+            head_sha.as_deref(),
+        ),
+        event_type,
+        head_sha,
         number,
-    ))
+    })
 }
 
 /// Extracts the delivery identifier from the REST item's `id` field
