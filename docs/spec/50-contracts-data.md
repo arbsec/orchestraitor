@@ -63,7 +63,8 @@ Built-in domains, roles, verification commands, review thresholds, context polic
 - model routes (§9.19.2) at every layer;
 - review thresholds (how many reviewers, what severity blocks merge);
 - context policies (token budgets, omission rules, index scope — §9.15);
-- automation levels (which tasks are fully autonomous vs prompt-required).
+- automation levels (which tasks are fully autonomous vs prompt-required);
+- built-in role presets (§9.45.1) — the built-in instruction bodies, internal-tool allowlists, and effort/summary defaults for each orchestration role ship as default TOML data under the same replaceable-at-every-layer rule.
 
 #### 9.22.5 Named profiles
 
