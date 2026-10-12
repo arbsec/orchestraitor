@@ -289,7 +289,9 @@ impl IngressStore {
                     reason: format!("raw-id read failed: {other}"),
                 }),
             })?;
-        Ok(stored.and_then(|secs| u64::try_from(secs).ok()).filter(|id| *id > 0))
+        Ok(stored
+            .and_then(|secs| u64::try_from(secs).ok())
+            .filter(|id| *id > 0))
     }
 
     /// Marks the endpoint as first-enable-baselined (its first page-1

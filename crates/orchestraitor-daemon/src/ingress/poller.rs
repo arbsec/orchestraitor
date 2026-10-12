@@ -236,12 +236,8 @@ fn normalize_event_type(
 ) -> Option<String> {
     match (kind, action, issue_marks_pull) {
         ("IssuesEvent", Some("opened"), false) => Some("issues-opened".to_string()),
-        ("IssueCommentEvent", Some("created"), false) => {
-            Some("issue-commented".to_string())
-        }
-        ("IssueCommentEvent", Some("created"), true) => {
-            Some("pr-commented".to_string())
-        }
+        ("IssueCommentEvent", Some("created"), false) => Some("issue-commented".to_string()),
+        ("IssueCommentEvent", Some("created"), true) => Some("pr-commented".to_string()),
         ("PullRequestEvent", Some("ready_for_review"), true) => {
             Some("pr-ready-for-review".to_string())
         }
@@ -448,6 +444,9 @@ impl EventPoller {
             .map_err(|_| PollError::Failed)?
             .max_raw_id(&target.key)
             .map_err(|_| PollError::Failed)?;
+        // The boundary as of BEFORE this poll (the skip guard below uses
+        // it; the store's max is updated only after processing).
+        let max_raw_id_this_poll_before_update = last_seen_raw_id;
         let mut max_raw_id_this_poll = last_seen_raw_id;
         let mut page = Some(response);
         let mut pages = 0_usize;
@@ -482,16 +481,16 @@ impl EventPoller {
                         .as_ref()
                         .and_then(value_to_id)
                         .and_then(|id| id.parse::<u64>().ok())
-                        .is_some_and(|id| {
-                            last_seen_raw_id.is_some_and(|last| id <= last)
-                        })
+                        .is_some_and(|id| last_seen_raw_id.is_some_and(|last| id <= last))
                 });
             for raw_id in page_items.iter().filter_map(|item| {
-                item.id.as_ref().and_then(value_to_id).and_then(|id| id.parse::<u64>().ok())
+                item.id
+                    .as_ref()
+                    .and_then(value_to_id)
+                    .and_then(|id| id.parse::<u64>().ok())
             }) {
-                max_raw_id_this_poll = max_raw_id_this_poll.map_or(Some(raw_id), |last| {
-                    Some(last.max(raw_id))
-                });
+                max_raw_id_this_poll =
+                    max_raw_id_this_poll.map_or(Some(raw_id), |last| Some(last.max(raw_id)));
             }
             items.append(&mut page_items);
             if page_reached_boundary {
@@ -562,7 +561,8 @@ impl EventPoller {
                 poll_after_secs: poll_after,
             });
         }
-        let (accepted, duplicates, dropped) = self.process_items(&items, target, now_secs)?;
+        let (accepted, duplicates, dropped) =
+            self.process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)?;
         if let Some(max_id) = max_raw_id_this_poll {
             self.lock_store()
                 .map_err(|_| PollError::Failed)?
@@ -586,6 +586,7 @@ impl EventPoller {
         items: &[RestEventItem],
         target: &PollTarget,
         now_secs: u64,
+        last_seen_raw_id: Option<u64>,
     ) -> Result<(usize, usize, usize), PollError> {
         let mut accepted = 0_usize;
         let mut duplicates = 0_usize;
@@ -598,6 +599,20 @@ impl EventPoller {
             let Some(derived) = item_derived(item, target) else {
                 continue; // outside the operator's §9.47 event filter or unshaped
             };
+            // Items at or below the raw-id boundary are already-processed
+            // history — skipped BEFORE the dedup check (a gen-18 review
+            // finding: the feed retains up to 90 days but the dedup table
+            // only 30, so a mixed page's old items need the raw-id guard,
+            // not just the window).
+            if let Some(raw_id) = item
+                .id
+                .as_ref()
+                .and_then(value_to_id)
+                .and_then(|id| id.parse::<u64>().ok())
+                && last_seen_raw_id.is_some_and(|last| raw_id <= last)
+            {
+                continue;
+            }
             // Dedup is DURABLE (the store), before the queue: a redelivery
             // never consumes queue capacity and never produces a second
             // kick-off (§9.26.3 via §9.47).

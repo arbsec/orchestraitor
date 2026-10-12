@@ -2746,6 +2746,24 @@ async fn a_seeded_budget_day_fires_the_reset_on_a_moved_boundary() {
 /// requested ids (retain-keyed), matching the production
 /// `KickoffIngressSource` semantics. The optional counter counts peek
 /// calls for the in-flight contract test.
+/// A poller whose FIRST poll returns an empty board and every later one
+/// a ready item (drives the no-op-pass → ready-item sequence).
+struct ChangingPoller {
+    first: Mutex<bool>,
+}
+#[async_trait::async_trait]
+impl orchestraitor_campaign::BoardPoller for ChangingPoller {
+    async fn poll(&self) -> Result<BoardSnapshot, CampaignError> {
+        let mut first = self.first.lock().unwrap();
+        if *first {
+            *first = false;
+            Ok(empty_snapshot())
+        } else {
+            Ok(snapshot_with(&[1]))
+        }
+    }
+}
+
 struct KickoffFixtureSource {
     queue: Mutex<Vec<String>>,
     peek_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
@@ -3010,10 +3028,13 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
         push_hook: Mutex::new(None),
         drain_log: Mutex::new(Vec::new()),
     });
+    // max_cycles = 2: both slots fill on pass 1; after the stall kills
+    // and reaps, an extra idle pass would re-consult the source (the
+    // counter assertion depends on exactly one consultation).
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
-        Some(3),
+        Some(2),
     )
     .unwrap()
     .with_kickoff(KickoffSettings {
@@ -3139,6 +3160,8 @@ async fn a_no_op_pass_drains_previously_evaluated_events() {
         push_hook: Mutex::new(None),
         drain_log: Mutex::new(Vec::new()),
     });
+    // Pass 1: empty board (the event fires, plans a no-op). Pass 2+: a
+    // ready item appears — `new_eligible_work` fires the selection.
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3153,8 +3176,8 @@ async fn a_no_op_pass_drains_previously_evaluated_events() {
     let runs = LoopRunStore::open_in_memory().unwrap();
     let runner = LoopRunner::new(
         config,
-        FakePoller {
-            snapshot: empty_snapshot(),
+        ChangingPoller {
+            first: Mutex::new(true),
         },
         FakeStarter::new(Behavior::Complete {
             turns: 1,
@@ -3170,7 +3193,7 @@ async fn a_no_op_pass_drains_previously_evaluated_events() {
     .with_event_source(Arc::clone(&source) as Arc<dyn orchestraitor_campaign::KickoffEventSource>);
     let summary = runner.run(never()).await.unwrap();
 
-    assert_eq!(summary.spawns, 0, "the board stays empty");
+    assert_eq!(summary.spawns, 1, "pass 2's ready item kicked off");
     assert_eq!(
         source.queue.lock().unwrap().len(),
         0,
