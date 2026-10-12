@@ -204,7 +204,7 @@ fn issues_events_body() -> String {
         {
             "id": "111",
             "type": "IssueCommentEvent",
-            "payload": { "issue": { "number": 504 } }
+            "payload": { "action": "created", "issue": { "number": 504 } }
         },
         {
             "id": "222",
@@ -364,7 +364,7 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
     let delivery_body = json!([{
         "id": "111",
         "type": "IssueCommentEvent",
-        "payload": { "issue": { "number": 504 } }
+        "payload": { "action": "created", "issue": { "number": 504 } }
     }])
     .to_string();
     let server = FixtureServer::start(vec![
@@ -760,9 +760,9 @@ fn poll_targets_are_repository_scoped() {
 #[tokio::test(flavor = "current_thread")]
 async fn items_without_a_delivery_id_are_skipped_never_shared() {
     let body = json!([
-        { "type": "IssueCommentEvent", "payload": { "issue": { "number": 1 } } },
-        { "id": { "nested": true }, "type": "IssueCommentEvent", "payload": { "issue": { "number": 3 } } },
-        { "id": "", "type": "IssueCommentEvent", "payload": { "issue": { "number": 4 } } }
+        { "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 1 } } },
+        { "id": { "nested": true }, "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 3 } } },
+        { "id": "", "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 4 } } }
     ])
     .to_string();
     let server = FixtureServer::start(vec![Rule {
@@ -794,5 +794,79 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
             .record_delivery("|arbsec/orchestraitor|issue-commented|", 1_000)
             .expect("record"),
         "the empty delivery key was never written (a fresh record proves it)"
+    );
+}
+
+/// Gen-13 cloud review (§21.4 negative): only the documented §9.47
+/// actions pass the filter — a `closed` `IssuesEvent` and a
+/// `synchronize` `PullRequestEvent` (both with distinct delivery keys)
+/// produce nothing; untracked actions never multiply kick-offs.
+#[tokio::test(flavor = "current_thread")]
+async fn untracked_actions_are_filtered() {
+    let body = json!([
+        {
+            "id": "777",
+            "type": "IssuesEvent",
+            "payload": { "action": "closed", "issue": { "number": 504 } }
+        },
+        {
+            "id": "888",
+            "type": "PullRequestEvent",
+            "payload": {
+                "action": "synchronize",
+                "pull_request": { "number": 504, "head": { "sha": "abc" } }
+            }
+        }
+    ])
+    .to_string();
+    // Two rules: poll 1 = baseline, poll 2 = the delta (both untracked).
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: body.clone(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, store, poller) = fixture_ingress();
+    let target = server.target("events", "events");
+    // First poll = baseline (registers, enqueues nothing).
+    let baseline = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("baseline poll ok");
+    assert_eq!(baseline.accepted, 0);
+    // Second poll = the delta with the untracked actions: still nothing.
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("poll ok");
+    assert_eq!(
+        (outcome.accepted, outcome.duplicates, outcome.dropped),
+        (0, 0, 0),
+        "untracked actions produce nothing"
+    );
+    assert!(queue.take().is_empty());
+    assert!(
+        store
+            .lock()
+            .expect("store lock")
+            .record_delivery("777|arbsec/orchestraitor|issues-opened|", 1_000)
+            .expect("record"),
+        "the filter never wrote the untracked actions' keys to the dedup \
+         table (a fresh record proves the keys were absent)"
     );
 }

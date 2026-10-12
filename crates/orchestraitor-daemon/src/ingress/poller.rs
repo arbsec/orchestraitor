@@ -176,6 +176,14 @@ struct RestEventItem {
 /// `pull_request`).
 #[derive(Debug, serde::Deserialize)]
 struct RestPayload {
+    /// The activity verb (`opened`, `closed`, `synchronize`,
+    /// `ready_for_review`, ...). Only the documented §9.47 verbs pass
+    /// the filter — every `IssuesEvent`/`IssueCommentEvent`/
+    /// `PullRequestEvent` type carries multiple actions whose delivery
+    /// keys (head SHA included) would otherwise multiply kick-offs
+    /// (a gen-13 cloud review finding).
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     issue: Option<RestIssueRef>,
     #[serde(default)]
@@ -208,12 +216,18 @@ struct RestPullHead {
 /// fixed §9.47 set). On the repository events feed, PRs appear as
 /// issues carrying `payload.issue.pull_request`; `IssueCommentEvent`
 /// distinguishes PR comments from issue comments that way.
-fn normalize_event_type(kind: &str, issue_marks_pull: bool) -> Option<String> {
-    match (kind, issue_marks_pull) {
-        ("IssuesEvent", false) => Some("issues-opened".to_string()),
-        ("IssueCommentEvent", false) => Some("issue-commented".to_string()),
-        ("IssueCommentEvent", true) => Some("pr-commented".to_string()),
-        ("PullRequestEvent", true) => Some("pr-ready-for-review".to_string()),
+fn normalize_event_type(
+    kind: &str,
+    issue_marks_pull: bool,
+    action: Option<&str>,
+) -> Option<String> {
+    match (kind, action, issue_marks_pull) {
+        ("IssuesEvent", Some("opened"), false) => Some("issues-opened".to_string()),
+        ("IssueCommentEvent", _, false) => Some("issue-commented".to_string()),
+        ("IssueCommentEvent", _, true) => Some("pr-commented".to_string()),
+        ("PullRequestEvent", Some("ready_for_review"), true) => {
+            Some("pr-ready-for-review".to_string())
+        }
         _ => None,
     }
 }
@@ -561,7 +575,11 @@ impl EventPoller {
                         .as_ref()
                         .is_some_and(|issue| issue.pull_request.is_some())
             });
-            let Some(event_type) = normalize_event_type(&item.kind, is_pull) else {
+            let action = item
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.action.as_deref());
+            let Some(event_type) = normalize_event_type(&item.kind, is_pull, action) else {
                 continue; // outside the operator's §9.47 event filter
             };
             let number = if is_pull {
@@ -684,7 +702,11 @@ fn item_delivery_key(item: &RestEventItem, target: &PollTarget) -> Option<String
                 .as_ref()
                 .is_some_and(|issue| issue.pull_request.is_some())
     });
-    let event_type = normalize_event_type(&item.kind, is_pull)?;
+    let action = item
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.action.as_deref());
+    let event_type = normalize_event_type(&item.kind, is_pull, action)?;
     let delivery_id = item.id.as_ref().and_then(value_to_id)?;
     let head_sha = if is_pull {
         item.payload

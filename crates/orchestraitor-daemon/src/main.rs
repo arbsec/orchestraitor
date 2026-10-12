@@ -241,6 +241,20 @@ async fn watch_cycle() -> Result<ExitCode> {
     // the operator arms the condition separately via
     // `[watch.kickoff].external_event`. Disabled (the default) keeps the
     // trigger set board/reconcile-derived only.
+    if watch_config.ingress.enabled && !watch_config.kickoff.external_event {
+        // Enabled ingress with a disarmed consumer: the queue fills to
+        // capacity, drops surplus, and stays `degraded` permanently (a
+        // gen-13 review finding). The poller still runs (polling is the
+        // operator's explicit opt-in and the reconcile poll remains the
+        // completeness authority), but the operator must see the
+        // mismatched configuration.
+        tracing::warn!(
+            "orcd watch: watch.ingress.enabled is true but \
+             watch.kickoff.external_event is false - the ingress queue \
+             has no kick-off consumer and will fill, drop surplus, and \
+             stay degraded; arm external_event or disable the ingress"
+        );
+    }
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> =
         if watch_config.ingress.enabled {
             let (_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
