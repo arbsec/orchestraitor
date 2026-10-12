@@ -55,7 +55,10 @@ impl KickoffIngressSource {
 
 impl orchestraitor_campaign::KickoffEventSource for KickoffIngressSource {
     fn pending(&self) -> Vec<KickoffExternalEvent> {
-        match self.queue.take() {
+        // A PEEK: non-destructive (the kick-off gate evaluates against
+        // pending events; the destructive drain runs only after the
+        // pass's planner selects a task — a gen-6 cloud review fix).
+        match self.queue.peek() {
             Ok(events) => events
                 .into_iter()
                 .map(|event| KickoffExternalEvent {
@@ -66,6 +69,18 @@ impl orchestraitor_campaign::KickoffEventSource for KickoffIngressSource {
             // must see an empty source rather than panic inside the loop
             // runner — the queue's own error path surfaces it on the next
             // push/read, and the §9.43 reconcile poll keeps completeness.
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn drain_pending(&self) -> Vec<KickoffExternalEvent> {
+        match self.queue.take() {
+            Ok(events) => events
+                .into_iter()
+                .map(|event| KickoffExternalEvent {
+                    id: event.delivery_key,
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }

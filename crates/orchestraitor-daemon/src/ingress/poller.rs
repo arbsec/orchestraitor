@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestraitor_board::BoardAuth;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue, IF_NONE_MATCH, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue, IF_NONE_MATCH, LINK, USER_AGENT};
 use secrecy::ExposeSecret;
 
 use crate::error::DaemonError;
@@ -47,6 +47,38 @@ pub const RATE_LIMIT_FALLBACK_SECS: u64 = 300;
 /// The maximum accepted response body (matches the board client's
 /// bound; a larger body is refused fail-closed rather than trusted).
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The maximum pagination pages followed per poll (bounded so a
+/// hostile or looping `next` link cannot spin the poller; 10 pages at
+/// up to 100 events each is far beyond any plausible poll delta).
+const MAX_PAGES_PER_POLL: usize = 10;
+
+/// Parses the `rel="next"` URL out of an RFC 5987 `Link` header value.
+fn next_link(link_header: &str) -> Option<String> {
+    for part in link_header.split(',') {
+        let mut segments = part.split(';');
+        let Some(url_part) = segments.next() else {
+            continue;
+        };
+        let url = url_part
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+        let mut is_next = false;
+        for param in segments {
+            let param = param.trim();
+            if let Some(rel) = param.strip_prefix("rel=")
+                && rel.trim_matches('"') == "next"
+            {
+                is_next = true;
+            }
+        }
+        if is_next {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
 
 /// The event types the poll fallback tracks (spec §9.47: new issues,
 /// issue/PR comments, PR ready-for-review). The operator's
@@ -247,6 +279,10 @@ impl EventPoller {
     }
 
     /// Polls one endpoint with its stored `ETag`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the poll flow (conditional request, 304/429/auth-error arms, bounded pagination chain, dedup+queue) reads top-to-bottom as one sequence; extracting arms would scatter the single response contract"
+    )]
     async fn poll_one(&self, target: &PollTarget, now_secs: u64) -> Result<PollOutcome, PollError> {
         let etag = self
             .lock_store()
@@ -327,18 +363,72 @@ impl EventPoller {
             .get(ETAG)
             .and_then(|value| value.to_str().ok())
             .map(std::string::ToString::to_string);
-        let length = response.content_length();
-        if let Some(length) = length
-            && length > MAX_RESPONSE_BYTES
-        {
-            return Err(PollError::Failed);
+        // Follow the Link-header pagination chain (bounded): the event
+        // feed is a paginated collection, and only the first page would
+        // otherwise be processed (a gen-6 cloud review finding). The
+        // chain is bounded so a hostile or looping `next` link cannot
+        // spin the poller; items accumulate and dedup runs across ALL
+        // fetched pages before the poll completes.
+        let mut items: Vec<RestEventItem> = Vec::new();
+        let mut page = Some(response);
+        let mut pages = 0_usize;
+        while let Some(current) = page {
+            pages += 1;
+            if pages > MAX_PAGES_PER_POLL {
+                return Err(PollError::Failed);
+            }
+            let link = current
+                .headers()
+                .get(LINK)
+                .and_then(|value| value.to_str().ok())
+                .map(std::string::ToString::to_string);
+            let length = current.content_length();
+            if let Some(length) = length
+                && length > MAX_RESPONSE_BYTES
+            {
+                return Err(PollError::Failed);
+            }
+            let bytes = current.bytes().await.map_err(|_| PollError::Failed)?;
+            if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(PollError::Failed);
+            }
+            let mut page_items: Vec<RestEventItem> =
+                serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
+            items.append(&mut page_items);
+            page = match link.as_deref().and_then(next_link) {
+                Some(next) if !next.is_empty() => {
+                    let token = self
+                        .auth
+                        .bearer_token()
+                        .await
+                        .map_err(|_| PollError::Failed)?;
+                    let next_response = self
+                        .http
+                        .get(next)
+                        .header(AUTHORIZATION, format!("Bearer {}", token.expose_secret()))
+                        .header(
+                            USER_AGENT,
+                            HeaderValue::from_static("orchestraitor-ingress"),
+                        )
+                        .header(
+                            ACCEPT,
+                            HeaderValue::from_static("application/vnd.github+json"),
+                        )
+                        .header(
+                            "X-GitHub-Api-Version",
+                            HeaderValue::from_static(API_VERSION),
+                        )
+                        .send()
+                        .await
+                        .map_err(|_| PollError::Failed)?;
+                    if !next_response.status().is_success() {
+                        return Err(PollError::Failed);
+                    }
+                    Some(next_response)
+                }
+                _ => None,
+            };
         }
-        let bytes = response.bytes().await.map_err(|_| PollError::Failed)?;
-        if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(PollError::Failed);
-        }
-        let items: Vec<RestEventItem> =
-            serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
         let (accepted, duplicates, dropped) = self.process_items(&items, target, now_secs)?;
         self.record_conditional(&target.key, new_etag.as_deref(), poll_after, false)
             .map_err(|_| PollError::Failed)?;

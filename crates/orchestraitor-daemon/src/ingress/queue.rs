@@ -104,6 +104,21 @@ impl IngressQueue {
         Ok(PushOutcome::Accepted)
     }
 
+    /// Peeks every pending event WITHOUT removing them (a gen-6 cloud
+    /// review fix: the kick-off gate must evaluate against pending
+    /// events before the pass's planner selects; the destructive
+    /// [`Self::take`] runs only after selection succeeds). Order is
+    /// queue order; consumers must not rely on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] when the state mutex is
+    /// poisoned.
+    pub fn peek(&self) -> Result<Vec<IngressEvent>, crate::error::DaemonError> {
+        let state = self.lock()?;
+        Ok(state.events.iter().cloned().collect())
+    }
+
     /// Drains every pending event (kick-off consumption). The events are
     /// ordering-insensitive input (spec §9.47): drain order is queue
     /// order, and consumers must not rely on it.

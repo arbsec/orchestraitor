@@ -132,8 +132,18 @@ pub struct KickoffExternalEvent {
 /// #504; until then the shipped implementation is [`EmptyKickoffEvents`],
 /// the documented empty source, so the condition is wired but never fires.
 pub trait KickoffEventSource: Send + Sync {
-    /// Drains the currently pending external events (identifiers only).
+    /// Peeks the currently pending external events (identifiers only).
+    /// A PEEK is non-destructive: the events stay pending until
+    /// [`Self::drain_pending`] removes them. Implementations must
+    /// return the same events for repeated peeks until a drain.
     fn pending(&self) -> Vec<KickoffExternalEvent>;
+
+    /// Destructively removes every pending event (consumed when a
+    /// kick-off's planner actually selects a task). Returns the
+    /// drained events.
+    fn drain_pending(&self) -> Vec<KickoffExternalEvent> {
+        Vec::new()
+    }
 }
 
 /// The shipped empty §9.47 source (issue #504 pending): the external-event
