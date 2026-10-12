@@ -834,7 +834,7 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
             headers: vec![("X-Poll-Interval", "60".to_string())],
         },
     ])
-        .await;
+    .await;
     let (queue, _store, poller) = fixture_ingress();
     let target = server.target("events", "events");
     let baseline = poller
