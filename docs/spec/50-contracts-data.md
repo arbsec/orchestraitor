@@ -22,7 +22,7 @@ Built-in defaults are shipped as data (TOML tables or feature-gated const data),
 
 #### 9.22.2 Layered configuration precedence
 
-Configurable values resolve through this precedence chain, evaluated in order; the first match wins. Lower-numbered layers set defaults; higher-numbered layers tighten or override. For non-security values, weakening a parent layer is permitted. For security-sensitive values, weakening MUST be explicit, auditable, and limited to options Arbitraitor supports (see §9.22.9).
+Configurable values resolve through this precedence chain. Evaluation direction: layers are traversed from built-in defaults (lowest) to explicit CLI flag (highest), and for each key the LAST layer in that traversal that sets the key wins — i.e. higher-numbered layers override lower-numbered ones, and the per-key resolver records the winning layer as provenance ("the first match" in the chain listing below means the first layer to SET the key when read in that override order, not the first layer in list order to contain it). Lower-numbered layers set defaults; higher-numbered layers tighten or override. For non-security values, weakening a parent layer is permitted. For security-sensitive values, weakening MUST be explicit, auditable, and limited to options Arbitraitor supports (see §9.22.9).
 
 ```text
 built-in defaults
