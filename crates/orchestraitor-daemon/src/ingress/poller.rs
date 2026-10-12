@@ -105,29 +105,22 @@ pub struct PollTarget {
 }
 
 /// Builds the poll targets for the configured repositories: one
-/// issues-events and one pulls-events endpoint PER REPOSITORY (two
-/// conditional requests per repo per poll round — the §9.43 rate
-/// budgets are per provider instance, and the event feeds are
-/// repo-scoped, so sharing one URL across repositories would poll
-/// nothing and mislabel events).
+/// repository-scoped issue-events endpoint per repository (`GET
+/// /repos/{owner}/{repo}/issues/events` — the documented feed; GitHub
+/// treats pull requests as issues, so PR events arrive on the same feed
+/// identified by the item's `pull_request` property). One conditional
+/// request per repository per poll round: sharing one URL across
+/// repositories would mislabel every event, and per-repo scoping keeps
+/// the dedup key and the event's repo field exact.
 #[must_use]
 pub fn poll_targets(repos: &[String], base_url: &str) -> Vec<PollTarget> {
     let base = base_url.trim_end_matches('/');
     repos
         .iter()
-        .flat_map(|repo| {
-            [
-                PollTarget {
-                    url: format!("{base}/repos/{repo}/issues/events"),
-                    key: format!("{repo}/issues-events"),
-                    repo: repo.clone(),
-                },
-                PollTarget {
-                    url: format!("{base}/repos/{repo}/pulls/events"),
-                    key: format!("{repo}/pulls-events"),
-                    repo: repo.clone(),
-                },
-            ]
+        .map(|repo| PollTarget {
+            url: format!("{base}/repos/{repo}/issues/events"),
+            key: format!("{repo}/issues-events"),
+            repo: repo.clone(),
         })
         .collect()
 }
@@ -136,7 +129,8 @@ pub fn poll_targets(repos: &[String], base_url: &str) -> Vec<PollTarget> {
 /// poller consumes); parsed from the response array.
 #[derive(Debug, serde::Deserialize)]
 struct RestEventItem {
-    id: serde_json::Value,
+    #[serde(default)]
+    id: Option<serde_json::Value>,
     event: String,
     #[serde(default)]
     issue: Option<RestIssueRef>,
@@ -369,6 +363,9 @@ impl EventPoller {
             let Some(number) = number else {
                 continue; // unshaped payload: skip, never guess
             };
+            let Some(delivery_id) = item.id.as_ref().and_then(value_to_id) else {
+                continue; // no platform delivery id: skip, never share a key
+            };
             let head_sha = if is_pull {
                 item.pull_request
                     .as_ref()
@@ -378,7 +375,7 @@ impl EventPoller {
                 None
             };
             let delivery_key = IngressStore::delivery_key(
-                &value_to_id(&item.id),
+                &delivery_id,
                 &target.repo,
                 &event_type,
                 head_sha.as_deref(),
@@ -463,12 +460,13 @@ impl EventPoller {
 use reqwest::header::ETAG;
 
 /// Extracts the delivery identifier from the REST item's `id` field
-/// (number or string on the wire); a missing id fails the item, never
-/// invents a key.
-fn value_to_id(value: &serde_json::Value) -> String {
+/// (number or non-empty string on the wire); a missing, empty, or
+/// non-scalar id yields `None` — the item is skipped, never folded into
+/// a shared empty key.
+fn value_to_id(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::String(text) => text.clone(),
-        _ => String::new(),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+        _ => None,
     }
 }

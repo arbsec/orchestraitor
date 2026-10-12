@@ -659,7 +659,7 @@ fn poll_targets_are_repository_scoped() {
         "arbsec/arbitraitor".to_string(),
     ];
     let targets = poll_targets(&repos, "https://api.github.com/");
-    assert_eq!(targets.len(), 4, "two collections per repository");
+    assert_eq!(targets.len(), 2, "one issue-events target per repository");
     assert!(
         targets
             .iter()
@@ -674,14 +674,51 @@ fn poll_targets_are_repository_scoped() {
             ),
             "an issues-events target exists for {repo}"
         );
-        assert!(
-            targets.iter().any(|t| &t.repo == repo
-                && t.url.ends_with(&format!("/repos/{repo}/pulls/events"))),
-            "a pulls-events target exists for {repo}"
-        );
     }
     assert_eq!(targets[0].key, "arbsec/orchestraitor/issues-events");
-    assert_eq!(targets[1].key, "arbsec/orchestraitor/pulls-events");
-    assert_eq!(targets[2].key, "arbsec/arbitraitor/issues-events");
-    assert_eq!(targets[3].key, "arbsec/arbitraitor/pulls-events");
+    assert_eq!(targets[1].key, "arbsec/arbitraitor/issues-events");
+}
+
+/// §21.4 negative (gen-2 cloud review): a REST item with a missing or
+/// non-scalar `id` is SKIPPED — items without a platform delivery id
+/// never share an empty dedup key (which would drop every subsequent
+/// id-less event for 30 days).
+#[tokio::test(flavor = "current_thread")]
+async fn items_without_a_delivery_id_are_skipped_never_shared() {
+    let body = json!([
+        { "event": "commented", "issue": { "number": 1 } },
+        { "id": { "nested": true }, "event": "commented", "issue": { "number": 3 } },
+        { "id": "", "event": "commented", "issue": { "number": 4 } }
+    ])
+    .to_string();
+    let server = FixtureServer::start(vec![Rule {
+        path_needle: "arbsec/orchestraitor/issues/events",
+        requires_etag: None,
+        status: 200,
+        body,
+        headers: vec![("X-Poll-Interval", "60".to_string())],
+    }])
+    .await;
+    let (queue, store, poller) = fixture_ingress();
+    let target = server.target("issues-events", "issues");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("poll ok");
+    assert_eq!(
+        (outcome.accepted, outcome.duplicates, outcome.dropped),
+        (0, 0, 0),
+        "id-less items are skipped, never accepted or deduplicated"
+    );
+    assert!(queue.take().expect("drain").is_empty());
+    assert!(
+        store
+            .lock()
+            .expect("store lock")
+            .record_delivery("|arbsec/orchestraitor|issue-commented|", 1_000)
+            .expect("record"),
+        "the empty delivery key was never written (a fresh record proves it)"
+    );
 }
