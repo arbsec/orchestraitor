@@ -13,8 +13,9 @@
 
 <!-- Exactly ONE primary closing keyword on its own line, early in the body
      (Closes #N / Fixes #N / Resolves #N). Bare #N mentions are invisible to
-     auto-close and to pr-labels-from-issue. For partial landings, scope it
-     inline, e.g. `Closes #469 (worker path; loop path remains tracked in #N)`. -->
+     auto-close and to pr-labels-from-issue. For partial landings, keep the
+     closing line bare (`Closes #469`) and put the scope note on the next
+     line, e.g. `(worker path; loop path remains tracked in #N)`. -->
 
 ## Specification references
 
@@ -58,8 +59,8 @@
 <!-- Reviewed feature PRs only; omit for small fixes. Cite zero-findings
      generations with BOTH anchors: the reviewed head SHA and the base OID. -->
 
-| Gen | Head | Findings | Remediation |
-|---|---|---|---|
+| Gen | Head SHA | Base OID | Findings | Remediation |
+|---|---|---|---|---|
 
 ## Gates
 
