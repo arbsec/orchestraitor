@@ -617,6 +617,11 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     /// `external_event` — a disarmed condition never drains the queue,
     /// so events survive until the operator opts in.
     event_source: Option<Arc<dyn crate::kickoff::KickoffEventSource>>,
+    /// Event ids that already fired a NO-SELECTION pass (a gen-9 review
+    /// finding: without this, one parked event re-fires the kick-off on
+    /// every pass, bounded only by the backoff). Counted events leave
+    /// the set when the pass drains them (a selection consumed them).
+    evaluated_events: HashSet<String>,
 }
 
 /// The loop runner's typed counters (summarized into [`LoopSummary`]).
@@ -746,6 +751,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             slot_released_since_pass: false,
             last_pass_day: None,
             event_source: None,
+            evaluated_events: HashSet::new(),
         })
     }
 
@@ -1420,9 +1426,20 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         // while parked, and the §9.43 reconcile poll stays the
         // completeness authority.
         let peeked_events = match (&self.event_source, self.config.kickoff.external_event) {
-            (Some(source), true) if !campaign_in_flight => source.pending(),
+            (Some(source), true) if !campaign_in_flight => source
+                .pending()
+                .into_iter()
+                .filter(|event| !self.evaluated_events.contains(&event.id))
+                .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
+        // Every peeked event now "fired" this pass. If the pass selects
+        // and drains, the set clears (see plan_and_spawn); if not, these
+        // ids stay evaluated and cannot re-fire the condition on later
+        // passes.
+        for event in &peeked_events {
+            self.evaluated_events.insert(event.id.clone());
+        }
         let observation = KickoffObservation {
             ready_ids: snapshot
                 .ready
@@ -1581,9 +1598,15 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // cannot act yet, wasting the acceleration when
             // `new_eligible_work` is disarmed).
             if peeked_events && let Some(source) = &self.event_source {
-                // Drained; the count is implicit in the journal (the
-                // external-event condition fired for this pass).
-                let _ignore = source.drain_pending();
+                // Drained exactly the events this pass evaluated (the
+                // gate recorded them); events that arrived after the
+                // peek stay pending. The count is implicit in the
+                // journal (the external-event condition fired for this
+                // pass). The evaluated set clears: those events are
+                // consumed.
+                let ids: Vec<String> = self.evaluated_events.iter().cloned().collect();
+                let _ignore = source.drain_pending(&ids);
+                self.evaluated_events.clear();
             }
             let spend = self.runs.daily_spend(now)?;
             // Row first, then spawn: a durable insert failure must never

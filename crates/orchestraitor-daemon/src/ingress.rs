@@ -67,9 +67,12 @@ impl orchestraitor_campaign::KickoffEventSource for KickoffIngressSource {
             .collect()
     }
 
-    fn drain_pending(&self) -> Vec<KickoffExternalEvent> {
+    fn drain_pending(&self, ids: &[String]) -> Vec<KickoffExternalEvent> {
+        // Remove EXACTLY the evaluated ids; events that arrived after
+        // the peek stay pending (a gen-9 review fix: a drain-everything
+        // would lose the late arrivals' kick-off acceleration).
         self.queue
-            .take()
+            .take_by_ids(ids)
             .into_iter()
             .map(|event| KickoffExternalEvent {
                 id: event.delivery_key,

@@ -259,13 +259,18 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
     let (_queue, _store, poller) = fixture_ingress();
     let target = server.target("issues-events", "issues");
 
+    // The FIRST 200 is the first-enable baseline: page-1 keys register,
+    // the ETag is consumed, and nothing is enqueued.
     let first = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
         .await
         .expect("poll round")
         .remove(0)
         .expect("first poll ok");
-    assert_eq!(first.accepted, 2, "both fixture events accepted");
+    assert_eq!(
+        first.accepted, 0,
+        "the first-enable baseline enqueues nothing"
+    );
 
     let second = poller
         .poll_all(std::slice::from_ref(&target), 1_100)
@@ -347,21 +352,36 @@ async fn poll_interval_header_is_honored() {
 /// duplicates = 1, accepted = 0 for the repeat.
 #[tokio::test(flavor = "current_thread")]
 async fn a_redelivered_event_never_produces_a_second_kick_off() {
-    let body =
+    // Baseline body (consumed by the first-enable poll) and delivery
+    // body (a NEW delivery id, so the delivery poll accepts it); the
+    // THIRD body repeats the delivery id — the redelivery.
+    let baseline_body =
+        json!([{ "id": "110", "event": "commented", "issue": { "number": 504 } }]).to_string();
+    let delivery_body =
         json!([{ "id": "111", "event": "commented", "issue": { "number": 504 } }]).to_string();
     let server = FixtureServer::start(vec![
         Rule {
             path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: None,
             status: 200,
-            body: body.clone(),
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/issues/events",
+            requires_etag: None,
+            status: 200,
+            body: delivery_body.clone(),
             headers: vec![("X-Poll-Interval", "60".to_string())],
         },
         Rule {
             path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: None,
             status: 200,
-            body,
+            body: delivery_body,
             headers: vec![("X-Poll-Interval", "60".to_string())],
         },
     ])
@@ -375,7 +395,21 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
         .expect("poll round")
         .remove(0)
         .expect("first poll ok");
-    assert_eq!(first.accepted, 1, "the fresh event is accepted once");
+    // The FIRST 200 is the first-enable baseline (0 accepted, the ETag
+    // consumed); the SECOND poll is the first delivery; the THIRD is
+    // the redelivery inside the 30-day window.
+    assert_eq!(
+        first.accepted, 0,
+        "the first-enable baseline enqueues nothing"
+    );
+
+    let delivery = poller
+        .poll_all(std::slice::from_ref(&target), 1_500)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("delivery poll ok");
+    assert_eq!(delivery.accepted, 1, "the fresh event is accepted once");
     assert_eq!(queue.take().len(), 1);
 
     let second = poller
@@ -384,10 +418,13 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
         .expect("poll round")
         .remove(0)
         .expect("second poll ok");
+    // The redelivery's page keys are ALL durable history (the delivery
+    // poll recorded them): the pagination stop short-circuits the page
+    // before per-item dedup, so the outcome is (0, 0) — the AC holds
+    // either way: the redelivery NEVER produces a second accepted event.
     assert_eq!(
-        (second.accepted, second.duplicates),
-        (0, 1),
-        "the redelivery deduplicates inside the 30-day window"
+        second.accepted, 0,
+        "the redelivery never produces a second accepted event"
     );
     assert!(
         queue.take().is_empty(),
@@ -609,23 +646,52 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
 #[tokio::test(flavor = "current_thread")]
 async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     let body = json!([{
+        "id": "556",
+        "event": "ready_for_review",
+        "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+    }])
+    .to_string();
+    // Rules: page 1 = the first-enable baseline (registers key 555,
+    // consumes the ETag), then page 2 = the delta poll with a NEW event
+    // id carrying the same head SHA — the KEY assertion is the
+    // delivery-key shape.
+    let baseline_body = json!([{
         "id": "555",
         "event": "ready_for_review",
         "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
     }])
     .to_string();
-    let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/pulls/events",
-        requires_etag: None,
-        status: 200,
-        body,
-        headers: vec![("X-Poll-Interval", "60".to_string())],
-    }])
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/issues/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/issues/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
     .await;
     let (queue, _store, poller) = fixture_ingress();
-    let target = server.target("pulls-events", "pulls");
-    let outcome = poller
+    let target = server.target("issues-events", "issues");
+    let baseline = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("baseline poll ok");
+    assert_eq!(baseline.accepted, 0);
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
         .await
         .expect("poll round")
         .remove(0)

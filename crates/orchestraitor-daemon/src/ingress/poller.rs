@@ -374,6 +374,17 @@ impl EventPoller {
         // history exceeds the page cap). The page cap is a successful
         // partial poll, never an error: the §9.43 reconcile poll stays
         // the completeness authority for anything left.
+        //
+        // FIRST-ENABLE BASELINE (a gen-9 review finding): when no ETag
+        // is stored, this poll is the operator's starting point — every
+        // item on the pages is history from BEFORE the ingress existed.
+        // Recording it would fill the queue with pre-enable activity and
+        // arm kick-offs for work that predates the feature. Instead the
+        // first poll only REGISTERS the page-1 keys in the dedup table
+        // (so the next poll's redelivery window sees them as history)
+        // and consumes the ETag — no event reaches the queue on the
+        // very first 200.
+        let first_enable = etag.is_none();
         let mut items: Vec<RestEventItem> = Vec::new();
         let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut page = Some(response);
@@ -471,6 +482,28 @@ impl EventPoller {
                 }
                 _ => None,
             };
+        }
+        if first_enable {
+            // Baseline registration only: record every page-1 delivery
+            // key as already-seen, then persist the ETag. The queue is
+            // untouched; the next poll (with the ETag stored) processes
+            // only the delta against this baseline.
+            let mut store = self.lock_store().map_err(|_| PollError::Failed)?;
+            for key in items
+                .iter()
+                .filter_map(|item| item_delivery_key(item, target))
+            {
+                let _ignore = store.record_delivery(&key, now_secs);
+            }
+            drop(store);
+            self.record_conditional(&target.key, new_etag.as_deref(), poll_after, false)
+                .map_err(|_| PollError::Failed)?;
+            return Ok(PollOutcome {
+                accepted: 0,
+                duplicates: 0,
+                dropped: 0,
+                poll_after_secs: poll_after,
+            });
         }
         let (accepted, duplicates, dropped) = self.process_items(&items, target, now_secs)?;
         self.record_conditional(&target.key, new_etag.as_deref(), poll_after, false)

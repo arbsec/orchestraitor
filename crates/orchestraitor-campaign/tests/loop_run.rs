@@ -2759,7 +2759,10 @@ async fn an_attached_event_source_kicks_off_when_armed() {
                 .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
                 .collect()
         }
-        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        fn drain_pending(
+            &self,
+            _ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2835,7 +2838,10 @@ async fn a_disarmed_condition_never_drains_the_event_source() {
                 .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
                 .collect()
         }
-        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        fn drain_pending(
+            &self,
+            _ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2905,7 +2911,10 @@ async fn an_external_event_alone_kicks_off() {
                 .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
                 .collect()
         }
-        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        fn drain_pending(
+            &self,
+            _ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2992,7 +3001,10 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
                 .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
                 .collect()
         }
-        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        fn drain_pending(
+            &self,
+            _ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -3085,7 +3097,10 @@ async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
                 .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
                 .collect()
         }
-        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        fn drain_pending(
+            &self,
+            _ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)

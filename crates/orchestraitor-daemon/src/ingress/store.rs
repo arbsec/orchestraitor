@@ -209,12 +209,11 @@ impl IngressStore {
             path: self.path_label.clone(),
             reason: format!("unix seconds out of range: {now_secs}"),
         })?;
-        let window = i64::try_from(REDELIVERY_WINDOW_SECS).map_err(|_| {
-            DaemonError::IngressStore {
+        let window =
+            i64::try_from(REDELIVERY_WINDOW_SECS).map_err(|_| DaemonError::IngressStore {
                 path: self.path_label.clone(),
                 reason: "redelivery window out of range".to_string(),
-            }
-        })?;
+            })?;
         let cutoff = now.saturating_sub(window);
         let seen: Option<i64> = self
             .conn

@@ -138,13 +138,15 @@ pub trait KickoffEventSource: Send + Sync {
     /// return the same events for repeated peeks until a drain.
     fn pending(&self) -> Vec<KickoffExternalEvent>;
 
-    /// Destructively removes every pending event (consumed when a
-    /// kick-off's planner actually selects a task). Returns the
-    /// drained events. REQUIRED: a source whose `pending` is a
-    /// non-destructive peek MUST implement the matching destructive
-    /// drain — the default would leave events queued and re-fire the
-    /// condition every later pass (a gen-7 cloud review finding).
-    fn drain_pending(&self) -> Vec<KickoffExternalEvent>;
+    /// Destructively removes exactly the events whose ids are in
+    /// `ids` (the ids the gate evaluated). Called when a kick-off's
+    /// planner actually selects a task. Returns the drained events.
+    /// REQUIRED: a source whose `pending` is a non-destructive peek
+    /// MUST implement the matching destructive drain — a drain-everything
+    /// default would drop events that arrived after the peek (a gen-7
+    /// cloud review finding), and a drain-nothing default would re-fire
+    /// the condition every later pass.
+    fn drain_pending(&self, ids: &[String]) -> Vec<KickoffExternalEvent>;
 }
 
 /// The shipped empty §9.47 source (issue #504 pending): the external-event
@@ -157,7 +159,7 @@ impl KickoffEventSource for EmptyKickoffEvents {
         Vec::new()
     }
 
-    fn drain_pending(&self) -> Vec<KickoffExternalEvent> {
+    fn drain_pending(&self, _ids: &[String]) -> Vec<KickoffExternalEvent> {
         Vec::new()
     }
 }

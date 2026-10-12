@@ -115,6 +115,23 @@ impl IngressQueue {
         state.events.drain(..).collect()
     }
 
+    /// Removes exactly the events whose delivery keys are in `ids`
+    /// (the ids the kick-off gate evaluated); every other event —
+    /// including ones that arrived after the peek — stays pending.
+    pub fn take_by_ids(&self, ids: &[String]) -> Vec<IngressEvent> {
+        let mut state = self.inner.lock();
+        let mut drained = Vec::new();
+        state.events.retain(|event| {
+            if ids.contains(&event.delivery_key) {
+                drained.push(event.clone());
+                false
+            } else {
+                true
+            }
+        });
+        drained
+    }
+
     /// Whether the queue is currently degraded (an overflow happened and
     /// the flood-free quiet window has not yet elapsed). `now_secs` is
     /// the caller's clock. The clear is LAZY: evaluated on read, so the
