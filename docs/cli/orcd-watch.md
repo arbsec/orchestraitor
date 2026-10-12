@@ -117,14 +117,17 @@ enabled = true           # default false — the operator opts in
 queue_capacity = 256     # bounded queue (§7.3); zero is rejected
 ```
 
-When enabled, the daemon polls the configured board repositories' issue
-and PR event feeds with `If-None-Match` conditional requests (a 304
-costs no quota), honors the server's `X-Poll-Interval`, and adapts the
-cadence to rate-limit feedback — the poll never widens beyond it. Events
-deduplicate on a durable delivery key — the platform delivery id,
-repository, event type, and head SHA where present — with a 30-day
-redelivery window (`<config-dir>/ingress-events.db`), so a redelivery
-never produces a second kick-off.
+When enabled, the daemon polls each configured board repository's
+issue-events feed (`GET /repos/{owner}/{repo}/issues/events`; GitHub
+treats PRs as issues, so PR events — including ready-for-review — arrive
+on the same feed, identified by the item's `pull_request` property) with
+`If-None-Match` conditional requests (a 304 costs no quota), honors the
+server's `X-Poll-Interval`, and adapts the cadence to rate-limit
+feedback — the poll never widens beyond it. Events deduplicate on a
+durable delivery key — the platform delivery id, repository, event type,
+and head SHA where present — with a 30-day redelivery window
+(`<config-dir>/ingress-events.db`), so a redelivery never produces a
+second kick-off.
 
 The ingress queue is bounded: sustained flooding drops surplus events
 and records the `degraded` marker (surfaced in the log; §7.3 — the bound
