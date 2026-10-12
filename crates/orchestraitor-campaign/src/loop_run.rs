@@ -697,12 +697,8 @@ fn kick_off_rationale(
 /// One §9.36 kick-off gate decision for a pass (issue #505).
 enum KickoffGate {
     /// The pass proceeds to plan (a campaign is in flight or a
-    /// condition fired). The flag carries whether the gate PEEKED
-    /// external events from the §9.47 source this pass (armed condition,
-    /// no campaign in flight): the durable drain runs after the planner
-    /// SELECTS a task — a peeked event whose board item was not yet
-    /// visible must stay pending (a gen-6 cloud review fix).
-    Proceed { peeked_events: bool },
+    /// condition fired).
+    Proceed,
     /// No campaign is in flight and no armed condition held: the
     /// pass is skipped (the verdict rides the journal event).
     Skipped(KickoffObservation),
@@ -1473,9 +1469,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // everything still queued).
             return KickoffGate::Skipped(observation);
         }
-        KickoffGate::Proceed {
-            peeked_events: !peeked_events.is_empty(),
-        }
+        KickoffGate::Proceed
     }
 
     /// Records one kick-off-skipped pass (issue #505, gen-1 review fix):
@@ -1553,10 +1547,9 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             counters.task_budget_skips += task_exclusions.budget_skips.len() as u64;
         }
         let gate = self.kickoff_gate(now, &snapshot, &task_exclusions.excluded);
-        let peeked_events = match &gate {
-            KickoffGate::Proceed { peeked_events } => *peeked_events,
-            KickoffGate::Skipped(_) => false,
-        };
+        // The drain condition is the evaluated SET (see below), not this
+        // pass's peek: a pass that selects via another condition still
+        // consumes previously evaluated events.
         match gate {
             KickoffGate::Skipped(observation) => {
                 self.record_kickoff_skip(
@@ -1567,7 +1560,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 )?;
                 return Ok(false);
             }
-            KickoffGate::Proceed { .. } => {}
+            KickoffGate::Proceed => {}
         }
         let excluded = &task_exclusions.excluded;
         let budget_skips = &task_exclusions.budget_skips;
@@ -1597,13 +1590,17 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             // draining before selection would consume an event that
             // cannot act yet, wasting the acceleration when
             // `new_eligible_work` is disarmed).
-            if peeked_events && let Some(source) = &self.event_source {
-                // Drained exactly the events this pass evaluated (the
-                // gate recorded them); events that arrived after the
-                // peek stay pending. The count is implicit in the
-                // journal (the external-event condition fired for this
-                // pass). The evaluated set clears: those events are
-                // consumed.
+            // The drain runs whenever the evaluated set is NON-EMPTY
+            // and a selection happened — not only when THIS pass peeked
+            // (a gen-10 review finding: a pass that selected via another
+            // condition must still consume the evaluated events, or they
+            // stay queued forever and later idle passes cannot re-fire).
+            if !self.evaluated_events.is_empty()
+                && let Some(source) = &self.event_source
+            {
+                // Drained exactly the events evaluated so far; events
+                // that arrived after the last peek stay pending (their
+                // kick-off acceleration is preserved).
                 let ids: Vec<String> = self.evaluated_events.iter().cloned().collect();
                 let _ignore = source.drain_pending(&ids);
                 self.evaluated_events.clear();

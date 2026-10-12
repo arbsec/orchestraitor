@@ -2761,13 +2761,19 @@ async fn an_attached_event_source_kicks_off_when_armed() {
         }
         fn drain_pending(
             &self,
-            _ids: &[String],
+            requested_ids: &[String],
         ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
-            queue
-                .drain(..)
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
-                .collect()
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
         }
     }
 
@@ -2840,13 +2846,19 @@ async fn a_disarmed_condition_never_drains_the_event_source() {
         }
         fn drain_pending(
             &self,
-            _ids: &[String],
+            requested_ids: &[String],
         ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
-            queue
-                .drain(..)
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
-                .collect()
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
         }
     }
 
@@ -2913,13 +2925,19 @@ async fn an_external_event_alone_kicks_off() {
         }
         fn drain_pending(
             &self,
-            _ids: &[String],
+            requested_ids: &[String],
         ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
-            queue
-                .drain(..)
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
-                .collect()
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
         }
     }
 
@@ -3003,13 +3021,19 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
         }
         fn drain_pending(
             &self,
-            _ids: &[String],
+            requested_ids: &[String],
         ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
-            queue
-                .drain(..)
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
-                .collect()
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
         }
     }
 
@@ -3099,13 +3123,19 @@ async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
         }
         fn drain_pending(
             &self,
-            _ids: &[String],
+            requested_ids: &[String],
         ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
-            queue
-                .drain(..)
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
-                .collect()
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
         }
     }
 

@@ -708,10 +708,10 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     );
 }
 
-/// The poll targets are repository-scoped: one issues-events and one
-/// pulls-events endpoint PER repository, each keyed by its own repo
-/// (§9.47(b): complete over the same event filter; the dedup key and
-/// event repo field carry exactly one repository).
+/// The poll targets are repository-scoped: one documented issue-events
+/// endpoint per repository, keyed by its own repo (§9.47(b): complete
+/// over the same event filter; the dedup key and event repo field
+/// carry exactly one repository).
 #[test]
 fn poll_targets_are_repository_scoped() {
     let repos = vec![
