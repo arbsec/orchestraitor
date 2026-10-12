@@ -90,6 +90,11 @@ impl IngressStore {
 
     /// Configures the connection and creates the schema.
     fn init(conn: Connection, path_label: String) -> Result<Self, DaemonError> {
+        // Schema migration for stores created before the ever_baselined
+        // column: ALTER TABLE fails harmlessly when the column exists.
+        let _ignore = conn.execute_batch(
+            "ALTER TABLE ingress_etags ADD COLUMN ever_baselined INTEGER NOT NULL DEFAULT 0;",
+        );
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -103,7 +108,8 @@ impl IngressStore {
                  endpoint        TEXT PRIMARY KEY,
                  etag            TEXT,
                  poll_after_secs INTEGER NOT NULL DEFAULT 0,
-                 not_modified    INTEGER NOT NULL DEFAULT 0
+                 not_modified    INTEGER NOT NULL DEFAULT 0,
+                 ever_baselined  INTEGER NOT NULL DEFAULT 0
              );",
         )
         .map_err(|error| DaemonError::IngressStore {
@@ -232,6 +238,52 @@ impl IngressStore {
                 }),
             })?;
         Ok(seen.is_some())
+    }
+
+    /// Marks the endpoint as first-enable-baselined (its first page-1
+    /// keys registered). Later polls with a missing `ETag` header must
+    /// NOT flip back into baseline mode (a gen-11 review finding: a
+    /// 200 without an `ETag` would otherwise discard the next delta).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn mark_baselined(&self, endpoint: &str) -> Result<(), DaemonError> {
+        self.conn
+            .execute(
+                "INSERT INTO ingress_etags (endpoint, ever_baselined) VALUES (?1, 1)
+                 ON CONFLICT(endpoint) DO UPDATE SET ever_baselined = 1",
+                [endpoint],
+            )
+            .map_err(|error| DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: format!("baseline mark failed: {error}"),
+            })?;
+        Ok(())
+    }
+
+    /// Whether the endpoint has completed its first-enable baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn is_baselined(&self, endpoint: &str) -> Result<bool, DaemonError> {
+        let flag: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT ever_baselined FROM ingress_etags WHERE endpoint = ?1",
+                [endpoint],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(DaemonError::IngressStore {
+                    path: self.path_label.clone(),
+                    reason: format!("baseline read failed: {other}"),
+                }),
+            })?;
+        Ok(flag.is_some_and(|flag| flag == 1))
     }
 
     /// Stores the conditional-request bookkeeping for one endpoint: the

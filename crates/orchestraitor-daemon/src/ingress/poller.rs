@@ -384,7 +384,11 @@ impl EventPoller {
         // (so the next poll's redelivery window sees them as history)
         // and consumes the ETag — no event reaches the queue on the
         // very first 200.
-        let first_enable = etag.is_none();
+        let first_enable = !self
+            .lock_store()
+            .map_err(|_| PollError::Failed)?
+            .is_baselined(&target.key)
+            .map_err(|_| PollError::Failed)?;
         let mut items: Vec<RestEventItem> = Vec::new();
         let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut page = Some(response);
@@ -495,6 +499,9 @@ impl EventPoller {
             {
                 let _ignore = store.record_delivery(&key, now_secs);
             }
+            store
+                .mark_baselined(&target.key)
+                .map_err(|_| PollError::Failed)?;
             drop(store);
             self.record_conditional(&target.key, new_etag.as_deref(), poll_after, false)
                 .map_err(|_| PollError::Failed)?;

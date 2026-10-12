@@ -19,9 +19,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   it into board state. Opt in with the new `[watch.ingress]` layered
   config block (`enabled`, `queue_capacity`)
   and arm the kick-off condition with `[watch.kickoff].external_event`.
-  The poller issues ETag/304 conditional requests against the
-  repositories' issue and PR event feeds, honors the server's
-  `X-Poll-Interval`, and adapts its cadence to rate-limit feedback
+  The poller issues ETag/304 conditional requests against each
+  repository's issue-events feed (PR events ride the same feed —
+  GitHub treats PRs as issues), honors the server's `X-Poll-Interval`,
+  and adapts its cadence to rate-limit feedback
   (never widening beyond it). Events deduplicate on a durable delivery
   key (platform delivery id + repository + event type + head SHA) with
   a 30-day redelivery window — a redelivery never produces a second

@@ -1582,6 +1582,21 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             no_op_reason: stored.decision.no_op_reason,
             task_id: selected.map(|task| task.task_id.clone()),
         });
+        if selected.is_none() {
+            // The pass planned a NO-OP: the board state was evaluated and
+            // nothing is actionable now — reconcile covers the item when
+            // it becomes actionable (a gen-11 review finding: keeping the
+            // event armed forever would park it through every later pass
+            // and starve the bounded queue). Drain + clear so the next
+            // EXTERNAL event can fire again.
+            if !self.evaluated_events.is_empty()
+                && let Some(source) = &self.event_source
+            {
+                let ids: Vec<String> = self.evaluated_events.iter().cloned().collect();
+                let _ignore = source.drain_pending(&ids);
+                self.evaluated_events.clear();
+            }
+        }
         if let Some(selected) = selected {
             // The pass SELECTED a task: the kick-off fired and the
             // peeked §9.47 events are consumed NOW — an event whose

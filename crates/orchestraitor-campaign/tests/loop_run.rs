@@ -3101,12 +3101,12 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     );
 }
 
-/// Gen-6 cloud review fix: a PEEKED event whose board item is not yet
-/// visible stays pending — the drain runs only after the pass's planner
-/// SELECTS a task. With an EMPTY board, an armed event is peeked and the
-/// gate fires, but nothing is selected, so the event SURVIVES for the
-/// next pass (the old drain-at-gate behavior would consume it and waste
-/// the kick-off when `new_eligible_work` is disarmed).
+/// Gen-11 review correction: a pass that plans a NO-OP has evaluated the
+/// board state and nothing is actionable now — reconcile covers the item
+/// when it becomes actionable. The evaluated events are consumed (drained
+/// + cleared) on the no-op pass, so a parked event cannot re-arm through
+/// every later pass and starve the bounded queue. The forbidden effect:
+/// an event that re-fires `ExternalEvent` on every quiet pass.
 #[tokio::test(start_paused = true)]
 async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
     use orchestraitor_campaign::KickoffSettings;
@@ -3175,9 +3175,92 @@ async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
     assert_eq!(summary.spawns, 0, "an empty board has nothing to select");
     assert_eq!(
         source.0.lock().unwrap().len(),
-        1,
-        "the peeked event SURVIVED the no-selection pass (the drain is \
-         deferred to selection; forbidden effect: a consumed event that \
-         could not act)"
+        0,
+        "the no-op pass consumed the evaluated event: the board state was \
+         evaluated and reconcile covers the item when it becomes actionable \
+         (forbidden effect: the event re-arming every quiet pass)"
+    );
+}
+
+/// Gen-11 (continued): a peeked event does NOT starve when its board item
+/// appears later — the pass that selects (here via fresh ready work after
+/// a state change) drains evaluated events even when the pass itself
+/// peeked nothing. With `new_eligible_work` armed, ready work fires and
+/// the drain clears the evaluated set.
+#[tokio::test(start_paused = true)]
+async fn a_selection_on_a_later_pass_drains_previously_evaluated_events() {
+    use orchestraitor_campaign::KickoffSettings;
+    use std::sync::Mutex;
+
+    struct FixtureSource(Mutex<Vec<String>>);
+    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
+        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let queue = self.0.lock().unwrap();
+            queue
+                .iter()
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+                .collect()
+        }
+        fn drain_pending(
+            &self,
+            requested_ids: &[String],
+        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let mut queue = self.0.lock().unwrap();
+            let mut drained = Vec::new();
+            queue.retain(|id| {
+                if requested_ids.iter().any(|requested| requested == id) {
+                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                    false
+                } else {
+                    true
+                }
+            });
+            drained
+        }
+    }
+
+    // The event is in the queue but the FIRST snapshot's ready queue is
+    // empty: pass 1 fires ExternalEvent, plans a no-op, and consumes it.
+    // Pass 2's ready item then fires new-eligible-work; the drain runs
+    // (evaluated set non-empty guard) — with the event already gone,
+    // nothing else is consumed.
+    let source = Arc::new(FixtureSource(Mutex::new(vec!["999".to_string()])));
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        external_event: true,
+        ..KickoffSettings::builtin_defaults()
+    });
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: empty_snapshot(),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap()
+    .with_event_source(Arc::clone(&source) as Arc<dyn orchestraitor_campaign::KickoffEventSource>);
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.spawns, 0, "the board stays empty");
+    assert_eq!(
+        source.0.lock().unwrap().len(),
+        0,
+        "the event was consumed on the no-op pass (one-shot firing per \
+         board evaluation)"
     );
 }
