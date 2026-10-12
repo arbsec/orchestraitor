@@ -463,8 +463,19 @@ impl EventPoller {
             if bytes.len() as u64 > MAX_RESPONSE_BYTES {
                 return Err(PollError::Failed);
             }
-            let mut page_items: Vec<RestEventItem> =
+            // Per-item tolerance (a gen-23 review finding): one item with
+            // an unexpected payload shape must not block the endpoint's
+            // ingress permanently (the poll would fail before the ETag/
+            // boundary advance, and the next poll would reach the same
+            // item). Parse the page as raw values, convert each item
+            // individually, and skip the failures; the boundary scan
+            // still counts a skipped item's raw id.
+            let raw_items: Vec<serde_json::Value> =
                 serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
+            let mut page_items: Vec<RestEventItem> = raw_items
+                .into_iter()
+                .filter_map(|raw| serde_json::from_value(raw).ok())
+                .collect();
             // Boundary detection uses EVERY item's raw platform id, not
             // only tracked ones: an all-untracked page must still end
             // the chain once it reaches already-processed history (the
