@@ -64,7 +64,7 @@ Built-in domains, roles, verification commands, review thresholds, context polic
 - review thresholds (how many reviewers, what severity blocks merge);
 - context policies (token budgets, omission rules, index scope — §9.15);
 - automation levels (which tasks are fully autonomous vs prompt-required);
-- built-in role presets (§9.45.1) — the built-in instruction bodies, internal-tool allowlists, and effort/summary defaults for each orchestration role ship as default TOML data. Preset field resolution follows this chain's override direction (a higher layer that sets a key overrides the lower one), with participation gated by the trusted-layer rules in §9.45.2 and the declared-tools gate (§9.15 of `20-harness-worker.md`): instruction bodies and internal-tool allowlists are overridable only by trusted layers above the built-in defaults; project and lower layers can neither define nor override any preset field (typed error).
+- built-in role presets (§9.45.1) — the built-in instruction bodies, internal-tool allowlists, and effort/summary defaults for each orchestration role ship as default TOML data. Preset field resolution follows this chain's override direction (a higher layer that sets a key overrides the lower one), with participation gated by the trusted-layer rules in §9.45.2 and the declared-tools gate (§9.15 of `20-harness-worker.md`): instruction bodies and internal-tool allowlists are overridable only by trusted layers above the built-in defaults; untrusted layers (project, directory/domain, task/agent, CLI flag) can neither define nor override any preset field (typed error).
 
 #### 9.22.5 Named profiles
 
