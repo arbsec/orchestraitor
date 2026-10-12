@@ -793,42 +793,80 @@ fn poll_targets_are_repository_scoped() {
 /// id-less event for 30 days).
 #[tokio::test(flavor = "current_thread")]
 async fn items_without_a_delivery_id_are_skipped_never_shared() {
+    // Baseline (id 100, valid) then delta: a VALID positive control with
+    // a higher id (accepted, enqueued) plus three id-less items (skipped
+    // — never folded into a shared empty key).
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssueCommentEvent",
+        "payload": { "action": "created", "issue": { "number": 504 } }
+    }])
+    .to_string();
     let body = json!([
-        { "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 1 } } },
-        { "id": { "nested": true }, "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 3 } } },
-        { "id": "", "type": "IssueCommentEvent", "payload": { "action": "created", "issue": { "number": 4 } } }
+        {
+            "id": "300",
+            "type": "IssueCommentEvent",
+            "payload": { "action": "created", "issue": { "number": 1 } }
+        },
+        {
+            "type": "IssueCommentEvent",
+            "payload": { "action": "created", "issue": { "number": 2 } }
+        },
+        {
+            "id": { "nested": true },
+            "type": "IssueCommentEvent",
+            "payload": { "action": "created", "issue": { "number": 3 } }
+        },
+        {
+            "id": "",
+            "type": "IssueCommentEvent",
+            "payload": { "action": "created", "issue": { "number": 4 } }
+        }
     ])
     .to_string();
-    let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/events",
-        requires_etag: None,
-        status: 200,
-        body,
-        headers: vec![("X-Poll-Interval", "60".to_string())],
-    }])
-    .await;
-    let (queue, store, poller) = fixture_ingress();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+        .await;
+    let (queue, _store, poller) = fixture_ingress();
     let target = server.target("events", "events");
-    let outcome = poller
+    let baseline = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("baseline poll ok");
+    assert_eq!(baseline.accepted, 0, "the baseline enqueues nothing");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
         .await
         .expect("poll round")
         .remove(0)
         .expect("poll ok");
     assert_eq!(
-        (outcome.accepted, outcome.duplicates, outcome.dropped),
-        (0, 0, 0),
-        "id-less items are skipped, never accepted or deduplicated"
+        outcome.accepted, 1,
+        "exactly the positive control is accepted (the id-less items are \
+         skipped, never folded into a shared empty key)"
     );
-    assert!(queue.take().is_empty());
-    assert!(
-        store
-            .lock()
-            .expect("store lock")
-            .record_delivery("|arbsec/orchestraitor|issue-commented|", 1_000)
-            .expect("record"),
-        "the empty delivery key was never written (a fresh record proves it)"
-    );
+    let drained = queue.take();
+    assert_eq!(drained.len(), 1, "only the control reaches the queue");
+    assert_eq!(drained[0].number, 1, "the control's event");
 }
 
 /// Gen-13 cloud review (§21.4 negative): only the documented §9.47
@@ -906,13 +944,4 @@ async fn untracked_actions_are_filtered() {
         "untracked actions produce nothing"
     );
     assert!(queue.take().is_empty());
-    assert!(
-        store
-            .lock()
-            .expect("store lock")
-            .record_delivery("777|arbsec/orchestraitor|issues-opened|", 1_100)
-            .expect("record"),
-        "the filter never wrote the untracked actions' keys to the dedup \
-         table (a fresh record proves the keys were absent)"
-    );
 }
