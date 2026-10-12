@@ -39,7 +39,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 ## Core procedure
 
 ```text
-1. DRAFT          Create the PR as DRAFT linked to the leaf issue (Closes #N) and spec
+1. DRAFT          Create the PR as DRAFT linked to the leaf issue
+                  (`Closes #N` for full-scope landings, bare `Refs #N` for
+                  partial landings) and spec
                   references with `pr-create` (routes `gh pr create` through
                   `orc_lib_gh_service`; never call `gh pr create` directly).
                   The body follows `.github/PULL_REQUEST_TEMPLATE.md`
