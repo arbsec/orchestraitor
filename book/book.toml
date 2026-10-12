@@ -1,0 +1,19 @@
+[book]
+title = "Orchestraitor"
+authors = ["Orchestraitor Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/arbsec/orchestraitor"
+edit-url-template = "https://github.com/arbsec/orchestraitor/edit/main/book/src/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3

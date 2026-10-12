@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Regression tests for `pr-labels-from-issue` (arbsec/orchestraitor#469) and
+# the pr-create labeling chain, with synthetic GitHub responses; no network.
+#
+# Covers:
+#   (a) single and multiple Closes/Fixes/Resolves extraction from the PR body
+#   (b) allowlist intersection — non-process issue labels (e.g. agent-created)
+#       are NOT copied
+#   (c) idempotency — a label already on the PR is not re-added (no pr edit)
+#   (d) non-fatal behavior when one issue fetch fails (others still apply)
+#   (e) pr-create chains pr-labels then pr-labels-from-issue after creation
+#   (f) the chain is non-fatal: a failing labeler still exits 0 from pr-create
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/repo/scripts" "$TMP/bin" "$TMP/files"
+git -C "$TMP/repo" init -q
+cp -L "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" \
+  "$SCRIPT_DIR/pr-labels" "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"
+chmod +x "$TMP/repo/scripts/"* 2>/dev/null || true
+
+# gh stub: records argv, serves PR body / PR labels / issue labels from env.
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+jq -cn --args '$ARGS.positional' -- "$@" >> "$GH_LOG"
+out=""; j=""
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/create) printf '%s\n' "${PR_CREATE_URL:-https://github.com/test-org/repo/pull/77}" ; exit 0 ;;
+  pr/view)
+    if [[ "$*" == *--json\ body* ]]; then
+      case "${PR_BODY:-}" in __GH_FAIL__) exit 1 ;; esac
+      out="{\"body\":$(jq -cn --arg b "${PR_BODY:-Closes #101}" '$b')}"
+    elif [[ "$*" == *--json\ author* ]]; then
+      out="{\"author\":{\"login\":\"${PR_AUTHOR:-app/arbsec-agent}\"}}"
+    elif [[ "$*" == *--json\ labels* ]]; then
+      # PR_LABELS is comma-separated label names (empty = no labels);
+      # build the JSON array here. An empty PR_LABELS must produce an
+      # empty array, not a truncated object (jq -R emits nothing on empty input).
+      if [ -n "${PR_LABELS+x}" ] && [ -z "$PR_LABELS" ]; then
+        out='{"labels":[]}'
+      else
+        out="{\"labels\":$(printf '%s' "${PR_LABELS-agent-created}" | jq -R -c 'split(",") | map(select(length > 0)) | map({name: .})')}"
+      fi
+    fi ;;
+  api/*)
+    case "$2" in
+      repos/test-org/repo/pulls/*/files)
+        # pr-labels file listing: one innocuous path, no sensitive content.
+        printf '%s\n' '{"filename":"README.md","patch":"@@ -1 +1,2 @@\n+doc line\n"}'
+        exit 0 ;;
+      repos/test-org/repo/issues/*)
+        n="${2##*/issues/}"; n="${n%%/*}"
+        if [ "$n" = "${ISSUE_FAIL:-}" ]; then exit 1; fi
+        labels_var="ISSUE_${n}_LABELS"
+        labels_value="${!labels_var:-}"
+        out="{\"labels\":$(printf '%s' "$labels_value" \
+          | jq -R -c 'split(",") | map(select(length > 0)) | map({name: .})')}" ;;
+      *) out="{}" ;;
+    esac ;;
+  pr/edit)
+    printf '%s\n' "EDIT:$*" >> "$GH_LOG"
+    printf '%s\n' '{}'; exit 0 ;;
+esac
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--jq" ]; then j="$a"; fi
+  prev="$a"
+done
+if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
+printf '%s\n' "$out"
+STUB
+chmod +x "$TMP/bin/gh"
+
+# orc stub: service-identity route; gh-env re-execs the gh stub in-process.
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub-config ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export GH_LOG="$TMP/gh.jsonl" TMPDIR="$TMP/files"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+PASS=0; FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
+}
+run() {
+  : > "$GH_LOG"
+  OUT="$(cd "$TMP/repo" && "scripts/$@" 2>"$TMP/stderr")"; RC=$?
+}
+pr_edit_adds() {
+  # All --add-label values of every `pr edit` call in the log, in order.
+  # The stub records mutations on dedicated `EDIT:pr edit …` lines (plain
+  # argv, one shell word per blank), kept out of the JSONL stream.
+  local line out="[" first=true label
+  while IFS= read -r line; do
+    line="${line#EDIT:}"
+    local prev="" current=0
+    for label in $line; do
+      if [ "$prev" = "--add-label" ]; then
+        $first || out+=","
+        first=false
+        out+="\"$label\""
+      fi
+      prev="$label"
+    done
+  done < <(grep '^EDIT:' "$GH_LOG" || true)
+  out+="]"
+  printf '%s\n' "$out"
+}
+
+# --- default issue fixture: bug + agent-created + MVP ---------------------------
+export ISSUE_101_LABELS="MVP,agent-created,bug"
+
+echo "--- pr-labels-from-issue ---"
+
+# (a1) single Closes ref, allowlist intersection, PR without prior labels.
+export PR_BODY="Closes #101" PR_LABELS="agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'single ref exits 0' 0 "$RC"
+assert 'single ref copies only process labels' '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'agent-created not copied' 0 "$(pr_edit_adds | jq '[.[] | select(. == "agent-created")] | length' -r)"
+
+# (a2) multiple refs (Closes/Fixes/Resolves, mixed case, several issues).
+export ISSUE_102_LABELS="spec,test" ISSUE_103_LABELS="dependencies,question"
+export PR_BODY="Closes #101, fixes #102 and Resolves #103. Also mentions #999 without a keyword."
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'multiple refs exit 0' 0 "$RC"
+api_calls="$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+assert 'three issue fetches' 3 "$api_calls"
+assert 'keyword-only extraction (no bare #999)' 0 "$(grep -c 'issues/999' "$GH_LOG")"
+assert 'labels from all issues applied (order-independent)' \
+  "$(pr_edit_adds | jq -c 'unique | sort')" \
+  '["MVP","bug","dependencies","spec","test"]'
+assert 'non-allowlisted issue label (question) not copied' 0 "$(pr_edit_adds | jq '[.[] | select(. == "question")] | length' -r)"
+
+# (a3) duplicate refs deduplicated (same issue referenced twice).
+export PR_BODY="Fixes #101 (also tracked as Closes #101)"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'duplicate refs deduplicated' 1 "$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+
+# (b) issue carrying only non-process labels -> nothing copied, no mutation.
+export ISSUE_101_LABELS="agent-created,good first issue,done"
+export PR_BODY="Closes #101" PR_LABELS="agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'non-process-only issue exits 0' 0 "$RC"
+assert 'non-process labels not copied' 0 "$(jq -sr '[.[] | select(.[0] == "pr" and .[1] == "edit")] | length' "$GH_LOG")"
+
+# (c) idempotency: PR already carries the labels -> no pr edit at all.
+export ISSUE_101_LABELS="MVP,bug" PR_LABELS="MVP,bug,agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'idempotent run exits 0' 0 "$RC"
+assert 'already-present labels not re-added' 0 "$(jq -sr '[.[] | select(.[0] == "pr" and .[1] == "edit")] | length' "$GH_LOG")"
+
+# (c2) partially present: only the missing one is added.
+export PR_LABELS="MVP,agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'partial overlap exits 0' 0 "$RC"
+assert 'only missing label added' '["bug"]' "$(pr_edit_adds)"
+
+# (d) one issue fetch fails -> non-fatal, others still applied.
+export ISSUE_101_LABELS="MVP" ISSUE_102_LABELS="spec" ISSUE_FAIL=999
+export PR_BODY="Closes #999, Closes #101 and Closes #102" PR_LABELS="agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'failing issue does not fail the run' 0 "$RC"
+assert 'failure warning names the skipped issue' 1 "$(grep -cF 'issue #999' "$TMP/stderr")"
+assert 'other issues still contribute labels (order-independent)' \
+  "$(pr_edit_adds | jq -c 'unique | sort')" \
+  '["MVP","spec"]'
+
+# (d2) no references in body -> exit 0, no mutations.
+unset ISSUE_FAIL
+export PR_BODY="This body has a bare #42 reference but no closing keyword."
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'no refs exits 0' 0 "$RC"
+assert 'no refs mutates nothing' 0 "$(jq -sr '[.[] | select(.[0] == "pr" and .[1] == "edit")] | length' "$GH_LOG")"
+
+# (d3) unreadable PR -> typed failure. The stub fails a `pr view --json body`
+# when the body starts with the sentinel (its own command fails -> rc 1).
+export PR_BODY="__GH_FAIL__"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'unreadable PR body exits 1' 1 "$RC"
+export PR_BODY="Closes #101"
+
+# usage errors
+run pr-labels-from-issue
+assert 'missing argument exits 2' 2 "$RC"
+run pr-labels-from-issue notanumber --repo test-org/repo
+assert 'non-numeric PR exits 2' 2 "$RC"
+run pr-labels-from-issue --help
+assert 'help exits 0' 0 "$RC"
+
+echo "--- pr-create labeling chain ---"
+
+# (e) pr-create chains pr-labels then pr-labels-from-issue after creation.
+export PR_BODY="Closes #101" PR_LABELS="" ISSUE_101_LABELS="MVP,bug"
+: > "$GH_LOG"
+OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo 2>"$TMP/stderr")"; RC=$?
+assert 'pr-create exits 0' 0 "$RC"
+assert 'pr-create prints the PR URL' 'https://github.com/test-org/repo/pull/77' "$OUT"
+# pr-labels derives its labels from launch facts: with a service-identity
+# author and an innocuous diff it adds `agent-created` (not already present
+# on a fresh PR) — that edit must be the FIRST pr edit after creation;
+# pr-labels-from-issue's process-label edit follows.
+first_edit="$(grep '^EDIT:' "$GH_LOG" | sed 's/^EDIT://' | sed -n 1p)"
+case "$first_edit" in
+  "pr edit 77 --repo test-org/repo --add-label agent-created"*)
+    assert 'pr-labels runs first (attribution label)' ok ok ;;
+  *)
+    assert 'pr-labels runs first (attribution label)' 'pr edit 77 … agent-created' "$first_edit" ;;
+esac
+second_edit="$(grep '^EDIT:' "$GH_LOG" | sed 's/^EDIT://' | sed -n 2p)"
+case "$second_edit" in
+  "pr edit 77 --repo test-org/repo --add-label MVP"*|\
+"pr edit 77 --repo test-org/repo --add-label bug"*)
+    assert 'pr-labels-from-issue runs second' ok ok ;;
+  *)
+    assert 'pr-labels-from-issue runs second' 'pr edit 77 … process label' "$second_edit" ;;
+esac
+receipt_first="$(grep -n '"author":"app/arbsec-agent"' "$TMP/stderr" | head -1 | cut -d: -f1)"
+receipt_second="$(grep -n '"labels_added":\[' "$TMP/stderr" | grep -v '"author"' | head -1 | cut -d: -f1)"
+if [ -n "$receipt_first" ] && [ -n "$receipt_second" ] && [ "$receipt_first" -lt "$receipt_second" ]; then
+  assert 'pr-labels receipt precedes from-issue receipt' ok ok
+else
+  assert 'pr-labels receipt precedes from-issue receipt' 'first<second' "first=$receipt_first second=$receipt_second"
+fi
+
+# (f) a failing labeler is non-fatal: pr-create still exits 0 and the URL stands.
+export GH_FAIL_ON="pr edit"
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+jq -cn --args '$ARGS.positional' -- "$@" >> "$GH_LOG"
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/create) printf '%s\n' "https://github.com/test-org/repo/pull/77"; exit 0 ;;
+  pr/edit) echo "stub: pr edit failed" >&2; exit 1 ;;
+  pr/view)
+    case "$*" in
+      *--json\ body*) out="{\"body\":$(jq -cn --arg b "${PR_BODY:-Closes #101}" '$b')}";;
+      *--json\ author*) out="{\"author\":{\"login\":\"app/arbsec-agent\"}}";;
+      *--json\ labels*) out='{"labels":[]}';;
+      *) out="{}" ;;
+    esac ;;
+  api/repos/test-org/repo/issues/*)
+    # Succeed so pr-labels-from-issue reaches its failing `pr edit`: this
+    # fixture isolates the CHAIN's non-fatality (a labeler failing at its
+    # mutation), not the partial-read path (covered separately above).
+    out='{"labels":[{"name":"MVP"}]}';;
+  api/repos/test-org/repo/pulls/*/files)
+    printf '%s\n' '{"filename":"README.md","patch":"@@ -1 +1,2 @@\n+doc line\n"}';;
+  *) out="{}" ;;
+esac
+j=""; prev=""
+for a in "$@"; do [ "$prev" = "--jq" ] && j="$a"; prev="$a"; done
+if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
+printf '%s\n' "$out"
+STUB
+chmod +x "$TMP/bin/gh"
+OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo 2>"$TMP/stderr")"; RC=$?
+assert 'labeling failure does not fail pr-create' 0 "$RC"
+assert 'PR URL still emitted on labeling failure' 'https://github.com/test-org/repo/pull/77' "$OUT"
+assert 'failure warnings name the PR' 2 "$(grep -cF 'PR #77' "$TMP/stderr")"
+assert 'failure warnings name the manual commands' 4 "$(grep -cF 'pr-labels' "$TMP/stderr")"
+
+printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

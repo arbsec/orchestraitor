@@ -1,0 +1,20 @@
+[package]
+name = "orchestraitor-delivery"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Spec-driven autonomous delivery: task metadata, backlog DAG, runner, and review loop (spec §9.33)"
+
+[lints]
+workspace = true
+
+[dependencies]
+orchestraitor-model = { path = "../orchestraitor-model" }
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

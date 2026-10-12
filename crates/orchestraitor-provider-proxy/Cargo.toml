@@ -1,0 +1,35 @@
+[package]
+name = "orchestraitor-provider-proxy"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "OpenAI and Anthropic compatible local provider proxy for Orchestraitor"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1"
+bytes = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
+orchestraitor-cost-ledger = { path = "../orchestraitor-cost-ledger" }
+orchestraitor-events = { path = "../orchestraitor-events" }
+orchestraitor-model = { path = "../orchestraitor-model" }
+orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
+secrecy = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

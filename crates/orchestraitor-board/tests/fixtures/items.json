@@ -1,0 +1,205 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "id": "PVTI_F_130",
+            "content": {
+              "__typename": "Issue",
+              "number": 130,
+            "state": "OPEN",
+              "title": "Eligible native task",
+              "url": "https://github.com/arbsec/orchestraitor/issues/130",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 3,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } },
+                {}
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_131",
+            "content": {
+              "__typename": "Issue",
+              "number": 131,
+            "state": "OPEN",
+              "title": "Blocked bug",
+              "url": "https://github.com/arbsec/orchestraitor/issues/131",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Bug" },
+              "labels": { "nodes": [{ "name": "bug" }], "totalCount": 1 },
+              "blockedBy": { "nodes": [{ "state": "OPEN" }], "totalCount": 1 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_132",
+            "content": {
+              "__typename": "Issue",
+              "number": 132,
+            "state": "OPEN",
+              "title": "Epic mislabeled as task",
+              "url": "https://github.com/arbsec/orchestraitor/issues/132",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Epic" },
+              "labels": { "nodes": [{ "name": "task" }], "totalCount": 1 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_133",
+            "content": {
+              "__typename": "Issue",
+              "number": 133,
+            "state": "OPEN",
+              "title": "Truncated blocker window",
+              "url": "https://github.com/arbsec/orchestraitor/issues/133",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 2 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_134",
+            "content": {
+              "__typename": "Issue",
+              "number": 134,
+            "state": "OPEN",
+              "title": "Next-target task",
+              "url": "https://github.com/arbsec/orchestraitor/issues/134",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "Next", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_135",
+            "content": {
+              "__typename": "Issue",
+              "number": 135,
+            "state": "OPEN",
+              "title": "In-progress task",
+              "url": "https://github.com/arbsec/orchestraitor/issues/135",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "In Progress", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_136",
+            "content": { "__typename": "DraftIssue", "title": "untracked draft" },
+            "fieldValues": { "totalCount": 0, "nodes": [] }
+          },
+          {
+            "id": "PVTI_F_137",
+            "content": {
+              "__typename": "Issue",
+              "number": 137,
+            "state": "OPEN",
+              "title": "Sibling-repo issue",
+              "url": "https://github.com/arbsec/arbitraitor/issues/137",
+              "repository": { "nameWithOwner": "arbsec/arbitraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_138",
+            "content": {
+              "__typename": "Issue",
+              "number": 138,
+            "state": "OPEN",
+              "title": "Label-fallback bug with closed blocker",
+              "url": "https://github.com/arbsec/orchestraitor/issues/138",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": null,
+              "labels": { "nodes": [{ "name": "bug" }], "totalCount": 1 },
+              "blockedBy": { "nodes": [{ "state": "CLOSED" }], "totalCount": 1 }
+            },
+            "fieldValues": {
+              "totalCount": 2,
+              "nodes": [
+                { "name": "MVP", "field": { "name": "Target" } },
+                { "name": "Ready", "field": { "name": "Status" } }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_F_139",
+            "content": null,
+            "fieldValues": { "totalCount": 0, "nodes": [] }
+          },
+          {
+            "id": "PVTI_F_140",
+            "content": {
+              "__typename": "Issue",
+              "number": 140,
+            "state": "OPEN",
+              "title": "Truncated field-values window",
+              "url": "https://github.com/arbsec/orchestraitor/issues/140",
+              "repository": { "nameWithOwner": "arbsec/orchestraitor" },
+              "issueType": { "name": "Task" },
+              "labels": { "nodes": [], "totalCount": 0 },
+              "blockedBy": { "nodes": [], "totalCount": 0 }
+            },
+            "fieldValues": { "totalCount": 30, "nodes": [] }
+          }
+        ]
+      }
+    }
+  }
+}

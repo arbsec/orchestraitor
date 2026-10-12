@@ -1,0 +1,24 @@
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+owner = "arbsec"
+repository = "orchestraitor"
+authors = [
+    { username = "mekwall", signature = "Marcus Ekwall <marcus.ekwall@gmail.com>" }
+]
+
+[commit_types]
+feat = "Features"
+fix = "Bug Fixes"
+security = "Security"
+chore = "Miscellaneous Chores"
+bump = "Version Bumps"
+docs = "Documentation"
+perf = "Performance"
+refactor = "Refactoring"
+revert = "Reverts"
+style = "Styling"
+test = "Tests"
+build = "Build System"
+ci = "Continuous Integration"

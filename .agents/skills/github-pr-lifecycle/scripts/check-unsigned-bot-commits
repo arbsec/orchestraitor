@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# pre-push guard: refuse unsigned commits authored or committed by the agent
+# service identity.
+#
+# The AGENTS.md service-identity rule requires agent commits to be created via
+# the App API (GraphQL createCommitOnBranch) so GitHub signs them (web-flow
+# committer, verification.reason=valid). A locally-created commit carrying the
+# bot identity is unsigned by construction ("unknown_key") — pushing it fails
+# the required_signatures ruleset on protected branches and pollutes PR history
+# with unverified commits. This hook blocks that push; the correct path is the
+# replay procedure (verified-commit-path.md) or recreating the commit through
+# the App API.
+#
+# Human-authored commits are exempt: they are signed by the author's own
+# registered key (or the operator accepts unverified human commits on
+# unprotected branches — outside this hook's scope).
+#
+# Verification model:
+#   The local `%G?` status is only a fast-fail. `N` (no signature) and `B`
+#   (bad signature) are provably invalid, so they are refused without further
+#   work. Every other status — including `G`, `E`, and the web-flow signature
+#   status local git reports — is indeterminate: local git cannot attest that
+#   a signature belongs to GitHub's web-flow key or to the bot identity, and
+#   committer metadata is attacker-controlled. Local verification is NOT
+#   GitHub verification: an incident (2026-10-07, PR #486) pushed a bot commit
+#   that was locally verifiable against an SSH key GitHub has never registered,
+#   so the repository reported verification.reason=unknown_key. For
+#   indeterminate commits the guard therefore queries GitHub's own verification
+#   oracle (the commits API, reached through the service-identity gh-env route)
+#   and accepts ONLY `verified == true` with `reason == "valid"`. The API call
+#   failing (gh missing, gh-env resolution failure, network) is treated as
+#   unverified (fail closed); a deliberate local-only push can bypass
+#   explicitly with `--no-verify`. Additionally, a repo with
+#   `commit.gpgsign=true` is refused outright: a locally-gpg-signed
+#   bot-identity commit can never be GitHub-verified.
+#
+# Identity matching: a commit is bot-attributed when the author name+email OR
+# the committer name+email pair matches a BOT_IDENTITIES entry (attribution
+# metadata alone never proves anything; matching both fields closes the
+# identity-spoofing scope gap).
+#
+# Input (stdin): "<local-ref> <local-oid> <remote-ref> <remote-oid>" lines.
+set -euo pipefail
+
+BOT_IDENTITIES=(
+  "arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>"
+  "arbsec-agent[bot] <arbsec-agent[bot]@users.noreply.github.com>"
+)
+
+ORC_REPO="${ORC_REPO:-arbsec/orchestraitor}"
+
+zero="0000000000000000000000000000000000000000"
+
+# Refuses bot-attributed commits that are provably unsigned locally; returns
+# 0 when the status is indeterminate and the GitHub oracle must decide.
+# Arguments: oid, verify-status, author pair, committer pair.
+guard_commit() {
+  local oid="$1" verified="$2" author_pair="$3" committer_pair="$4"
+
+  # Fast-fail on provably invalid local signature states.
+  if [ "$verified" = "N" ]; then
+    echo >&2 "pre-push: refusing unsigned agent commit"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  N (no signature; use the App API)"
+    echo >&2 ""
+    echo >&2 "Agent commits must be created via the App API (createCommitOnBranch)"
+    echo >&2 "so GitHub signs them. See:"
+    echo >&2 "  .agents/skills/github-pr-lifecycle/references/verified-commit-path.md"
+    return 1
+  fi
+  if [ "$verified" = "B" ]; then
+    echo >&2 "pre-push: refusing bad agent signature"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  B (bad signature; use the App API)"
+    return 1
+  fi
+
+  # Indeterminate locally (G/U/X/Y/R/E): only GitHub's own verification
+  # decides. Fail closed when the oracle is unreachable or disagrees.
+  local oracle
+  if [ "$(git config --type=bool --get commit.gpgsign 2>/dev/null || true)" = "true" ]; then
+    echo >&2 "pre-push: refusing agent commit from a repo with commit.gpgsign enabled"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  $verified (locally signed; local signing is not the verified-commit path)"
+    echo >&2 ""
+    echo >&2 "A locally-gpg-signed bot-identity commit can never be GitHub-verified"
+    echo >&2 "(the bot's key is not registered with GitHub). Use"
+    echo >&2 "\`orc github push-branch\` — the App-signed landing path."
+    return 1
+  fi
+  if ! oracle="$(gh api "repos/$ORC_REPO/commits/$oid" \
+      --jq '.commit.verification.verified == true and .commit.verification.reason == "valid"' 2>/dev/null)"; then
+    echo >&2 "pre-push: refusing unverified agent commit (GitHub oracle unreachable)"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  $verified (locally indeterminate; GitHub verification query failed)"
+    echo >&2 ""
+    echo >&2 "Agent commits must be created via the App API (createCommitOnBranch)"
+    echo >&2 "so GitHub signs them. See:"
+    echo >&2 "  .agents/skills/github-pr-lifecycle/references/verified-commit-path.md"
+    return 1
+  fi
+  if [ "$oracle" != "true" ]; then
+    echo >&2 "pre-push: refusing unverified agent commit (GitHub reports unverified)"
+    echo >&2 "  commit:  $oid"
+    echo >&2 "  author:  $author_pair"
+    echo >&2 "  verify:  $verified locally, GitHub oracle: $oracle"
+    return 1
+  fi
+  return 0
+}
+
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+  [ "$local_oid" = "$zero" ] && continue        # deletion
+  range="$remote_oid..$local_oid"
+  if [ "$remote_oid" = "$zero" ]; then
+    # New-branch push: excluding ALL remote-tracking refs would let a bot
+    # commit skip the oracle check just by being reachable from any fetched
+    # ref. Exclude only the default branch's remote-tracking refs so the
+    # enumerated range is every commit not on the base history; with no
+    # default-branch ref at all we cannot bound the range — fail closed.
+    bases="$(git for-each-ref --format='%(refname)' refs/remotes/origin/main refs/remotes/origin/master)"
+    if [ -z "$bases" ]; then
+      echo >&2 "pre-push: no refs/remotes/origin/main (or master) to bound the new-branch range; refusing"
+      exit 1
+    fi
+    range="$local_oid --not $(echo "$bases" | tr '\n' ' ')"
+  fi
+  if ! oids="$(git rev-list $range)"; then
+    echo >&2 "pre-push: cannot enumerate commits for $range"
+    exit 1
+  fi
+  for oid in $oids; do
+    author_pair="$(git log -1 --format='%an <%ae>' "$oid")"
+    committer_pair="$(git log -1 --format='%cn <%ce>' "$oid")"
+    is_bot=false
+    for bot in "${BOT_IDENTITIES[@]}"; do
+      if [ "$author_pair" = "$bot" ] || [ "$committer_pair" = "$bot" ]; then
+        is_bot=true
+        break
+      fi
+    done
+    if [ "$is_bot" = true ]; then
+      verified="$(git log -1 --format='%G?' "$oid")"
+      guard_commit "$oid" "$verified" "$author_pair" "$committer_pair" || exit 1
+    fi
+  done
+done
+
+exit 0

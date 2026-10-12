@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# pr-labels: apply attribution labels to a PR from launch facts (spec
+# `10-orchestrator.md` §9.33(c)).
+#
+# Labels derive ONLY from observable facts — the PR author and the changed
+# paths — never from model-generated text, titles, or PR descriptions.
+# Application is idempotent: adding an already-present label is a no-op, and
+# the script never removes any label (attribution correction is the daemon's
+# reconcile job, not this script's).
+#
+#   - `agent-created`  : PR author is a service-identity principal
+#                        (app/arbsec-agent or any configured bot login).
+#   - `needs-human-review`: the diff touches a §21.1 security-sensitive
+#                        class by path or content (privileged brokers,
+#                        sandboxing, policy, capability issuance, filesystem
+#                        projection, network/secret handling, `unsafe`).
+#
+# Positional: <pr-number>. Flags: --repo <owner/name>, --dry-run.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+orc_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  orc_lib_print_help "pr-labels" "Apply attribution labels from launch facts (idempotent). Positional: <pr-number>. Flags: --repo <owner/name>."
+  exit "$ORC_OK"
+fi
+
+PR="${ORC_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+  echo "error: numeric PR number required" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+orc_lib_require_gh_scope
+REPO="$(orc_lib_resolve_repo)"
+
+# Service-identity principals: the GitHub App bot and its app/ prefix form.
+# Extend here if the service-identity set grows (§9.41 configuration).
+SERVICE_IDENTITIES=("app/arbsec-agent" "arbsec-agent[bot]")
+
+# Governance areas: these get the maintainer REVIEWER DOMAIN (a reviewer
+# request per workflow policy "PR labeling and human attention") — never the
+# `needs-human-review` label. Path classification skips them entirely;
+# CONTENT classification below still applies, because a governance-path file
+# can still IMPLEMENT a security control (e.g. a lefthook commit-provenance
+# guard under .agents/), and classification is by diff content, not intent.
+GOVERNANCE_PATHS=(
+  "^\.github/"
+  "^\.agents/"
+  "^AGENTS\.md$"
+  "^docs/spec/"
+)
+
+# §21.1 security-sensitive path classes (workflow policy
+# .agents/project/orchestraitor-workflow.md "PR labeling and human attention";
+# spec 50-contracts-data.md §21.1: privilege boundaries, sandboxing, policy,
+# capability issuance, filesystem projection, network/secret handling, unsafe).
+SENSITIVE_PATHS=(
+  "^\.arbitraitor"
+  "^arbitraitor"
+  "arbitraitor"
+  "commands/github\.rs"
+  "github_app"
+  "push-branch"
+  "sandbox"
+  "security"
+  "policy"
+  "secret"
+  "auth"
+  "credential"
+  "token"
+  "permission"
+  "capabilit"
+  "unsafe"
+  "mediat"
+  "network"
+  "projection"
+  "keyring"
+  "signing"
+  "signature"
+  "required_signatures"
+)
+
+# §21.1 security-sensitive CONTENT markers: an added line carrying one of
+# these (word-ish boundary, case-insensitive) triggers the human gate even
+# when every path is innocuous — e.g. a new `unsafe` block in `src/lib.rs`,
+# or a policy-enforcement script (.agents/**, lefthook config) implementing
+# the service-identity / verified-commit controls: classification is by
+# diff content, not by intent, so such scripts are security-sensitive
+# regardless of their path.
+SENSITIVE_CONTENT=(
+  "unsafe fn"
+  "unsafe impl"
+  "unsafe {"
+  "allow(unsafe_code)"
+  "forbid(unsafe_code)"
+  "deny(unsafe_code)"
+  "secret://"
+  "private_key"
+  "api_key"
+  "password"
+  "sudo "
+  "setuid"
+  "landlock"
+  "seccomp"
+  "namespac"
+  "%g?"
+  "bot_identities"
+  "pre-push"
+  "use_stdin"
+)
+
+# --- Launch facts (read-only) -------------------------------------------------
+AUTHOR="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json author --jq '.author.login')" ||
+  { echo "error: cannot read PR #$PR author" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+
+FILES="$(orc_lib_gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')" ||
+  { echo "error: cannot read PR #$PR files" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+
+# ADDED lines only (paths alone are necessary but not sufficient: the
+# workflow policy classifies "by path and diff content"). Bounded to the
+# first 2000 added lines — the fetch writes to a temporary file and its
+# exit status is checked BEFORE truncation, so no pipeline stage can
+# die of SIGPIPE and launder a real fetch failure into an empty scan
+# (or vice versa).
+# An EMPTY result is valid (a delete/rename-only PR has no added lines);
+# only a genuine fetch/pipe failure exits.
+ADDED_LINES=""
+fetch_rc=0
+PATCH_FILE="$(mktemp "${TMPDIR:-/tmp}/pr-labels-patch.XXXXXX")"
+orc_lib_gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].patch // empty' > "$PATCH_FILE" || fetch_rc=$?
+if [ "$fetch_rc" -eq 0 ]; then
+  # Filter from the file: no `head` closing the writer's pipe mid-fetch, so
+  # no SIGPIPE (141) can be laundered into either direction; the bounded
+  # truncation happens AFTER the fetch has fully succeeded.
+  ADDED_LINES="$( { grep '^+' "$PATCH_FILE" || true; } | { grep -v '^+++' || true; } | head -2000 )"
+fi
+rm -f "$PATCH_FILE"
+if [ "$fetch_rc" -ne 0 ]; then
+  echo "error: cannot read PR #$PR diff patches (exit $fetch_rc)" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+fi
+
+EXISTING="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')" ||
+  { echo "error: cannot read PR #$PR labels" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
+
+label_present() {
+  [ "$EXISTING" = "$1" ] && return 0
+  printf '%s' "$EXISTING" | tr ',' '\n' | grep -qxF "$1"
+}
+
+# --- Classify -----------------------------------------------------------------
+WANT_AGENT_CREATED=false
+for principal in "${SERVICE_IDENTITIES[@]}"; do
+  if [ "$AUTHOR" = "$principal" ] || [ "app/${AUTHOR#app/}" = "$principal" ] ||
+     [[ "$AUTHOR" == *"[bot]" && "$AUTHOR" == "${principal%%[}*}"* ]]; then
+    WANT_AGENT_CREATED=true
+    break
+  fi
+done
+
+WANT_HUMAN_REVIEW=false
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  # Governance paths never trigger via path prefix (reviewer-domain routing,
+  # not the label); their ADDED-LINE content is still classified below, and a
+  # governance filename whose stem names a §21.1 subject (e.g.
+  # `check-unsigned-bot-commits`, `service-identity-enforcement`) still
+  # classifies: match its filename part against the same §21.1 patterns, so a
+  # governance-path change touching a security-control subject is not hidden
+  # by the routing carve-out.
+  governance=false
+  for gpattern in "${GOVERNANCE_PATHS[@]}"; do
+    if printf '%s' "$lower" | grep -qE "$gpattern"; then
+      governance=true
+      break
+    fi
+  done
+  if [ "$governance" = true ]; then
+    stem="${lower##*/}"
+    base="${stem%.*}"
+    # Only a compound stem that NAMES a control counts as content-bearing:
+    # either a governance-subject × control-mechanism pair (e.g.
+    # `check-unsigned-bot-commits`, `service-identity-enforcement`), or a
+    # control-mechanism pair on a governance path (e.g.
+    # `unsigned-bot-commits`, `verified-commit-path`). A single adjective
+    # (`security.yml` — GitHub's own workflow naming) or a process noun
+    # (`remediation`, `review`) does not.
+    control_mechanism="(^|-)(guard|enforcement|audit|verification|verified|unsigned|signing|signature|check|checks|blocking|block|gate)(-|$)"
+    gov_subject="identity|bot|commits?|service|app|secret|credential|token|auth|keyring|sandbox|network|projection|capabilit|permission|unsafe|policy"
+    if printf '%s' "$base" | grep -qE "$control_mechanism" && printf '%s' "$base" | grep -qE "$gov_subject"; then
+      for pattern in "${SENSITIVE_PATHS[@]}"; do
+        if printf '%s' "$base" | grep -q "$pattern"; then
+          WANT_HUMAN_REVIEW=true
+          break 2
+        fi
+      done
+    fi
+    continue
+  fi
+  for pattern in "${SENSITIVE_PATHS[@]}"; do
+    if printf '%s' "$lower" | grep -q "$pattern"; then
+      WANT_HUMAN_REVIEW=true
+      break 2
+    fi
+  done
+done <<< "$FILES"
+
+# Content classification: only ADDED lines can introduce a new
+# security-sensitive construct; removed lines cannot newly require review.
+# The marker test uses an if-guarded grep: a `grep -qF` early exit inside a
+# `||`-chain is fine, but the guard makes the match decision explicit and
+# immune to `set -o pipefail` short-circuit surprises.
+if [ "$WANT_HUMAN_REVIEW" = false ] && [ -n "$ADDED_LINES" ]; then
+  lower_added="$(printf '%s\n' "$ADDED_LINES" | tr '[:upper:]' '[:lower:]')"
+  for pattern in "${SENSITIVE_CONTENT[@]}"; do
+    if printf '%s\n' "$lower_added" | grep -qF -- "$pattern"; then
+      WANT_HUMAN_REVIEW=true
+      break
+    fi
+  done
+fi
+
+LABELS_TO_ADD=()
+if [ "$WANT_AGENT_CREATED" = true ] && ! label_present "agent-created"; then
+  LABELS_TO_ADD+=("agent-created")
+fi
+if [ "$WANT_HUMAN_REVIEW" = true ] && ! label_present "needs-human-review"; then
+  LABELS_TO_ADD+=("needs-human-review")
+fi
+
+# --- Apply --------------------------------------------------------------------
+if [ "${#LABELS_TO_ADD[@]}" -eq 0 ]; then
+  echo "{\"pr\":$PR,\"labels_added\":[],\"author\":\"$AUTHOR\",\"agent_created\":$WANT_AGENT_CREATED,\"needs_human_review\":$WANT_HUMAN_REVIEW}"
+  exit "$ORC_OK"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr edit $PR --repo $REPO --add-label ${LABELS_TO_ADD[*]}" >&2
+  exit "$ORC_OK"
+fi
+
+ADD_ARGS=()
+for label in "${LABELS_TO_ADD[@]}"; do
+  ADD_ARGS+=(--add-label "$label")
+done
+orc_lib_gh_service pr edit "$PR" --repo "$REPO" "${ADD_ARGS[@]}" >/dev/null
+
+RESULT='{"pr":'"$PR"',"labels_added":['
+for index in "${!LABELS_TO_ADD[@]}"; do
+  [ "$index" -gt 0 ] && RESULT+=','
+  RESULT+='"'"${LABELS_TO_ADD[$index]}"'"'
+done
+RESULT+='],"author":"'"$AUTHOR"'","agent_created":'"$WANT_AGENT_CREATED"',"needs_human_review":'"$WANT_HUMAN_REVIEW"'}'
+echo "$RESULT"
