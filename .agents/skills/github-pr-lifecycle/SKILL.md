@@ -48,7 +48,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   auto-close and `pr-labels-from-issue`, Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
-                  feature PRs only; omit for small fixes), Gates). Titles are plain Conventional Commits
+                  feature PRs only; omit for small fixes), Gates, Security
+                  impact, Documentation impact, Rollback implications, Newly
+                  discovered follow-up work, Merge checklist). Titles are plain Conventional Commits
                   `type(scope): description`, ASCII only (no section signs,
                   em/en dashes, arrows, or smart quotes — use hyphens, `->`,
                   straight quotes, or rephrase), never spec-section or

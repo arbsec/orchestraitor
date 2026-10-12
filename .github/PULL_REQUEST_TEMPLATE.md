@@ -69,6 +69,12 @@
 <!-- For any PR with CI: the exact commands run and their results. Attribute
      pre-existing environmental failures (reproduced on clean origin/main). -->
 
+## Security impact
+
+<!-- Required. Describe affected security boundaries and implications, or state
+     that there is no impact. Orchestraitor implements NO security primitive —
+     new security behavior is blocked on an Arbitraitor issue/PR; link it. -->
+
 ## Documentation impact
 
 - [ ] No public-behavior change
