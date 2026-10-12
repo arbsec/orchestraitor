@@ -43,8 +43,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   references with `pr-create` (routes `gh pr create` through
                   `orc_lib_gh_service`; never call `gh pr create` directly).
                   The body follows `.github/PULL_REQUEST_TEMPLATE.md`
-                  (Summary, exactly ONE primary closing keyword (`Closes #N`
-                  / `Fixes #N` / `Resolves #N`) on its own line
+                  (Summary, exactly ONE primary `Closes #N` on its own line
                   early in the body — bare `#N` mentions are invisible to
                   auto-close and `pr-labels-from-issue`, Specification
                   references, Change, Design summary (feature/design-changing

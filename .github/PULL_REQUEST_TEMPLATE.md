@@ -11,11 +11,13 @@
 
 ## Closes
 
-<!-- Exactly ONE primary closing keyword on its own line, early in the body
-     (Closes #N / Fixes #N / Resolves #N). Bare #N mentions are invisible to
-     auto-close and to pr-labels-from-issue. For partial landings, keep the
-     closing line bare (`Closes #469`) and put the scope note on the next
-     line, e.g. `(worker path; loop path remains tracked in #N)`. -->
+<!-- Exactly ONE primary closing keyword on its own line, early in the body:
+     Closes #N. (Not Fixes/Resolves — the pr-lifecycle skill and
+     pr-labels-from-issue contract key on Closes.) Bare #N mentions are
+     invisible to auto-close and to pr-labels-from-issue. For partial
+     landings, keep the closing line bare (`Closes #469`) and put the scope
+     note on the next line, e.g. `(worker path; loop path remains tracked in
+     #N)`. -->
 
 ## Specification references
 
