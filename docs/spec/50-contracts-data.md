@@ -64,7 +64,7 @@ Built-in domains, roles, verification commands, review thresholds, context polic
 - review thresholds (how many reviewers, what severity blocks merge);
 - context policies (token budgets, omission rules, index scope — §9.15);
 - automation levels (which tasks are fully autonomous vs prompt-required);
-- built-in role presets (§9.45.1) — the built-in instruction bodies, internal-tool allowlists, and effort/summary defaults for each orchestration role ship as default TOML data. Preset replacement remains subject to the trusted-layer gates in §9.45.2 and the declared-tools gate (§9.15 of `20-harness-worker.md`): instruction bodies and internal-tool allowlists are replaceable only in trusted layers; project and lower layers override only the non-security fields §9.45.2 names.
+- built-in role presets (§9.45.1) — the built-in instruction bodies, internal-tool allowlists, and effort/summary defaults for each orchestration role ship as default TOML data. Preset replacement remains subject to the trusted-layer gates in §9.45.2 and the declared-tools gate (§9.15 of `20-harness-worker.md`), AND to §9.22.2's first-match-wins direction: instruction bodies and internal-tool allowlists are replaceable only in trusted layers above the built-in defaults; the non-security fields §9.45.2 names are likewise overridable only by trusted layers, never by project or lower layers.
 
 #### 9.22.5 Named profiles
 
