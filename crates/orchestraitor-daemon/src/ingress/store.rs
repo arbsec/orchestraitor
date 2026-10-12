@@ -192,6 +192,49 @@ impl IngressStore {
         Ok(accepted)
     }
 
+    /// Whether this delivery key was already recorded INSIDE the
+    /// redelivery window (a read-only check that does NOT insert — used
+    /// by the poller's pagination stop so a page of already-judged
+    /// history ends the chain without re-inserting anything).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn delivery_seen_within_window(
+        &self,
+        delivery_key: &str,
+        now_secs: u64,
+    ) -> Result<bool, DaemonError> {
+        let now = i64::try_from(now_secs).map_err(|_| DaemonError::IngressStore {
+            path: self.path_label.clone(),
+            reason: format!("unix seconds out of range: {now_secs}"),
+        })?;
+        let window = i64::try_from(REDELIVERY_WINDOW_SECS).map_err(|_| {
+            DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: "redelivery window out of range".to_string(),
+            }
+        })?;
+        let cutoff = now.saturating_sub(window);
+        let seen: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT first_seen_secs FROM ingress_deliveries
+                 WHERE delivery_key = ?1 AND first_seen_secs >= ?2",
+                rusqlite::params![delivery_key, cutoff],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(DaemonError::IngressStore {
+                    path: self.path_label.clone(),
+                    reason: format!("delivery lookup failed: {other}"),
+                }),
+            })?;
+        Ok(seen.is_some())
+    }
+
     /// Stores the conditional-request bookkeeping for one endpoint: the
     /// last `ETag` and the server-advised minimum wait (`X-Poll-Interval`,
     /// seconds) for the NEXT request. `not_modified` records whether the

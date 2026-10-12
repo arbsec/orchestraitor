@@ -405,8 +405,31 @@ impl EventPoller {
                 .iter()
                 .filter_map(|item| item_delivery_key(item, target))
                 .collect();
-            let page_all_seen =
-                !page_keys.is_empty() && page_keys.iter().all(|key| seen_keys.contains(key));
+            // The stop condition consults the DURABLE dedup table (any
+            // key recorded inside the redelivery window — including
+            // from earlier polls), not just this poll's own pages: the
+            // feed lists newest-first, so a page whose keys the table
+            // already judged is the boundary into already-processed
+            // history (a gen-8 cloud review finding — a per-poll key
+            // set alone never matches durable history, so every 200
+            // response would replay the full page cap). The guard is
+            // scoped to the synchronous lookups; it must never span
+            // the await below.
+            let page_all_seen = {
+                let store = self.lock_store().map_err(|_| PollError::Failed)?;
+                let mut all_seen = !page_keys.is_empty();
+                for key in &page_keys {
+                    match store.delivery_seen_within_window(key, now_secs) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            all_seen = false;
+                            break;
+                        }
+                        Err(_) => return Err(PollError::Failed),
+                    }
+                }
+                all_seen
+            };
             seen_keys.extend(page_keys.iter().cloned());
             items.append(&mut page_items);
             if page_all_seen {
