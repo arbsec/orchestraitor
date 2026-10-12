@@ -236,8 +236,12 @@ fn normalize_event_type(
 ) -> Option<String> {
     match (kind, action, issue_marks_pull) {
         ("IssuesEvent", Some("opened"), false) => Some("issues-opened".to_string()),
-        ("IssueCommentEvent", _, false) => Some("issue-commented".to_string()),
-        ("IssueCommentEvent", _, true) => Some("pr-commented".to_string()),
+        ("IssueCommentEvent", Some("created"), false) => {
+            Some("issue-commented".to_string())
+        }
+        ("IssueCommentEvent", Some("created"), true) => {
+            Some("pr-commented".to_string())
+        }
         ("PullRequestEvent", Some("ready_for_review"), true) => {
             Some("pr-ready-for-review".to_string())
         }
