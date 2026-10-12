@@ -46,8 +46,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   (Summary, exactly ONE primary `Closes #N` on its own line
                   early in the body — bare `#N` mentions are invisible to
                   auto-close and `pr-labels-from-issue`, Specification
-                  references, Change, Design summary, Test evidence, Review
-                  convergence, Gates). Titles are plain Conventional Commits
+                  references, Change, Design summary (feature/design-changing
+                  spec PRs only), Test evidence, Review convergence (reviewed
+                  feature PRs only; omit for small fixes), Gates). Titles are plain Conventional Commits
                   `type(scope): description`, ASCII only (no section signs,
                   em/en dashes, arrows, or smart quotes — use hyphens, `->`,
                   straight quotes, or rephrase), never spec-section or
