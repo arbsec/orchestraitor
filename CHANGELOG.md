@@ -14,9 +14,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 ### Added
 
 - **GitHub event ingress for `orcd watch`**: the poll-only fallback
-  that lets external GitHub activity — new issues, issue/PR comments,
-  PR ready-for-review — kick off the loop without a human translating
-  it into board state. Opt in with the new `[watch.ingress]` layered
+  that lets external GitHub activity — new issues and issue/PR
+  comments — kick off the loop without a human translating it into
+  board state. Opt in with the new `[watch.ingress]` layered
   config block (`enabled`, `queue_capacity`)
   and arm the kick-off condition with `[watch.kickoff].external_event`.
   The poller issues ETag/304 conditional requests against each

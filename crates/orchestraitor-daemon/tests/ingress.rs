@@ -808,10 +808,17 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
 /// Gen-13 cloud review (§21.4 negative): only the documented §9.47
 /// actions pass the filter — a `closed` `IssuesEvent` and a
 /// `synchronize` `PullRequestEvent` (both with distinct delivery keys)
-/// produce nothing; untracked actions never multiply kick-offs. Runs
-/// past the first-enable baseline so `process_items` is exercised.
+/// produce nothing; untracked actions never multiply kick-offs. A
+/// baseline poll first, then a delta with HIGHER raw ids, so
+/// `process_items` is exercised past the baseline.
 #[tokio::test(flavor = "current_thread")]
 async fn untracked_actions_are_filtered() {
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 504 } }
+    }])
+    .to_string();
     let body = json!([
         {
             "id": "777",
@@ -828,14 +835,18 @@ async fn untracked_actions_are_filtered() {
         }
     ])
     .to_string();
-    // Two rules: poll 1 = baseline, poll 2 = the delta (both untracked).
+    // Two rules: poll 1 = baseline (with an ETag so the delta runs),
+    // poll 2 = the delta (both items untracked).
     let server = FixtureServer::start(vec![
         Rule {
             path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
-            body: body.clone(),
-            headers: vec![("X-Poll-Interval", "60".to_string())],
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
         },
         Rule {
             path_needle: "arbsec/orchestraitor/events",
@@ -873,7 +884,7 @@ async fn untracked_actions_are_filtered() {
         store
             .lock()
             .expect("store lock")
-            .record_delivery("777|arbsec/orchestraitor|issues-opened|", 1_000)
+            .record_delivery("777|arbsec/orchestraitor|issues-opened|", 1_100)
             .expect("record"),
         "the filter never wrote the untracked actions' keys to the dedup \
          table (a fresh record proves the keys were absent)"
