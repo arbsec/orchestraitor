@@ -137,21 +137,21 @@ pub struct PollTarget {
 }
 
 /// Builds the poll targets for the configured repositories: one
-/// repository-scoped issue-events endpoint per repository (`GET
-/// /repos/{owner}/{repo}/issues/events` — the documented feed; GitHub
-/// treats pull requests as issues, so PR events arrive on the same feed
-/// identified by the item's `pull_request` property). One conditional
-/// request per repository per poll round: sharing one URL across
-/// repositories would mislabel every event, and per-repo scoping keeps
-/// the dedup key and the event's repo field exact.
+/// repository events endpoint per repository (`GET
+/// /repos/{owner}/{repo}/events` — the documented feed, which supports
+/// `ETag`/304 and `X-Poll-Interval`; issue and PR activity both appear
+/// there under the `{type, payload}` shape). One conditional request
+/// per repository per poll round: sharing one URL across repositories
+/// would mislabel every event, and per-repo scoping keeps the dedup
+/// key and the event's repo field exact.
 #[must_use]
 pub fn poll_targets(repos: &[String], base_url: &str) -> Vec<PollTarget> {
     let base = base_url.trim_end_matches('/');
     repos
         .iter()
         .map(|repo| PollTarget {
-            url: format!("{base}/repos/{repo}/issues/events"),
-            key: format!("{repo}/issues-events"),
+            url: format!("{base}/repos/{repo}/events"),
+            key: format!("{repo}/events"),
             repo: repo.clone(),
         })
         .collect()
@@ -163,7 +163,19 @@ pub fn poll_targets(repos: &[String], base_url: &str) -> Vec<PollTarget> {
 struct RestEventItem {
     #[serde(default)]
     id: Option<serde_json::Value>,
-    event: String,
+    /// The repository-event type (`IssuesEvent`, `IssueCommentEvent`,
+    /// `PullRequestEvent`, ...).
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    payload: Option<RestPayload>,
+}
+
+/// The `payload` object; which fields carry the number depends on the
+/// event kind (issues carry `issue`, PR activity carries
+/// `pull_request`).
+#[derive(Debug, serde::Deserialize)]
+struct RestPayload {
     #[serde(default)]
     issue: Option<RestIssueRef>,
     #[serde(default)]
@@ -173,6 +185,8 @@ struct RestEventItem {
 #[derive(Debug, serde::Deserialize)]
 struct RestIssueRef {
     number: u64,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -188,16 +202,18 @@ struct RestPullHead {
     sha: Option<String>,
 }
 
-/// Normalizes a raw platform `event` verb into the operator-facing
-/// event type (the dedup `event_type`). Untracked verbs return `None`
+/// Normalizes a repository-event `type` into the operator-facing event
+/// type (the dedup `event_type`). Untracked kinds return `None`
 /// (filtered out before dedup — the operator's event filter is the
-/// fixed §9.47 set).
-fn normalize_event_type(raw: &str, is_pull: bool) -> Option<String> {
-    match (raw, is_pull) {
-        ("opened", false) => Some("issues-opened".to_string()),
-        ("commented", false) => Some("issue-commented".to_string()),
-        ("commented", true) => Some("pr-commented".to_string()),
-        ("ready_for_review", true) => Some("pr-ready-for-review".to_string()),
+/// fixed §9.47 set). On the repository events feed, PRs appear as
+/// issues carrying `payload.issue.pull_request`; `IssueCommentEvent`
+/// distinguishes PR comments from issue comments that way.
+fn normalize_event_type(kind: &str, issue_marks_pull: bool) -> Option<String> {
+    match (kind, issue_marks_pull) {
+        ("IssuesEvent", false) => Some("issues-opened".to_string()),
+        ("IssueCommentEvent", false) => Some("issue-commented".to_string()),
+        ("IssueCommentEvent", true) => Some("pr-commented".to_string()),
+        ("PullRequestEvent", true) => Some("pr-ready-for-review".to_string()),
         _ => None,
     }
 }
@@ -535,14 +551,32 @@ impl EventPoller {
         let mut duplicates = 0_usize;
         let mut dropped = 0_usize;
         for item in items {
-            let is_pull = item.pull_request.is_some();
-            let Some(event_type) = normalize_event_type(&item.event, is_pull) else {
+            // PRs appear as issues carrying `payload.issue.pull_request`;
+            // PR-specific activity (PullRequestEvent) carries
+            // `payload.pull_request` directly.
+            let is_pull = item.payload.as_ref().is_some_and(|payload| {
+                payload.pull_request.is_some()
+                    || payload
+                        .issue
+                        .as_ref()
+                        .is_some_and(|issue| issue.pull_request.is_some())
+            });
+            let Some(event_type) = normalize_event_type(&item.kind, is_pull) else {
                 continue; // outside the operator's §9.47 event filter
             };
             let number = if is_pull {
-                item.pull_request.as_ref().map(|pr| pr.number)
+                item.payload
+                    .as_ref()
+                    .and_then(|payload| payload.pull_request.as_ref().map(|pr| pr.number))
+                    .or_else(|| {
+                        item.payload
+                            .as_ref()
+                            .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
+                    })
             } else {
-                item.issue.as_ref().map(|issue| issue.number)
+                item.payload
+                    .as_ref()
+                    .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
             };
             let Some(number) = number else {
                 continue; // unshaped payload: skip, never guess
@@ -551,8 +585,9 @@ impl EventPoller {
                 continue; // no platform delivery id: skip, never share a key
             };
             let head_sha = if is_pull {
-                item.pull_request
+                item.payload
                     .as_ref()
+                    .and_then(|payload| payload.pull_request.as_ref())
                     .and_then(|pr| pr.head.as_ref())
                     .and_then(|head| head.sha.clone())
             } else {
@@ -642,12 +677,19 @@ use reqwest::header::ETAG;
 /// The item's full delivery key (None when the item would be filtered
 /// or skipped later — it never enters the seen set).
 fn item_delivery_key(item: &RestEventItem, target: &PollTarget) -> Option<String> {
-    let is_pull = item.pull_request.is_some();
-    let event_type = normalize_event_type(&item.event, is_pull)?;
+    let is_pull = item.payload.as_ref().is_some_and(|payload| {
+        payload.pull_request.is_some()
+            || payload
+                .issue
+                .as_ref()
+                .is_some_and(|issue| issue.pull_request.is_some())
+    });
+    let event_type = normalize_event_type(&item.kind, is_pull)?;
     let delivery_id = item.id.as_ref().and_then(value_to_id)?;
     let head_sha = if is_pull {
-        item.pull_request
+        item.payload
             .as_ref()
+            .and_then(|payload| payload.pull_request.as_ref())
             .and_then(|pr| pr.head.as_ref())
             .and_then(|head| head.sha.clone())
     } else {

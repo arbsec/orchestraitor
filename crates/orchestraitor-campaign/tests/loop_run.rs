@@ -8,6 +8,7 @@
 // must fail the test loudly.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -2740,6 +2741,60 @@ async fn a_seeded_budget_day_fires_the_reset_on_a_moved_boundary() {
     assert_eq!(summary2.spawns, 0, "the same-day seed never claims a reset");
 }
 
+/// Module-level peek/drain §9.47 fixture (gen-12 dedup): `pending` is a
+/// non-destructive peek, `drain_pending(ids)` removes exactly the
+/// requested ids (retain-keyed), matching the production
+/// `KickoffIngressSource` semantics. The optional counter counts peek
+/// calls for the in-flight contract test.
+struct KickoffFixtureSource {
+    queue: Mutex<Vec<String>>,
+    peek_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Deterministic mid-poll arrival hook: runs inside `pending()`
+    /// (between the peek and the later drain) so tests can verify the
+    /// selective drain never touches a late arrival.
+    push_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Records every `drain_pending`'s REQUESTED ids: the selective-drain
+    /// contract is "drain exactly what was evaluated" — pinned by
+    /// asserting the requested ids, not the final queue state.
+    drain_log: Mutex<Vec<Vec<String>>>,
+}
+impl orchestraitor_campaign::KickoffEventSource for KickoffFixtureSource {
+    fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        if let Some(counter) = &self.peek_calls {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let queue = self.queue.lock().unwrap();
+        let events = queue
+            .iter()
+            .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+            .collect::<Vec<_>>();
+        drop(queue);
+        // The hook runs AFTER the peek snapshot: an event it pushes is a
+        // late arrival — visible to the later drain but NOT to this peek.
+        if let Some(hook) = self.push_hook.lock().unwrap().as_ref() {
+            hook();
+        }
+        events
+    }
+    fn drain_pending(
+        &self,
+        requested_ids: &[String],
+    ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+        self.drain_log.lock().unwrap().push(requested_ids.to_vec());
+        let mut queue = self.queue.lock().unwrap();
+        let mut drained = Vec::new();
+        queue.retain(|id| {
+            if requested_ids.iter().any(|requested| requested == id) {
+                drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
+                false
+            } else {
+                true
+            }
+        });
+        drained
+    }
+}
+
 /// Condition 5 trigger (issue #504): an external GitHub event drained
 /// from the attached §9.47 source kicks off the loop when the condition
 /// is armed — with ready work also present (both conditions fire; the
@@ -2749,37 +2804,14 @@ async fn an_attached_event_source_kicks_off_when_armed() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
 
-    /// A fixture §9.47 source serving queued event ids.
-    struct FixtureSource(Mutex<Vec<String>>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
-
-    let source = Arc::new(FixtureSource(Mutex::new(vec![
-        "111|arbsec/orchestraitor|issue-commented|".to_string(),
-    ])));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec![
+            "111|arbsec/orchestraitor|issue-commented|".to_string(),
+        ]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -2822,7 +2854,7 @@ async fn an_attached_event_source_kicks_off_when_armed() {
     // The source was drained: a redelivery would not re-kick-off (the
     // dedup contract lives in the ingress; the runner only drains).
     assert!(
-        source.0.lock().unwrap().is_empty(),
+        source.queue.lock().unwrap().is_empty(),
         "the armed condition drains the source"
     );
 }
@@ -2835,34 +2867,12 @@ async fn a_disarmed_condition_never_drains_the_event_source() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
 
-    struct FixtureSource(Mutex<Vec<String>>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
-
-    let source = Arc::new(FixtureSource(Mutex::new(vec!["111".to_string()])));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec!["111".to_string()]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -2899,7 +2909,7 @@ async fn a_disarmed_condition_never_drains_the_event_source() {
         "fresh ready work still kicks off (condition 1 armed)"
     );
     assert_eq!(
-        source.0.lock().unwrap().len(),
+        source.queue.lock().unwrap().len(),
         1,
         "the disarmed condition never consults the source: the event \
          survives for when the operator opts in"
@@ -2914,36 +2924,14 @@ async fn an_external_event_alone_kicks_off() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
 
-    struct FixtureSource(Mutex<Vec<String>>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
-
-    let source = Arc::new(FixtureSource(Mutex::new(vec![
-        "222|arbsec/orchestraitor|pr-ready-for-review|caad752a".to_string(),
-    ])));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec![
+            "222|arbsec/orchestraitor|pr-ready-for-review|caad752a".to_string(),
+        ]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3007,35 +2995,6 @@ async fn an_external_event_alone_kicks_off() {
 #[tokio::test(start_paused = true)]
 async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     use orchestraitor_campaign::KickoffSettings;
-    use std::sync::Mutex;
-
-    struct FixtureSource(Mutex<Vec<String>>, Arc<std::sync::atomic::AtomicUsize>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
 
     // Pass 1: fresh ready work kicks off (the source is consulted and
     // drained — no campaign in flight). Pass 2+: a campaign is in
@@ -3045,10 +3004,12 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     // consults the source during flight would bump the counter even
     // though the queue is empty (gen-5 review finding).
     let pending_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let source = Arc::new(FixtureSource(
-        Mutex::new(vec!["111".to_string()]),
-        Arc::clone(&pending_calls),
-    ));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec!["111".to_string()]),
+        peek_calls: Some(Arc::clone(&pending_calls)),
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3085,7 +3046,7 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
         "fresh work fills the cap: idle kick-off + in-flight scheduling"
     );
     assert!(
-        source.0.lock().unwrap().is_empty(),
+        source.queue.lock().unwrap().is_empty(),
         "pass 1 drained the (single) event while idle"
     );
     // The exact contract: pending() ran exactly ONCE (the idle first
@@ -3108,38 +3069,16 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
 /// every later pass and starve the bounded queue. The forbidden effect:
 /// an event that re-fires `ExternalEvent` on every quiet pass.
 #[tokio::test(start_paused = true)]
-async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
+async fn a_no_op_pass_consumes_its_evaluated_events() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
 
-    struct FixtureSource(Mutex<Vec<String>>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
-
-    let source = Arc::new(FixtureSource(Mutex::new(vec!["999".to_string()])));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec!["999".to_string()]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3174,7 +3113,7 @@ async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
 
     assert_eq!(summary.spawns, 0, "an empty board has nothing to select");
     assert_eq!(
-        source.0.lock().unwrap().len(),
+        source.queue.lock().unwrap().len(),
         0,
         "the no-op pass consumed the evaluated event: the board state was \
          evaluated and reconcile covers the item when it becomes actionable \
@@ -3188,43 +3127,21 @@ async fn a_peeked_event_survives_a_pass_that_selects_nothing() {
 /// peeked nothing. With `new_eligible_work` armed, ready work fires and
 /// the drain clears the evaluated set.
 #[tokio::test(start_paused = true)]
-async fn a_selection_on_a_later_pass_drains_previously_evaluated_events() {
+async fn a_no_op_pass_drains_previously_evaluated_events() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
-
-    struct FixtureSource(Mutex<Vec<String>>);
-    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
-        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let queue = self.0.lock().unwrap();
-            queue
-                .iter()
-                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
-                .collect()
-        }
-        fn drain_pending(
-            &self,
-            requested_ids: &[String],
-        ) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
-            let mut queue = self.0.lock().unwrap();
-            let mut drained = Vec::new();
-            queue.retain(|id| {
-                if requested_ids.iter().any(|requested| requested == id) {
-                    drained.push(orchestraitor_campaign::KickoffExternalEvent { id: id.clone() });
-                    false
-                } else {
-                    true
-                }
-            });
-            drained
-        }
-    }
 
     // The event is in the queue but the FIRST snapshot's ready queue is
     // empty: pass 1 fires ExternalEvent, plans a no-op, and consumes it.
     // Pass 2's ready item then fires new-eligible-work; the drain runs
     // (evaluated set non-empty guard) — with the event already gone,
     // nothing else is consumed.
-    let source = Arc::new(FixtureSource(Mutex::new(vec!["999".to_string()])));
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec!["999".to_string()]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3258,9 +3175,85 @@ async fn a_selection_on_a_later_pass_drains_previously_evaluated_events() {
 
     assert_eq!(summary.spawns, 0, "the board stays empty");
     assert_eq!(
-        source.0.lock().unwrap().len(),
+        source.queue.lock().unwrap().len(),
         0,
         "the event was consumed on the no-op pass (one-shot firing per \
          board evaluation)"
+    );
+}
+
+/// Gen-12 (continued): an event that arrives AFTER the peek must SURVIVE
+/// the selective drain — `drain_pending(ids)` removes exactly the
+/// evaluated ids, never a late arrival (the fixture's retain-keyed drain
+/// makes the wrong-id regression detectable).
+#[tokio::test(start_paused = true)]
+async fn a_late_arriving_event_survives_the_selective_drain() {
+    use orchestraitor_campaign::KickoffSettings;
+
+    // Pass 1: fresh ready work (issue 1) kicks off; the source holds
+    // event "111" (evaluated + drained). The fixture queue gains a LATE
+    // event "222" before the drain runs — it must stay pending because
+    // the drain removes only "111".
+    let source = Arc::new(KickoffFixtureSource {
+        queue: Mutex::new(vec!["111".to_string()]),
+        peek_calls: None,
+        push_hook: Mutex::new(None),
+        drain_log: Mutex::new(Vec::new()),
+    });
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(2),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        external_event: true,
+        ..KickoffSettings::builtin_defaults()
+    });
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    // Late arrival, deterministically: the fixture pushes "222" into its
+    // own queue during the FIRST pending() call (after the peek snapshot,
+    // before the drain). The drain is selective (ids the gate evaluated):
+    // "111" is evaluated and drained; "222" — a late arrival — must
+    // survive THAT drain. (A later quiet pass legitimately consumes it
+    // via the no-op path; the fixture records the DRAINED ids so the
+    // selective contract is pinned exactly.)
+    let pusher_source = Arc::clone(&source);
+    *source.push_hook.lock().unwrap() = Some(Box::new(move || {
+        pusher_source.queue.lock().unwrap().push("222".to_string());
+    }));
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1]),
+        },
+        FakeStarter::new(Behavior::Complete {
+            turns: 1,
+            tokens: 10,
+        }),
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap()
+    .with_event_source(Arc::clone(&source) as Arc<dyn orchestraitor_campaign::KickoffEventSource>);
+    let summary = runner.run(never()).await.unwrap();
+
+    assert_eq!(summary.spawns, 1, "the kick-off spawned on fresh work");
+    // The selective-drain contract: pass 1's drain requested EXACTLY the
+    // ids the gate evaluated ("111" — the peeked event), never the late
+    // arrival "222". (Later quiet passes legitimately consume "222" via
+    // the no-op path, so the final queue state is not the contract.)
+    let log = source.drain_log.lock().unwrap();
+    let selective_drain = log
+        .iter()
+        .find(|requested| requested.iter().any(|id| id == "111"))
+        .expect("pass 1 drained its evaluated event");
+    assert!(
+        !selective_drain.iter().any(|id| id == "222"),
+        "the selective drain never requests the late arrival: {selective_drain:?}"
     );
 }

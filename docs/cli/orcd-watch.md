@@ -118,9 +118,8 @@ queue_capacity = 256     # bounded queue (§7.3); zero is rejected
 ```
 
 When enabled, the daemon polls each configured board repository's
-issue-events feed (`GET /repos/{owner}/{repo}/issues/events`; GitHub
-treats PRs as issues, so PR events — including ready-for-review — arrive
-on the same feed, identified by the item's `pull_request` property) with
+repository-events feed (`GET /repos/{owner}/{repo}/events`) for issue
+opened, issue/PR commented, and PR ready-for-review activity, with
 `If-None-Match` conditional requests (a 304 costs no quota), honors the
 server's `X-Poll-Interval`, and adapts the cadence to rate-limit
 feedback — the poll never widens beyond it. Events deduplicate on a

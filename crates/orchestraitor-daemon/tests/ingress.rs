@@ -203,13 +203,13 @@ fn issues_events_body() -> String {
     json!([
         {
             "id": "111",
-            "event": "commented",
-            "issue": { "number": 504 }
+            "type": "IssueCommentEvent",
+            "payload": { "issue": { "number": 504 } }
         },
         {
             "id": "222",
-            "event": "opened",
-            "issue": { "number": 505 }
+            "type": "IssuesEvent",
+            "payload": { "action": "opened", "issue": { "number": 505 } }
         }
     ])
     .to_string()
@@ -238,7 +238,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
     let etag = "\"abc123\"";
     let server = FixtureServer::start(vec![
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body: issues_events_body(),
@@ -248,7 +248,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
             ],
         },
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: Some(etag.to_string()),
             status: 304,
             body: String::new(),
@@ -257,7 +257,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
     ])
     .await;
     let (_queue, _store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
 
     // The FIRST 200 is the first-enable baseline: page-1 keys register,
     // the ETag is consumed, and nothing is enqueued.
@@ -314,7 +314,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
 #[tokio::test(flavor = "current_thread")]
 async fn poll_interval_header_is_honored() {
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/issues/events",
+        path_needle: "arbsec/orchestraitor/events",
         requires_etag: None,
         status: 200,
         body: issues_events_body(),
@@ -322,7 +322,7 @@ async fn poll_interval_header_is_honored() {
     }])
     .await;
     let (_queue, store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
     let outcome = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
         .await
@@ -333,7 +333,7 @@ async fn poll_interval_header_is_honored() {
     let store = store.lock().expect("store lock");
     assert_eq!(
         store
-            .poll_after_secs("arbsec/orchestraitor/issues-events")
+            .poll_after_secs("arbsec/orchestraitor/events")
             .expect("read"),
         90,
         "the advised interval persists in the durable bookkeeping"
@@ -355,13 +355,21 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
     // Baseline body (consumed by the first-enable poll) and delivery
     // body (a NEW delivery id, so the delivery poll accepts it); the
     // THIRD body repeats the delivery id — the redelivery.
-    let baseline_body =
-        json!([{ "id": "110", "event": "commented", "issue": { "number": 504 } }]).to_string();
-    let delivery_body =
-        json!([{ "id": "111", "event": "commented", "issue": { "number": 504 } }]).to_string();
+    let baseline_body = json!([{
+        "id": "110",
+        "type": "IssueCommentEvent",
+        "payload": { "issue": { "number": 504 } }
+    }])
+    .to_string();
+    let delivery_body = json!([{
+        "id": "111",
+        "type": "IssueCommentEvent",
+        "payload": { "issue": { "number": 504 } }
+    }])
+    .to_string();
     let server = FixtureServer::start(vec![
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body: baseline_body,
@@ -371,14 +379,14 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
             ],
         },
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body: delivery_body.clone(),
             headers: vec![("X-Poll-Interval", "60".to_string())],
         },
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body: delivery_body,
@@ -387,7 +395,7 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
     ])
     .await;
     let (queue, _store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
 
     let first = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
@@ -531,7 +539,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
     let now = 1_000_000_u64;
     let reset = now + 120;
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/issues/events",
+        path_needle: "arbsec/orchestraitor/events",
         requires_etag: None,
         status: 403,
         body: String::new(),
@@ -542,7 +550,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
     }])
     .await;
     let (_queue, store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
     let outcome = poller
         .poll_all(std::slice::from_ref(&target), now)
         .await
@@ -560,7 +568,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
     let store = store.lock().expect("store lock");
     assert_eq!(
         store
-            .poll_after_secs("arbsec/orchestraitor/issues-events")
+            .poll_after_secs("arbsec/orchestraitor/events")
             .expect("read"),
         120,
         "the adapted cadence persists for the next poll"
@@ -573,7 +581,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
 async fn retry_after_hint_drives_the_cadence() {
     let now = 1_000_000_u64;
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/pulls/events",
+        path_needle: "arbsec/orchestraitor/events",
         requires_etag: None,
         status: 429,
         body: String::new(),
@@ -581,7 +589,7 @@ async fn retry_after_hint_drives_the_cadence() {
     }])
     .await;
     let (_queue, _store, poller) = fixture_ingress();
-    let target = server.target("pulls-events", "pulls");
+    let target = server.target("events", "events");
     let outcome = poller
         .poll_all(std::slice::from_ref(&target), now)
         .await
@@ -603,12 +611,12 @@ async fn retry_after_hint_drives_the_cadence() {
 #[tokio::test(flavor = "current_thread")]
 async fn untracked_event_verbs_are_filtered_before_dedup() {
     let body = json!([
-        { "id": "333", "event": "assigned", "issue": { "number": 1 } },
-        { "id": "444", "event": "closed", "issue": { "number": 2 } }
+        { "id": "333", "type": "AssignedEvent", "payload": { "issue": { "number": 1 } } },
+        { "id": "444", "type": "ClosedEvent", "payload": { "issue": { "number": 2 } } }
     ])
     .to_string();
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/issues/events",
+        path_needle: "arbsec/orchestraitor/events",
         requires_etag: None,
         status: 200,
         body,
@@ -616,7 +624,7 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
     }])
     .await;
     let (queue, store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
     let outcome = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
         .await
@@ -647,8 +655,11 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
 async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     let body = json!([{
         "id": "556",
-        "event": "ready_for_review",
-        "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+        "type": "PullRequestEvent",
+        "payload": {
+            "action": "ready_for_review",
+            "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+        }
     }])
     .to_string();
     // Rules: page 1 = the first-enable baseline (registers key 555,
@@ -657,13 +668,16 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     // delivery-key shape.
     let baseline_body = json!([{
         "id": "555",
-        "event": "ready_for_review",
-        "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+        "type": "PullRequestEvent",
+        "payload": {
+            "action": "ready_for_review",
+            "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+        }
     }])
     .to_string();
     let server = FixtureServer::start(vec![
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body: baseline_body,
@@ -673,7 +687,7 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
             ],
         },
         Rule {
-            path_needle: "arbsec/orchestraitor/issues/events",
+            path_needle: "arbsec/orchestraitor/events",
             requires_etag: None,
             status: 200,
             body,
@@ -682,7 +696,7 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     ])
     .await;
     let (queue, _store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
     let baseline = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
         .await
@@ -729,14 +743,14 @@ fn poll_targets_are_repository_scoped() {
     );
     for repo in &repos {
         assert!(
-            targets.iter().any(
-                |t| &t.repo == repo && t.url.ends_with(&format!("/repos/{repo}/issues/events"))
-            ),
-            "an issues-events target exists for {repo}"
+            targets
+                .iter()
+                .any(|t| &t.repo == repo && t.url.ends_with(&format!("/repos/{repo}/events"))),
+            "an events target exists for {repo}"
         );
     }
-    assert_eq!(targets[0].key, "arbsec/orchestraitor/issues-events");
-    assert_eq!(targets[1].key, "arbsec/arbitraitor/issues-events");
+    assert_eq!(targets[0].key, "arbsec/orchestraitor/events");
+    assert_eq!(targets[1].key, "arbsec/arbitraitor/events");
 }
 
 /// §21.4 negative (gen-2 cloud review): a REST item with a missing or
@@ -746,13 +760,13 @@ fn poll_targets_are_repository_scoped() {
 #[tokio::test(flavor = "current_thread")]
 async fn items_without_a_delivery_id_are_skipped_never_shared() {
     let body = json!([
-        { "event": "commented", "issue": { "number": 1 } },
-        { "id": { "nested": true }, "event": "commented", "issue": { "number": 3 } },
-        { "id": "", "event": "commented", "issue": { "number": 4 } }
+        { "type": "IssueCommentEvent", "payload": { "issue": { "number": 1 } } },
+        { "id": { "nested": true }, "type": "IssueCommentEvent", "payload": { "issue": { "number": 3 } } },
+        { "id": "", "type": "IssueCommentEvent", "payload": { "issue": { "number": 4 } } }
     ])
     .to_string();
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/issues/events",
+        path_needle: "arbsec/orchestraitor/events",
         requires_etag: None,
         status: 200,
         body,
@@ -760,7 +774,7 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
     }])
     .await;
     let (queue, store, poller) = fixture_ingress();
-    let target = server.target("issues-events", "issues");
+    let target = server.target("events", "events");
     let outcome = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
         .await
