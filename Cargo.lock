@@ -157,7 +157,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-analysis"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-archive",
  "arbitraitor-artifact",
@@ -180,7 +180,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-archive"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-model",
@@ -201,7 +201,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-artifact"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
@@ -214,7 +214,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-core"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-policy",
@@ -231,7 +231,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-engine"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-artifact",
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-exec"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-core",
@@ -279,7 +279,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-fetch"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-archive",
  "arbitraitor-artifact",
@@ -299,7 +299,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-intel"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-mcp"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-artifact",
@@ -344,7 +344,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-model"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-workspace-hack",
  "serde",
@@ -356,7 +356,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-plugin-api"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-intel",
  "arbitraitor-model",
@@ -369,7 +369,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-policy"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
@@ -383,7 +383,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-provenance"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
@@ -398,7 +398,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-receipt"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-exec",
@@ -416,7 +416,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-workspace-hack",
  "libc",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-shell"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
@@ -446,7 +446,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-store"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "aho-corasick",
  "allocator-api2",
@@ -550,7 +550,7 @@ dependencies = [
 [[package]]
 name = "arbitraitor-yarax"
 version = "0.1.0"
-source = "git+https://github.com/arbsec/arbitraitor.git?rev=ab7af5ec8fb45a885c609036b26737af71cdcf26#ab7af5ec8fb45a885c609036b26737af71cdcf26"
+source = "git+https://github.com/arbsec/arbitraitor.git?rev=e36644eed6207f957083cdc8cc02abe34cf28ddd#e36644eed6207f957083cdc8cc02abe34cf28ddd"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-artifact",
