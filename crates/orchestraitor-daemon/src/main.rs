@@ -257,7 +257,7 @@ async fn watch_cycle() -> Result<ExitCode> {
     }
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> =
         if watch_config.ingress.enabled {
-            let (_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
+            let (ingress_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
                 &config_dir.join("ingress-events.db"),
                 Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
                 watch_config.ingress.queue_capacity,
@@ -272,7 +272,7 @@ async fn watch_cycle() -> Result<ExitCode> {
                 orchestraitor_daemon::poll_targets(&ingress_repos, "https://api.github.com");
             let poll_shutdown = signal_rx.clone();
             tokio::spawn(async move {
-                ingress_poll_loop(ingress_poller, targets, poll_shutdown).await;
+                ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
             });
             Some(Arc::new(source))
         } else {
@@ -648,8 +648,12 @@ fn primary_and_shards(
 async fn ingress_poll_loop(
     poller: orchestraitor_daemon::EventPoller,
     targets: Vec<orchestraitor_daemon::PollTarget>,
+    queue: std::sync::Arc<orchestraitor_daemon::IngressQueue>,
     mut shutdown: tokio::sync::watch::Receiver<u64>,
 ) {
+    // The observable `degraded` marker (§7.3): entered on overflow,
+    // cleared after the flood-free window. Transitions are logged once.
+    let mut degraded_logged = false;
     loop {
         let now_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -700,6 +704,27 @@ async fn ingress_poll_loop(
                     );
                 }
             }
+        }
+        // The observable degraded marker: log the ENTER and CLEAR
+        // transitions once each (§7.3 — the marker is observable, never
+        // a silent drop).
+        let now_unix_secs_degraded = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let degraded_now = queue.degraded(now_unix_secs_degraded);
+        if degraded_now && !degraded_logged {
+            tracing::warn!(
+                "orcd watch: ingress queue DEGRADED (overflow); surplus \
+                 events are being dropped until the flood-free window \
+                 elapses"
+            );
+            degraded_logged = true;
+        } else if !degraded_now && degraded_logged {
+            tracing::info!(
+                "orcd watch: ingress queue degraded marker CLEARED after \
+                 the flood-free window"
+            );
+            degraded_logged = false;
         }
         // The stored per-endpoint intervals already include this round's
         // feedback; the loop's wait is the largest across endpoints, at

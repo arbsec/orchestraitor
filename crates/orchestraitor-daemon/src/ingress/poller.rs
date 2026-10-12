@@ -448,7 +448,7 @@ impl EventPoller {
             // history).
             let page_keys: Vec<String> = page_items
                 .iter()
-                .filter_map(|item| item_delivery_key(item, target))
+                .filter_map(|item| item_delivery_key_with_number(item, target).map(|(key, _)| key))
                 .collect();
             // The stop condition consults the DURABLE dedup table (any
             // key recorded inside the redelivery window — including
@@ -525,7 +525,7 @@ impl EventPoller {
             let mut store = self.lock_store().map_err(|_| PollError::Failed)?;
             for key in items
                 .iter()
-                .filter_map(|item| item_delivery_key(item, target))
+                .filter_map(|item| item_delivery_key_with_number(item, target).map(|(key, _)| key))
             {
                 let _ignore = store.record_delivery(&key, now_secs);
             }
@@ -692,9 +692,13 @@ impl EventPoller {
 
 use reqwest::header::ETAG;
 
-/// The item's full delivery key (None when the item would be filtered
-/// or skipped later — it never enters the seen set).
-fn item_delivery_key(item: &RestEventItem, target: &PollTarget) -> Option<String> {
+/// The item's full delivery key PLUS the issue/PR number it is about
+/// (None when the item would be filtered or skipped later — it never
+/// enters the seen set or the queue).
+fn item_delivery_key_with_number(
+    item: &RestEventItem,
+    target: &PollTarget,
+) -> Option<(String, u64)> {
     let is_pull = item.payload.as_ref().is_some_and(|payload| {
         payload.pull_request.is_some()
             || payload
@@ -717,11 +721,28 @@ fn item_delivery_key(item: &RestEventItem, target: &PollTarget) -> Option<String
     } else {
         None
     };
-    Some(IngressStore::delivery_key(
-        &delivery_id,
-        &target.repo,
-        &event_type,
-        head_sha.as_deref(),
+    let number = if is_pull {
+        item.payload
+            .as_ref()
+            .and_then(|payload| payload.pull_request.as_ref().map(|pr| pr.number))
+            .or_else(|| {
+                item.payload
+                    .as_ref()
+                    .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
+            })
+    } else {
+        item.payload
+            .as_ref()
+            .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
+    }?;
+    Some((
+        IngressStore::delivery_key(
+            &delivery_id,
+            &target.repo,
+            &event_type,
+            head_sha.as_deref(),
+        ),
+        number,
     ))
 }
 

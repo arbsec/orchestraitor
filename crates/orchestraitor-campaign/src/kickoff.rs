@@ -139,13 +139,16 @@ pub trait KickoffEventSource: Send + Sync {
     fn pending(&self) -> Vec<KickoffExternalEvent>;
 
     /// Destructively removes exactly the events whose ids are in
-    /// `ids` (the ids the gate evaluated). Called when a kick-off's
-    /// planner actually selects a task. Returns the drained events.
-    /// REQUIRED: a source whose `pending` is a non-destructive peek
-    /// MUST implement the matching destructive drain — a drain-everything
-    /// default would drop events that arrived after the peek (a gen-7
-    /// cloud review finding), and a drain-nothing default would re-fire
-    /// the condition every later pass.
+    /// `ids` (the ids the gate peeked this pass). The runner calls it
+    /// after EVERY pass that passed the gate and planned — selection or
+    /// typed no-op: either way the board state was evaluated, and the
+    /// event must not re-arm on later passes. Returns the drained
+    /// events. REQUIRED: a source whose `pending` is a non-destructive
+    /// peek MUST implement the matching selective drain — a
+    /// drain-everything implementation would drop events that arrived
+    /// after the peek (a gen-7 cloud review finding), and a
+    /// drain-nothing implementation would re-fire the condition every
+    /// later pass (a gen-11 review finding).
     fn drain_pending(&self, ids: &[String]) -> Vec<KickoffExternalEvent>;
 }
 

@@ -617,11 +617,6 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     /// `external_event` — a disarmed condition never drains the queue,
     /// so events survive until the operator opts in.
     event_source: Option<Arc<dyn crate::kickoff::KickoffEventSource>>,
-    /// Event ids that already fired a NO-SELECTION pass (a gen-9 review
-    /// finding: without this, one parked event re-fires the kick-off on
-    /// every pass, bounded only by the backoff). Counted events leave
-    /// the set when the pass drains them (a selection consumed them).
-    evaluated_events: HashSet<String>,
 }
 
 /// The loop runner's typed counters (summarized into [`LoopSummary`]).
@@ -697,8 +692,12 @@ fn kick_off_rationale(
 /// One §9.36 kick-off gate decision for a pass (issue #505).
 enum KickoffGate {
     /// The pass proceeds to plan (a campaign is in flight or a
-    /// condition fired).
-    Proceed,
+    /// condition fired). `peeked_ids` are the §9.47 event ids the gate
+    /// peeked this pass (empty when the condition is disarmed, the
+    /// source is absent, or a campaign is in flight): the durable drain
+    /// runs after planning — selection or typed no-op, either way the
+    /// board state was evaluated and the event must not re-arm.
+    Proceed { peeked_ids: Vec<String> },
     /// No campaign is in flight and no armed condition held: the
     /// pass is skipped (the verdict rides the journal event).
     Skipped(KickoffObservation),
@@ -747,7 +746,6 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             slot_released_since_pass: false,
             last_pass_day: None,
             event_source: None,
-            evaluated_events: HashSet::new(),
         })
     }
 
@@ -1422,20 +1420,9 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         // while parked, and the §9.43 reconcile poll stays the
         // completeness authority.
         let peeked_events = match (&self.event_source, self.config.kickoff.external_event) {
-            (Some(source), true) if !campaign_in_flight => source
-                .pending()
-                .into_iter()
-                .filter(|event| !self.evaluated_events.contains(&event.id))
-                .collect::<Vec<_>>(),
+            (Some(source), true) if !campaign_in_flight => source.pending(),
             _ => Vec::new(),
         };
-        // Every peeked event now "fired" this pass. If the pass selects
-        // and drains, the set clears (see plan_and_spawn); if not, these
-        // ids stay evaluated and cannot re-fire the condition on later
-        // passes.
-        for event in &peeked_events {
-            self.evaluated_events.insert(event.id.clone());
-        }
         let observation = KickoffObservation {
             ready_ids: snapshot
                 .ready
@@ -1465,11 +1452,12 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             .collect();
         if !campaign_in_flight && !verdict.kick_off() {
             // Nothing was selected; the peeked events stay pending —
-            // the next pass re-peeks (and the next drain collects
-            // everything still queued).
+            // the next pass re-peeks.
             return KickoffGate::Skipped(observation);
         }
-        KickoffGate::Proceed
+        KickoffGate::Proceed {
+            peeked_ids: peeked_events.iter().map(|event| event.id.clone()).collect(),
+        }
     }
 
     /// Records one kick-off-skipped pass (issue #505, gen-1 review fix):
@@ -1547,9 +1535,10 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             counters.task_budget_skips += task_exclusions.budget_skips.len() as u64;
         }
         let gate = self.kickoff_gate(now, &snapshot, &task_exclusions.excluded);
-        // The drain condition is the evaluated SET (see below), not this
-        // pass's peek: a pass that selects via another condition still
-        // consumes previously evaluated events.
+        let peeked_ids = match &gate {
+            KickoffGate::Proceed { peeked_ids } => peeked_ids.clone(),
+            KickoffGate::Skipped(_) => Vec::new(),
+        };
         match gate {
             KickoffGate::Skipped(observation) => {
                 self.record_kickoff_skip(
@@ -1560,7 +1549,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
                 )?;
                 return Ok(false);
             }
-            KickoffGate::Proceed => {}
+            KickoffGate::Proceed { .. } => {}
         }
         let excluded = &task_exclusions.excluded;
         let budget_skips = &task_exclusions.budget_skips;
@@ -1582,44 +1571,15 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             no_op_reason: stored.decision.no_op_reason,
             task_id: selected.map(|task| task.task_id.clone()),
         });
-        if selected.is_none() {
-            // The pass planned a NO-OP: the board state was evaluated and
-            // nothing is actionable now — reconcile covers the item when
-            // it becomes actionable (a gen-11 review finding: keeping the
-            // event armed forever would park it through every later pass
-            // and starve the bounded queue). Drain + clear so the next
-            // EXTERNAL event can fire again.
-            if !self.evaluated_events.is_empty()
-                && let Some(source) = &self.event_source
-            {
-                let ids: Vec<String> = self.evaluated_events.iter().cloned().collect();
-                let _ignore = source.drain_pending(&ids);
-                self.evaluated_events.clear();
-            }
+        // The gate passed: the board state was evaluated this pass.
+        // Drain EXACTLY the peeked ids — selection or typed no-op, either
+        // way the event must not re-arm on later passes (a gen-11 review
+        // finding); events that arrived after the peek stay pending (a
+        // gen-7 cloud review finding — the drain is selective).
+        if !peeked_ids.is_empty() && let Some(source) = &self.event_source {
+            let _ignore = source.drain_pending(&peeked_ids);
         }
         if let Some(selected) = selected {
-            // The pass SELECTED a task: the kick-off fired and the
-            // peeked §9.47 events are consumed NOW — an event whose
-            // board item was not yet visible in this snapshot stays
-            // pending for the next pass (a gen-6 cloud review fix:
-            // draining before selection would consume an event that
-            // cannot act yet, wasting the acceleration when
-            // `new_eligible_work` is disarmed).
-            // The drain runs whenever the evaluated set is NON-EMPTY
-            // and a selection happened — not only when THIS pass peeked
-            // (a gen-10 review finding: a pass that selected via another
-            // condition must still consume the evaluated events, or they
-            // stay queued forever and later idle passes cannot re-fire).
-            if !self.evaluated_events.is_empty()
-                && let Some(source) = &self.event_source
-            {
-                // Drained exactly the events evaluated so far; events
-                // that arrived after the last peek stay pending (their
-                // kick-off acceleration is preserved).
-                let ids: Vec<String> = self.evaluated_events.iter().cloned().collect();
-                let _ignore = source.drain_pending(&ids);
-                self.evaluated_events.clear();
-            }
             let spend = self.runs.daily_spend(now)?;
             // Row first, then spawn: a durable insert failure must never
             // strand a running worker (a dropped handle detaches the task to

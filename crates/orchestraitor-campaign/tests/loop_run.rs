@@ -2990,19 +2990,19 @@ async fn an_external_event_alone_kicks_off() {
 /// Gen-3 review fix (issue #504): with a campaign IN FLIGHT, the gate
 /// does NOT consult the event source — the pass proceeds on other
 /// grounds anyway, so a drain there would consume events that never
-/// trigger a kick-off. The bounded queue holds them until a slot
-/// frees.
+/// trigger a kick-off. The gate never consults the source on those
+/// passes (the lifecycle lasts one pass).
 #[tokio::test(start_paused = true)]
 async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     use orchestraitor_campaign::KickoffSettings;
 
     // Pass 1: fresh ready work kicks off (the source is consulted and
     // drained — no campaign in flight). Pass 2+: a campaign is in
-    // flight with free capacity; the source gains a NEW event that must
-    // SURVIVE the in-flight passes. The call counter pins the contract:
-    // pending() must run EXACTLY once (pass 1) — a regression that
-    // consults the source during flight would bump the counter even
-    // though the queue is empty (gen-5 review finding).
+    // flight with free capacity; the gate NEVER consults the source on
+    // those passes. The call counter pins the contract: pending() must
+    // run EXACTLY once (pass 1) — a regression that consults the source
+    // during flight would bump the counter even though the queue is
+    // empty (gen-5 review finding).
     let pending_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let source = Arc::new(KickoffFixtureSource {
         queue: Mutex::new(vec!["111".to_string()]),
@@ -3121,21 +3121,18 @@ async fn a_no_op_pass_consumes_its_evaluated_events() {
     );
 }
 
-/// Gen-11 (continued): a peeked event does NOT starve when its board item
-/// appears later — the pass that selects (here via fresh ready work after
-/// a state change) drains evaluated events even when the pass itself
-/// peeked nothing. With `new_eligible_work` armed, ready work fires and
-/// the drain clears the evaluated set.
+/// Gen-14: the peek/drain lifecycle lasts ONE pass. Pass 1 (empty board)
+/// fires `ExternalEvent`, plans a no-op, and drains the peeked id. Pass 2
+/// shows a ready item: `new_eligible_work` fires and the drain runs again
+/// (empty) — the event never re-arms on later passes.
 #[tokio::test(start_paused = true)]
 async fn a_no_op_pass_drains_previously_evaluated_events() {
     use orchestraitor_campaign::KickoffSettings;
-    use std::sync::Mutex;
 
     // The event is in the queue but the FIRST snapshot's ready queue is
     // empty: pass 1 fires ExternalEvent, plans a no-op, and consumes it.
     // Pass 2's ready item then fires new-eligible-work; the drain runs
-    // (evaluated set non-empty guard) — with the event already gone,
-    // nothing else is consumed.
+    // again (empty) — the event never re-arms.
     let source = Arc::new(KickoffFixtureSource {
         queue: Mutex::new(vec!["999".to_string()]),
         peek_calls: None,
