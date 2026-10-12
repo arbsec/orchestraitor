@@ -21,8 +21,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   and arm the kick-off condition with `[watch.kickoff].external_event`.
   The poller issues ETag/304 conditional requests against each
   repository's repository-events feed (`/repos/{owner}/{repo}/events`)
-  for issue opened, issue/PR commented, and PR ready-for-review
-  activity, honors the server's `X-Poll-Interval`, and adapts its
+  for issue opened and issue/PR commented activity, honors the
+  server's `X-Poll-Interval`, and adapts its
   cadence to rate-limit feedback
   (never widening beyond it). Events deduplicate on a durable delivery
   key (platform delivery id + repository + event type + head SHA) with

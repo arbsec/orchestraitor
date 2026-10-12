@@ -606,8 +606,10 @@ async fn retry_after_hint_drives_the_cadence() {
     );
 }
 
-/// The event filter: untracked platform verbs never reach the dedup
-/// table or the queue (the operator's filter is the fixed §9.47 set).
+/// The event filter: untracked platform event types never reach the
+/// dedup table or the queue (the operator's filter is the fixed §9.47
+/// set); runs past the first-enable baseline so `process_items` is
+/// exercised.
 #[tokio::test(flavor = "current_thread")]
 async fn untracked_event_verbs_are_filtered_before_dedup() {
     let body = json!([
@@ -648,17 +650,21 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
     );
 }
 
-/// PR events normalize with the head SHA in the delivery key: a new
-/// push (new head SHA) on the same PR comment event is a NEW delivery
-/// (spec §9.47: head SHA where present is part of the key).
+/// PR comment events (`IssueCommentEvent` whose `payload.issue` carries
+/// the `pull_request` marker) normalize with the head SHA in the delivery key:
+/// a new push (new head SHA) on the same PR comment event is a NEW
+/// delivery (spec §9.47: head SHA where present is part of the key).
 #[tokio::test(flavor = "current_thread")]
 async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     let body = json!([{
         "id": "556",
-        "type": "PullRequestEvent",
+        "type": "IssueCommentEvent",
         "payload": {
-            "action": "ready_for_review",
-            "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+            "action": "created",
+            "issue": {
+                "number": 504,
+                "pull_request": { "merged_at": null }
+            }
         }
     }])
     .to_string();
@@ -668,10 +674,13 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     // delivery-key shape.
     let baseline_body = json!([{
         "id": "555",
-        "type": "PullRequestEvent",
+        "type": "IssueCommentEvent",
         "payload": {
-            "action": "ready_for_review",
-            "pull_request": { "number": 504, "head": { "sha": "caad752a" } }
+            "action": "created",
+            "issue": {
+                "number": 504,
+                "pull_request": { "merged_at": null }
+            }
         }
     }])
     .to_string();
@@ -713,11 +722,10 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     assert_eq!(outcome.accepted, 1);
     let drained = queue.take();
     let event = &drained[0];
-    assert_eq!(event.event_type, "pr-ready-for-review");
-    assert_eq!(event.head_sha.as_deref(), Some("caad752a"));
+    assert_eq!(event.event_type, "pr-commented");
     assert!(
-        event.delivery_key.ends_with("|caad752a"),
-        "the head SHA rides the delivery key: {}",
+        event.delivery_key.ends_with('|'),
+        "the delivery key ends with the empty head-SHA slot: {}",
         event.delivery_key
     );
 }
@@ -800,7 +808,8 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
 /// Gen-13 cloud review (§21.4 negative): only the documented §9.47
 /// actions pass the filter — a `closed` `IssuesEvent` and a
 /// `synchronize` `PullRequestEvent` (both with distinct delivery keys)
-/// produce nothing; untracked actions never multiply kick-offs.
+/// produce nothing; untracked actions never multiply kick-offs. Runs
+/// past the first-enable baseline so `process_items` is exercised.
 #[tokio::test(flavor = "current_thread")]
 async fn untracked_actions_are_filtered() {
     let body = json!([

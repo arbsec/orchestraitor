@@ -91,12 +91,17 @@ impl IngressStore {
     /// Configures the connection and creates the schema.
     fn init(conn: Connection, path_label: String) -> Result<Self, DaemonError> {
         // Schema migrations for stores created before the ever_baselined
-        // and last_seen_raw_id columns: ALTER TABLE fails harmlessly when
-        // the column exists.
-        let _ignore = conn.execute_batch(
-            "ALTER TABLE ingress_etags ADD COLUMN ever_baselined INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE ingress_etags ADD COLUMN last_seen_raw_id INTEGER NOT NULL DEFAULT 0;",
-        );
+        // and last_seen_raw_id columns: run ONE statement per
+        // execute_batch (execute_batch stops at the first failure, so a
+        // combined batch would leave a partially migrated store); a
+        // duplicate-column failure is expected and discarded, but real
+        // failures (I/O) still surface through the later calls.
+        for migration in [
+            "ALTER TABLE ingress_etags ADD COLUMN ever_baselined INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE ingress_etags ADD COLUMN last_seen_raw_id INTEGER NOT NULL DEFAULT 0;",
+        ] {
+            let _ignore = conn.execute_batch(migration);
+        }
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;

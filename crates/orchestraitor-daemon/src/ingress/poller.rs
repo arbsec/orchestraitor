@@ -96,13 +96,12 @@ fn next_link(link_header: &str) -> Option<String> {
 /// The event types the poll fallback tracks (spec §9.47: new issues,
 /// issue/PR comments, PR ready-for-review). The operator's
 /// `[watch.ingress].enabled` gate selects this fixed set; the names are
-/// the normalized dedup `event_type` values.
-pub const EVENT_TYPES: [&str; 4] = [
-    "issues-opened",
-    "issue-commented",
-    "pr-commented",
-    "pr-ready-for-review",
-];
+/// the normalized dedup `event_type` values. NOTE (gen-19): the
+/// repository events feed does not carry `ready_for_review` (its
+/// `PullRequestEvent` action set lacks it), so `pr-ready-for-review` is
+/// temporarily REMOVED from the filter — it returns when the poller
+/// gains a supported source for it (the issue-events endpoint).
+pub const EVENT_TYPES: [&str; 3] = ["issues-opened", "issue-commented", "pr-commented"];
 
 /// One completed poll request over one endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,9 +237,6 @@ fn normalize_event_type(
         ("IssuesEvent", Some("opened"), false) => Some("issues-opened".to_string()),
         ("IssueCommentEvent", Some("created"), false) => Some("issue-commented".to_string()),
         ("IssueCommentEvent", Some("created"), true) => Some("pr-commented".to_string()),
-        ("PullRequestEvent", Some("ready_for_review"), true) => {
-            Some("pr-ready-for-review".to_string())
-        }
         _ => None,
     }
 }
@@ -546,7 +542,26 @@ impl EventPoller {
                 .iter()
                 .filter_map(|item| item_derived(item, target).map(|derived| derived.delivery_key))
             {
-                let _ignore = store.record_delivery(&key, now_secs);
+                // Propagated: a failed registration would leave the key
+                // unrecorded, so the next delta poll would enqueue it as
+                // a spurious new event (a gen-15 review finding).
+                store
+                    .record_delivery(&key, now_secs)
+                    .map_err(|_| PollError::Failed)?;
+            }
+            // The raw-id boundary covers EVERY item (tracked or not), so
+            // history beyond the baseline never re-enters the chain (a
+            // gen-19 review finding: without it, the second poll's
+            // boundary is unset and the full page cap is walked).
+            for raw_id in items.iter().filter_map(|item| {
+                item.id
+                    .as_ref()
+                    .and_then(value_to_id)
+                    .and_then(|id| id.parse::<u64>().ok())
+            }) {
+                store
+                    .record_max_raw_id(&target.key, raw_id)
+                    .map_err(|_| PollError::Failed)?;
             }
             store
                 .mark_baselined(&target.key)

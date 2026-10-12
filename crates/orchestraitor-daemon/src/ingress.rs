@@ -1,6 +1,8 @@
 //! The §9.47 GitHub event ingress (issue #504): the poll-only fallback
-//! that feeds external GitHub activity (new issues, issue/PR comments,
-//! PR ready-for-review) into the §9.36 kick-off evaluation.
+//! that feeds external GitHub activity (new issues, issue/PR comments)
+//! into the §9.36 kick-off evaluation. PR ready-for-review is planned
+//! but not yet tracked: the repository events feed this poller consumes
+//! does not carry that event.
 //!
 //! - [`poller::EventPoller`] — conditional requests (ETag/304) over the
 //!   REST API, honoring `X-Poll-Interval` and rate-limit feedback

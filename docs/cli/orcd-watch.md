@@ -101,9 +101,11 @@ Notes:
 
 ## Event ingress (§9.47(b), opt-in)
 
-The daemon can consume external GitHub activity — new issues, issue/PR
-comments, PR ready-for-review — as kick-off acceleration, without a human
-translating it into board state. The shipped mechanism is the POLL
+The daemon can consume external GitHub activity — new issues and
+issue/PR comments — as kick-off acceleration, without a human
+translating it into board state. (PR ready-for-review is planned but not
+yet tracked: the repository events feed this poller consumes does not
+carry that event.) The shipped mechanism is the POLL
 fallback only: a conditional-request poller over the GitHub REST API
 (the §9.47(a) Actions push relay stays blocked until Arbitraitor's
 ingress-envelope authentication lands). The §9.43 reconcile poll stays
