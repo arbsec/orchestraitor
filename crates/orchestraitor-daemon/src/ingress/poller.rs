@@ -90,36 +90,46 @@ pub enum PollError {
     Failed,
 }
 
-/// The per-endpoint poll target: repositories sharing one REST
-/// collection (`issues` or `pulls` events) condense into one conditional
-/// request per poll tick — the dedup key keeps per-repo identity.
+/// One repository-scoped poll target: one conditional request per
+/// repository per collection — GitHub's REST event feeds are
+/// repo-scoped (`/repos/{owner}/{name}/{collection}/events`), so the
+/// dedup key and the event's repo field carry exactly one repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PollTarget {
     /// Absolute endpoint URL (for tests, a fixture server base).
     pub url: String,
     /// The ETag-store key for this endpoint.
     pub key: String,
-    /// Repositories whose events this endpoint serves (`owner/name`).
-    pub repos: Vec<String>,
+    /// The single repository this endpoint serves (`owner/name`).
+    pub repo: String,
 }
 
 /// Builds the poll targets for the configured repositories: one
-/// issues-events and one pulls-events endpoint per repo set.
+/// issues-events and one pulls-events endpoint PER REPOSITORY (two
+/// conditional requests per repo per poll round — the §9.43 rate
+/// budgets are per provider instance, and the event feeds are
+/// repo-scoped, so sharing one URL across repositories would poll
+/// nothing and mislabel events).
 #[must_use]
 pub fn poll_targets(repos: &[String], base_url: &str) -> Vec<PollTarget> {
     let base = base_url.trim_end_matches('/');
-    vec![
-        PollTarget {
-            url: format!("{base}/issues/events"),
-            key: "issues-events".to_string(),
-            repos: repos.to_vec(),
-        },
-        PollTarget {
-            url: format!("{base}/pulls/events"),
-            key: "pulls-events".to_string(),
-            repos: repos.to_vec(),
-        },
-    ]
+    repos
+        .iter()
+        .flat_map(|repo| {
+            [
+                PollTarget {
+                    url: format!("{base}/repos/{repo}/issues/events"),
+                    key: format!("{repo}/issues-events"),
+                    repo: repo.clone(),
+                },
+                PollTarget {
+                    url: format!("{base}/repos/{repo}/pulls/events"),
+                    key: format!("{repo}/pulls-events"),
+                    repo: repo.clone(),
+                },
+            ]
+        })
+        .collect()
 }
 
 /// One fixture payload item (the subset of the REST event shape the
@@ -369,7 +379,7 @@ impl EventPoller {
             };
             let delivery_key = IngressStore::delivery_key(
                 &value_to_id(&item.id),
-                &first_repo(target),
+                &target.repo,
                 &event_type,
                 head_sha.as_deref(),
             );
@@ -387,7 +397,7 @@ impl EventPoller {
             }
             let event = IngressEvent {
                 delivery_key,
-                repo: first_repo(target),
+                repo: target.repo.clone(),
                 event_type,
                 head_sha,
                 number,
@@ -461,10 +471,4 @@ fn value_to_id(value: &serde_json::Value) -> String {
         serde_json::Value::String(text) => text.clone(),
         _ => String::new(),
     }
-}
-
-/// The endpoint's primary repository (the first configured); the dedup
-/// key and the event carry it.
-fn first_repo(target: &PollTarget) -> String {
-    target.repos.first().cloned().unwrap_or_default()
 }

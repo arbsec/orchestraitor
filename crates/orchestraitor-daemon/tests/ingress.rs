@@ -124,12 +124,14 @@ impl FixtureServer {
         self.captured.lock().expect("captured lock").clone()
     }
 
-    /// Builds the poll target pointing at this server.
+    /// Builds the poll target pointing at this server (repo-scoped, the
+    /// production shape).
     fn target(&self, key: &'static str, collection: &str) -> PollTarget {
+        let repo = "arbsec/orchestraitor";
         PollTarget {
-            url: format!("{}/{collection}/events", self.base),
-            key: key.to_string(),
-            repos: vec!["arbsec/orchestraitor".to_string()],
+            url: format!("{}/repos/{repo}/{collection}/events", self.base),
+            key: format!("{repo}/{key}"),
+            repo: repo.to_string(),
         }
     }
 }
@@ -236,7 +238,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
     let etag = "\"abc123\"";
     let server = FixtureServer::start(vec![
         Rule {
-            path_needle: "issues/events",
+            path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: None,
             status: 200,
             body: issues_events_body(),
@@ -246,7 +248,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
             ],
         },
         Rule {
-            path_needle: "issues/events",
+            path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: Some(etag.to_string()),
             status: 304,
             body: String::new(),
@@ -307,7 +309,7 @@ async fn conditional_request_sends_stored_etag_on_next_poll() {
 #[tokio::test(flavor = "current_thread")]
 async fn poll_interval_header_is_honored() {
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "issues/events",
+        path_needle: "arbsec/orchestraitor/issues/events",
         requires_etag: None,
         status: 200,
         body: issues_events_body(),
@@ -325,7 +327,9 @@ async fn poll_interval_header_is_honored() {
     assert_eq!(outcome.poll_after_secs, 90);
     let store = store.lock().expect("store lock");
     assert_eq!(
-        store.poll_after_secs("issues-events").expect("read"),
+        store
+            .poll_after_secs("arbsec/orchestraitor/issues-events")
+            .expect("read"),
         90,
         "the advised interval persists in the durable bookkeeping"
     );
@@ -347,14 +351,14 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
         json!([{ "id": "111", "event": "commented", "issue": { "number": 504 } }]).to_string();
     let server = FixtureServer::start(vec![
         Rule {
-            path_needle: "issues/events",
+            path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: None,
             status: 200,
             body: body.clone(),
             headers: vec![("X-Poll-Interval", "60".to_string())],
         },
         Rule {
-            path_needle: "issues/events",
+            path_needle: "arbsec/orchestraitor/issues/events",
             requires_etag: None,
             status: 200,
             body,
@@ -496,7 +500,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
     let now = 1_000_000_u64;
     let reset = now + 120;
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "issues/events",
+        path_needle: "arbsec/orchestraitor/issues/events",
         requires_etag: None,
         status: 403,
         body: String::new(),
@@ -524,7 +528,9 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
     );
     let store = store.lock().expect("store lock");
     assert_eq!(
-        store.poll_after_secs("issues-events").expect("read"),
+        store
+            .poll_after_secs("arbsec/orchestraitor/issues-events")
+            .expect("read"),
         120,
         "the adapted cadence persists for the next poll"
     );
@@ -536,7 +542,7 @@ async fn rate_limit_feedback_adapts_the_cadence_without_widening() {
 async fn retry_after_hint_drives_the_cadence() {
     let now = 1_000_000_u64;
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "pulls/events",
+        path_needle: "arbsec/orchestraitor/pulls/events",
         requires_etag: None,
         status: 429,
         body: String::new(),
@@ -571,7 +577,7 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
     ])
     .to_string();
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "issues/events",
+        path_needle: "arbsec/orchestraitor/issues/events",
         requires_etag: None,
         status: 200,
         body,
@@ -615,7 +621,7 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     }])
     .to_string();
     let server = FixtureServer::start(vec![Rule {
-        path_needle: "pulls/events",
+        path_needle: "arbsec/orchestraitor/pulls/events",
         requires_etag: None,
         status: 200,
         body,
@@ -642,16 +648,40 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     );
 }
 
-/// The poll targets condense the configured repositories into one
-/// issues-events and one pulls-events endpoint (§9.47(b): complete over
-/// the same event filter).
+/// The poll targets are repository-scoped: one issues-events and one
+/// pulls-events endpoint PER repository, each keyed by its own repo
+/// (§9.47(b): complete over the same event filter; the dedup key and
+/// event repo field carry exactly one repository).
 #[test]
-fn poll_targets_cover_both_collections() {
-    let repos = vec!["arbsec/orchestraitor".to_string()];
+fn poll_targets_are_repository_scoped() {
+    let repos = vec![
+        "arbsec/orchestraitor".to_string(),
+        "arbsec/arbitraitor".to_string(),
+    ];
     let targets = poll_targets(&repos, "https://api.github.com/");
-    assert_eq!(targets.len(), 2);
-    assert!(targets[0].url.ends_with("/issues/events"));
-    assert!(targets[1].url.ends_with("/pulls/events"));
-    assert_eq!(targets[0].key, "issues-events");
-    assert_eq!(targets[1].key, "pulls-events");
+    assert_eq!(targets.len(), 4, "two collections per repository");
+    assert!(
+        targets
+            .iter()
+            .all(|t| t.url.starts_with("https://api.github.com/repos/")),
+        "every target is repo-scoped: {:?}",
+        targets.iter().map(|t| &t.url).collect::<Vec<_>>()
+    );
+    for repo in &repos {
+        assert!(
+            targets.iter().any(
+                |t| &t.repo == repo && t.url.ends_with(&format!("/repos/{repo}/issues/events"))
+            ),
+            "an issues-events target exists for {repo}"
+        );
+        assert!(
+            targets.iter().any(|t| &t.repo == repo
+                && t.url.ends_with(&format!("/repos/{repo}/pulls/events"))),
+            "a pulls-events target exists for {repo}"
+        );
+    }
+    assert_eq!(targets[0].key, "arbsec/orchestraitor/issues-events");
+    assert_eq!(targets[1].key, "arbsec/orchestraitor/pulls-events");
+    assert_eq!(targets[2].key, "arbsec/arbitraitor/issues-events");
+    assert_eq!(targets[3].key, "arbsec/arbitraitor/pulls-events");
 }

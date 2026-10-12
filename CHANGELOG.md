@@ -13,11 +13,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
-- **GitHub event ingress for `orcd watch`** (spec §9.47(b)): the
-  poll-only fallback that lets external GitHub activity — new issues,
-  issue/PR comments, PR ready-for-review — kick off the loop without a
-  human translating it into board state. Opt in with the new
-  `[watch.ingress]` layered config block (`enabled`, `queue_capacity`)
+- **GitHub event ingress for `orcd watch`**: the poll-only fallback
+  that lets external GitHub activity — new issues, issue/PR comments,
+  PR ready-for-review — kick off the loop without a human translating
+  it into board state. Opt in with the new `[watch.ingress]` layered
+  config block (`enabled`, `queue_capacity`)
   and arm the kick-off condition with `[watch.kickoff].external_event`.
   The poller issues ETag/304 conditional requests against the
   repositories' issue and PR event feeds, honors the server's
@@ -27,7 +27,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   a 30-day redelivery window — a redelivery never produces a second
   kick-off. The ingress queue is bounded: sustained flooding drops
   surplus and records a `degraded` marker that clears only after a
-  flood-free window. The §9.43 reconcile poll stays the completeness
+  flood-free window. The board reconcile poll stays the completeness
   authority; events only accelerate kick-off. Documented in
   [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-947b-opt-in).
 - **Configurable kick-off conditions for `orcd watch`**: the daemon now
