@@ -62,9 +62,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   issue-style parenthetical refs; spec refs and issue links
                   live in the body. The only allowed title parenthetical is
                   `(re-land of #N)` for supersession. Wrap every identifier,
-                  path, config key, symbol, SHA, and label in inline code
-                  (the primary `Closes #N` line is exempt — it must stay
-                  bare); fenced blocks only for multi-line
+                  path, config key, symbol, SHA, and label in inline code.
+                  Keep the primary reference line bare (`Closes #N` for
+                  full-scope landings or `Refs #N` for partial landings);
+                  fenced blocks only for multi-line
                   commands/config/schemas.
                   Checked checkboxes are verified facts, never aspirations;
                   cite evidence with head SHA + base OID, never claim it.
