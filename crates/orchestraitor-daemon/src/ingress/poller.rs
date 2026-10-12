@@ -298,7 +298,18 @@ impl EventPoller {
                 poll_after_secs: poll_after,
             });
         }
-        if status.as_u16() == 403 || status.as_u16() == 429 {
+        // 429 is always a rate limit; a 403 only when GitHub's
+        // rate-limit headers say so (a plain 403 is permission or auth
+        // failure — surfacing it as "rate-limited" would mislead the
+        // operator, a gen-5 review finding).
+        let limited_403 = status.as_u16() == 403
+            && (response
+                .headers()
+                .get("X-RateLimit-Remaining")
+                .and_then(|v| v.to_str().ok())
+                == Some("0")
+                || response.headers().contains_key("Retry-After"));
+        if status.as_u16() == 429 || limited_403 {
             let wait = Self::rate_limit_wait_secs(response.headers(), now_secs);
             self.record_conditional(&target.key, etag.as_deref(), wait, false)
                 .map_err(|_| PollError::Failed)?;

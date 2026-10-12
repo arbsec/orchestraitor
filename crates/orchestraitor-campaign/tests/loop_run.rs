@@ -2961,9 +2961,10 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     use orchestraitor_campaign::KickoffSettings;
     use std::sync::Mutex;
 
-    struct FixtureSource(Mutex<Vec<String>>);
+    struct FixtureSource(Mutex<Vec<String>>, Arc<std::sync::atomic::AtomicUsize>);
     impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
         fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2975,8 +2976,15 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     // Pass 1: fresh ready work kicks off (the source is consulted and
     // drained — no campaign in flight). Pass 2+: a campaign is in
     // flight with free capacity; the source gains a NEW event that must
-    // SURVIVE the in-flight passes.
-    let source = Arc::new(FixtureSource(Mutex::new(vec!["111".to_string()])));
+    // SURVIVE the in-flight passes. The call counter pins the contract:
+    // pending() must run EXACTLY once (pass 1) — a regression that
+    // consults the source during flight would bump the counter even
+    // though the queue is empty (gen-5 review finding).
+    let pending_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = Arc::new(FixtureSource(
+        Mutex::new(vec!["111".to_string()]),
+        Arc::clone(&pending_calls),
+    ));
     let config = LoopConfig::new(
         WorkerBudgets::bootstrap_defaults(),
         Duration::from_secs(5),
@@ -3016,12 +3024,14 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
         source.0.lock().unwrap().is_empty(),
         "pass 1 drained the (single) event while idle"
     );
-    // No second spawn: the ready sibling is held back only by the
-    // concurrency cap being full (SilentHang occupies the one slot) —
-    // and even when capacity freed, an in-flight pass must not have
-    // consumed events that would never re-trigger. The contract here:
-    // the source is EMPTY (pass 1 drained it) and later passes NEVER
-    // consulted it (there was nothing to drain, and the drain is
-    // skipped while in flight — pinned by the implementation; a
-    // regression would show up as events vanishing while parked).
+    // The exact contract: pending() ran exactly ONCE (the idle first
+    // pass). Every later pass had a campaign in flight and must not
+    // have consulted the source — a regression would bump this counter
+    // even though the queue is empty.
+    assert_eq!(
+        pending_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "pending() ran exactly once (the idle pass); in-flight passes \
+         must never consult the source"
+    );
 }

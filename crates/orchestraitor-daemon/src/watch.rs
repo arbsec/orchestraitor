@@ -216,11 +216,14 @@ impl WatchConfig {
                 Self::resolve_kickoff(resolver)?,
                 Self::resolve_ingress(resolver)?,
             ),
-            None => Ok(Self {
-                poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
-                kickoff: Self::resolve_kickoff(resolver)?,
-                ingress: Self::resolve_ingress(resolver)?,
-            }),
+            // Routed through the same constructor as the configured arm:
+            // the zero-capacity rejection must hold whether or not the
+            // cadence key is present (a gen-5 review finding).
+            None => Self::with_ingress(
+                DEFAULT_POLL_INTERVAL_SECS,
+                Self::resolve_kickoff(resolver)?,
+                Self::resolve_ingress(resolver)?,
+            ),
         }
     }
 

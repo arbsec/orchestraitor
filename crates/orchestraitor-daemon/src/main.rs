@@ -696,11 +696,13 @@ async fn ingress_poll_loop(
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
             changed = shutdown.changed() => {
-                if changed.is_err() {
-                    return; // the sender is gone: the daemon is exiting
-                }
-                // A shutdown signal preempts the wait; loop once more to
-                // observe the channel state (the next select returns).
+                // A shutdown signal — or a closed sender (the daemon is
+                // exiting) — ends the ingress loop at once. Returning
+                // (not looping) also keeps each later signal from
+                // triggering an extra immediate poll round (a gen-5
+                // review finding).
+                let _ = changed;
+                return;
             }
         }
     }
