@@ -9,9 +9,9 @@
 //! reconcile pass reads still describes it.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use crate::ingress::store::IngressEvent;
 
@@ -43,6 +43,9 @@ pub enum PushOutcome {
 /// The bounded §9.47 ingress queue. Shared between the poll task
 /// (producer) and the kick-off source (consumer) behind a mutex; the
 /// clock is injectable for deterministic tests.
+/// The bounded queue's state mutex is a `parking_lot::Mutex`: guards
+/// return directly (no poisoning), the critical sections are short, and
+/// call sites show locking rather than error boilerplate.
 #[derive(Debug)]
 pub struct IngressQueue {
     inner: Mutex<QueueState>,
@@ -84,24 +87,14 @@ impl IngressQueue {
     /// Pushes one already-deduplicated event. At capacity the surplus is
     /// dropped and the `degraded` marker set with `now_secs` (the
     /// caller's clock; injectable for determinism).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::WatchConfig`] when the state mutex is
-    /// poisoned (a panic inside the queue is an internal defect and must
-    /// surface, never silently drop on a broken guard).
-    pub fn push(
-        &self,
-        event: IngressEvent,
-        now_secs: u64,
-    ) -> Result<PushOutcome, crate::error::DaemonError> {
-        let mut state = self.lock()?;
+    pub fn push(&self, event: IngressEvent, now_secs: u64) -> PushOutcome {
+        let mut state = self.inner.lock();
         if state.events.len() >= self.capacity {
             state.degraded_at = Some(now_secs);
-            return Ok(PushOutcome::Dropped);
+            return PushOutcome::Dropped;
         }
         state.events.push_back(event);
-        Ok(PushOutcome::Accepted)
+        PushOutcome::Accepted
     }
 
     /// Peeks every pending event WITHOUT removing them (a gen-6 cloud
@@ -109,27 +102,17 @@ impl IngressQueue {
     /// events before the pass's planner selects; the destructive
     /// [`Self::take`] runs only after selection succeeds). Order is
     /// queue order; consumers must not rely on it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::WatchConfig`] when the state mutex is
-    /// poisoned.
-    pub fn peek(&self) -> Result<Vec<IngressEvent>, crate::error::DaemonError> {
-        let state = self.lock()?;
-        Ok(state.events.iter().cloned().collect())
+    pub fn peek(&self) -> Vec<IngressEvent> {
+        let state = self.inner.lock();
+        state.events.iter().cloned().collect()
     }
 
     /// Drains every pending event (kick-off consumption). The events are
     /// ordering-insensitive input (spec §9.47): drain order is queue
     /// order, and consumers must not rely on it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::WatchConfig`] when the state mutex is
-    /// poisoned.
-    pub fn take(&self) -> Result<Vec<IngressEvent>, crate::error::DaemonError> {
-        let mut state = self.lock()?;
-        Ok(state.events.drain(..).collect())
+    pub fn take(&self) -> Vec<IngressEvent> {
+        let mut state = self.inner.lock();
+        state.events.drain(..).collect()
     }
 
     /// Whether the queue is currently degraded (an overflow happened and
@@ -137,30 +120,17 @@ impl IngressQueue {
     /// the caller's clock. The clear is LAZY: evaluated on read, so the
     /// marker clears on the first read after the quiet window even with
     /// no further traffic — and a fresh overflow re-arms it immediately.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::WatchConfig`] when the state mutex is
-    /// poisoned.
-    pub fn degraded(&self, now_secs: u64) -> Result<bool, crate::error::DaemonError> {
-        let mut state = self.lock()?;
+    #[must_use]
+    pub fn degraded(&self, now_secs: u64) -> bool {
+        let mut state = self.inner.lock();
         match state.degraded_at {
             Some(at) if now_secs.saturating_sub(at) >= DEGRADED_QUIET_WINDOW.as_secs() => {
                 // Flood-free window elapsed: the overflow case clears.
                 state.degraded_at = None;
-                Ok(false)
+                false
             }
-            Some(_) => Ok(true),
-            None => Ok(false),
+            Some(_) => true,
+            None => false,
         }
-    }
-
-    /// Locks the state, mapping poison to a typed error (never
-    /// `blocking_lock` — the queue is touched from async contexts, and a
-    /// poisoned guard is an internal defect the caller must see).
-    fn lock(&self) -> Result<MutexGuard<'_, QueueState>, crate::error::DaemonError> {
-        self.inner.lock().map_err(|_| {
-            crate::error::DaemonError::WatchConfig("ingress queue state poisoned".to_string())
-        })
     }
 }

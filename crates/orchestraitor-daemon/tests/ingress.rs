@@ -376,7 +376,7 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
         .remove(0)
         .expect("first poll ok");
     assert_eq!(first.accepted, 1, "the fresh event is accepted once");
-    assert_eq!(queue.take().expect("drain").len(), 1);
+    assert_eq!(queue.take().len(), 1);
 
     let second = poller
         .poll_all(std::slice::from_ref(&target), 2_000)
@@ -390,7 +390,7 @@ async fn a_redelivered_event_never_produces_a_second_kick_off() {
         "the redelivery deduplicates inside the 30-day window"
     );
     assert!(
-        queue.take().expect("drain").is_empty(),
+        queue.take().is_empty(),
         "the redelivery never reaches the kick-off queue (forbidden effect: \
          a second kick-off for the same delivery)"
     );
@@ -435,42 +435,36 @@ async fn flood_drops_surplus_records_degraded_and_recovers() {
         accepted_at_secs: n,
     };
     // Fill to capacity, then flood.
+    assert_eq!(queue.push(event(1), 1_000), PushOutcome::Accepted);
+    assert_eq!(queue.push(event(2), 1_000), PushOutcome::Accepted);
     assert_eq!(
-        queue.push(event(1), 1_000).expect("push"),
-        PushOutcome::Accepted
-    );
-    assert_eq!(
-        queue.push(event(2), 1_000).expect("push"),
-        PushOutcome::Accepted
-    );
-    assert_eq!(
-        queue.push(event(3), 1_100).expect("push"),
+        queue.push(event(3), 1_100),
         PushOutcome::Dropped,
         "the surplus is dropped at capacity, never queued"
     );
     assert!(
-        queue.degraded(1_100).expect("degraded"),
+        queue.degraded(1_100),
         "the degraded marker is recorded on the overflow"
     );
     assert!(
-        queue.degraded(1_100 + 299).expect("degraded"),
+        queue.degraded(1_100 + 299),
         "still degraded inside the flood-free window"
     );
     // The queue drains (the kick-off consumed the accepted events).
-    let drained = queue.take().expect("drain");
+    let drained = queue.take();
     assert_eq!(drained.len(), 2, "the accepted events survive the flood");
     assert!(
-        queue.degraded(1_100 + 299).expect("degraded"),
+        queue.degraded(1_100 + 299),
         "the marker survives a drain inside the window (only a flood-free \
          window clears it)"
     );
     // The §7.3 forbidden effect — unbounded growth — is structurally
     // impossible: capacity is fixed; assert the bound holds under flood.
     for n in 10..100 {
-        let _ignore = queue.push(event(n), 1_200).expect("push");
+        let _ignore = queue.push(event(n), 1_200);
     }
     assert!(
-        queue.take().expect("drain").len() <= 2,
+        queue.take().len() <= 2,
         "the queue never exceeds its bound under sustained flooding"
     );
     // After the quiet window the marker clears and the queue accepts
@@ -478,15 +472,15 @@ async fn flood_drops_surplus_records_degraded_and_recovers() {
     // on every push past capacity), so the clear is evaluated from the
     // LAST overflow, not the first.
     assert!(
-        queue.degraded(1_200 + 299).expect("degraded"),
+        queue.degraded(1_200 + 299),
         "still degraded inside the re-armed flood-free window"
     );
     assert!(
-        !queue.degraded(1_200 + 300).expect("degraded"),
+        !queue.degraded(1_200 + 300),
         "the degraded marker clears after the flood-free window"
     );
     assert_eq!(
-        queue.push(event(200), 1_200 + 300).expect("push"),
+        queue.push(event(200), 1_200 + 300),
         PushOutcome::Accepted,
         "the queue recovers after the quiet window"
     );
@@ -597,7 +591,7 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
         (0, 0),
         "untracked verbs produce nothing"
     );
-    assert!(queue.take().expect("drain").is_empty());
+    assert!(queue.take().is_empty());
     assert!(
         store
             .lock()
@@ -637,7 +631,7 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
         .remove(0)
         .expect("poll ok");
     assert_eq!(outcome.accepted, 1);
-    let drained = queue.take().expect("drain");
+    let drained = queue.take();
     let event = &drained[0];
     assert_eq!(event.event_type, "pr-ready-for-review");
     assert_eq!(event.head_sha.as_deref(), Some("caad752a"));
@@ -712,7 +706,7 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
         (0, 0, 0),
         "id-less items are skipped, never accepted or deduplicated"
     );
-    assert!(queue.take().expect("drain").is_empty());
+    assert!(queue.take().is_empty());
     assert!(
         store
             .lock()

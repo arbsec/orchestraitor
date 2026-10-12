@@ -4691,6 +4691,7 @@ dependencies = [
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-worker",
+ "parking_lot",
  "reqwest",
  "rusqlite",
  "secrecy",

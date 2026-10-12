@@ -366,17 +366,20 @@ impl EventPoller {
         // Follow the Link-header pagination chain (bounded): the event
         // feed is a paginated collection, and only the first page would
         // otherwise be processed (a gen-6 cloud review finding). The
-        // chain is bounded so a hostile or looping `next` link cannot
-        // spin the poller; items accumulate and dedup runs across ALL
-        // fetched pages before the poll completes.
+        // chain stops at the FIRST page containing an already-seen
+        // delivery key — the feed lists newest-first, so everything
+        // after that page is history the dedup table already judged
+        // (a gen-7 cloud review finding: unbounded historical paging
+        // would re-accept history on first enable and fail when the
+        // history exceeds the page cap). The page cap is a successful
+        // partial poll, never an error: the §9.43 reconcile poll stays
+        // the completeness authority for anything left.
         let mut items: Vec<RestEventItem> = Vec::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut page = Some(response);
         let mut pages = 0_usize;
         while let Some(current) = page {
             pages += 1;
-            if pages > MAX_PAGES_PER_POLL {
-                return Err(PollError::Failed);
-            }
             let link = current
                 .headers()
                 .get(LINK)
@@ -394,7 +397,24 @@ impl EventPoller {
             }
             let mut page_items: Vec<RestEventItem> =
                 serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
+            // Stop when this page adds nothing new: its keys are all
+            // already seen (newest-first ordering makes the page head
+            // the newest entry, so a fully-seen page means the rest is
+            // history).
+            let page_keys: Vec<String> = page_items
+                .iter()
+                .filter_map(|item| item_delivery_key(item, target))
+                .collect();
+            let page_all_seen =
+                !page_keys.is_empty() && page_keys.iter().all(|key| seen_keys.contains(key));
+            seen_keys.extend(page_keys.iter().cloned());
             items.append(&mut page_items);
+            if page_all_seen {
+                break;
+            }
+            if pages >= MAX_PAGES_PER_POLL {
+                break; // successful partial poll; never an error
+            }
             page = match link.as_deref().and_then(next_link) {
                 Some(next) if !next.is_empty() => {
                     let token = self
@@ -501,11 +521,7 @@ impl EventPoller {
                 number,
                 accepted_at_secs: now_secs,
             };
-            match self
-                .queue
-                .push(event, now_secs)
-                .map_err(|_| PollError::Failed)?
-            {
+            match self.queue.push(event, now_secs) {
                 PushOutcome::Accepted => accepted += 1,
                 PushOutcome::Duplicate => duplicates += 1, // unreachable via this path; kept for exhaustiveness
                 PushOutcome::Dropped => dropped += 1,
@@ -559,6 +575,28 @@ impl EventPoller {
 }
 
 use reqwest::header::ETAG;
+
+/// The item's full delivery key (None when the item would be filtered
+/// or skipped later — it never enters the seen set).
+fn item_delivery_key(item: &RestEventItem, target: &PollTarget) -> Option<String> {
+    let is_pull = item.pull_request.is_some();
+    let event_type = normalize_event_type(&item.event, is_pull)?;
+    let delivery_id = item.id.as_ref().and_then(value_to_id)?;
+    let head_sha = if is_pull {
+        item.pull_request
+            .as_ref()
+            .and_then(|pr| pr.head.as_ref())
+            .and_then(|head| head.sha.clone())
+    } else {
+        None
+    };
+    Some(IngressStore::delivery_key(
+        &delivery_id,
+        &target.repo,
+        &event_type,
+        head_sha.as_deref(),
+    ))
+}
 
 /// Extracts the delivery identifier from the REST item's `id` field
 /// (number or non-empty string on the wire); a missing, empty, or

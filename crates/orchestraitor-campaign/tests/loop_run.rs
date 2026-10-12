@@ -2753,6 +2753,13 @@ async fn an_attached_event_source_kicks_off_when_armed() {
     struct FixtureSource(Mutex<Vec<String>>);
     impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
         fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let queue = self.0.lock().unwrap();
+            queue
+                .iter()
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+                .collect()
+        }
+        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2822,6 +2829,13 @@ async fn a_disarmed_condition_never_drains_the_event_source() {
     struct FixtureSource(Mutex<Vec<String>>);
     impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
         fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let queue = self.0.lock().unwrap();
+            queue
+                .iter()
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+                .collect()
+        }
+        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2885,6 +2899,13 @@ async fn an_external_event_alone_kicks_off() {
     struct FixtureSource(Mutex<Vec<String>>);
     impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
         fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let queue = self.0.lock().unwrap();
+            queue
+                .iter()
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+                .collect()
+        }
+        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)
@@ -2965,6 +2986,13 @@ async fn events_are_not_drained_while_a_campaign_is_in_flight() {
     impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
         fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let queue = self.0.lock().unwrap();
+            queue
+                .iter()
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id: id.clone() })
+                .collect()
+        }
+        fn drain_pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
             let mut queue = self.0.lock().unwrap();
             queue
                 .drain(..)

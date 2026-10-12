@@ -47,6 +47,10 @@ orchestraitor-worker = { path = "../orchestraitor-worker" }
 # HTTP client (issue #504); the same transport stack the board client
 # uses, already in the workspace lock.
 reqwest = { workspace = true }
+# parking_lot (MIT OR Apache-2.0): guard-returning mutexes for the
+# ingress queue's short critical sections — no poisoning boilerplate at
+# the call sites.
+parking_lot = { workspace = true }
 rusqlite = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
