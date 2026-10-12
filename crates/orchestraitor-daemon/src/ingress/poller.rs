@@ -53,6 +53,19 @@ const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 /// up to 100 events each is far beyond any plausible poll delta).
 const MAX_PAGES_PER_POLL: usize = 10;
 
+/// Whether `next` carries the same scheme, host, and effective port as
+/// `base` (the bearer token must never leave the configured origin).
+fn same_origin(next: &str, base: &str) -> bool {
+    match (reqwest::Url::parse(next), reqwest::Url::parse(base)) {
+        (Ok(n), Ok(b)) => {
+            n.scheme() == b.scheme()
+                && n.host_str() == b.host_str()
+                && n.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
+    }
+}
+
 /// Parses the `rel="next"` URL out of an RFC 5987 `Link` header value.
 fn next_link(link_header: &str) -> Option<String> {
     for part in link_header.split(',') {
@@ -484,7 +497,10 @@ impl EventPoller {
                 break; // successful partial poll; never an error
             }
             page = match link.as_deref().and_then(next_link) {
-                Some(next) if !next.is_empty() => {
+                // Same-origin only: a `Link` header can point anywhere;
+                // the bearer token must never go to another host or a
+                // downgrade to plain HTTP (a gen-15 review finding).
+                Some(next) if !next.is_empty() && same_origin(&next, &target.url) => {
                     let token = self
                         .auth
                         .bearer_token()
@@ -736,12 +752,7 @@ fn item_delivery_key_with_number(
             .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
     }?;
     Some((
-        IngressStore::delivery_key(
-            &delivery_id,
-            &target.repo,
-            &event_type,
-            head_sha.as_deref(),
-        ),
+        IngressStore::delivery_key(&delivery_id, &target.repo, &event_type, head_sha.as_deref()),
         number,
     ))
 }

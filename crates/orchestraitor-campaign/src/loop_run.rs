@@ -1576,7 +1576,9 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         // way the event must not re-arm on later passes (a gen-11 review
         // finding); events that arrived after the peek stay pending (a
         // gen-7 cloud review finding — the drain is selective).
-        if !peeked_ids.is_empty() && let Some(source) = &self.event_source {
+        if !peeked_ids.is_empty()
+            && let Some(source) = &self.event_source
+        {
             let _ignore = source.drain_pending(&peeked_ids);
         }
         if let Some(selected) = selected {
