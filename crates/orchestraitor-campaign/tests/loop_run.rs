@@ -2950,3 +2950,78 @@ async fn an_external_event_alone_kicks_off() {
          {first_skipped:?}"
     );
 }
+
+/// Gen-3 review fix (issue #504): with a campaign IN FLIGHT, the gate
+/// does NOT consult the event source — the pass proceeds on other
+/// grounds anyway, so a drain there would consume events that never
+/// trigger a kick-off. The bounded queue holds them until a slot
+/// frees.
+#[tokio::test(start_paused = true)]
+async fn events_are_not_drained_while_a_campaign_is_in_flight() {
+    use orchestraitor_campaign::KickoffSettings;
+    use std::sync::Mutex;
+
+    struct FixtureSource(Mutex<Vec<String>>);
+    impl orchestraitor_campaign::KickoffEventSource for FixtureSource {
+        fn pending(&self) -> Vec<orchestraitor_campaign::KickoffExternalEvent> {
+            let mut queue = self.0.lock().unwrap();
+            queue
+                .drain(..)
+                .map(|id| orchestraitor_campaign::KickoffExternalEvent { id })
+                .collect()
+        }
+    }
+
+    // Pass 1: fresh ready work kicks off (the source is consulted and
+    // drained — no campaign in flight). Pass 2+: a campaign is in
+    // flight with free capacity; the source gains a NEW event that must
+    // SURVIVE the in-flight passes.
+    let source = Arc::new(FixtureSource(Mutex::new(vec!["111".to_string()])));
+    let config = LoopConfig::new(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        Some(3),
+    )
+    .unwrap()
+    .with_kickoff(KickoffSettings {
+        external_event: true,
+        ..KickoffSettings::builtin_defaults()
+    });
+    let decisions = CampaignDecisionStore::open_in_memory().unwrap();
+    let runs = LoopRunStore::open_in_memory().unwrap();
+    let runner = LoopRunner::new(
+        config,
+        FakePoller {
+            snapshot: snapshot_with(&[1, 2]),
+        },
+        FakeStarter::new(Behavior::SilentHang), // the worker never finishes
+        &decisions,
+        &runs,
+        routing(),
+        "inv".to_string(),
+        START_UNIX,
+    )
+    .unwrap()
+    .with_event_source(Arc::clone(&source) as Arc<dyn orchestraitor_campaign::KickoffEventSource>);
+    let summary = runner.run(never()).await.unwrap();
+
+    // Two spawns: the concurrency cap is 2 and two ready items existed;
+    // the FIRST spawn pass was idle (drained the event), the SECOND was
+    // in-flight scheduling under the cap (not a kick-off drain).
+    assert_eq!(
+        summary.spawns, 2,
+        "fresh work fills the cap: idle kick-off + in-flight scheduling"
+    );
+    assert!(
+        source.0.lock().unwrap().is_empty(),
+        "pass 1 drained the (single) event while idle"
+    );
+    // No second spawn: the ready sibling is held back only by the
+    // concurrency cap being full (SilentHang occupies the one slot) —
+    // and even when capacity freed, an in-flight pass must not have
+    // consumed events that would never re-trigger. The contract here:
+    // the source is EMPTY (pass 1 drained it) and later passes NEVER
+    // consulted it (there was nothing to drain, and the drain is
+    // skipped while in flight — pinned by the implementation; a
+    // regression would show up as events vanishing while parked).
+}

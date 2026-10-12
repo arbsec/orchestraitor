@@ -1401,6 +1401,20 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         excluded: &HashSet<String>,
     ) -> KickoffGate {
         let campaign_in_flight = !self.slots.is_empty();
+        // The §9.47 source (issue #504): drained ONLY when the operator
+        // armed the external-event condition AND no campaign is in
+        // flight — when a campaign IS in flight the gate proceeds on
+        // other grounds anyway, so draining there would consume events
+        // that never trigger a kick-off (a gen-3 review finding: the
+        // acceleration is lost without a record). The bounded queue
+        // holds the events until a slot frees; the queue's own §7.3
+        // bound (drop + `degraded`) covers sustained flooding while
+        // parked, and the §9.43 reconcile poll stays the completeness
+        // authority.
+        let external_events = match (&self.event_source, self.config.kickoff.external_event) {
+            (Some(source), true) if !campaign_in_flight => source.pending(),
+            _ => Vec::new(),
+        };
         let observation = KickoffObservation {
             ready_ids: snapshot
                 .ready
@@ -1412,17 +1426,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             previous_blocked_ids: std::mem::take(&mut self.previous_blocked_ids),
             slot_released: std::mem::take(&mut self.slot_released_since_pass),
             budget_window_reset: self.budget_window_reset(now),
-            // The §9.47 source (issue #504): drained only when the
-            // operator armed the external-event condition; unset or
-            // disarmed keeps the shipped empty behavior. Events drained
-            // on a SKIPPED pass are still consumed — the §9.47 queue is
-            // ordering-insensitive kick-off acceleration, never a state
-            // authority, and the §9.43 reconcile poll remains the
-            // completeness authority.
-            external_events: match (&self.event_source, self.config.kickoff.external_event) {
-                (Some(source), true) => source.pending(),
-                _ => Vec::new(),
-            },
+            external_events,
         };
         let verdict = crate::kickoff::evaluate(&self.config.kickoff, &observation);
         // The previous pass's queues feed the NEXT pass's evaluation;
