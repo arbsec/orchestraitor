@@ -42,7 +42,24 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 1. DRAFT          Create the PR as DRAFT linked to the leaf issue (Closes #N) and spec
                   references with `pr-create` (routes `gh pr create` through
                   `orc_lib_gh_service`; never call `gh pr create` directly).
-                  The managed checklist (<!-- orc:* --> markers) starts
+                  The body follows `.github/PULL_REQUEST_TEMPLATE.md`
+                  (Summary, exactly ONE primary `Closes #N` on its own line
+                  early in the body — bare `#N` mentions are invisible to
+                  auto-close and `pr-labels-from-issue`, Specification
+                  references, Change, Design summary, Test evidence, Review
+                  convergence, Gates). Titles are plain Conventional Commits
+                  `type(scope): description`, ASCII only (no section signs,
+                  em/en dashes, arrows, or smart quotes — use hyphens, `->`,
+                  straight quotes, or rephrase), never spec-section or
+                  issue-style parenthetical refs; spec refs and issue links
+                  live in the body. The only allowed title parenthetical is
+                  `(re-land of #N)` for supersession. Wrap every identifier,
+                  path, config key, symbol, SHA, and label in inline code;
+                  fenced blocks only for multi-line commands/config/schemas.
+                  Checked checkboxes are verified facts, never aspirations;
+                  cite evidence with head SHA + base OID, never claim it.
+                  Internal dev notes never go in the CHANGELOG — body or
+                  skill docs only. The managed checklist (<!-- orc:* --> markers) starts
                   unchecked — checkboxes are verified facts, not intentions.
                   Labeling is AUTOMATIC at creation: `pr-create` chains
                   `pr-labels` (attribution: `agent-created` for the

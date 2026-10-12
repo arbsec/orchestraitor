@@ -7,48 +7,66 @@
 
 ## Summary
 
-<!-- What does this PR do and why? One paragraph. -->
+<!-- 1-3 sentences: what this PR does and why. No code blocks. -->
 
-## Linked issue
+## Closes
 
-<!-- Closes #N, Refs #N. The linked issue must carry Target = MVP, Status = Ready, and no
-     unresolved blockers before this PR may merge (workflow policy). -->
+<!-- Exactly ONE primary closing keyword on its own line, early in the body
+     (Closes #N / Fixes #N / Resolves #N). Bare #N mentions are invisible to
+     auto-close and to pr-labels-from-issue. For partial landings, scope it
+     inline, e.g. `Closes #469 (worker path; loop path remains tracked in #N)`. -->
 
 ## Specification references
 
-<!-- docs/spec/<document>.md §N and/or docs/spec/tech-stack.md §N that this change implements
-     (legacy § numbers resolve via docs/spec/spec.md). Every implementation PR traces to a spec
-     requirement (AGENTS.md). -->
+<!-- docs/spec/<document>.md sections and/or docs/spec/tech-stack.md sections
+     that this change implements (legacy section numbers resolve via
+     docs/spec/spec.md). NEVER in the title. Format as a table (File | Change)
+     or a linked list. The PR title is plain Conventional Commits
+     `type(scope): description`, ASCII only (no section signs, em/en dashes,
+     arrows, or smart quotes) with no parenthetical issue/spec refs; the only
+     allowed parenthetical is `(re-land of #N)`. -->
 
-## Change summary
+| File | Change |
+|---|---|
 
-<!-- Bullet list of the concrete changes, sufficiently detailed for a reviewer on a fresh
-     context to follow without re-deriving the diff. -->
+## Change
 
-## Security impact
+<!-- Bullet list; wrap every identifier, path, config key, symbol, SHA, and
+     label in inline code so a fresh-context reviewer can follow the diff
+     without re-deriving it. -->
 
-<!-- Required. Describe any security implications. Orchestraitor implements NO security
-     primitive (spec §2.2, §16) — if this change needs new security behavior, it is blocked on
-     an Arbitraitor issue/PR; link it here. -->
+-
 
-- [ ] No security impact
-- [ ] Arbitraitor integration boundary touched (requires security-owner review)
-- [ ] Security-sensitive path changed — requires human review before release (spec §21.1)
-- [ ] Blocked on an Arbitraitor issue/PR: <!-- link it -->
+## Design summary
+
+<!-- Features and design-changing spec PRs only; omit for small fixes. -->
+<!-- Bullets, not a prose wall (each bullet roughly 60 words or fewer).
+     Rejected alternatives: one sentence each. -->
+
+-
 
 ## Test evidence
 
-<!-- What tests were added/updated? For security-sensitive behavior, include negative and
-     adversarial tests asserting the forbidden effect did not occur (spec §21.4). -->
+<!-- Named tests as checkbox items, each with a one-clause assertion. A
+     checked box is a verified fact at the time of writing, never aspirational.
+     Security-sensitive PRs include negative/adversarial test names. -->
 
-- [ ] Unit tests added/updated
-- [ ] Property tests added where applicable
-- [ ] Negative/adversarial tests for security-sensitive behavior
-- [ ] Regression test added for any defect found during this work
+- [ ]
+
+## Review convergence
+
+<!-- Reviewed feature PRs only; omit for small fixes. Cite zero-findings
+     generations with BOTH anchors: the reviewed head SHA and the base OID. -->
+
+| Gen | Head | Findings | Remediation |
+|---|---|---|---|
+
+## Gates
+
+<!-- For any PR with CI: the exact commands run and their results. Attribute
+     pre-existing environmental failures (reproduced on clean origin/main). -->
 
 ## Documentation impact
-
-<!-- Any change to public behavior updates human-facing docs in the same PR (spec §9.33). Generated API docs alone do not count. -->
 
 - [ ] No public-behavior change
 - [ ] Public behavior changed — docs updated (README, CLI/config reference, CHANGELOG)
