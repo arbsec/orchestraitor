@@ -1434,8 +1434,8 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
             slot_released: std::mem::take(&mut self.slot_released_since_pass),
             budget_window_reset: self.budget_window_reset(now),
             // The verdict sees the PEEKED events; the durable drain
-            // happens only when the pass selects a task (see
-            // `plan_and_spawn`).
+            // (exactly these ids) runs after EVERY pass that plans —
+            // selection or typed no-op (see `plan_and_spawn`).
             external_events: peeked_events.clone(),
         };
         let verdict = crate::kickoff::evaluate(&self.config.kickoff, &observation);

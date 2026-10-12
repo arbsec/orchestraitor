@@ -608,27 +608,53 @@ async fn retry_after_hint_drives_the_cadence() {
 
 /// The event filter: untracked platform event types never reach the
 /// dedup table or the queue (the operator's filter is the fixed §9.47
-/// set); runs past the first-enable baseline so `process_items` is
-/// exercised.
+/// set); a baseline poll first, then a delta with HIGHER raw ids, so
+/// `process_items` is exercised past the baseline.
 #[tokio::test(flavor = "current_thread")]
 async fn untracked_event_verbs_are_filtered_before_dedup() {
+    // Baseline (id 100) then delta (ids 200/201, untracked types only).
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
     let body = json!([
-        { "id": "333", "type": "AssignedEvent", "payload": { "issue": { "number": 1 } } },
-        { "id": "444", "type": "ClosedEvent", "payload": { "issue": { "number": 2 } } }
+        { "id": "200", "type": "AssignedEvent", "payload": { "issue": { "number": 1 } } },
+        { "id": "201", "type": "ClosedEvent", "payload": { "issue": { "number": 2 } } }
     ])
     .to_string();
-    let server = FixtureServer::start(vec![Rule {
-        path_needle: "arbsec/orchestraitor/events",
-        requires_etag: None,
-        status: 200,
-        body,
-        headers: vec![("X-Poll-Interval", "60".to_string())],
-    }])
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
     .await;
     let (queue, store, poller) = fixture_ingress();
     let target = server.target("events", "events");
-    let outcome = poller
+    let baseline = poller
         .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("baseline poll ok");
+    assert_eq!(baseline.accepted, 0, "the baseline enqueues nothing");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
         .await
         .expect("poll round")
         .remove(0)
@@ -636,7 +662,7 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
     assert_eq!(
         (outcome.accepted, outcome.duplicates),
         (0, 0),
-        "untracked verbs produce nothing"
+        "untracked event types produce nothing on the delta poll"
     );
     assert!(queue.take().is_empty());
     assert!(
