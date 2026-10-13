@@ -71,7 +71,7 @@ Concretely:
   still satisfy both checks) — extending the test to assert the canonical
   identifier set is recorded as a follow-up, not part of this ADR.
 - The `ControlStatus::from(ControlState)` mapping
-  (`capability.rs:431`) is `match`-exhaustive over the three
+  (`capability.rs:64`) is `match`-exhaustive over the three
   `ControlState` variants — adding a fourth `ControlState` is a
   compile-time error here, not a silent default.
 
@@ -135,6 +135,8 @@ Concretely:
 
 ## References
 
+- `crates/orchestraitor-daemon/src/capability.rs:64` — `ControlState`
+  to `ControlStatus` conversion (`From<ControlState> for ControlStatus`).
 - `crates/orchestraitor-daemon/src/capability.rs:191` —
   `required_capabilities_from`, the seven-entry translation.
 - `crates/orchestraitor-daemon/src/capability.rs:431` — test section

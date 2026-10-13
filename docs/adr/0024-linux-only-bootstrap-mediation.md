@@ -53,9 +53,15 @@ Concretely:
 - `crates/orchestraitor-arb-client/src/mediation.rs:84` declares
   `pub const WORKER_PLATFORM: &str = "linux";` as the single source of
   truth for the platform name consumed by the preflight.
-- `MediatedWorker::spawn` performs the Arbitraitor preflight and gates on
-  the platform string before any execution surface exists — no child
-  process, no temporary execution directory, no run-state row.
+- `MediatedWorker::spawn` first gates on the platform string
+  (`mediation.rs:431` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
+  — `UnsupportedPlatform` is returned before Arbitraitor is probed at all.
+  On a supported platform, `spawn` then performs the Arbitraitor preflight
+  and `gate_preflight` (mediation.rs:438-439) before any execution surface
+  exists — no child process, no temporary execution directory, no
+  run-state row. The `gate_preflight` inner platform check
+  (`is_supported_platform`, mediation.rs:282) is a defense-in-depth second
+  gate, not the first refusal path readers encounter.
 - `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:146`)
   is the typed refusal; its `Display` impl explicitly cites
   "ADR-0024 fails closed; no non-secure mode" so the diagnostic anchors
