@@ -463,6 +463,8 @@ Preferred design:
 
 Provider traffic may be handled by the trusted daemon instead of the worker in direct-provider mode.
 
+**Web tools example (§9.19/§9.19.8).** The built-in `web_search`/`web_fetch` tools (spec `20-harness-worker.md` §9.19/§9.19.8) are the first consumers of mediated daemon-side egress: a single-host, GET-only, domain+method+path-scoped grant per configured engine (hostname + port + method `GET` + path, response content-type bound, size bound, per-request receipt). Until the mediated HTTP egress capability for daemon-owned tools lands in Arbitraitor (arbsec/arbitraitor#797), these tools fail closed at startup with a typed error naming the missing capability. Scope note: v1 is GET-only — POST/request bodies are deliberately out of scope in line with Arbitraitor's upload invariants (Arbitraitor §39.7 + §9 invariants 9/24) and its caller-origin rule (Arbitraitor §23.1.1).
+
 ### 9.13 Arbitraitor secret enforcement
 
 Arbitraitor owns secret capability policy, credential release, and enforcement. The preferred design is capability use without secret disclosure.
@@ -472,6 +474,7 @@ Examples:
 - GitHub push through a broker that injects a scoped token
 - Package-registry download through a proxy
 - Cloud API call through a signed request broker
+- Web-tool engine credential header (§9.19/§9.19.8): a `SecretGrant` binding a secret reference to the mediated-egress capability so the search-engine API key is injected broker-side and never enters Orchestraitor memory (Arbitraitor §39.15 secret references; ADR-0033 receipts record the credential class, never the value). Needed only when credential-header engines (Kagi, Exa) are enabled.
 - Provider request executed by the trusted daemon
 - Temporary SSH certificates rather than long-lived private keys
 
@@ -648,6 +651,8 @@ When Orchestraitor needs a missing security capability:
 7. Add only the Orchestraitor integration, UI, and workflow after the Arbitraitor capability exists.
 
 A security-sensitive prototype may not bypass this process by placing a temporary implementation in Orchestraitor. Until Arbitraitor supports the capability, the associated Orchestraitor feature remains blocked, experimental in an explicitly non-secure mode, or out of scope.
+
+**Open gap: mediated HTTP egress for agent web tools (GET-only v1).** The built-in `web_search`/`web_fetch` tools (spec `20-harness-worker.md` §9.19/§9.19.8) are blocked on the mediated HTTP egress capability tracked in [arbsec/arbitraitor#797](https://github.com/arbsec/arbitraitor/issues/797): a daemon-side, policy-allowlisted, domain+method+path-scoped HTTP GET operation class with HTTPS-only default and cert rejection (Arbitraitor §11.2), DNS-rebind/private-address blocking (ADR-0018), response bounds, one receipt per request (Arbitraitor §31.2/§11.5, ADR-0023/ADR-0039), and optional secret-reference-bound header injection (Arbitraitor §39.15, ADR-0033). POST/request bodies are out of v1 per Arbitraitor's upload invariants (Arbitraitor §39.7; §9 invariants 9/24; caller-origin rule Arbitraitor §23.1.1). Until #797 is released and pinned, both tools fail closed at startup with a typed error naming the missing capability (step 7 above; §6.7).
 
 ### 16.3 Dependency direction
 

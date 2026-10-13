@@ -85,6 +85,7 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.18.4 | `20-harness-worker.md#918-project-initialization-and-configuration-interoperability` |
 | §9.18.5 | `20-harness-worker.md#918-project-initialization-and-configuration-interoperability` |
 | §9.19 | `30-model-routing.md#919-agent-catalog-domain-routing-and-cost-ledger` |
+| §9.19.8 | `20-harness-worker.md#919-web-search-and-page-fetch` |
 | §9.19.1 | `30-model-routing.md#9191-domains-roles-and-the-generic-fallback` |
 | §9.19.2 | `30-model-routing.md#9192-per-domain-and-per-role-model-routing` |
 | §9.19.3 | `30-model-routing.md#9193-agent-manifest` |
