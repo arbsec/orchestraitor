@@ -109,7 +109,12 @@ The loop's first concrete surfaces ship today:
 - [`orc config`](docs/cli/orc-init.md) — configuration inspection, validation, diff, and
   forward-only migration.
 - [`orc github mint-token`](docs/cli/orc-github.md) — GitHub App installation-token minting
-  (non-secret metadata only).
+  (non-secret metadata only). The full `orc github` surface (seven subcommands total: `mint-token`,
+  `api`, `gh-env`, `gh-env-pr-create-chain`, `commit-author`, `push-branch`, `verify-identity`)
+  is documented in [`docs/cli/orc-github.md`](docs/cli/orc-github.md).
+- [`orc stats efficiency`](docs/cli/orc-stats.md) — per-session / per-profile token-efficiency
+  rollups over the cost ledger (spec §13.5.1; `--group-by-profile` is the A/B mechanism for the
+  token-saving features; #565).
 - [`orc board query`](docs/cli/orc-board.md) — the read-only `board.query` coordinator
   decision tool (#458): typed filter search plus a transitive blocked-graph walk with cycle
   detection. In this slice it reads a deterministic in-memory fixture board; the live
@@ -127,7 +132,12 @@ The loop's first concrete surfaces ship today:
 
 The cron-shaped `orc loop` runner and the always-on `orcd watch` daemon
 (§9.36 thin slice, #503) ship today — see
-[docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
+[docs/cli/orcd-watch.md](docs/cli/orcd-watch.md). The daemon's kick-off conditions
+are operator-configurable through the new `[watch.kickoff]` layered block
+(new eligible work, unblocked promotion, slot released, budget-window reset,
+external event; #573), and the §9.47(b) opt-in GitHub event ingress feeds
+the `external_event` condition through the new `[watch.ingress]` block
+(`enabled`, `queue_capacity`; #575).
 
 > **This software is not production-ready.** Security claims in the specification describe the
 > intended design, not a shipped guarantee. Do not rely on Orchestraitor for isolation until a
@@ -147,8 +157,11 @@ The cron-shaped `orc loop` runner and the always-on `orcd watch` daemon
   normalize, verify, review a compact diff, atomically promote or roll back (spec `20-harness-worker.md` §9.5, `40-arbitraitor-integration.md` §9.14).
 - **Opinionated by default, customizable by design, never mysterious about active config**
   (spec `50-contracts-data.md` §9.22.11).
-- **Incremental adoption.** `orc observe` → `orc wrap` → `orc connect` → native; reversible,
-  with `orc disconnect` restoring prior state in under 30 seconds (spec `20-harness-worker.md` §9.18.2, `60-milestones.md` MVP-2).
+- **Incremental adoption (planned, not yet shipped).** `orc observe` → `orc wrap` → `orc connect`
+  → native is the intended harness-adoption path; reversible via `orc disconnect` in under 30
+  seconds (spec `20-harness-worker.md` §9.18.2, `60-milestones.md` MVP-2). None of these four
+  subcommands are exposed today — they are not in `crates/orchestraitor-cli/src/cli.rs:82-141`
+  and are marked here as future work.
 
 ## Specifications
 
@@ -178,7 +191,29 @@ The cron-shaped `orc loop` runner and the always-on `orcd watch` daemon
 - [`orc loop`](docs/cli/orc-loop.md) — the cron-shaped foreground bootstrap loop: poll
   the board, run one campaign pass, supervise in-flight workers, repeat — under the
   minimal guard set (concurrency cap, stall kill, worker timeout, backoff, spend soft
-  cap, run budget; spec `10-orchestrator.md` §9.36 thin slice, issue #314).
+  cap, run budget; spec `10-orchestrator.md` §9.36 thin slice, issue #314). Anti-stuck
+  guardrails (`tool-loop-churn`, `no-progress`, `ci-poll-budget`; spec §9.27.1, #528) ship
+  default-on. Per-agent cost attribution (spec §9.19.4; #502) emits `agent_costs` rollups
+  per board task in the run summary.
+- [`orc routing resolve`](docs/cli/orc-routing.md) — role routing over the six built-in
+  orchestration roles, custom roles, and the default-off `DecisionProvider` fixture (and
+  `systemone` System One decision protocol; #526).
+- [`orc github`](docs/cli/orc-github.md) — the seven-subcommand service-identity surface
+  (`mint-token`, `api`, `gh-env`, `gh-env-pr-create-chain`, `commit-author`, `push-branch`,
+  `verify-identity`; #307, #460, #491, #498, #499, #520, #572, #577). The `push-branch`
+  path is the App-signed landing path required by `required_signatures` rulesets;
+  `verify-identity` is the Rust twin of the `commit-identity` skill script.
+- [`orc stats efficiency`](docs/cli/orc-stats.md) — token-efficiency statistics over the
+  cost ledger (spec §13.5.1; per-session rollups; `--group-by-profile` A/B comparison;
+  #565).
+- [`orcd watch`](docs/cli/orcd-watch.md) — the daemon's always-on running mode (spec §9.36
+  thin slice; #503): same poll/supervise cycle as `orc loop`, with operator-configurable
+  kick-off conditions (`[watch.kickoff]`; #573) and an opt-in GitHub event ingress
+  (`[watch.ingress]`; #575) feeding the `external_event` condition.
+- [`decision.record`](docs/cli/orc-decision-record.md) — the MCP-gateway coordinator
+  decision tool (not a CLI subcommand): persists one append-only, replayable §9.35
+  decision record into the campaign store (#334). The CLI equivalent is
+  `orc campaign run --once`.
 - [`orc simplify`](docs/cli/orc-simplify.md) — the rule-driven pre-landing simplify
   pass: cargo clippy / cargo fmt / rumdl / cargo-machete rendered as typed §9.5
   suggestions (Format / Safe fix / Semantic), fail-open, never a blocker.
@@ -195,6 +230,7 @@ The `orc` binary also exposes the configuration inspection and migration command
 spec `50-contracts-data.md` §9.22.3 and §9.22.8:
 
 ```sh
+orc init [--dry-run] [--project <path>]
 orc config get <key>
 orc config explain <key>
 orc config set <key> <value> [--layer=project|user|org|dir]
@@ -205,11 +241,22 @@ orc config migrate
 orc models refresh
 orc models rollback
 orc github mint-token
+orc github api <METHOD> <path> [--input <file>|-] [--field <key>=<value>]...
+orc github gh-env -- <child argv...>
+orc github gh-env-pr-create-chain <owner/name> -- <gh pr create argv...>
+orc github commit-author
+orc github push-branch [--branch <name>] [--remote-branch <name>] [--base <ref>] --message <headline> [--body-file <file>|-] [--owner <owner>] [--repo <name>] [--re-land] [--dry-run]
+orc github verify-identity [<path>]
 orc routing resolve --role <id> [--json]
-orc campaign run --once [--json]
+orc board ready [--json]
+orc board move <issue-number> --status "<Status option name>"
 orc board query [--blocked-by <item-id> | [--item-type <type>] [--status <name>] [--field <name>=<option>]...] [--json]
 orc board guarded-move <item-id> --status "<Status option name>" --session <session-label> [--json]
-orc loop --max-cycles N [--json]
+orc worker run --task <id> [--json]
+orc campaign run --once [--json]
+orc loop [--json] [--max-cycles N]
+orc stats efficiency [--group-by-profile] [--json]
+orc simplify run [--staged] [--path <PATH>...] [--fix none|format|safe] [--pedantic-check] [--json]
 ```
 
 The last line lands with #434; `orc board query` shipped with #458 (fixture board;
