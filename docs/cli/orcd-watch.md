@@ -66,7 +66,7 @@ new_eligible_work = true      # ready-queue work the previous pass did not see r
 unblocked_promotion = true    # a blocked task became unblocked (§9.40 promotion)
 slot_released = true          # a lease or worker slot was released
 budget_window_reset = true    # a per-day budget window reset (§9.19.6)
-external_event = false        # an external GitHub event arrived (§9.47)
+external_event = false        # an external GitHub event arrived (§9.50)
 ```
 
 Notes:
@@ -74,7 +74,7 @@ Notes:
 - An absent `[watch.kickoff]` block (or absent key) inherits the built-in
   default shown above. Any higher layer (user, org, project, directory)
   overrides any key.
-- `external_event` ships **disarmed**: the §9.47 GitHub event ingress is
+- `external_event` ships **disarmed**: the §9.50 GitHub event ingress is
   opt-in (`[watch.ingress].enabled`, below). With the ingress disabled
   the condition can never fire. Arm it only together with the ingress.
 - **Disabling every condition yields an idle-but-healthy daemon**: the
@@ -99,15 +99,17 @@ Notes:
   gates starting a session from idle, not the in-flight session's own
   spawn decisions.
 
-## Event ingress (§9.47(b), opt-in)
+## Event ingress (§9.50(b), opt-in)
 
 The daemon can consume external GitHub activity — new issues and
-issue/PR comments — as kick-off acceleration, without a human
-translating it into board state. (PR ready-for-review is planned but not
-yet tracked: the repository events feed this poller consumes does not
-carry that event.) The shipped mechanism is the POLL
+issue/PR comments, plus CI completions (check-run and workflow-run
+completions for head SHAs the daemon actively tracks, below) — as
+kick-off acceleration, without a human translating it into board state.
+(PR ready-for-review is planned but not yet tracked: the repository
+events feed this poller consumes does not carry that event.) The shipped
+mechanism is the POLL
 fallback only: a conditional-request poller over the GitHub REST API
-(the §9.47(a) Actions push relay stays blocked until Arbitraitor's
+(the §9.50(a) Actions push relay stays blocked until Arbitraitor's
 ingress-envelope authentication lands). The §9.43 reconcile poll stays
 the completeness authority either way: an event only makes the next
 kick-off evaluation fire sooner; a missed or delayed event never loses
@@ -129,6 +131,22 @@ durable delivery key — the platform delivery id, repository, event type,
 and head SHA where present — with a 30-day redelivery window
 (`<config-dir>/ingress-events.db`), so a redelivery never produces a
 second kick-off.
+
+**CI completions lane.** The repository events feed carries no CI
+completions (no `CheckRunEvent`, no `WorkflowRunEvent`), so a second
+conditional poll lane covers them. The daemon polls
+`GET /repos/{owner}/{repo}/commits/{sha}/check-runs` for each head SHA
+it actively tracks — head SHAs of the open agent PRs and in-flight
+tasks waiting on CI that the reconcile poll already reads — plus
+`GET /repos/{owner}/{repo}/actions/runs` (filtered to
+`event=pull_request` workflow runs) per repository, each with its own
+stored `ETag`, the same 304/`X-Poll-Interval`/rate-limit cadence rules,
+and the same 30-day delivery-key dedup (`check-run-completed` keys on
+the check-run id + head SHA; `workflow-run-completed` keys on the run
+id + attempt + head SHA). A SHA not tracked by any open agent PR or
+CI-waiting task is never polled, so the lane's cost stays proportional
+to active work. CI state the lane misses still arrives on the next
+reconcile pass — the lane is acceleration, never a trigger authority.
 
 The ingress queue is bounded: sustained flooding drops surplus events
 and records the `degraded` marker (surfaced in the log; §7.3 — the bound
@@ -192,7 +210,8 @@ rows all behave exactly as documented for
 - Event ingress (when `[watch.ingress].enabled`): `<config-dir>/ingress-events.db`
   — the durable dedup table (30-day redelivery window) and the
   per-endpoint conditional-request bookkeeping (ETag, advised poll
-  interval).
+  interval) for the events feed, the CI completions lane's check-runs
+  endpoints (one per tracked head SHA), and the Actions-runs endpoint.
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme

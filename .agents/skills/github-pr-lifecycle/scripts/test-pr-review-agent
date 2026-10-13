@@ -6,8 +6,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/scripts" "$TMP/bin" "$TMP/files"
 git -C "$TMP/repo" init -q
-cp -L "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-review-agent" \
-  "$SCRIPT_DIR/convergence-status" "$SCRIPT_DIR/merge-gate" "$TMP/repo/scripts/"
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-review-agent" "$SCRIPT_DIR/convergence-status" \
+  "$TMP/repo/scripts/"
+cp -L -- "$SCRIPT_DIR/merge-gate" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"*
 # Stub only the independent checks; exercise real convergence and merge scripts.
 for check in pr-checks review-threads reconcile-checklist; do
