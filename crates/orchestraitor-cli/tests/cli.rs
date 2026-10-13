@@ -2378,28 +2378,32 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
 
 // --- `orc github push-branch`: App-signed landing -----------------------------
 
+/// Repository-location variables inherited from the ambient environment
+/// (a `git push` pre-push hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE)
+/// would redirect every fixture `git` call to the CALLING worktree's
+/// gitdir — the #553 corruption (fixture commits landed on a real feature
+/// branch, PR #551 deleted the whole repository). Scrubbed on every child.
+/// The complete production set (mirrors `AMBIENT_GIT_LOCATION_VARS` in
+/// `src/commands/github.rs`; CodeRabbit review on PR #599). Lifted to
+/// module level so the adversarial ambient-git test can reference the
+/// same list — duplicating the array inside the test let a partial scrub
+/// pass even when the fixture's full scrub regressed (CodeRabbit #629).
+const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
 /// Builds a local git repo with one base commit and one feature branch that
 /// changes a file; returns the temp dir (must outlive the test), the repo
 /// path, and the base branch's tree oid. Uses a pinned author identity so
 /// the test never depends on ambient git config.
 fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
     use std::process::Command;
-    // Repository-location variables inherited from the ambient environment
-    // (a `git push` pre-push hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE)
-    // would redirect every fixture `git` call to the CALLING worktree's
-    // gitdir — the #553 corruption (fixture commits landed on a real feature
-    // branch, PR #551 deleted the whole repository). Scrubbed on every child.
-    // The complete production set (mirrors AMBIENT_GIT_LOCATION_VARS in
-    // src/commands/github.rs; CodeRabbit review on PR #599).
-    const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_NAMESPACE",
-    ];
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
@@ -2582,7 +2586,7 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
             .args(["rev-parse", "--git-dir"])
             .env("GIT_DIR", &hostile_git_dir)
             .env("GIT_WORK_TREE", &hostile_repo);
-        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        for variable in AMBIENT_GIT_LOCATION_VARS {
             command.env_remove(variable);
         }
         command.output().into_diagnostic()?
