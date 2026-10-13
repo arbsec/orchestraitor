@@ -433,7 +433,11 @@ Every campaign session persists exactly ONE decision record before exiting:
 
 ```text
 decision id + campaign session id
-kind                     # spawn | no-op
+kind                     # spawn | no-op | triage (§9.52 — the triage classification
+                         # pass persists the same record shape; a triage record
+                         # carries the classification outcome in the rationale
+                         # instead of worker arguments, and never hands a spawn
+                         # to the daemon)
 selected task            # stable board item identity (§9.43)
 role                     # orchestration role from the role registry
 model + provider         # resolved per §9.19.2 precedence
