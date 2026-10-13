@@ -729,6 +729,111 @@ The status output MUST clearly state which actions remain outside Orchestraitor 
 
 ---
 
+### 9.19 Web search and page fetch
+
+The harness ships two built-in internal tools for external context gathering:
+
+```text
+web_search   # REST search against a pluggable engine list, merged in-repo
+web_fetch    # bounded retrieval of a single URL as clean text
+```
+
+Both are **opt-in and fail-closed**. A built-in internal tool that is not configured does not exist at admission time — the same `built_ins_only()` posture as every other unconfigured tool.
+
+#### 9.19.1 Opt-in configuration (trusted layers only)
+
+Each tool is enabled by a `[tools.web_search]` / `[tools.web_fetch]` block in the layered config. The block is honored from trusted layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in the project or a lower layer is a typed error naming the tool — never a silent drop (§9.22.9, same gate as declared tools). Absence of the block disables the tool entirely. An enabled `[tools.web_search]` block with an empty `engines` list is a typed startup error — a configured search tool MUST have at least one engine; until an engine ships (§9.19.3), any `[tools.web_search]` block fails closed at startup exactly like a missing capability (§9.19.6).
+
+```toml
+[tools.web_search]                     # absent by default
+engines = []                           # ILLUSTRATIVE ONLY: empty = typed startup error
+                                       # (no engine ships until the mediated egress +
+                                       # brokered-credential capabilities exist, §9.19.3/§9.19.6)
+max_results = 5                        # post-merge cap; hard maximum 10
+max_content_tokens = 2_000             # per-hit token cap
+max_total_tokens = 8_000               # per-call budget across hits
+cache_ttl_secs = 3600
+
+[tools.web_search.kagi]                # only if "kagi" in engines (future; §9.19.3)
+auth = "secret://keyring/kagi-search"  # §9.23.1 SecretUri grammar
+
+[tools.web_fetch]
+max_bytes = 262_144                    # response size bound
+max_content_tokens = 2_000             # per-fetch token cap (same guard semantics as web_search)
+timeout_ms = 15_000
+```
+
+Engine credential values resolve through the §9.23 secret resolution chain (`secret://keyring/<id>` / `secret://env/<VAR>`); plaintext credential values are refused and keys never appear in errors, traces, or receipts (§9.23.4).
+
+#### 9.19.2 Engine architecture and aggregation
+
+The engine surface is a project-owned trait; every third-party API shape dies in its adapter (same isolation rule as `ProviderTransport`, tech-stack §1):
+
+```rust
+pub trait SearchEngine: Send + Sync {
+    fn id(&self) -> &'static str;   // no v1 engine yet; first candidates: "kagi", then "exa"
+    async fn search(&self, q: &SearchQuery) -> Result<Vec<SearchHit>, EngineError>;
+}
+```
+
+Aggregation is built in-repo (worker module — no new crate, §16.6 layout; tech-stack §14). It borrows the shape of open-source metasearch aggregation (per-engine trait, async fan-out, URL-normalization dedup, Reciprocal Rank Fusion) while REJECTING the scraping-engine class entirely (tech-stack §16):
+
+- **Async fan-out** with partial-failure semantics: engines run concurrently; the call NEVER fails while at least one engine answered. Individual engine failures degrade the result — the merged response carries `engines_failed: [engine_id]` so the model, event log, and review UI see degraded provenance. A typed error is returned only when ALL configured engines fail.
+- **Per-engine timeout** covering connection AND body download (a slow-drip server must not stall the worker past budget).
+- **Dedup by URL normalization**: canonical key = scheme + normalized port (explicit or scheme-default) + lowercased host, fragment stripped, tracking parameters removed, remaining query parameters sorted, trailing slash normalized. URLs differing by scheme or non-default port stay distinct. Unparseable URLs are skipped and do not consume rank.
+- **Reciprocal Rank Fusion** for merging: `score = Σ 1/(k + rank)` with `k = 60` (Cormack et al. 2009), computed over usable results per engine. Engine list order carries no ranking weight; cross-engine agreement (same normalized URL from two engines) surfaces naturally via summed reciprocal ranks. Merged entries carry per-hit provenance (§9.19.4).
+
+#### 9.19.3 Engine set (v1) and the scraping boundary
+
+The v1 engine set is APIs-only. As of this writing, NO current paid search API of the candidate providers conforms to the GET-only transport scope of §9.19.6:
+
+- **Kagi** — v1 Search is POST-only (`POST /search`, `POST /extract`). Evidence conflict, resolved: Kagi's help page carries a stale GET-style `curl` example against `/api/v1/search?q=…`, but the authoritative surfaces all specify POST — Kagi's own OpenAPI reference (`kagi.com/api/docs/openapi/search/search`: "Endpoint: POST /search"), the official generated clients (`kagisearch/kagi-openapi-python` SearchApi: `POST /search`; `kagisearch/kagimcp`'s vendored client: `method='POST', resource_path='/search'`), and a live probe (2026-10-13): `GET /api/v1/search` returns a 404 HTML error page (no route) while `POST /api/v1/search` reaches the API handler (structured `general.invalid_token` error envelope). A GET `/search` exists only in the deprecated v0 (Legacy) API, which is explicitly marked deprecated by Kagi.
+- **Exa** — `/search`, `/findSimilar`, `/contents`, and `/answer` are all POST-with-JSON-body per Exa's published OpenAPI spec (`exa-labs/openapi-spec`); the only GET endpoints are research-task status polling.
+
+The v1 engine set is therefore EMPTY pending the first compliant capability combination:
+
+- **Kagi** — intended primary quality provider (official REST/JSON API; search $12/1k requests, Extract $4/1k pages; no ads, no scraping anywhere in the retrieval chain). Ships as the first engine once a mediated-POST capability lands under an explicit policy ruling (§9.19.6) — or a GET-conformant Kagi access mode is verified and approved.
+
+**Future engines (explicitly NOT in v1):**
+
+- **Exa** — excluded on the same transport grounds: every search-relevant endpoint is POST-with-JSON-body. It returns to the engine set only after a mediated-POST capability lands under an explicit policy ruling (§9.19.6), or if a GET-conformant Exa access mode is verified and approved.
+- **Self-hosted SearXNG** — a meta-engine whose result supply is its operators' upstream engine configuration, so enabling it imports that upstream chain's data-governance posture (queries leave toward infrastructure the operator does not control). Deferred pending an explicit policy ruling, not silently added later.
+
+**Scraping engines are rejected outright.** A receipt-producing security harness cannot ship, even opt-in, engines whose operation is defined by ToS violation or bot-evasion (SERP scraping of Google/DuckDuckGo/Bing-class properties, User-Agent spoofing, selector-churn HTML parsing). The aggregation layer is a dependency on NO metasearch project — only its merge-machinery shape is borrowed.
+
+#### 9.19.4 Budget guards, provenance, and event recording
+
+- **Budget guards:** `max_results` is capped at 10 post-merge; per-hit (`max_content_tokens`) and per-call (`max_total_tokens`) token caps are enforced before results enter the observation channel; over-cap content is truncated with an explicit truncation marker. `web_fetch` output passes the SAME observation-channel truncation: `max_bytes` bounds the response size at the transport edge and the fetch-side `max_content_tokens` cap bounds what enters context, with the same explicit truncation marker — a fetched page is never exempt from the per-hit token budget (§9.15 guardrails). Full page content is retrieved only on explicit `fetch=true` for specific URLs — snippets inline by default.
+- **Provenance:** every hit carries engine id, retrieval time, and cache-hit flag. Merged hits additionally carry the contributing engine list. Search calls and fetches emit `network request` and (when credentials are used) `secret use` events (§9.17), and every fetched page enters context with `origin = web-content`, `trust_class = untrusted` (§9.15.1): untrusted data MUST NOT gain instruction authority merely by entering model context.
+- **Cost metering:** every engine call — paid or free-tier — increments a counter in the cost ledger (`orchestraitor-cost-ledger`, §9.19.4) keyed by engine, with a unit-cost multiplier per provider (Kagi search $12/1k requests, Extract $4/1k pages; Exa instant $4/1k when enabled). Free-tier usage is still counted: the count is the rate-governance input. Cache hits increment a separate cache-hit counter and make no upstream call.
+
+#### 9.19.5 Tool classification and annotations
+
+`web_search` and `web_fetch` are read-only, non-destructive, open-world surfaces — but they are also information-disclosure surfaces (queries leave the machine toward third parties). Their `readOnly`-style annotations are ADVISORY input to policy (§9.18.1); authority comes from Arbitraitor's analyzer. The security narrative must not lean on the annotation.
+
+#### 9.19.6 Arbitraitor-mediated egress (fail-closed gate)
+
+Every HTTP call of either tool routes through Arbitraitor-mediated egress — no direct sockets, no second mediation path (§9.12; tech-stack §5.3). The required capability is **mediated HTTP egress for daemon-owned tools (GET-only v1)**, tracked upstream as arbsec/arbitraitor#797:
+
+- **Separate grant classes.** `web_search` uses GET-scoped grants for configured engine API hosts only. `web_fetch` uses a SEPARATE per-request target grant for the requested URL, validated for host, port, scheme, method, and path against policy allowlists; a fetch NEVER inherits an engine grant or engine credentials (§23.1/§23.6 equivalents in Arbitraitor policy inputs).
+- **Query content control.** Destination and method scoping alone does not bound WHAT leaves the machine: a search query is arbitrary text and can carry restricted data (paths, identifiers, code snippets). Every `web_search` query MUST carry its ACTUAL provenance — per the §9.15.1 origin taxonomy (`user-instruction`, `repository-content`, `model-output`, …), never a blanket `repository-content` label — plus its data classification, into Arbitraitor's data-release decision, applying the §9.28.2 rules verbatim: `restricted` content is NEVER sent to a remote search provider — it is redacted, summarized locally (default refuses), or the request is blocked before the GET is issued; `confidential` content goes only to engines explicitly approved in `[data_governance.confidential_providers]` and is otherwise blocked (default empty = block). Where the query embeds repository-derived content, that content's classification rides the same decision. The same restricted-content authority governs every other egress surface; Orchestraitor never performs that classification itself (§2.2). The egress receipt records the verdict class (allowed / redacted / approved / blocked), never the query text itself.
+- **Redirects are rejected by default.** If a redirect is followed, every hop MUST pass the domain, method, path, HTTPS, certificate, DNS-rebinding, and private-address checks again, and the request receipt MUST record the redirect decision and every followed hop.
+- HTTPS-only default, certificate rejection, connect/read/total timeouts, response size and content-type bounds (Arbitraitor §11.2 behavior);
+- DNS-rebinding and private-address blocking (Arbitraitor ADR-0018);
+- one receipt per request (Arbitraitor §31.2/§11.5; ADR-0023/ADR-0039 envelope), with receipts recording the credential class, never the secret value (ADR-0033).
+
+Per §16.2 this capability MUST land in Arbitraitor first. Until arbsec/arbitraitor#797 is released and pinned, both tools **fail closed at startup**: a configured-but-unsupported `[tools.web_search]`/`[tools.web_fetch]` block is a typed startup error naming the missing Arbitraitor capability — never a direct-socket fallback and never a silently weaker mode (§16.2, §6.7).
+
+**POST/bodies are out of v1.** The GET-only scope aligns with Arbitraitor's upload invariants (Arbitraitor §39.7; §9 invariants 9 and 24 — no hidden cloud upload; untrusted config cannot permit uploads). The candidate search APIs (Kagi v1, Exa) are POST-based (§9.19.3), so they are out of scope until an explicit policy ruling admits a mediated-POST capability class; the caller-origin rule (Arbitraitor §23.1.1) draws the line.
+
+**Secret broker:** the §9.13-style secret broker (credential-header injection so the key never enters Orchestraitor memory) is a HARD prerequisite for any credential-header engine — with Kagi as the first candidate — not an optional enhancement. A credential-header engine fails closed at startup unless BOTH the mediated-egress capability (#797, and any mediated-POST class the engine's API requires) AND the brokered-injection capability are available. The ONE exception is the weaker expose-only `SecretString` path: available only with explicit user acceptance per §9.13, never a default, and it lifts ONLY the brokered-injection prerequisite — mediated egress (and any mediated-POST class the engine's API requires) remains MANDATORY in that mode.
+
+#### 9.19.7 Cache
+
+Search results MAY be cached in the daemon's data dir (never the workspace — queries must not leak into the repository) keyed by engine-set configuration, canonical query, and parameters, with the TTL from config. A cache hit makes no upstream call, emits no network request, and costs nothing; the cache-hit flag rides hit provenance (§9.19.4). Negative caching of rate-limit/5xx responses is bounded and short.
+
+---
+
 ### 9.20 Project initialization without a configured provider
 
 `orc init` MUST work fully without an LLM provider. Repository detection is deterministic and local wherever possible: files, manifests, language metadata, formatter/linter configuration, IDE configuration, project structure, and VCS state.

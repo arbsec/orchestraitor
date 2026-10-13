@@ -16,7 +16,8 @@ The following MUST NOT be hardcoded constants in any Orchestraitor crate:
 - artifact retention, log retention, and lifecycle behavior;
 - context compiler policies, index budgets, and omission thresholds;
 - normalization rules (format-on-write, safe/unsafe fix classification, max passes — see §9.5);
-- workspace mode defaults (§9.4) and security mode defaults (§14).
+- workspace mode defaults (§9.4) and security mode defaults (§14);
+- web-tool configuration keys, per block (spec `20-harness-worker.md` §9.19; trusted layers only, absent by default = tools disabled): `[tools.web_search]` — engine list (`engines`), `max_results`, `max_content_tokens`, `max_total_tokens`, `cache_ttl_secs`, per-engine auth; `[tools.web_fetch]` — `max_bytes`, `timeout_ms`, and the fetch-side token/truncation bound (§9.19.4).
 
 Built-in defaults are shipped as data (TOML tables or feature-gated const data), not as compile-time constants in business logic. This allows every default to be overridden by a higher layer without code changes.
 
