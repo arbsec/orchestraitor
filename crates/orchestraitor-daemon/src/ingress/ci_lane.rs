@@ -270,6 +270,11 @@ pub struct CiLane {
     /// successful (ETag-bypassing) runs fetch for — after that, the
     /// persisted `ETag` rides normally.
     runs_initialized: Mutex<HashSet<String>>,
+    /// The last valid in-flight snapshot per repository: a runs `304`
+    /// confirms the stored representation is unchanged, so the snapshot
+    /// is reused for that round's quiet-SHA decisions instead of
+    /// treating the round as snapshot-less.
+    last_snapshot: Mutex<HashMap<String, Vec<String>>>,
     /// Per-repository tracked head SHAs, newest-first: the union of the
     /// in-flight run SHAs from the last runs response and the previously
     /// tracked SHAs (a SHA stays tracked until the cap evicts it, oldest
@@ -301,6 +306,7 @@ impl CiLane {
             store,
             queue,
             runs_initialized: Mutex::new(HashSet::new()),
+            last_snapshot: Mutex::new(HashMap::new()),
             tracked: Mutex::new(HashMap::new()),
         })
     }
@@ -355,19 +361,52 @@ impl CiLane {
         // ETag rides normally. `insert` returns true when the key was new
         // (this IS the first poll) — bypass exactly then.
         let bypass_etag = !self.runs_initialized.lock().contains(&target.runs_key);
+        // `Some(in_flight)` = this round supplied a valid runs snapshot
+        // (quiet-SHA pruning may apply); `None` = a 304/failure carried no
+        // snapshot (previous set restored; pruning must not treat an
+        // unavailable snapshot as an empty in-flight set).
+        let mut current_in_flight: Option<Vec<String>> = None;
         match self
             .poll_runs(target, previous.clone(), bypass_etag, now_secs)
             .await
         {
-            Ok(outcome) => outcomes.push(Ok(outcome)),
+            Ok((outcome, in_flight)) => {
+                outcomes.push(Ok(outcome));
+                current_in_flight = in_flight;
+            }
             // A failed runs poll never touched the tracked set (the union
             // update happens only on the 200 path), so `previous` stays
             // authoritative for this round's check-runs polls.
             Err(error) => outcomes.push(Err(error)),
         }
         let tracked_after_runs = self.take_tracked(target);
+        // Quiet-SHA pruning: every tracked SHA keeps its check-runs poll
+        // every round, but a SHA is pruned (set + bookkeeping) only when
+        // this round supplied a valid runs snapshot AND the SHA is not in
+        // its in-flight discovery AND its check-runs endpoint answered
+        // 304 (no completions pending). Without a snapshot — a runs
+        // 304/failure, whose `Option` is `None` — a SHA absent from an
+        // empty list must never be treated as quiet: the previous set was
+        // restored and keeps its polls.
+        let mut quiet = HashSet::new();
         for head_sha in &tracked_after_runs {
-            outcomes.push(self.poll_check_runs(target, head_sha, now_secs).await);
+            match self.poll_check_runs(target, head_sha, now_secs).await {
+                Ok(outcome) => {
+                    let quiet_eligible = current_in_flight
+                        .as_ref()
+                        .is_some_and(|in_flight| !in_flight.iter().any(|sha| sha == head_sha));
+                    if quiet_eligible {
+                        let not_modified = self
+                            .lock_store()?
+                            .not_modified(&check_runs_key(&target.repo, head_sha))?;
+                        if not_modified {
+                            quiet.insert(head_sha.clone());
+                        }
+                    }
+                    outcomes.push(Ok(outcome));
+                }
+                Err(error) => outcomes.push(Err(error)),
+            }
         }
         // Prune per-SHA bookkeeping for SHAs the lane no longer tracks.
         // The prefix is repository-scoped: `check-runs|<repo>/` matches
@@ -377,10 +416,17 @@ impl CiLane {
         // never emit).
         let keep: Vec<String> = tracked_after_runs
             .iter()
+            .filter(|sha| !quiet.contains(*sha))
             .map(|sha| check_runs_key(&target.repo, sha))
             .collect();
         let prune_prefix = format!("check-runs|{}/", target.repo);
         self.lock_store()?.prune_endpoints(&prune_prefix, &keep)?;
+        if !quiet.is_empty() {
+            let mut tracked = self.tracked.lock();
+            if let Some(shas) = tracked.get_mut(&target.repo) {
+                shas.retain(|sha| !quiet.contains(sha));
+            }
+        }
         Ok(outcomes)
     }
 
@@ -394,7 +440,7 @@ impl CiLane {
         previous_tracked: Vec<String>,
         bypass_etag: bool,
         now_secs: u64,
-    ) -> Result<PollOutcome, PollError> {
+    ) -> Result<(PollOutcome, Option<Vec<String>>), PollError> {
         let etag = if bypass_etag {
             None
         } else {
@@ -411,12 +457,22 @@ impl CiLane {
         if status.as_u16() == 304 {
             self.record_conditional(&target.runs_key, etag.as_deref(), poll_after, true)
                 .map_err(|_| PollError::Failed)?;
-            return Ok(PollOutcome {
-                accepted: 0,
-                duplicates: 0,
-                dropped: 0,
-                poll_after_secs: poll_after,
-            });
+            // A 304 confirms the previously stored runs representation is
+            // UNCHANGED: restore the previous tracked set and reuse the
+            // last valid in-flight snapshot for this round's quiet-SHA
+            // decisions (`None` only when no snapshot was ever fetched —
+            // the very first rounds, where pruning must not fire).
+            self.set_tracked(target, previous_tracked.clone());
+            let snapshot = self.last_snapshot.lock().get(&target.repo).cloned();
+            return Ok((
+                PollOutcome {
+                    accepted: 0,
+                    duplicates: 0,
+                    dropped: 0,
+                    poll_after_secs: poll_after,
+                },
+                snapshot,
+            ));
         }
         if let Some(wait) = rate_limit_wait(response.headers(), status, now_secs) {
             self.record_conditional(&target.runs_key, etag.as_deref(), wait, false)
@@ -477,7 +533,10 @@ impl CiLane {
         }
         union.truncate(MAX_TRACKED_HEAD_SHAS);
         self.set_tracked(target, union);
-        Ok(outcome)
+        self.last_snapshot
+            .lock()
+            .insert(target.repo.clone(), in_flight.clone());
+        Ok((outcome, Some(in_flight)))
     }
 
     /// The conditional check-runs poll for one tracked head SHA. The

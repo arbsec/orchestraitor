@@ -704,10 +704,9 @@ async fn a_sha_whose_run_completes_stays_tracked() {
 /// in-flight SHAs are deduplicated BEFORE the 16-SHA cap.
 #[tokio::test(flavor = "current_thread")]
 async fn duplicate_in_flight_shas_do_not_spend_the_cap() {
-    // 20 rows, all in-flight, but only 17 distinct SHAs: two SHAs repeat
-    // 2x and 3x. The cap is 16 — with dedup-before-cap all 17 distinct
-    // SHAs... no: cap keeps 16 of the 17 distinct. Assert exactly 16
-    // distinct SHAs are tracked (deduped), not 16 rows-worth with dupes.
+    // 20 rows, all in-flight, but only 17 distinct SHAs. Dedup-before-cap
+    // keeps 16 of the 17 DISTINCT SHAs tracked (never 16 rows-worth with
+    // duplicates).
     let mut runs = Vec::new();
     for i in 0..20u64 {
         let sha = format!("sha{:02}", i % 17); // 17 distinct, 20 rows
@@ -951,5 +950,238 @@ async fn cap_eviction_is_deterministic_oldest_first() {
             .iter()
             .all(|p| { (16..32).any(|i| p.contains(&format!("/commits/n{i:02}/check-runs"))) }),
         "round 3 never polled the evicted SHAs: {round3:?}"
+    );
+}
+
+/// Regression (review finding): a SHA that is BOTH in-flight this round
+/// AND answered 304 on check-runs is NOT pruned — an in-flight run can
+/// still produce completions after its runs finish.
+#[tokio::test(flavor = "current_thread")]
+async fn a_304_check_runs_sha_still_in_flight_is_not_pruned() {
+    let server = FixtureServer::start(vec![
+        // Round 1: beef34 in-flight -> tracked; its check-runs 200 baseline.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(702, "success"),
+            headers: vec![("ETag", "\"z1\"".to_string())],
+        },
+        // Round 2: beef34 STILL in-flight AND its check-runs 304.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"z1\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        // Round 3: beef34 still in-flight — its check-runs MUST be polled
+        // again (the 304 must not have pruned it).
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"z1\"".to_string()),
+            status: 200,
+            body: check_runs_body(703, "failure"),
+            headers: vec![("ETag", "\"z2\"".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let mut third = lane.poll_repo(&target, 1_200).await.expect("round 3");
+    assert_eq!(
+        third.len(),
+        2,
+        "the 304 + still-in-flight SHA was NOT pruned: its check-runs poll fires again"
+    );
+    let checks = third.remove(1).expect("check-runs poll ok");
+    assert_eq!(
+        (checks.accepted, checks.duplicates),
+        (1, 0),
+        "the newly-completed check run (703:failure) is delivered"
+    );
+    // Queue: round 1's baseline emits nothing and round 2's 304 emits
+    // nothing, but round 1's runs poll DID enqueue the `900:success`
+    // completion (still pending — never drained) and round 3 delivers the
+    // `703:failure` check completion: two pending events.
+    assert_eq!(queue.take().len(), 2);
+}
+
+/// Regression (review finding): a runs 304 restores the previous tracked
+/// set and does NOT treat the unavailable snapshot as an empty in-flight
+/// list — a quiet-SHA prune must not fire on a snapshot-less round.
+#[tokio::test(flavor = "current_thread")]
+async fn a_runs_304_restores_the_tracked_set_and_skips_quiet_pruning() {
+    let etag = "\"runs-snap\"";
+    let server = FixtureServer::start(vec![
+        // Round 1: 200 with beef34 in-flight -> tracked; checks baseline 200.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(704, "success"),
+            headers: vec![("ETag", "\"w1\"".to_string())],
+        },
+        // Round 2: runs 304 (no snapshot); checks 304.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"w1\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        // Round 3: the tracked set SURVIVED the snapshot-less round —
+        // beef34's check-runs poll fires again (and delivers).
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"w1\"".to_string()),
+            status: 200,
+            body: check_runs_body(705, "failure"),
+            headers: vec![("ETag", "\"w2\"".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let mut third = lane.poll_repo(&target, 1_200).await.expect("round 3");
+    assert_eq!(
+        third.len(),
+        2,
+        "the tracked set survived the snapshot-less round: beef34 is polled again"
+    );
+    let checks = third.remove(1).expect("check-runs poll ok");
+    assert_eq!(
+        (checks.accepted, checks.duplicates),
+        (1, 0),
+        "the completion that arrived during the snapshot-less rounds is delivered"
+    );
+    assert_eq!(queue.take().len(), 2); // round-1 run 900 + this check 705
+}
+
+/// Regression (review finding): a runs 304 REUSES the last valid
+/// snapshot — a SHA that went quiet under the last snapshot (not
+/// re-discovered in-flight) is pruned on the 304 round's matching
+/// check-runs 304.
+#[tokio::test(flavor = "current_thread")]
+async fn a_runs_304_reuses_the_last_snapshot_for_quiet_pruning() {
+    let etag = "\"snap-x\"";
+    // Round 1: beef34 in-flight -> tracked; checks baseline.
+    // Round 2: beef34 NOT in the runs response (its run finished), check-runs 200
+    //          (not quiet yet — the run just completed).
+    // Round 3: runs 304 (snapshot reused: beef34 absent -> NOT in-flight);
+    //          check-runs 304 -> quiet prune fires.
+    // Round 4: beef34 no longer polled (bookkeeping pruned).
+    let empty_runs = json!({ "workflow_runs": [] }).to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(706, "success"),
+            headers: vec![("ETag", "\"y1\"".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 200,
+            body: empty_runs,
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"y1\"".to_string()),
+            status: 200,
+            body: check_runs_body(707, "success"),
+            headers: vec![("ETag", "\"y2\"".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"y2\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (_queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let _ = lane
+        .poll_repo(&target, 1_200)
+        .await
+        .expect("round 3 (304 + 304 -> quiet)");
+    let fourth = lane.poll_repo(&target, 1_300).await.expect("round 4");
+    assert_eq!(
+        fourth.len(),
+        1,
+        "the quiet SHA was pruned on the 304 round: only the runs poll fires in round 4"
     );
 }
