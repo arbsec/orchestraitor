@@ -2533,8 +2533,7 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
     // env (every fixture child receives GIT_DIR/GIT_WORK_TREE before the
     // internal scrub). The fixture's scrub is what neutralizes the
     // redirect; a regression lets the fixture bind to the hostile gitdir.
-    let (temp, repo, _base_tree, _feature_tree, main_commit) =
-        spawn_local_repo(&hostile_env)?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&hostile_env)?;
     let _ = temp; // outlives the assertions below
 
     // Control: a scrub-less git child, pointed at the fixture repo's cwd
