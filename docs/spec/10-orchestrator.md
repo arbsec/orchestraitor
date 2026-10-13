@@ -614,10 +614,13 @@ pr.status <N> -> {
   is_draft, review_decision,         # gh pr view fields, verbatim
   merge_state,                       # mergeStateStatus (BEHIND|BLOCKED|CLEAN|DIRTY|DRAFT|HAS_HOOKS|UNSTABLE|UNKNOWN,
                                      # the GraphQL MergeStateStatus enum),
-                                     # INFORMATIONAL ONLY - never a convergence input
-                                     # (convergence-status and merge-gate do not read it; a DIRTY
-                                     # state is a display hint for the operator, and a merge refusal
-                                     # surfaces from gh at merge time, not here)
+                                     # informational: convergence-status and merge-gate do not read it,
+                                     # BUT a DIRTY state can never yield `mergeable: true` — the
+                                     # resolver runs the merge computation and reports the
+                                     # conflict through its own reasons; a DIRTY state here means
+                                     # the check-buckets above cannot all be `pass`, so the
+                                     # checks gate already refuses. A merge refusal additionally
+                                     # surfaces from gh at merge time.
   checks: [ { name, state, bucket, classification, workflow, link } ],
                                      # classification: pass|fail|pending|skip|not-applicable|unknown,
                                      # including the KNOWN_DISABLED_JOBS semantics ("Docs

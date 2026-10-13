@@ -44,9 +44,14 @@ fallback at all.
 
 ## Decision
 
-The bootstrap worker runs on Linux only. Every other platform fails
-closed with a typed `MediationError::UnsupportedPlatform`; no explicitly
-labelled non-secure mode exists on this path.
+The bootstrap worker runs on Linux only **for the mediated-bash path**:
+`MediatedBashMediator` (which constructs the landlock/namespace sandbox) is
+engaged on the worker's first bash call, and any platform other than Linux
+fails closed there with a typed `MediationError::UnsupportedPlatform`; no
+explicitly labelled non-secure mode exists on this path. (A worker run that
+never invokes bash — e.g. one served entirely by `ReadOnlyBashStub` — does
+not reach the platform gate; the decision below scopes the refusal to the
+mediation surface it actually guards.)
 
 Concretely:
 

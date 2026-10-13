@@ -303,12 +303,6 @@ file and anchor. New references should cite the target document directly, for ex
 | §21.12 | `50-contracts-data.md#2112-security-profiles-and-fine-grained-configuration` |
 | §21.13 | `50-contracts-data.md#2113-security-first-review-gates` |
 | §21.14 | `50-contracts-data.md#2114-design-principles` |
-| §21.15 | `50-contracts-data.md#2115-adversarial-review-panels-and-per-finding-fix-re-verification` |
-| §21.15.1 | `50-contracts-data.md#21151-existing-coverage-what-this-section-does-and-does-not-specify` |
-| §21.15.2 | `50-contracts-data.md#21152-multi-model-review-panels` |
-| §21.15.3 | `50-contracts-data.md#21153-per-finding-fix-re-verification` |
-| §21.15.4 | `50-contracts-data.md#21154-reviewer-model-self-confirmation-bias` |
-| §21.15.5 | `50-contracts-data.md#21155-model-identity-pinning-for-re-verification` |
 | §22 | `60-milestones.md#22-delivery-milestones` |
 | §22.6 | `60-milestones.md#226-supply-chain-and-release-requirements` |
 | §22.7 | `60-milestones.md#227-installation-upgrade-and-removal-tests` |

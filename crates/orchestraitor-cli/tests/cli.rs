@@ -2389,7 +2389,17 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     // would redirect every fixture `git` call to the CALLING worktree's
     // gitdir — the #553 corruption (fixture commits landed on a real feature
     // branch, PR #551 deleted the whole repository). Scrubbed on every child.
-    const AMBIENT_GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+    // The complete production set (mirrors AMBIENT_GIT_LOCATION_VARS in
+    // src/commands/github.rs; CodeRabbit review on PR #599).
+    const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ];
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
@@ -2464,14 +2474,15 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
 /// shape a `git push` pre-push hook exports into the test process) must NOT
 /// redirect the fixture's git children into the pointed-at repository. The
 /// forbidden effect — the fixture's `base` commit landing in the hostile
-/// repo — is asserted NOT to happen; the fixture repo itself carries the
-/// commits. `spawn_local_repo` is built so the poisoning env arrives via
-/// the fixture's own child processes' inheritance, so here the hostile
-/// environment is exercised by re-running the fixture's `run` helper shape:
-/// a child WITH the scrub (inside `spawn_local_repo`) against a child
-/// WITHOUT it (raw `Command::new("git")`) — the latter provably binds to the
-/// hostile gitdir, proving the poisoning is real and the scrub is what
-/// neutralizes it.
+/// repo — is asserted NOT to happen: the hostile repository is asserted to
+/// carry NO commits after the fixture ran, and a scrub-less control git
+/// child with the hostile variables in its inherited environment provably
+/// binds to the hostile gitdir, proving the poisoning is real and the scrub
+/// inside `spawn_local_repo` is what neutralizes it. The hostile
+/// environment is hostile for `spawn_local_repo`'s children the same way
+/// (they inherit the process environment a hook would poison); the
+/// rev-list assertion also runs under the hostile variables themselves
+/// (local review, head 4b26b0e).
 #[test]
 fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<()> {
     use std::process::Command;
@@ -2529,6 +2540,34 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
         String::from_utf8_lossy(&fixture_head.stdout).trim(),
         main_commit,
         "fixture repo main must carry the fixture commit"
+    );
+
+    // And the FIXTURE ITSELF is exercised under the hostile environment:
+    // a scrub-less control git child with the hostile variables in ITS
+    // inherited environment binds to the hostile gitdir (proven above);
+    // `spawn_local_repo`'s children face the same inheritance and are
+    // scrubbed by the fixture itself. Assert the hostile repository has
+    // NO commits after the fixture ran under this poisoned environment —
+    // the forbidden effect did not happen. (Child-process re-invocation
+    // shape replaced: the fixture children already receive the hostile
+    // env through inheritance; the assertions below prove the outcome.)
+    let hostile_commits = Command::new("git")
+        .arg("-C")
+        .arg(&hostile_repo)
+        .args(["rev-list", "--count", "--all"])
+        .env("GIT_DIR", &hostile_git_dir)
+        .env("GIT_WORK_TREE", &hostile_repo)
+        .output()
+        .into_diagnostic()?;
+    assert!(
+        hostile_commits.status.success(),
+        "hostile repo rev-list must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&hostile_commits.stdout).trim(),
+        "0",
+        "forbidden effect: the hostile repo must carry NO commits after the \
+         fixture ran under the hostile environment"
     );
 
     // And the fixture's own children were scrubbed: re-resolving the
