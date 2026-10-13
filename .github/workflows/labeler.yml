@@ -1,0 +1,23 @@
+# Safety net for PR process labels (see .github/labeler.yml). The in-script
+# labeling chain (pr-labels + pr-labels-from-issue via pr-create) stays
+# authoritative for attribution and needs-human-review routing.
+name: labeler
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@b8dd2d9be0f68b860e7dae5dae7d772984eacd6d # v6.0.0 (node24)
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,30 @@
+# .github/labeler.yml — SAFETY NET for PR labels. The in-script labeling
+# chain (`pr-labels` + `pr-labels-from-issue`, run by `pr-create` at create
+# time) stays AUTHORITATIVE for attribution (`agent-created`) and
+# `needs-human-review` routing; this file only backfills process labels when
+# the chain does not fire (e.g. Renovate PRs, chain subcommand unavailable).
+# Derived from the policy in
+# .agents/project/orchestraitor-workflow.md "PR labeling and human attention"
+# and .agents/skills/github-pr-lifecycle/scripts/pr-labels-from-issue.
+#
+# NOTE (verified against the pinned action source,
+# src/api/get-label-configs.ts at v6.0.0): actions/labeler supports ONLY
+# `changed-files`, `head-branch`, and `base-branch` keys — `title` rules are
+# logged as unknown and dropped, so title-derived labels (dependencies-from-
+# Conventional-Commit, task) stay with the in-script `pr-labels` chain, which
+# remains the authoritative attribution + title/path classifier.
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file: ['Cargo.toml', 'Cargo.lock']
+spec:
+  - changed-files:
+      - any-glob-to-any-file: ['docs/spec/**']
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.md', 'docs/**']
+github-actions:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/workflows/**', '.github/actions/**']
+test:
+  - changed-files:
+      - any-glob-to-any-file: ['**/tests/**', '**/*_test.rs', '**/test_*.rs', '**/conformance/**']

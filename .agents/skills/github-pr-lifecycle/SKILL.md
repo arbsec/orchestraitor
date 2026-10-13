@@ -39,7 +39,22 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 ## Core procedure
 
 ```text
-1. DRAFT          Create the PR as DRAFT linked to the leaf issue
+1. DRAFT          PRE-REVIEW GATE: before `pr-create` creates a PR, it
+                  verifies a recorded CLEAN local review generation exists
+                  for the exact (head, base) pair being proposed (a
+                  `.orchestraitor/reviews` record whose head SHA matches
+                  the current HEAD and whose base OID matches the
+                  merge-base with the target base branch). Absent, stale,
+                  or non-clean evidence fails the create (typed exit 2:
+                  `pre-review-gate: ... run pr-review-local first`) — run
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local`
+                  first, then re-run `pr-create`. Escapes: a diff vs base
+                  containing ONLY `*.md` files skips the gate
+                  automatically; `--skip-review-gate` overrides it
+                  explicitly — ONLY for docs-only PRs where CodeRabbit is
+                  not applicable, or an explicit owner directive (it
+                  prints a loud notice and the PR still gets reviewed).
+                  Create the PR as DRAFT linked to the leaf issue
                   (`Closes #N` for full-scope landings, bare `Refs #N` for
                   partial landings) and spec
                   references with `pr-create` (routes `gh pr create` through
