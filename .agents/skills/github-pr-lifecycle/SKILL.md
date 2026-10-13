@@ -323,4 +323,5 @@ This skill describes **how** to drive a PR generically. **Whether** the Orchestr
 
 - Re-verify `gh` flags against [`references/gh-capabilities.md`](references/gh-capabilities.md) on `gh` bumps. The `reviewThreads` GraphQL connection and `gh pr checks --json` field shapes have shifted before.
 - Update [`references/graphql.md`](references/graphql.md) if GitHub renames review-thread mutations (`resolveReviewThread` etc.).
+- Skill scripts may land as mode 100644 (the App-signed commit path cannot create 100755), so sibling scripts must be invoked as `bash "$SCRIPT_DIR/<script>"`, never exec'd directly. Run `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations` to guard against reintroduction.
 - Keep this file **under 500 lines** (Agent Skills spec). Move new detail to a reference, not here.

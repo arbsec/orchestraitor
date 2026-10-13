@@ -23,7 +23,7 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 **Pre-PR generations count (no doubling).** The pre-PR local review gate
 in `pr-create` requires a CLEAN local review generation at the exact
 (head, base) pair being proposed — that same generation IS the PR's
-"first required generation": the pre-create run satisfies step 6's
+"first required generation": the pre-create run satisfies rule item 1's
 clean-at-HEAD requirement and no additional generation is needed before
 the first review loop, as long as neither anchor has moved. The usual
 invalidation rule applies unchanged: any post-PR commit (or base

@@ -6,27 +6,25 @@
 # Derived from the policy in
 # .agents/project/orchestraitor-workflow.md "PR labeling and human attention"
 # and .agents/skills/github-pr-lifecycle/scripts/pr-labels-from-issue.
+#
+# NOTE (verified against the pinned action source,
+# src/api/get-label-configs.ts at 8558fd7): actions/labeler@v5 supports ONLY
+# `changed-files`, `head-branch`, and `base-branch` keys — `title` rules are
+# logged as unknown and dropped, so title-derived labels (dependencies-from-
+# Conventional-Commit, task) stay with the in-script `pr-labels` chain, which
+# remains the authoritative attribution + title/path classifier.
 dependencies:
   - changed-files:
       - any-glob-to-any-file: ['Cargo.toml', 'Cargo.lock']
-  - title:
-      - regex: '^chore\(deps(-dev)?\)(\([^)]+\))?!?: '
 spec:
   - changed-files:
       - any-glob-to-any-file: ['docs/spec/**']
-  - title:
-      - regex: '^docs\(spec\)(\([^)]+\))?!?: '
 documentation:
   - changed-files:
-      - any-glob-to-any-file: ['**/*.md', 'docs/**', 'README.md', 'CHANGELOG.md', 'AGENTS.md', '.github/ISSUE_TEMPLATE/**', 'docs/adr/**']
-  - title:
-      - regex: '^docs(\([^)]+\))?!?: '
+      - any-glob-to-any-file: ['**/*.md', 'docs/**']
 github-actions:
   - changed-files:
       - any-glob-to-any-file: ['.github/workflows/**', '.github/actions/**']
 test:
   - changed-files:
       - any-glob-to-any-file: ['**/tests/**', '**/*_test.rs', '**/test_*.rs', '**/conformance/**']
-task:
-  - title:
-      - regex: '^(feat|fix|chore|perf|refactor|test|ci|build)\('

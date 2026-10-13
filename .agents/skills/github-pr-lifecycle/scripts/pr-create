@@ -58,16 +58,35 @@ if [ -z "$PR_CREATE_REPO_ROOT" ]; then
 fi
 PR_CREATE_TARGET_BASE="${PR_CREATE_BASE_BRANCH:-}"
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  # No explicit --base: default to the branch's upstream, else the repo default branch.
-  PR_CREATE_TARGET_BASE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | sed 's|^origin/||')" || true
+  # Resolve the effective `gh pr create` base from the pass-through args:
+  # an explicit --base <v> / --base=<v> wins (the gate must check the SAME
+  # diff the PR will propose); otherwise fall back to gh's own precedence —
+  # the branch's configured gh-merge-base, then the repo default branch.
+  # The head branch's @{u} is NEVER a substitute: a pushed feature branch
+  # tracks itself and would make the gate diff empty/wrong.
+  PR_CREATE_I=0
+  while [ "$PR_CREATE_I" -lt "${#REST[@]}" ]; do
+    case "${REST[$PR_CREATE_I]}" in
+      --base)
+        PR_CREATE_TARGET_BASE="${REST[$((PR_CREATE_I + 1))]:-}"; break ;;
+      --base=*)
+        PR_CREATE_TARGET_BASE="${REST[$PR_CREATE_I]#--base=}"; break ;;
+    esac
+    PR_CREATE_I=$((PR_CREATE_I + 1))
+  done
+fi
+if [ -z "$PR_CREATE_TARGET_BASE" ]; then
+  PR_CREATE_TARGET_BASE="$(git config --get "branch.$(git rev-parse --abbrev-ref HEAD).gh-merge-base" 2>/dev/null)" || true
 fi
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
   PR_CREATE_TARGET_BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" || true
 fi
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  echo "pre-review-gate: cannot resolve the target base branch (no --base, no upstream, no origin/HEAD) — pass --base explicitly" >&2
+  echo "pre-review-gate: cannot resolve the target base branch (no --base, no gh-merge-base, no origin/HEAD) — pass --base explicitly" >&2
   exit "$ORC_ERR_CONFIG"
 fi
+# Normalize "origin/main" style values to the branch name gh pr create expects.
+PR_CREATE_TARGET_BASE="${PR_CREATE_TARGET_BASE#origin/}"
 PR_CREATE_MERGE_BASE="$(git merge-base "$PR_CREATE_TARGET_BASE" HEAD 2>/dev/null)" || PR_CREATE_MERGE_BASE=""
 if [ -z "$PR_CREATE_MERGE_BASE" ]; then
   echo "pre-review-gate: cannot compute a merge-base with base branch '$PR_CREATE_TARGET_BASE' — is the branch based on it?" >&2
@@ -75,8 +94,10 @@ if [ -z "$PR_CREATE_MERGE_BASE" ]; then
 fi
 PR_CREATE_HEAD_SHA="$(git rev-parse HEAD)"
 
-# Docs-only auto-skip: every changed path vs the merge-base ends in .md
-# (or the diff is empty — a no-diff PR carries nothing for CodeRabbit to review).
+# Docs-only auto-skip: every changed path vs the merge-base ends in .md.
+# (An empty diff — no changes vs the merge-base — still reaches the gate:
+# a no-diff PR has nothing for CodeRabbit to review, but also nothing to
+# refuse; treat it like docs-only so a stray empty PR can still be opened.)
 if [ "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | wc -l)" -gt 0 ] &&
    [ -z "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | grep -v '\.md$')" ]; then
   echo "pre-review-gate: docs-only diff (only *.md changed vs $PR_CREATE_TARGET_BASE) — local review gate skipped" >&2
@@ -96,6 +117,7 @@ if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
   done
   if [ -z "$PR_CREATE_GATE_RECORD" ]; then
     echo "pre-review-gate: no clean local review generation at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_MERGE_BASE) — run pr-review-local first" >&2
+    echo "  (gate reads CLEAN records from $PR_CREATE_REPO_ROOT/.orchestraitor/reviews/; a stale or wrong-pair record does not pass)" >&2
     echo "  bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local" >&2
     exit "$ORC_ERR_CONFIG"
   fi
