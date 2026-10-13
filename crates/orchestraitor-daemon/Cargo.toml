@@ -43,7 +43,7 @@ orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 # orchestraitor-worker (MIT OR Apache-2.0): the pinned guard set and the
 # bootstrap transport the watch mode's direct-path starter wires.
 orchestraitor-worker = { path = "../orchestraitor-worker" }
-# reqwest (MIT OR Apache-2.0): the §9.47(b) conditional-request poller's
+# reqwest (MIT OR Apache-2.0): the §9.50(b) conditional-request poller's
 # HTTP client (issue #504); the same transport stack the board client
 # uses, already in the workspace lock.
 reqwest = { workspace = true }

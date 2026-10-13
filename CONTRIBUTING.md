@@ -13,7 +13,7 @@ are attributed to the human submitter, who remains responsible for the change re
 which tool produced it. The one exception is a registered `service_identities` slug: commits
 authored as `<slug>[bot]` (`<slug>[bot]` noreply address) satisfy the DCO via the bot's own
 sign-off, and human accountability rides the launch facts and attribution labels (spec
-`10-orchestrator.md` §9.47(c)) plus the human-reviewed PR.
+`10-orchestrator.md` §9.50(c)) plus the human-reviewed PR.
 
 ## Before contributing: where does the work belong?
 

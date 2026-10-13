@@ -68,17 +68,17 @@ pub struct WatchConfigBlock {
     pub poll_interval_secs: Option<u64>,
     /// §9.36 kick-off condition enables (issue #505). Absent block keeps
     /// the built-in defaults (every board/reconcile-derived condition
-    /// armed; the external-event condition disarmed until the §9.47
+    /// armed; the external-event condition disarmed until the §9.50
     /// source exists).
     pub kickoff: Option<WatchKickoffConfig>,
-    /// §9.47 event-ingress settings (issue #504). Absent block keeps the
+    /// §9.50 event-ingress settings (issue #504). Absent block keeps the
     /// built-in defaults (ingress disabled: the shipped posture is
     /// poll-only, opt-in).
     pub ingress: Option<WatchIngressConfig>,
 }
 
 /// Event-ingress settings (`[watch.ingress]`; spec `10-orchestrator.md`
-/// §9.47(b), issue #504). The poll fallback is complete ingress on its
+/// §9.50(b), issue #504). The poll fallback is complete ingress on its
 /// own (the push relay stays `blocked:arbitraitor`); the operator opts
 /// in by enabling the block, then arms the kick-off condition through
 /// `[watch.kickoff].external_event`.
@@ -108,8 +108,8 @@ pub struct WatchKickoffConfig {
     pub slot_released: Option<bool>,
     /// Arm the budget-window-reset condition (§9.19.6; default: true).
     pub budget_window_reset: Option<bool>,
-    /// Arm the external-event condition (§9.47; default: false). The
-    /// event source is the §9.47 poll-only ingress (issue #504): arm it
+    /// Arm the external-event condition (§9.50; default: false). The
+    /// event source is the §9.50 poll-only ingress (issue #504): arm it
     /// ONLY together with `[watch.ingress].enabled = true` — with the
     /// ingress disabled the condition can never fire (the shipped
     /// default source is empty).

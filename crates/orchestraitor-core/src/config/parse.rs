@@ -148,7 +148,7 @@ fn is_known_key(key: &str) -> bool {
                 | "watch.kickoff.budget_window_reset"
                 | "watch.kickoff.external_event"
         )
-        // The §9.47 event-ingress block (issue #504, `[watch.ingress]`).
+        // The §9.50 event-ingress block (issue #504, `[watch.ingress]`).
         || matches!(
             key,
             "watch.ingress.enabled" | "watch.ingress.queue_capacity"

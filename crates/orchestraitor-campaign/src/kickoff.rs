@@ -17,7 +17,7 @@
 //!   (§9.19.6 per-day budget scopes: a new UTC day restarts the daily
 //!   spend window, so a spend-stopped loop may kick off again);
 //! - [`KickoffCondition::ExternalEvent`] — an external GitHub event
-//!   arrived (§9.47 queue). The condition type is defined now; the event
+//!   arrived (§9.50 queue). The condition type is defined now; the event
 //!   source lands with issue #504, so the shipped source is the empty
 //!   [`EmptyKickoffEvents`] no-op and the condition never fires.
 //!
@@ -53,7 +53,7 @@ pub enum KickoffCondition {
     SlotReleased,
     /// A budget window reset (§9.19.6).
     BudgetWindowReset,
-    /// An external GitHub event arrived (§9.47; source lands with #504).
+    /// An external GitHub event arrived (§9.50; source lands with #504).
     ExternalEvent,
 }
 
@@ -91,7 +91,7 @@ pub struct KickoffSettings {
     pub slot_released: bool,
     /// Arm the budget-window-reset condition (default on).
     pub budget_window_reset: bool,
-    /// Arm the external-event condition (default OFF: the §9.47 event
+    /// Arm the external-event condition (default OFF: the §9.50 event
     /// source lands with issue #504; the shipped source is empty).
     pub external_event: bool,
 }
@@ -100,7 +100,7 @@ impl KickoffSettings {
     /// The built-in default enables — the value the daemon's built-in
     /// defaults TOML layer ships (§9.22.1): every board/reconcile-derived
     /// condition armed, the external-event condition disarmed until the
-    /// §9.47 source exists (#504).
+    /// §9.50 source exists (#504).
     #[must_use]
     pub const fn builtin_defaults() -> Self {
         Self {
@@ -119,7 +119,7 @@ impl Default for KickoffSettings {
     }
 }
 
-/// One external GitHub event from the §9.47 ingress queue (issue #504).
+/// One external GitHub event from the §9.50 ingress queue (issue #504).
 /// Events carry identifiers only — never board or PR content.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct KickoffExternalEvent {
@@ -127,7 +127,7 @@ pub struct KickoffExternalEvent {
     pub id: String,
 }
 
-/// The §9.47 external-event source. The production source (relay PUSH +
+/// The §9.50 external-event source. The production source (relay PUSH +
 /// conditional POLL ingress feeding the dedup queue) lands with issue
 /// #504; until then the shipped implementation is [`EmptyKickoffEvents`],
 /// the documented empty source, so the condition is wired but never fires.
@@ -152,7 +152,7 @@ pub trait KickoffEventSource: Send + Sync {
     fn drain_pending(&self, ids: &[String]) -> Vec<KickoffExternalEvent>;
 }
 
-/// The shipped empty §9.47 source (issue #504 pending): the external-event
+/// The shipped empty §9.50 source (issue #504 pending): the external-event
 /// condition is defined and configurable but can never fire.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EmptyKickoffEvents;
@@ -187,7 +187,7 @@ pub struct KickoffObservation {
     /// The UTC day boundary moved since the last pass (§9.19.6: the
     /// per-day budget window reset). `false` on a pass-less start.
     pub budget_window_reset: bool,
-    /// Pending external events drained from the §9.47 source.
+    /// Pending external events drained from the §9.50 source.
     pub external_events: Vec<KickoffExternalEvent>,
 }
 
@@ -439,7 +439,7 @@ mod tests {
     }
 
     /// §9.36 condition 5, trigger: an armed external-event condition
-    /// fires when the §9.47 source reports pending events.
+    /// fires when the §9.50 source reports pending events.
     #[test]
     fn external_event_fires_when_the_source_reports_events() {
         let settings = KickoffSettings {
@@ -473,7 +473,7 @@ mod tests {
         let verdict = evaluate(&settings, &observation);
         assert!(
             verdict.fired.is_empty(),
-            "the empty §9.47 source fired the condition: {:?}",
+            "the empty §9.50 source fired the condition: {:?}",
             verdict.fired
         );
     }

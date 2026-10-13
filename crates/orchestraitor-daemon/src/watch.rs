@@ -64,11 +64,11 @@ pub const POLL_INTERVAL_CONFIG_KEY: &str = "watch.poll_interval_secs";
 /// kick-off condition enables (issue #505).
 pub const KICKOFF_CONFIG_KEY_PREFIX: &str = "watch.kickoff";
 
-/// The §9.22 layered configuration key prefix carrying the §9.47
+/// The §9.22 layered configuration key prefix carrying the §9.50
 /// event-ingress settings (issue #504).
 pub const INGRESS_CONFIG_KEY_PREFIX: &str = "watch.ingress";
 
-/// Operator-configurable §9.47 event-ingress settings (issue #504).
+/// Operator-configurable §9.50 event-ingress settings (issue #504).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngressSettings {
     /// Enable the conditional-request event poller (default OFF: the
@@ -125,7 +125,7 @@ pub struct WatchConfig {
     /// `[watch.kickoff]` layered block; absent keys inherit the built-in
     /// defaults.
     pub kickoff: orchestraitor_campaign::KickoffSettings,
-    /// The §9.47 event-ingress settings (issue #504): the poll fallback
+    /// The §9.50 event-ingress settings (issue #504): the poll fallback
     /// runs when the operator enables it, feeding the bounded queue the
     /// external-event kick-off condition drains.
     pub ingress: IngressSettings,
@@ -150,7 +150,7 @@ impl WatchConfig {
     }
 
     /// Builds and validates the watch configuration with explicit
-    /// §9.47 event-ingress settings (issue #504). Fail-closed: a zero
+    /// §9.50 event-ingress settings (issue #504). Fail-closed: a zero
     /// interval is a runaway poll loop and a zero queue capacity makes
     /// every push a drop — both are rejected.
     ///
@@ -265,7 +265,7 @@ impl WatchConfig {
         })
     }
 
-    /// Resolves the §9.47 event-ingress settings (issue #504) from the
+    /// Resolves the §9.50 event-ingress settings (issue #504) from the
     /// layered `[watch.ingress]` block. Every absent key inherits the
     /// built-in default (ingress disabled, capacity 256).
     ///
@@ -1003,7 +1003,7 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     // pass after a day boundary observes the budget-window-reset kick-off
     // condition (issue #505, gen-4 review fix).
     .with_previous_budget_day(previous_budget_day);
-    // The §9.47 event source (issue #504): attached when the operator
+    // The §9.50 event source (issue #504): attached when the operator
     // enabled the ingress; the gate consults it only when the
     // external-event condition is ARMED, so a disarmed condition never
     // drains the queue.

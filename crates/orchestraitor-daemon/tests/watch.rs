@@ -221,7 +221,7 @@ fn watch_kickoff_resolves_from_layers_with_built_in_defaults()
     );
     assert!(
         !config.kickoff.external_event,
-        "the §9.47 external-event condition ships disarmed (#504 pending)"
+        "the §9.50 external-event condition ships disarmed (#504 pending)"
     );
 
     // A partial block: configured keys override, absent keys inherit.
@@ -697,7 +697,7 @@ fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// §9.47 layered config (issue #504): the `[watch.ingress]` block
+/// §9.50 layered config (issue #504): the `[watch.ingress]` block
 /// resolves with built-in defaults (disabled, capacity 256); a higher
 /// layer overrides; a zero capacity is rejected fail-closed.
 #[test]
@@ -710,7 +710,7 @@ fn watch_ingress_resolves_from_layers_with_built_in_defaults()
     let config = WatchConfig::from_layers(&resolver)?;
     assert!(
         !config.ingress.enabled,
-        "the §9.47 poll ingress ships disabled (opt-in per #573's posture)"
+        "the §9.50 poll ingress ships disabled (opt-in per #573's posture)"
     );
     assert_eq!(
         config.ingress.queue_capacity,

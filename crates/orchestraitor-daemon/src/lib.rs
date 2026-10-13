@@ -12,7 +12,7 @@ mod rpc;
 mod server;
 mod watch;
 
-/// The §9.47 GitHub event ingress (issue #504): the poll-only fallback
+/// The §9.50 GitHub event ingress (issue #504): the poll-only fallback
 /// feeding the §9.36 kick-off evaluation — conditional-request poller,
 /// durable dedup, bounded queue, and the production `KickoffEventSource`.
 pub mod ingress;

@@ -2741,7 +2741,7 @@ async fn a_seeded_budget_day_fires_the_reset_on_a_moved_boundary() {
     assert_eq!(summary2.spawns, 0, "the same-day seed never claims a reset");
 }
 
-/// Module-level peek/drain §9.47 fixture (gen-12 dedup): `pending` is a
+/// Module-level peek/drain §9.50 fixture (gen-12 dedup): `pending` is a
 /// non-destructive peek, `drain_pending(ids)` removes exactly the
 /// requested ids (retain-keyed), matching the production
 /// `KickoffIngressSource` semantics. The optional counter counts peek
@@ -2814,7 +2814,7 @@ impl orchestraitor_campaign::KickoffEventSource for KickoffFixtureSource {
 }
 
 /// Condition 5 trigger (issue #504): an external GitHub event drained
-/// from the attached §9.47 source kicks off the loop when the condition
+/// from the attached §9.50 source kicks off the loop when the condition
 /// is armed — with ready work also present (both conditions fire; the
 /// spawn happens once).
 #[tokio::test(start_paused = true)]

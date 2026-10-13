@@ -1,4 +1,4 @@
-//! Fixture-driven integration tests for the §9.47(b) CI completions
+//! Fixture-driven integration tests for the §9.50(b) CI completions
 //! conditional poll lane: the CI lane poller runs against the same
 //! scripted in-process HTTP server pattern as the events lane (no live
 //! network in CI). Negative and adversarial cases (§21.4) pin the

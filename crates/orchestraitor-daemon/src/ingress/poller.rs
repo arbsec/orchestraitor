@@ -1,4 +1,4 @@
-//! The §9.47(b) conditional-request poller (issue #504): the poll-only
+//! The §9.50(b) conditional-request poller (issue #504): the poll-only
 //! event ingress over the GitHub REST API.
 //!
 //! Every poll sends `If-None-Match` with the endpoint's stored `ETag`; a
@@ -8,7 +8,7 @@
 //! and rate-limit feedback (§9.43: `X-RateLimit-Remaining: 0` /
 //! `Retry-After` / HTTP 403-429) adapts the cadence — the next poll
 //! never fires before the limit resets, and the poller never widens its
-//! cadence beyond that feedback (spec §9.47(b): "never automatic
+//! cadence beyond that feedback (spec §9.50(b): "never automatic
 //! widening of the poll cadence beyond rate-limit feedback").
 //!
 //! Accepted events flow through the durable dedup table into the bounded
@@ -93,7 +93,7 @@ fn next_link(link_header: &str) -> Option<String> {
     None
 }
 
-/// The event types the poll fallback tracks (spec §9.47: new issues,
+/// The event types the poll fallback tracks (spec §9.50: new issues,
 /// issue/PR comments, PR ready-for-review). The operator's
 /// `[watch.ingress].enabled` gate selects this fixed set; the names are
 /// the normalized dedup `event_type` values. NOTE (gen-19): the
@@ -189,7 +189,7 @@ struct RestEventItem {
 #[derive(Debug, serde::Deserialize)]
 struct RestPayload {
     /// The activity verb (`opened`, `closed`, `synchronize`,
-    /// `ready_for_review`, ...). Only the documented §9.47 verbs pass
+    /// `ready_for_review`, ...). Only the documented §9.50 verbs pass
     /// the filter — every `IssuesEvent`/`IssueCommentEvent`/
     /// `PullRequestEvent` type carries multiple actions whose delivery
     /// keys (head SHA included) would otherwise multiply kick-offs
@@ -225,7 +225,7 @@ struct RestPullHead {
 /// Normalizes a repository-event `type` into the operator-facing event
 /// type (the dedup `event_type`). Untracked kinds return `None`
 /// (filtered out before dedup — the operator's event filter is the
-/// fixed §9.47 set). On the repository events feed, PRs appear as
+/// fixed §9.50 set). On the repository events feed, PRs appear as
 /// issues carrying `payload.issue.pull_request`; `IssueCommentEvent`
 /// distinguishes PR comments from issue comments that way.
 fn normalize_event_type(
@@ -241,7 +241,7 @@ fn normalize_event_type(
     }
 }
 
-/// The §9.47(b) conditional-request poller. Auth rides the board
+/// The §9.50(b) conditional-request poller. Auth rides the board
 /// provider's [`BoardAuth`] seam (public/board-visible events, the same
 /// credentials the reconcile poll uses); `ETag` bookkeeping rides the
 /// durable [`IngressStore`]; accepted events ride the bounded
@@ -623,7 +623,7 @@ impl EventPoller {
             // the stop check and the dedup table can never diverge (a
             // gen-17 review finding).
             let Some(derived) = item_derived(item, target) else {
-                continue; // outside the operator's §9.47 event filter or unshaped
+                continue; // outside the operator's §9.50 event filter or unshaped
             };
             // Items at or below the raw-id boundary are already-processed
             // history — skipped BEFORE the dedup check (a gen-18 review
@@ -641,7 +641,7 @@ impl EventPoller {
             }
             // Dedup is DURABLE (the store), before the queue: a redelivery
             // never consumes queue capacity and never produces a second
-            // kick-off (§9.26.3 via §9.47).
+            // kick-off (§9.26.3 via §9.50).
             let is_new = self
                 .lock_store()
                 .map_err(|_| PollError::Failed)?
@@ -668,7 +668,7 @@ impl EventPoller {
         Ok((accepted, duplicates, dropped))
     }
 
-    /// The rate-limit wait (§9.43 feedback, §9.47(b): the cadence never
+    /// The rate-limit wait (§9.43 feedback, §9.50(b): the cadence never
     /// widens beyond the feedback): an explicit `Retry-After` wins, else
     /// wait exactly until the reset epoch second (bounded below by the
     /// platform default so a bad clock cannot spin), else the bounded

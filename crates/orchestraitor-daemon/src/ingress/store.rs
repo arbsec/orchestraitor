@@ -1,4 +1,4 @@
-//! Durable state for the §9.47 event ingress (issue #504): the dedup
+//! Durable state for the §9.50 event ingress (issue #504): the dedup
 //! table and the per-endpoint conditional-request bookkeeping.
 //!
 //! The store is a dedicated `rusqlite` connection (the same pattern the
@@ -7,7 +7,7 @@
 //! stores, so ingress bookkeeping never contends with runner writes.
 //!
 //! **Dedup key.** Delivery is at-least-once on every ingress path (spec
-//! §9.47 idempotency): the durable delivery key is the platform delivery
+//! §9.50 idempotency): the durable delivery key is the platform delivery
 //! identifier (for the poll path, the REST event's `id`) plus repository,
 //! event type, and head SHA where present. A redelivery inside the
 //! 30-day window (the platform's redelivery/retention horizon) never
@@ -20,14 +20,14 @@ use rusqlite::Connection;
 
 use crate::error::DaemonError;
 
-/// The §9.47 redelivery window in seconds: the platform's redelivery and
+/// The §9.50 redelivery window in seconds: the platform's redelivery and
 /// retention horizon (30 days). A delivery key seen within this window
 /// deduplicates; outside it, the key may fire again (a genuinely new
 /// platform delivery of the same identifier).
 pub const REDELIVERY_WINDOW_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// One accepted external event after dedup: identifiers only — never
-/// board or PR content (spec §9.47: the queue feeds kick-off evaluation,
+/// board or PR content (spec §9.50: the queue feeds kick-off evaluation,
 /// not planning).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressEvent {
@@ -127,7 +127,7 @@ impl IngressStore {
         Ok(Self { conn, path_label })
     }
 
-    /// The durable delivery key for one platform delivery (spec §9.47):
+    /// The durable delivery key for one platform delivery (spec §9.50):
     /// platform delivery identifier + repository + event type + head SHA
     /// where present.
     #[must_use]
