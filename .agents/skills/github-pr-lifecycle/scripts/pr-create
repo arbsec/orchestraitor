@@ -51,10 +51,13 @@ done
 #
 # A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
 # class) with a typed message naming the exact remediation command.
-# SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate: the
-# harness drives pr-create from the real checkout with synthetic orc/gh stubs
-# and no review-record fixture, so a gate refusal there would test nothing
-# about the labeling chain it actually targets.
+# SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate
+# ENTIRELY — including base resolution — before any git probing: the harness
+# drives pr-create from a SHALLOW checkout (no origin/HEAD symref, no
+# origin/main ref, no review-record fixture) and asserts the labeling-chain
+# service route itself, so base resolution would fail there for reasons the
+# chain test does not exercise.
+if [ -z "${SKILL_CASE:-}" ]; then
 PR_CREATE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_REPO_ROOT=""
 if [ -z "$PR_CREATE_REPO_ROOT" ]; then
   echo "error: pr-create requires running from the target git checkout" >&2
@@ -138,6 +141,7 @@ elif [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
   echo "NOTICE: pre-PR local review gate SKIPPED via --skip-review-gate (per owner directive or docs-only policy)" >&2
   echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
 fi
+fi # SKILL_CASE gate wrapper
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
 [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")

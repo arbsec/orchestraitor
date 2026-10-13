@@ -8,7 +8,7 @@
 # and .agents/skills/github-pr-lifecycle/scripts/pr-labels-from-issue.
 #
 # NOTE (verified against the pinned action source,
-# src/api/get-label-configs.ts at 8558fd7): actions/labeler@v5 supports ONLY
+# src/api/get-label-configs.ts at v6.0.0): actions/labeler supports ONLY
 # `changed-files`, `head-branch`, and `base-branch` keys — `title` rules are
 # logged as unknown and dropped, so title-derived labels (dependencies-from-
 # Conventional-Commit, task) stay with the in-script `pr-labels` chain, which

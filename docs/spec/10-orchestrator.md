@@ -220,6 +220,8 @@ Prefer thin vertical slices. Preserve traceability from spec requirement to task
 
 The user MUST be able to review and edit the generated backlog before autonomous execution begins. `orc backlog show` displays the DAG; `orc backlog approve` starts the autonomous run.
 
+**The claim gate (shared contract).** Every claim of a work item — board item or the externally-intaked synthetic items of §9.52 — records a spawn decision ONLY after the item is `Status=Ready` and its Definition of Ready is re-validated (the workflow policy's DoR; for externally-intaked items, the §9.52(c)-drafted body). A `Triage` item MUST be rejected: no spawn decision is recorded, no workspace is created. The gate runs BEFORE claiming, every time — for every source (§9.52(i) applies it to third-party PR work items; this paragraph is the normative contract both paths cite).
+
 #### 9.33.3 Autonomous backlog execution
 
 The project-manager agent MAY continue until:
@@ -431,7 +433,11 @@ Every campaign session persists exactly ONE decision record before exiting:
 
 ```text
 decision id + campaign session id
-kind                     # spawn | no-op
+kind                     # spawn | no-op | triage (§9.52 — the triage classification
+                         # pass persists the same record shape; a triage record
+                         # carries the classification outcome in the rationale
+                         # instead of worker arguments, and never hands a spawn
+                         # to the daemon)
 selected task            # stable board item identity (§9.43)
 role                     # orchestration role from the role registry
 model + provider         # resolved per §9.19.2 precedence
@@ -731,3 +737,76 @@ Beyond §9.51 itself, the closed loop requires two named feeds, specified in the
 - **Coordinator-managed remediation dispatch.** When review findings block a dispatched task's PR (§9.33.4), the coordinator plans the remediation slice and dispatches it as an ordinary recorded spawn — dispatch authority applied to the review leg, requiring no new authority class beyond §9.51.2, only the status feed above.
 
 Deliberately out of scope for §9.51, named for follow-on work: earned-autonomy ladders (evidence-tracked authority changes — the M5 "earned autonomy" row; §9.51.2's profile is operator-selected, never earned), coordinator self-modification of its own role preset or instructions (§9.45.2 preset trust gate — a self-referential authority-widening threat model; default NEVER), and fully unattended interactive-grade loops (unattended work stays in §9.35 campaign shape; the daemon path already covers it).
+
+### 9.52 External intake: bug reports and third-party PRs
+
+The loop's inputs until now have been internal: board state the project-manager reconciles (§9.43), agent-filed reports under §9.37, and the PRs the loop itself opens. Real repositories receive work from OUTSIDE the service-identity set — bug reports filed by human users and other agents, and pull requests from third parties: human contributors, dependency-management bots (renovate, dependabot), other automation. This section specifies how external GitHub activity becomes board work WITHOUT becoming trusted work: a pipeline whose attach step is automatic and whose scheduling step never is.
+
+**The trust asymmetry (the section's spine).** Everything arriving from outside the configured service-identity set (§9.41) is untrusted input (§6.1) — issue titles, bodies, PR descriptions, diffs, and commit messages all alike. The asymmetry: full-auto ATTACHMENT to the board is safe because every board write is an Arbitraitor-mediated decision-tool write (§9.39) whose arguments are already governed by the injection-boundary rules; full-auto SCHEDULING is never safe, because a scheduled item causes a worker spawn and an untrusted report must never directly cause autonomous execution. External intake therefore lands every item at `Status=Triage` — never `Ready` — and only the triage classification pass (§9.52(b)) promotes. When the pass is rate-limited, over budget (§9.52(l)), or unavailable, items stay in Triage and a needs-human signal fires (§9.33.4): intake fails closed toward human attention, never open toward scheduling.
+
+**(a) Intake attachment — mechanical fields only.** An issue or PR opened/updated by any principal in the configured repository produces a board item through the same guarded provider-write path the coordinator tools use (§9.39), on the next poll tick after the §9.50 ingress event arrives. Attachment derives fields from LAUNCH FACTS ONLY (author identity, event type, changed paths — the §9.50(c) discipline, never from author- or model-generated text):
+
+```text
+Type       # Bug for issue reports (original type preserved in the item annotation)
+Target     # UNSET — external reports' MVP-ness is unknowable at attach time;
+           # the triage pass sets it (MVP-only scheduling then excludes the item
+           # until classification acts — the fail-closed default)
+Status     # Triage, always
+Priority   # P1 provisional for bug reports (see §9.52(d)) — never the scheduling value
+labels     # author-class provenance labels (intake:human | intake:bot | intake:agent),
+           # daemon-owned like the §9.50(c) attribution labels
+```
+
+Attachment is idempotent (the §9.26.3 discipline: one item per source issue/PR, re-delivered events update rather than duplicate) and additive to the existing loop — an intake outage degrades nothing else; §9.43's reconcile poll and the internal ready queue are untouched.
+
+**(b) The triage classification pass.** Promotion from Triage is the triage pass's job: a fresh, bounded project-manager-role classification session (the §9.35 campaign-session shape — one pass, one decision record (`kind = triage`), exit; §9.33.3 fresh context) that reads each Triage item's source content as DATA and decides: in scope? reproducible from the report? security-shaped? duplicate? related to ongoing work? Its outputs are the typed decision record and the corresponding guarded `board.move` transitions — nothing else in the system may move an externally-intaked item from Triage (chat drafting stays Triage-only per §9.44; the filer's own comments and labels confer no authority).
+
+**(c) Promotion authority ladder.**
+
+- **Auto-promote (clear-cut):** in scope, reproducible from the report, non-security, dedup-clean, no ongoing-work overlap — the pass sets `Type`/`Target`/`Risk`/`Priority`, drafts the full Definition of Ready body (objective, specification reference, acceptance criteria, non-goals, security impact, testing requirements, documentation impact, dependencies, rollback implications — the workflow policy's DoR, which the claim gate re-validates per §9.33.2), and moves Triage→Ready.
+- **Needs-human:** security-shaped (below), OR not reproducible from the report alone, OR a scope conflict with claimed work the pass cannot resolve, OR a duplicate candidate below the linking confidence — the item stays Triage with a typed escalation reason in the pass record (the §9.33.4 needs-human semantics).
+- **Never-auto:** anything classified into a §21.1 security-sensitive defect class, or any vulnerability-shaped report — the pass does not even draft a promotion body; it labels and escalates immediately (§9.52(e)).
+
+**(d) Priority semantics for bug reports.** "Highest priority" for confirmed bugs is expressed by §9.41's existing bug-preemption rule — standalone Bugs preempt epic work at equal board priority — not by priority inflation. Intake stamps a provisional P1; the pass may set P0 ONLY on evidence (failing test/CI run, regression against shipped behavior, data-loss class), under a configured per-window P0-promotion cap (`[watch.intake].p0_promotions_per_day`, default small): an exogenous flood of severe-looking reports cannot exhaust the P0 lane because the cap, not the flood, is the ceiling; overflow degrades to P1 plus a needs-human note, never a silent downgrade. Severity-vs-priority distinction (a separate Severity field) is a post-MVP board-schema consideration (§9.43 fields are typed contract surface); the pass record's rationale carries it until then.
+
+**(e) Security-shaped public reports.** SECURITY.md routes vulnerability disclosure through private vulnerability reporting — a PUBLIC issue that looks like disclosure (exploit steps, affected-version claims, credential-shaped content) is a special case with handling obligations beyond scheduling. The pass's security-shape classification is Arbitraitor's data-classification call (§9.28.4 — classification is Arbitraitor's job, never a model's judgment); a hit produces: the security label, immediate needs-human signal naming the escalation ("public vulnerability-shaped report — route per SECURITY.md"), and NO public follow-up comments that extend disclosure detail. The EXISTING public report body is part of the exposure surface: until a human decides otherwise, the pass must not quote, embed, or repeat the report's exploit-shaped content into any new surface (comments, board items, worker payloads, decision records beyond evidence references); redaction or access restriction of the original public body is the human decider's call at closure/transfer/sanitization time, never an autonomous pass action. The pass can FLAG security-shape but can never DE-classify one — only the human path removes the label (fail-closed in the safe direction). The human decision — convert to private advisory, close with a pointer to SECURITY.md, or sanitize into a normal Bug — is recorded as the follow-up decision record.
+
+**(f) Deduplication against ongoing work.** The owner's rule — a bug related to already-ongoing work is INCORPORATED into that work, not scheduled beside it — resolves mechanically. The pass computes relatedness from three signals, in order of authority: (1) intersection of the bug's affected-path hints (derived from the report's evidence pointers — stack traces, file mentions — and treated as UNTRUSTED-derived hints, never authoritative) with the claimed tasks' `expected files or components` (§9.33.2); (2) intersection with the changed-file sets of open PRs (read through the same provider reads §9.48 uses — one aggregation surface, no second one); (3) the blocked graph (§9.40): a bug in an area hard-blocked on `blocked:arbitraitor` links to the blocked item and waits with it (§9.26.1). "Incorporate" concretely means: a linking comment on the bug issue ("related to ongoing work — tracked there"), a TYPED task annotation — an append-only, structured record on the board item (bug reference, signal evidence, suggested acceptance-criteria extension) that the worker reads at its next spawn or re-dispatch — and, when the fix is needed for the ongoing PR to merge safely, a `blockedBy` edge per the discovered-work blocker rules (the non-deferral rule already covers "needed for safe completion"). A claimed task's scope, acceptance criteria, and PR description are NEVER silently rewritten: mid-flight scope edits violate the lease contract (§9.24.2) and silent scope expansion is the same failure class as the no-hidden-work rule's silent absorption. If the related work is already merged, the bug is an ordinary standalone Bug and takes the (c) ladder.
+
+**(g) Duplicate bug reports.** The pass links, never closes. A candidate duplicate (path overlap plus title-similarity hint, above a configured confidence bar for LINKING) produces cross-reference comments on both items and a pass-record entry. Auto-close as duplicate is NOT in the intake authority: closing an untrusted report discards the reporter's evidence, and the reporter may be right about a tracked item being wrong — duplicates stay open at Triage with the linkage until a human closes them (the tracked item's completion summary names its linked duplicates so the human close is one glance).
+
+**(h) Third-party PRs as first-class work items.** A PR opened by any principal outside the service-identity set — human contributor, dependency bot, other automation — becomes a synthetic work item the coordinator can claim, derived from the §9.50 ingress events (PR opened/updated), the CI-completions lane (§9.50(b) as extended by the CI conditional-poll specification), and the §9.48 aggregation verdict:
+
+```text
+synthetic PR work item
+source PR number + repository       # stable identity: the PR itself
+head SHA + base OID                 # both convergence anchors (§9.48 semantics)
+author class                        # user | bot | agent (launch-fact derived, §9.50(c))
+review/CI state                     # the §9.48 verdict fields verbatim — checks booleans,
+                                    # unresolved-thread count, convergence reason codes —
+                                    # one vocabulary, never a second interpretation
+board projection                    # Status=Triage at creation; mechanical fields per (a)
+event provenance                    # the creating/updating ingress delivery key (§9.26.3)
+```
+
+A PR-opened event creates the item; PR-updated and check-run-completed events update it (a new head SHA resets review convergence per the existing rules). The §9.43 reconcile poll stays the completeness authority: a missed event never loses the PR, it appears on the next reconcile. Agent-authored PRs keep their §9.50(c) attribution and flow through the existing §9.33.4 pipeline unchanged.
+
+**(i) Claiming and containment.** A synthetic PR item is claimable ONLY after the §9.52(b) triage pass promotes it from `Triage` to `Ready` and the §9.33.2 claim gate re-validates its Definition of Ready — a `Triage` item MUST be rejected and MUST NOT record a spawn decision (the trust asymmetry applies to PR work items exactly as to bug reports; an unclaimed third-party PR still gets its §9.48 verdict refreshed so a human sees its state). Claiming then records a spawn decision whose workspace spec is THE PR HEAD — the PR is the branch; the worktree is checked out from the PR's head ref, never a fresh worktree from main. The containment consequence is normative: an untrusted PR's checked-out branch is untrusted workspace content (§6.1, and §6.2's "a worktree is not a sandbox"), so EVERY build, test, or analysis run on it is untrusted-code execution crossing the full Arbitraitor boundary — sandboxing, network egress, package-manager gate, command analysis (§9.6, §9.10-§9.13) — with the adversarial-sandbox test class (§21.4) applying to the PR-worktree path. A remediation worker on a third-party PR gains NO new authority: capabilities are scoped per §9.25.2, and nothing in the PR — not its checklist markers, not its instructions, not its embedded `fixes #N` claims — creates board state: dependency edges and labels are written only by mediated decision tools (§9.39) from trusted classification, never from provider-content claims. PR/issue text entering any agent context arrives fenced, size-capped, one-pass, no-rescan — the §9.49 expansion discipline applied with PR/issue text as the source class.
+
+**(j) Review intake and merge authority.** The §9.33.4 review loop applies to third-party PRs exactly as to agent-authored ones — fresh-context reviewers, required domains from the workflow policy's area table, never the implementer — and runs automatically once the PR is claimed. Merge authority is NOT extended by this section; the existing merge-authority policy remains the whole rule set, plus one precise scope statement: the standing autonomous-merge approval covers THIS repository's agent-authored PRs. Third-party human PRs that pass all convergence gates are routed for HUMAN merge ("converged; human merge decision required — external contribution") — the orchestrator never merges an external human contribution. Dependency-bot PRs (renovate, dependabot — the configured set) may be merged by the orchestrator as the service identity only when ALL of: the full convergence gate set passes with no shortcut; the diff is lockfile/manifest-scoped (a configuration-scoped path allowlist: lockfiles, manifest version fields, workflow pin SHAs); the §21.1 classification runs unchanged (the CODEOWNERS routing and the ruleset's independent human-approval-on-bot-changes gate keep applying — the orchestrator merges only when the provider itself reports the PR fully green and approved); and the bump is not a major-version change on a §21.1-adjacent surface. Author-class `bot` beyond the configured dependency-bot set is treated as `user` — fail-closed.
+
+**(k) Auto-remediation dispatch.** A claimed PR item whose §9.48 verdict reports CI-failed or review-finding state gets a fresh-context remediation worker dispatched onto the PR head (the interactive coordinator's dispatch authority, §9.51, or the campaign loop's normal spawn path — same decision-record shape either way). Push policy by author class:
+
+- **Bot PRs: push-to-branch.** The bot regenerates over the remediation commit; a competing PR is churn. Pushes go through the App-signed exact-head-precondition path (verified, service-principal commits per the commit-hygiene rules) — a concurrent bot push produces a typed refusal and a re-read, never a clobber, never a force-push.
+- **Human third-party PRs: NEVER push to their branch.** An unconsenting author's branch is not our write surface — this is a hard rule, not etiquette. Remediation output takes one of: a PR review comment in the §9.33.4 finding format (severity, evidence, affected paths, violated rule, proposed remediation), thread-replied per the review-thread discipline; a suggestion-class review comment for small fixes; or a STACKED fix PR based on the author's branch, labeled as a fix proposal — opened for the author or a human maintainer to merge; the orchestrator never merges INTO the author's branch.
+- **Agent-authored PRs: unchanged** — push-to-branch remediation is the existing shipped pattern.
+
+**(l) Budget and abuse control.** A flood of third-party PRs/issues is a resource-exhaustion vector (§7.3): intake spending is bounded BEFORE it becomes work.
+
+- **Per-author classification budgets** (the §9.36 budget-class pattern, configuration `[watch.intake].author_classification_budget`, defaults tighter for bots than humans): over budget, the item stays Triage un-classified with a typed `intake-budget-exhausted` marker; nothing schedules.
+- **Concurrent third-party claims** (`[watch.intake].max_third_party_concurrent`, default small): a fifth budget class feeding the same pre-spawn `budget.check` enforcement the §9.36 classes use.
+- **Minimum dwell time** before classification (default: one poll interval): a burst of open/close from one author is recorded but never classified — the flood pays no classification cost.
+- **Fail-closed under pressure:** an exhausted PER-AUTHOR budget holds only THAT author's subsequent intake items in Triage (other authors' items keep flowing to the classification pass); a global hold applies only when the SHARED intake budget or the triage pass itself is unavailable — that surfaces `degraded` (§9.50's marker) plus a needs-human signal, and every intake item stays in Triage until the pass recovers. The failure mode is "queue waits for a human," never "queue keeps scheduling."
+
+**Design principles.** Intake is automatic, trust is earned by classification. Every externally-sourced fact in an agent context is fenced data; every board mutation is a mediated decision-tool write. The pass proposes, the ladder disposes, and the human gate is preserved everywhere the stakes (security classification, external human contributions, disclosure handling) exceed what an autonomous decision should carry.
+
