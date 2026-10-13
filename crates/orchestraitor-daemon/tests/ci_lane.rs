@@ -42,6 +42,7 @@ impl BoardAuth for StaticAuth {
 /// One request the fixture server captured.
 #[derive(Debug, Clone)]
 struct Captured {
+    path: String,
     if_none_match: Option<String>,
 }
 
@@ -142,6 +143,7 @@ fn handle(
         .map(std::string::ToString::to_string);
     let path = req.uri().path().to_string();
     captured.lock().expect("captured lock").push(Captured {
+        path: path.clone(),
         if_none_match: if_none_match.clone(),
     });
     let matched = {
@@ -303,11 +305,25 @@ async fn a_repoll_of_the_same_run_never_duplicates_the_delivery() {
             headers: vec![("ETag", "\"r1\"".to_string())],
         },
         Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(701, "success"),
+            headers: vec![("ETag", "\"q1\"".to_string())],
+        },
+        Rule {
             path_needle: "actions/runs",
             requires_etag: Some("\"r1\"".to_string()),
             status: 200,
             body: runs_body(),
             headers: vec![("ETag", "\"r1\"".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(701, "success"),
+            headers: vec![("ETag", "\"q1\"".to_string())],
         },
     ])
     .await;
@@ -322,14 +338,11 @@ async fn a_repoll_of_the_same_run_never_duplicates_the_delivery() {
         .expect("runs poll ok");
     assert_eq!(first.accepted, 1, "the first poll accepts the completion");
 
-    let second = lane
-        .poll_repo(&target, 1_100)
-        .await
-        .expect("second round")
-        .remove(0)
-        .expect("runs poll ok");
+    let mut second = lane.poll_repo(&target, 1_100).await.expect("second round");
+    let _requests = server.requests();
+    let runs2 = second.remove(0).expect("runs poll ok");
     assert_eq!(
-        (second.accepted, second.duplicates),
+        (runs2.accepted, runs2.duplicates),
         (0, 1),
         "the repeated run is deduplicated: zero accepted, one duplicate"
     );
@@ -619,4 +632,168 @@ async fn unshaped_run_items_are_skipped_never_shared() {
         "fork-PR (empty pull_requests), id-less, and non-pull_request runs are all skipped"
     );
     assert!(queue.peek().is_empty(), "nothing reached the queue");
+}
+
+/// Regression (review finding): the tracked set is the
+/// UNION of the previous SHAs and the newly in-flight SHAs — a SHA whose
+/// last run completed keeps its check-runs polls (its final Actions job
+/// and third-party checks may complete after the run).
+#[tokio::test(flavor = "current_thread")]
+async fn a_sha_whose_run_completes_stays_tracked() {
+    // Round 1: beef34 in-flight -> tracked; its check-runs baseline runs
+    // (scripted 304, no ETag stored yet? no — first poll is a 200).
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(701, "success"),
+            headers: vec![("ETag", "\"q1\"".to_string())],
+        },
+        // Round 2: NO in-flight runs (all completed) — beef34 must STILL
+        // be tracked (union) and get a check-runs poll.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: json!({"workflow_runs": [{
+                "id": 901, "status": "completed", "conclusion": "success",
+                "event": "pull_request", "head_sha": "beef34",
+                "run_attempt": 1, "pull_requests": [{"number": 505}]
+            }]})
+            .to_string(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"q1\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+
+    let mut first = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    assert_eq!(first.len(), 2, "runs + tracked beef34 check-runs");
+    let _ = first.remove(1).expect("baseline ok");
+
+    let second = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    assert_eq!(
+        second.len(),
+        2,
+        "beef34 stays tracked after its run completed (union tracking)"
+    );
+    assert!(
+        matches!(second[1], Ok(ref o) if o.accepted == 0 && o.duplicates == 0),
+        "the 304 check-runs poll produces no events"
+    );
+    let _ = queue.take();
+}
+
+/// Regression (review finding): duplicate
+/// in-flight SHAs are deduplicated BEFORE the 16-SHA cap.
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_in_flight_shas_do_not_spend_the_cap() {
+    // 20 rows, all in-flight, but only 17 distinct SHAs: two SHAs repeat
+    // 2x and 3x. The cap is 16 — with dedup-before-cap all 17 distinct
+    // SHAs... no: cap keeps 16 of the 17 distinct. Assert exactly 16
+    // distinct SHAs are tracked (deduped), not 16 rows-worth with dupes.
+    let mut runs = Vec::new();
+    for i in 0..20u64 {
+        let sha = format!("sha{:02}", i % 17); // 17 distinct, 20 rows
+        runs.push(json!({
+            "id": 1000 + i, "status": "in_progress", "event": "pull_request",
+            "head_sha": sha, "run_attempt": 1,
+            "pull_requests": [{"number": 600 + i}]
+        }));
+    }
+    let body = json!({ "workflow_runs": runs }).to_string();
+    let server = FixtureServer::start(vec![Rule {
+        path_needle: "actions/runs",
+        requires_etag: None,
+        status: 200,
+        body,
+        headers: vec![("X-Poll-Interval", "60".to_string())],
+    }])
+    .await;
+    let (_queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+
+    // The first poll fires check-runs for the tracked SHAs; the fixture
+    // has no rules for them (500 -> Failed). Count the DISTINCT check-run
+    // request paths.
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round");
+    let requests = server.requests();
+    let distinct_check_polls = requests
+        .iter()
+        .filter(|r| r.path.contains("/check-runs"))
+        .map(|r| r.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        distinct_check_polls.len(),
+        16,
+        "exactly the capped count of DISTINCT SHAs polled (dedup before cap)"
+    );
+}
+
+/// Regression (review finding): the FIRST poll of a
+/// process bypasses the persisted `runs` `ETag` — a restart must not hide
+/// active completions behind a 304.
+#[tokio::test(flavor = "current_thread")]
+async fn first_poll_of_a_process_bypasses_the_persisted_runs_etag() {
+    let etag = "\"persisted\"";
+    // Two rounds: round 1 (bypass — no If-None-Match even though the
+    // store would carry an ETag from a previous process), round 2 rides
+    // the ETag normally.
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    // Simulate a restart: the STORE carries the ETag, the lane is fresh.
+    let (_queue, store, lane) = fixture_lane();
+    store
+        .lock()
+        .expect("store lock")
+        .record_conditional("arbsec/orchestraitor/actions-runs", Some(etag), 60, true)
+        .expect("seed persisted etag");
+    let target = target_of(&server);
+
+    let first = lane
+        .poll_repo(&target, 1_000)
+        .await
+        .expect("first round")
+        .remove(0)
+        .expect("runs poll ok");
+    assert_eq!(
+        first.accepted, 1,
+        "the first poll bypassed the persisted ETag (200, not 304) and accepted the completion"
+    );
+    let requests = server.requests();
+    assert!(
+        requests[0].if_none_match.is_none(),
+        "the first runs request carries no If-None-Match (bypass)"
+    );
 }

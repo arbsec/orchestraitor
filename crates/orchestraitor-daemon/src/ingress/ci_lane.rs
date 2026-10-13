@@ -15,9 +15,13 @@
 //!   extra endpoint, no extra state, cost proportional to active work.
 //! - `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` (one per
 //!   tracked head SHA) — check-run completions for the SHAs the runs
-//!   poll discovered. A SHA stops being polled once its runs have all
-//!   completed AND its check-runs endpoint answers `304` (quiet); the
-//!   per-SHA bookkeeping row is pruned then.
+//!   poll discovered. The tracked set is the union of the SHAs of
+//!   in-flight runs and the previously tracked SHAs (a SHA whose last
+//!   run just completed may still have check runs completing after it);
+//!   a SHA leaves the tracked set — and its per-SHA bookkeeping row is
+//!   pruned — when the cap evicts it. The lane's first poll per process
+//!   bypasses the persisted `runs` `ETag` (the tracked set is in-memory; a
+//!   304 on the very first poll would hide active completions).
 //!
 //! Every request is conditional (`If-None-Match` with the stored
 //! `ETag`); a `304` costs no quota and produces no events. The lane
@@ -262,8 +266,13 @@ pub struct CiLane {
     http: reqwest::Client,
     store: Arc<std::sync::Mutex<IngressStore>>,
     queue: Arc<IngressQueue>,
-    /// Per-repository tracked head SHAs (the in-flight run SHAs from the
-    /// last runs response, kept until quiet).
+    /// Repository runs endpoints this process has completed its first
+    /// (ETag-bypassing) runs fetch for — after that, the persisted `ETag`
+    /// rides normally.
+    runs_initialized: Mutex<HashSet<String>>,
+    /// Per-repository tracked head SHAs: the union of the in-flight run
+    /// SHAs from the last runs response and the previously tracked SHAs
+    /// (kept until the cap evicts them).
     tracked: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -290,6 +299,7 @@ impl CiLane {
             http,
             store,
             queue,
+            runs_initialized: Mutex::new(HashSet::new()),
             tracked: Mutex::new(HashMap::new()),
         })
     }
@@ -334,7 +344,25 @@ impl CiLane {
         // their check-runs polls (their completion signals must not
         // stall because one endpoint blipped).
         let previous = self.take_tracked(target);
-        match self.poll_runs(target, now_secs).await {
+        // First-success gate (a CodeRabbit review fix): the durable runs
+        // ETag survives a daemon restart, but the in-memory tracked set
+        // does not. Sending the persisted ETag on this process's FIRST
+        // runs poll could yield a 304 with an empty tracked set — active
+        // completions would stay undetected until the endpoint changes.
+        // The first poll of this process therefore bypasses the persisted
+        // ETag (a 200 is the tracked-set source of truth); afterwards the
+        // ETag rides normally. `insert` returns true when the key was new
+        // (this IS the first poll) — bypass exactly then.
+        let bypass_etag = self.runs_initialized.lock().insert(target.runs_key.clone());
+        match self
+            .poll_runs(
+                target,
+                previous.iter().cloned().collect(),
+                bypass_etag,
+                now_secs,
+            )
+            .await
+        {
             Ok(outcome) => outcomes.push(Ok(outcome)),
             Err(error) => {
                 outcomes.push(Err(error));
@@ -346,11 +374,17 @@ impl CiLane {
             outcomes.push(self.poll_check_runs(target, head_sha, now_secs).await);
         }
         // Prune per-SHA bookkeeping for SHAs the lane no longer tracks.
+        // The prefix is repository-scoped: `check-runs|<repo>/` matches
+        // only THIS repository's rows — a cross-repo prefix would delete
+        // another repository's baseline rows and force its next check-runs
+        // poll into the first-enable baseline (its completions would
+        // never emit).
         let keep: Vec<String> = tracked_after_runs
             .iter()
             .map(|sha| check_runs_key(&target.repo, sha))
             .collect();
-        self.lock_store()?.prune_endpoints("check-runs|", &keep)?;
+        let prune_prefix = format!("check-runs|{}/", target.repo);
+        self.lock_store()?.prune_endpoints(&prune_prefix, &keep)?;
         Ok(outcomes)
     }
 
@@ -361,13 +395,18 @@ impl CiLane {
     async fn poll_runs(
         &self,
         target: &CiRepoTarget,
+        previous_tracked: HashSet<String>,
+        bypass_etag: bool,
         now_secs: u64,
     ) -> Result<PollOutcome, PollError> {
-        let etag = self
-            .lock_store()
-            .map_err(|_| PollError::Failed)?
-            .etag_for(&target.runs_key)
-            .map_err(|_| PollError::Failed)?;
+        let etag = if bypass_etag {
+            None
+        } else {
+            self.lock_store()
+                .map_err(|_| PollError::Failed)?
+                .etag_for(&target.runs_key)
+                .map_err(|_| PollError::Failed)?
+        };
         let response = self
             .send_conditional(&target.runs_url, etag.as_deref())
             .await?;
@@ -399,16 +438,19 @@ impl CiLane {
         let bytes = read_bounded(response).await?;
         let page: RunsPage = serde_json::from_slice(&bytes).map_err(|_| PollError::Failed)?;
         // Head-SHA discovery: every in-flight pull_request-triggered run
-        // carries a head SHA the daemon is actively waiting on. Bounded:
-        // the newest MAX_TRACKED_HEAD_SHAS win (the response is
-        // newest-first), so a flood of PR runs cannot multiply the
-        // lane's fan-out unboundedly.
+        // carries a head SHA the daemon is actively waiting on. Deduped
+        // BEFORE the cap (repeated in-flight runs of one SHA must not
+        // spend the budget) and bounded: the newest MAX_TRACKED_HEAD_SHAS
+        // distinct SHAs win (the response is newest-first), so a flood of
+        // PR runs cannot multiply the lane's fan-out unboundedly.
+        let mut seen_shas = HashSet::new();
         let in_flight: Vec<String> = page
             .workflow_runs
             .iter()
             .filter(|run| is_in_flight(run.status.as_deref()))
             .filter(|run| run.event.as_deref() == Some("pull_request"))
             .filter_map(|run| run.head_sha.clone().filter(|sha| !sha.is_empty()))
+            .filter(|sha| seen_shas.insert(sha.clone()))
             .take(MAX_TRACKED_HEAD_SHAS)
             .collect();
         let derived: Vec<DerivedCiEvent> = page
@@ -419,7 +461,21 @@ impl CiLane {
         let outcome = self.process_events(&derived, now_secs)?;
         self.record_conditional(&target.runs_key, new_etag.as_deref(), poll_after, false)
             .map_err(|_| PollError::Failed)?;
-        self.set_tracked(target, in_flight);
+        // The tracked set is the UNION of the previously tracked SHAs and
+        // the newly in-flight SHAs: a SHA whose last workflow run just
+        // completed still has check runs that may complete after the run
+        // (third-party checks included) — it stays tracked until its
+        // check-runs endpoint answers 304 quiet. The cap applies to the
+        // union (newest-first: in-flight SHAs first, then previously
+        // tracked), so a flood cannot grow the fan-out unboundedly.
+        let mut union = in_flight.clone();
+        for sha in previous_tracked {
+            if !union.contains(&sha) {
+                union.push(sha);
+            }
+        }
+        union.truncate(MAX_TRACKED_HEAD_SHAS);
+        self.set_tracked(target, union);
         Ok(outcome)
     }
 
