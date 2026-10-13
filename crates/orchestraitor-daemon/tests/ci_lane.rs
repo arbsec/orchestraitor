@@ -640,8 +640,8 @@ async fn unshaped_run_items_are_skipped_never_shared() {
 /// and third-party checks may complete after the run).
 #[tokio::test(flavor = "current_thread")]
 async fn a_sha_whose_run_completes_stays_tracked() {
-    // Round 1: beef34 in-flight -> tracked; its check-runs baseline runs
-    // (scripted 304, no ETag stored yet? no — first poll is a 200).
+    // Round 1: beef34 is in-flight, so it becomes tracked and its
+    // check-runs poll runs (first poll: a 200 baseline).
     let server = FixtureServer::start(vec![
         Rule {
             path_needle: "actions/runs",
@@ -730,8 +730,8 @@ async fn duplicate_in_flight_shas_do_not_spend_the_cap() {
     let target = target_of(&server);
 
     // The first poll fires check-runs for the tracked SHAs; the fixture
-    // has no rules for them (500 -> Failed). Count the DISTINCT check-run
-    // request paths.
+    // scripts none of them (each answers 500 -> Failed). Count the
+    // DISTINCT check-run request paths.
     let _ = lane.poll_repo(&target, 1_000).await.expect("round");
     let requests = server.requests();
     let distinct_check_polls = requests

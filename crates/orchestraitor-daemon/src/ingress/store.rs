@@ -445,12 +445,14 @@ impl IngressStore {
     ///
     /// Returns [`DaemonError::IngressStore`] on sqlite failure.
     pub fn prune_endpoints(&self, prefix: &str, keep: &[String]) -> Result<(), DaemonError> {
-        let survivors: Vec<String> = self
+        // Named for what the rows ARE (bookkeeping for SHAs this lane no
+        // longer tracks) — they are the deletion set.
+        let doomed: Vec<String> = self
             .all_endpoints()?
             .into_iter()
             .filter(|endpoint| endpoint.starts_with(prefix) && !keep.contains(endpoint))
             .collect();
-        for endpoint in survivors {
+        for endpoint in doomed {
             self.conn
                 .execute("DELETE FROM ingress_etags WHERE endpoint = ?1", [&endpoint])
                 .map_err(|error| DaemonError::IngressStore {

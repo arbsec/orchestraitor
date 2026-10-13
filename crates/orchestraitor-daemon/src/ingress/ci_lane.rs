@@ -57,7 +57,7 @@ use crate::ingress::poller::{
 use crate::ingress::queue::IngressQueue;
 use crate::ingress::store::{IngressEvent, IngressStore};
 
-/// The connect timeout for one poll request (matches the events lane).
+/// The total timeout for one poll request (matches the events lane).
 const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// The maximum number of head SHAs tracked per repository per round
@@ -360,10 +360,10 @@ impl CiLane {
             .await
         {
             Ok(outcome) => outcomes.push(Ok(outcome)),
-            Err(error) => {
-                outcomes.push(Err(error));
-                self.set_tracked(target, previous.clone());
-            }
+            // A failed runs poll never touched the tracked set (the union
+            // update happens only on the 200 path), so `previous` stays
+            // authoritative for this round's check-runs polls.
+            Err(error) => outcomes.push(Err(error)),
         }
         let tracked_after_runs = self.take_tracked(target);
         for head_sha in &tracked_after_runs {
