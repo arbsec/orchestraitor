@@ -355,11 +355,15 @@ impl CiLane {
         // ETag rides normally. `insert` returns true when the key was new
         // (this IS the first poll) — bypass exactly then.
         let bypass_etag = !self.runs_initialized.lock().contains(&target.runs_key);
+        let mut current_in_flight: Vec<String> = Vec::new();
         match self
             .poll_runs(target, previous.clone(), bypass_etag, now_secs)
             .await
         {
-            Ok(outcome) => outcomes.push(Ok(outcome)),
+            Ok((outcome, in_flight)) => {
+                outcomes.push(Ok(outcome));
+                current_in_flight = in_flight;
+            }
             // A failed runs poll never touched the tracked set (the union
             // update happens only on the 200 path), so `previous` stays
             // authoritative for this round's check-runs polls.
@@ -386,13 +390,12 @@ impl CiLane {
                     let not_modified = self
                         .lock_store()?
                         .not_modified(&check_runs_key(&target.repo, head_sha))?;
-                    let rediscovered_in_flight = self
-                        .tracked
-                        .lock()
-                        .get(&target.repo)
-                        .is_some_and(|shas| shas.contains(head_sha))
-                        && !previous.contains(head_sha);
-                    if not_modified && !rediscovered_in_flight {
+                    // Quiet = 304 AND the SHA is NOT in this round's
+                    // in-flight discovery (an in-flight run can still
+                    // produce completions after its runs finish; a 304
+                    // only prunes SHAs with nothing pending).
+                    let still_in_flight = current_in_flight.iter().any(|sha| sha == head_sha);
+                    if not_modified && !still_in_flight {
                         quiet.insert(head_sha.clone());
                     }
                     outcomes.push(Ok(outcome));
@@ -432,7 +435,7 @@ impl CiLane {
         previous_tracked: Vec<String>,
         bypass_etag: bool,
         now_secs: u64,
-    ) -> Result<PollOutcome, PollError> {
+    ) -> Result<(PollOutcome, Vec<String>), PollError> {
         let etag = if bypass_etag {
             None
         } else {
@@ -449,12 +452,15 @@ impl CiLane {
         if status.as_u16() == 304 {
             self.record_conditional(&target.runs_key, etag.as_deref(), poll_after, true)
                 .map_err(|_| PollError::Failed)?;
-            return Ok(PollOutcome {
-                accepted: 0,
-                duplicates: 0,
-                dropped: 0,
-                poll_after_secs: poll_after,
-            });
+            return Ok((
+                PollOutcome {
+                    accepted: 0,
+                    duplicates: 0,
+                    dropped: 0,
+                    poll_after_secs: poll_after,
+                },
+                Vec::new(),
+            ));
         }
         if let Some(wait) = rate_limit_wait(response.headers(), status, now_secs) {
             self.record_conditional(&target.runs_key, etag.as_deref(), wait, false)
@@ -515,7 +521,7 @@ impl CiLane {
         }
         union.truncate(MAX_TRACKED_HEAD_SHAS);
         self.set_tracked(target, union);
-        Ok(outcome)
+        Ok((outcome, in_flight))
     }
 
     /// The conditional check-runs poll for one tracked head SHA. The

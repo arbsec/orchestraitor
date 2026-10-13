@@ -952,3 +952,80 @@ async fn cap_eviction_is_deterministic_oldest_first() {
         "round 3 never polled the evicted SHAs: {round3:?}"
     );
 }
+
+/// Regression (review finding): a SHA that is BOTH in-flight this round
+/// AND answered 304 on check-runs is NOT pruned — an in-flight run can
+/// still produce completions after its runs finish.
+#[tokio::test(flavor = "current_thread")]
+async fn a_304_check_runs_sha_still_in_flight_is_not_pruned() {
+    let server = FixtureServer::start(vec![
+        // Round 1: beef34 in-flight -> tracked; its check-runs 200 baseline.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(702, "success"),
+            headers: vec![("ETag", "\"z1\"".to_string())],
+        },
+        // Round 2: beef34 STILL in-flight AND its check-runs 304.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"z1\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        // Round 3: beef34 still in-flight — its check-runs MUST be polled
+        // again (the 304 must not have pruned it).
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"z1\"".to_string()),
+            status: 200,
+            body: check_runs_body(703, "failure"),
+            headers: vec![("ETag", "\"z2\"".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let mut third = lane.poll_repo(&target, 1_200).await.expect("round 3");
+    assert_eq!(
+        third.len(),
+        2,
+        "the 304 + still-in-flight SHA was NOT pruned: its check-runs poll fires again"
+    );
+    let checks = third.remove(1).expect("check-runs poll ok");
+    assert_eq!(
+        (checks.accepted, checks.duplicates),
+        (1, 0),
+        "the newly-completed check run (703:failure) is delivered"
+    );
+    // Queue: round 1's baseline emits nothing and round 2's 304 emits
+    // nothing, but round 1's runs poll DID enqueue the `900:success`
+    // completion (still pending — never drained) and round 3 delivers the
+    // `703:failure` check completion: two pending events.
+    assert_eq!(queue.take().len(), 2);
+}
