@@ -13,6 +13,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **CI completions for the `orcd watch` event ingress**: when
+  `[watch.ingress].enabled = true`, a second conditional poll lane now
+  covers check-run and workflow-run completions, which the repository
+  events feed does not carry. The daemon polls
+  `/repos/{owner}/{repo}/actions/runs` (filtered to
+  `pull_request`-triggered runs) per repository and
+  `/repos/{owner}/{repo}/commits/{sha}/check-runs` for each head SHA it
+  actively tracks (head SHAs of in-flight CI runs, discovered from the
+  same runs response), all with `If-None-Match` conditional requests
+  (a 304 costs no quota), the same `X-Poll-Interval`/rate-limit cadence
+  rules, and the same 30-day delivery-key dedup and bounded queue as
+  the events lane — a completion redelivery never produces a second
+  kick-off. Only completions are events; the board reconcile poll stays
+  the completeness authority.
 - **GitHub event ingress for `orcd watch`**: the poll-only fallback
   that lets external GitHub activity — new issues and issue/PR
   comments — kick off the loop without a human translating it into
@@ -31,7 +45,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   surplus and records a `degraded` marker that clears only after a
   flood-free window. The board reconcile poll stays the completeness
   authority; events only accelerate kick-off. Documented in
-  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-947b-opt-in).
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-950b-opt-in).
 - **Configurable kick-off conditions for `orcd watch`**: the daemon now
   spawns a campaign session only when none is in flight and at least one
   kick-off condition holds — new eligible work appeared on the board, a

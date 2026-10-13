@@ -27,10 +27,10 @@ use crate::ingress::queue::{IngressQueue, PushOutcome};
 use crate::ingress::store::{IngressEvent, IngressStore};
 
 /// The GitHub API version the poller pins (same as the board client).
-const API_VERSION: &str = "2022-11-28";
+pub(crate) const API_VERSION: &str = "2022-11-28";
 
 /// The connect timeout for one poll request (matches the board client).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The total timeout for one poll request (matches the board client).
 const TOTAL_TIMEOUT: Duration = Duration::from_mins(1);
@@ -46,7 +46,7 @@ pub const RATE_LIMIT_FALLBACK_SECS: u64 = 300;
 
 /// The maximum accepted response body (matches the board client's
 /// bound; a larger body is refused fail-closed rather than trusted).
-const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The maximum pagination pages followed per poll (bounded so a
 /// hostile or looping `next` link cannot spin the poller; 10 pages at
