@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Regression test for the CodeRabbit finding on PR #600: the guard's old
+# whole-line exclusion grep (`grep -vE '(source|cp|echo) .*\$SCRIPT_DIR/'`)
+# dropped ENTIRE LINES that contained an exclusion command anywhere, so a
+# line with both an exclusion segment and a real direct sibling exec was
+# silently masked. The fix filters per command segment; this test asserts
+# the masked violation IS flagged (exit 1 with the offending line printed).
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GUARD="$SCRIPT_DIR/check-bash-subinvocations"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+pass=0
+fail=0
+
+run_guard() {
+  # Run the guard against a synthetic scripts tree: it derives ROOT from its
+  # own BASH_SOURCE, so we copy it into the tree and invoke it there.
+  mkdir -p "$TMP/github-pr-lifecycle/scripts" "$TMP/github-project-workflow/scripts"
+  cp -L -- "$GUARD" "$TMP/github-pr-lifecycle/scripts/check-bash-subinvocations"
+  chmod +x "$TMP/github-pr-lifecycle/scripts/check-bash-subinvocations" 2>/dev/null || true
+  bash "$TMP/github-pr-lifecycle/scripts/check-bash-subinvocations" 2>/dev/null
+}
+
+expect_flagged() { # name, fixture line
+  local name="$1" line="$2"
+  mkdir -p "$TMP/github-pr-lifecycle/scripts" "$TMP/github-project-workflow/scripts"
+  printf '# fixture\n%s\n' "$line" \
+    > "$TMP/github-pr-lifecycle/scripts/fixture.sh"
+  local out rc
+  out="$(run_guard "$TMP")"; rc=$?
+  rm -f "$TMP/github-pr-lifecycle/scripts/fixture.sh"
+  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF 'fixture.sh'; then
+    pass=$((pass + 1)); echo "PASS: $name (flagged, exit 1)"
+  else
+    fail=$((fail + 1)); echo "FAIL: $name (rc=$rc, expected exit 1 flagging fixture.sh)"; printf '%s\n' "$out"
+  fi
+}
+
+expect_clean() { # name, fixture line
+  local name="$1" line="$2"
+  mkdir -p "$TMP/github-pr-lifecycle/scripts" "$TMP/github-project-workflow/scripts"
+  printf '# fixture\n%s\n' "$line" \
+    > "$TMP/github-pr-lifecycle/scripts/fixture.sh"
+  local out rc
+  out="$(run_guard "$TMP")"; rc=$?
+  rm -f "$TMP/github-pr-lifecycle/scripts/fixture.sh"
+  if [ "$rc" -eq 0 ]; then
+    pass=$((pass + 1)); echo "PASS: $name (clean, exit 0)"
+  else
+    fail=$((fail + 1)); echo "FAIL: $name (rc=$rc, expected exit 0)"; printf '%s\n' "$out"
+  fi
+}
+
+# --- MASKED-EXEC CASES: previously invisible, must now be FLAGGED (exit 1) ---
+
+# 1. THE verified repro (CodeRabbit PR #600): exclusion command BEFORE the
+#    direct exec on the same line.
+expect_flagged "echo-before-direct-exec" \
+  'echo "starting" >&2; "$SCRIPT_DIR/pr-checks" "$PR" --json >/dev/null'
+
+# 2. exclusion command followed by `&&` direct exec.
+expect_flagged "cp-then-&&-direct-exec" \
+  'cp -L -- "$SCRIPT_DIR/_lib.sh" "$TMP/" && "$SCRIPT_DIR/pr-review-agent" 42'
+
+# 3. exclusion command AFTER the direct exec (exclusion grep also matched this
+#    because `. *$SCRIPT_DIR/` scans the whole line, not just the prefix).
+expect_flagged "direct-exec-then-echo" \
+  'OUT=$("$SCRIPT_DIR/pr-checks" "$PR" 2>/dev/null) && echo "$OUT"'
+
+# --- CLEAN CASES: must remain unflagged (exit 0) ---
+
+# 4. bash-prefixed invocation (the required form).
+expect_clean "bash-prefixed-invocation" \
+  'OUT="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --json)" || exit 1'
+
+# 5. plain `source` of the shared library.
+expect_clean "source-of-lib" \
+  'source "$SCRIPT_DIR/_lib.sh"'
+
+# 6. a real `cp` of a sibling script (test-fixture copy).
+expect_clean "cp-of-sibling" \
+  'cp -L -- "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"'
+
+# 7. `echo` of a usage hint naming a sibling script.
+expect_clean "echo-usage-hint" \
+  'echo "  bash $SCRIPT_DIR/pr-labels $PR_NUMBER" >&2'
+
+# 8. exclusion command THEN a bash-prefixed sibling invocation on one line
+#    (mixed line stays clean because the invocation itself is guarded).
+expect_clean "echo-then-bash-invocation" \
+  'echo "running checks" >&2; OUT="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --json)"'
+
+echo
+echo "check-bash-subinvocations regression: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
