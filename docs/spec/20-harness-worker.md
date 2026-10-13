@@ -871,6 +871,128 @@ Detection signals carry weights; a domain is enabled only above a configured thr
 
 ---
 
+### 9.49 Typed provider options and refusal
+
+Every model call carries generation options: reasoning effort or thinking budget, prompt caching, service tier, parallel tool calls, structured output. Today these ride a free-form `extensions` map on `ModelRequest` (`orchestraitor-provider-api/src/transport.rs`), and nothing forces an adapter to answer for them — the concrete defect is in the neuralwatt wire (`orchestraitor-provider-neuralwatt/src/wire.rs`): `build_request_body` maps `reasoning.effort` to the OpenAI-protocol `reasoning_effort` field but **silently drops `reasoning.budget_tokens`** — a user's thinking-budget setting vanishes between the typed surface and the wire with no error, no refusal, and no record. That is exactly the failure class spec `30-model-routing.md` §9.29.3 forbids ("the harness MUST visibly degrade … never silently fall back"), and this section closes it structurally.
+
+The design point is borrowed, not adopted: rig 0.44.0's `GenerationOptions` + `UnsupportedOption` refusal policy (`rig-core/src/completion/options.rs` and its per-wire `Mapping::{Send, Omit, Unsupported}` exhaustive mapping) is the reference shape, evaluated and REJECTED as a dependency (tech-stack §16, per the 2026-10-13 evaluation in `/tmp/rig-eval.md`); the typed-options/refusal design is reimplemented natively behind the project-owned `ProviderTransport` seam. The rationale for borrowing the ideas without the crate: behind `ProviderTransport`, rig degenerates to an HTTP wire the pinned genai baseline already covers, while its catalog/cost/agent-loop layers actively conflict with the §9.19.4 ledger and §9.29 provenance governance; the one unambiguous win — a typed options surface where every adapter MUST answer for every option — is a ~one-module port, not a framework adoption.
+
+#### 9.49.1 Typed options surface
+
+`ModelRequest` gains a typed `options` block as the PRIMARY surface for generation options, replacing the free-form `extensions` map in that role:
+
+```rust
+pub struct GenerationOptions {
+    /// Disjoint alternatives — exactly one shape is expressible.
+    pub reasoning: ReasoningPolicy,
+    pub caching: CachingPolicy,
+    pub service_tier: Option<ServiceTier>,
+    pub parallel_tool_calls: Option<bool>,
+    /// The existing `ModelRequest.structured_output` schema field folds in here.
+    pub structured_output: Option<StructuredOutputRequest>,
+    /// Provider-protocol-keyed sections for genuinely provider-specific knobs.
+    pub provider_protocol: BTreeMap<ProviderProtocol, ProtocolOptions>,
+}
+
+pub enum ReasoningPolicy {
+    /// Reasoning explicitly disabled (distinct from "unspecified").
+    Off,
+    /// Effort ladder — rig's Minimal..Max widened to the §9.45 effort vocabulary.
+    Effort(ReasoningEffort),           // minimal | low | medium | high
+    /// Explicit token budget — the wire maps it to `thinking.budget_tokens`
+    /// (Anthropic family) or refuses; never a silent drop (§9.49.2).
+    Budget { tokens: u32 },
+}
+```
+
+Normative requirements:
+
+- **`Effort` and `Budget` are disjoint alternatives** in one enum — never two independent `Option` fields whose combination is undefined. A request that means "spend up to N tokens thinking" and a request that means "think at effort level E" are different intents and serialize differently per protocol.
+- **Existing flat fields fold in.** `ModelRequest.reasoning: Option<ReasoningConfig>` and `ModelRequest.structured_output: Option<serde_json::Value>` move into `GenerationOptions` (the structured-output schema keeps provider-neutral JSON as its payload). The old fields are removed once all call sites migrate — this crate is internal; there is no deprecation window.
+- **`extensions` remains as an explicitly-labelled escape hatch**, renamed in documentation as such: a map for options the typed surface does not yet express, gated by the same layer-trust rule as declared tools (§9.15 "Declared tools") — an `extensions` entry contributing a provider option from an untrusted config layer (project, directory/domain, task/agent override, CLI flag — §9.22.2 chain order) is a typed error naming the option key — never a silent drop (§9.22.9). `extensions` is a migration expediant, not a second typed surface; each promoted key is removed from it.
+- **Exhaustive per-adapter handling (compile-time normative requirement).** Each adapter maps every option through an exhaustive per-field decision — `Send` (mapped onto the wire), `Omit` (deliberately not sent for this call shape), or `Unsupported` (refused, §9.49.2) — modeled on rig's `OptionFields` destructure, which has no `..` rest pattern: adding an option variant fails to compile in every adapter until that adapter answers for it. The implementation PR MUST encode this as a match over the option set with no default arm in each adapter's options-mapping module; a wildcard fallback arm is a review-blocking defect because it re-creates the silent-drop class this section exists to eliminate.
+
+#### 9.49.2 Refusal semantics: `OptionRefusal` and the dry-run check
+
+An option an adapter cannot honor is a **typed, recorded, non-retried failure** — never a silent drop and never a retry:
+
+```rust
+pub struct OptionRefusal {
+    pub option: &'static str,    // machine-readable option path, e.g. "reasoning.budget.tokens"
+    pub provider: ProviderId,
+    pub model: ModelId,
+    pub reason: String,          // log-safe, non-secret (§9.23.4 redaction rules)
+}
+```
+
+`ProviderTransport` gains a dry-run default method:
+
+```rust
+async fn check(&self, request: &ModelRequest) -> Result<(), Vec<OptionRefusal>> {
+    Ok(()) // default: no refusals known without adapter-specific knowledge
+}
+```
+
+Normative requirements:
+
+- **The worker MUST call `check` before the retry loop** (`orchestraitor-worker/src/model.rs::call_model`): a returned refusal list aborts the call BEFORE any provider round-trip, before any ledger spend, and before the backoff budget is touched. The refusal is recorded in the call record (with `CallOutcome::Refused`) and emits a `model request` §9.17 event carrying the refusal list — the §9.29.3 "visibly degrade" normative hook lands here: refusing visibly at the request boundary IS the degradation, and it is per-option (one refused budget does not suppress an unrelated supported caching option unless the adapter declares a dependency).
+- **Never retried.** A refusal is deterministic knowledge about `(provider, model, option)`; retrying it burns budget and skews the §9.19.4 ledger exactly like the non-retryable 400-class errors §9.49.3 fixes. The worker classifies a refusal like a non-retryable transport failure: a typed `TypedFailure`, no backoff, no second attempt.
+- **Per-wire mapping refusals and per-protocol extension refusals are the same type.** Whether an option was refused because the wire cannot spell it (`Mapping::Unsupported`), or because a provider-protocol extension section declared it unsupported, the caller sees one `OptionRefusal` list — refusal attribution is per-option, not per-mechanism.
+- **The motivating defect is named for migration:** the neuralwatt wire's silent drop of `reasoning.budget_tokens` (§9.49 intro) becomes, under this section, either a `Send` mapping (when the endpoint accepts a thinking budget), or an `OptionRefusal{ option: "reasoning.budget.tokens", … }` — the implementation PR MUST include the regression test asserting the budget setting can no longer disappear without a typed refusal.
+- **The empty `extensions` escape hatch gets no `check` bypass:** options injected via `extensions` are checked by the same dry run; an adapter that cannot answer for an `extensions` key refuses it rather than forwarding it blindly. (A key genuinely unknown to the adapter fails closed the same way — the escape hatch widens what may be *sent*, never what may be *silently dropped*.)
+
+#### 9.49.3 Retryable error classification
+
+`RequestFailed` widens from `{ provider_id }` to carry classification fields, set ONCE at adapter conversion time:
+
+```rust
+RequestFailed {
+    provider_id: ProviderId,
+    /// Classification from the HTTP status / machine error code at conversion time.
+    retryable: bool,
+    /// HTTP status when the failure surfaced over HTTP.
+    http_status: Option<u16>,
+    /// Provider-issued request id for support correlation — no secret material
+    /// (§9.23.4 redaction rules apply: never headers, cookies, keys, tokens).
+    provider_request_id: Option<String>,
+}
+```
+
+Normative requirements (modeled on rig's `ErrorReport{ retryable, http_status, request_id }`, reimplemented natively):
+
+- **Classification happens ONCE, at adapter conversion time, from the HTTP status or machine error code the provider returned.** Callers never re-classify, never guess from message text, and never override the flag — a retry decision is a transport fact, not a caller opinion. Timeout/connection-class failures surface as `retryable = true` from the adapter's own error taxonomy (the adapter knows whether the failure occurred before or after the provider accepted the request).
+- **The worker MUST NOT retry non-retryable classes.** Today `worker/src/model.rs` retries every `RequestFailed` through the full backoff budget — 400-class validation errors and context-length rejections burn the entire retry budget and skew spend (the same failure class §9.49.2 fixes for refusals, one layer lower). Under this section: `retryable = false` ⇒ record the failed call and return the typed failure immediately; `retryable = true` ⇒ the existing backoff path is unchanged.
+- **`provider_request_id` rides the call record and the §9.19.4 ledger entry** (the `request_id` anchor already exists in the ledger schema): a failed call is correlate-able against provider-side logs without re-running anything. The field is populated only from the provider's own response envelope or error body id field — never synthesized, never populated from headers containing credential material.
+- **No secrets in any new field** — `provider_request_id` is an opaque correlation id; `http_status` is a number; `retryable` is a flag. Error `Display`/`Debug` for the widened variant stays within the §9.23.4 redaction rules by construction (nothing secret-shaped is ever placed in these fields).
+
+#### 9.49.4 Per-model catalog rules: the third refusal layer
+
+`ProviderCapabilities` (`orchestraitor-provider-api/src/capabilities.rs`) already declares per-provider/per-model support states (`CapabilitySupport::{Unknown, Unsupported, Supported}`) — but nothing consults it at request-build time. It becomes the third refusal layer, consulted BEFORE the wire:
+
+1. **Per-wire mapping** (§9.49.1) — can this protocol family spell the option?
+2. **Per-protocol extension options** (§9.49.1 `provider_protocol` sections) — does this provider's extension surface declare it?
+3. **Per-model catalog rules (this subsection)** — is this specific model KNOWN not to support it?
+
+Normative requirements:
+
+- **At request-build time the worker consults the capability grid for `(provider, model)` and converts a `CapabilitySupport::Unsupported` state for any option the request carries into an `OptionRefusal` BEFORE the retry loop** — the same early, typed, non-retried failure path as §9.49.2, with `reason` naming the capability source. A model known not to support an option never reaches the wire carrying it.
+- **The refusal's `reason` field carries the §9.29 provenance** — the capability claim's source (catalog/discovery/probe/adapter/user-override), timestamp class, and confidence (`verified` / `claimed` / `unverified`) per spec `30-model-routing.md` §9.29.3 — so a reviewing agent can distinguish "the catalog says no" from "our probe proved no".
+- **`CapabilitySupport::Unknown` NEVER refuses.** Unknown is the absence of knowledge, and refusing on absence would break every newly-added model before metadata lands. Unknown options flow to the wire mapping (§9.49.1) and, if the wire cannot honor them, refuse there; the metadata ≠ proof rule (spec `30-model-routing.md` §9.29.1) applies in both directions — a catalog "supported" claim never bypasses a wire-level refusal, and a wire-level refusal is recorded so the §9.29 grid can be updated.
+- **The grid consultation is read-only at request time.** Probe results and refusal observations update the §9.29 grid through the provider-meta provenance machinery, never inline in the request path.
+
+#### 9.49.5 Roadmap: named follow-on sections
+
+This section deliberately scopes to the typed-options/refusal/classification core. The remaining borrows from the same analysis are named future sections so the implementation epic can reference them; each is independently testable and revertible, and NONE is authorized by this section:
+
+| Future slice | Scope (one line) |
+|---|---|
+| Stream-arg deltas + partial JSON parsing | `ToolCallStarted` / `ToolCallArgsDelta` / `ToolCallCompleted` events with display-only partial-argument parsing — the streamed tool-call surface the current per-delta `from_str` lossy path cannot express. |
+| Content-block message model | `ModelMessage.content` evolves from `String` to ordered content blocks (`Text`, `Reasoning{text, redacted, native}`, `ToolCall`, …) — the interleaved-thinking transport blocker (spec `30-model-routing.md` §9.29.2 adapter knowledge). |
+| Conformance scenario harness | Scenario tables driving raw wire bytes through the decode path with skip-accounting against the declared capability grid — the §9.30.1 recorded-fixtures harness. |
+| Structured-output ladder | Native structured outputs → output-tool fallback → prompted-JSON reprompt, with required-field validation, recorded per call — the §9.45.4 `structured_summary`/`output_contract` execution surface (owned by the worker; never the transport). |
+
+---
+
 ### 9.32 Platform architecture and capability parity
 
 The harness targets four platforms in priority order:
