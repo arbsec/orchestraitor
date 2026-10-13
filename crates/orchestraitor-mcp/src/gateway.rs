@@ -39,7 +39,7 @@ pub struct GatewayContext {
     /// (spec `10-orchestrator.md` §9.39, §9.43; issue #332). `None` disables
     /// the tool: the gateway's tool router drops `board.query` from
     /// `tools/list` (rmcp `disable_route`), so the tool is invisible AND
-    /// uncallsable — verified against rmcp 2.2.0, where `list_all`, `get`,
+    /// uncallsable — verified against rmcp 3.5.1, where `list_all`, `get`,
     /// and `call` all honor the disabled set.
     pub board: Option<std::sync::Arc<dyn BoardProvider>>,
     /// Shared audit store for `board.query` invocation events (§9.25.1).
@@ -407,11 +407,9 @@ impl McpGateway {
     }
 }
 
-// The lint fires on rmcp's macro-generated trait methods, not on code we
+// The lint fires on rmcp 3.x's macro-generated trait methods, not on code we
 // control here — silencing at the impl boundary is the tightest available
-// scope. `unknown_lints` keeps 1.96 (which predates the lint) compiling; the
-// allow itself must be dropped when rmcp's generated handlers stop being
-// async no-ops (or the lint learns to attribute macro-generated spans).
+// scope. `unknown_lints` keeps 1.96 (which predates the lint) compiling.
 #[allow(unknown_lints)]
 #[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router, name = "orchestraitor-mcp", version = "0.0.0")]
@@ -828,7 +826,7 @@ mod tests {
     /// F2 (issue #458): with no board provider, `board.query` is DISABLED —
     /// hidden from the router's tool list AND rejected by call. Probed
     /// through the same `disable_route` path rmcp's `list_all`/`get`/`call`
-    /// honor (verified against rmcp 2.2.0 source).
+    /// honor (verified against rmcp 3.5.1 source).
     #[test]
     fn board_query_is_absent_from_tool_list_when_unconfigured() -> McpGatewayResult<()> {
         let temp = tempfile::tempdir()?;
