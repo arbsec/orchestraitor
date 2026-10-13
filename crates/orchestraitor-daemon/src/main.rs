@@ -255,29 +255,51 @@ async fn watch_cycle() -> Result<ExitCode> {
              stay degraded; arm external_event or disable the ingress"
         );
     }
-    let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> =
-        if watch_config.ingress.enabled {
-            let (ingress_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
-                &config_dir.join("ingress-events.db"),
-                Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
-                watch_config.ingress.queue_capacity,
-            )
-            .into_diagnostic()
-            .wrap_err("event ingress construction failed")?;
-            // The poll task shares the daemon's lifetime: one conditional
-            // round per tick, sleeping the largest server-advised interval
-            // (never wider than the rate-limit feedback, §9.47(b)), racing
-            // the operator's shutdown signal.
-            let targets =
-                orchestraitor_daemon::poll_targets(&ingress_repos, "https://api.github.com");
-            let poll_shutdown = signal_rx.clone();
-            tokio::spawn(async move {
-                ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
-            });
-            Some(Arc::new(source))
-        } else {
-            None
-        };
+    let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
+        .ingress
+        .enabled
+    {
+        let (ingress_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
+            &config_dir.join("ingress-events.db"),
+            Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
+            watch_config.ingress.queue_capacity,
+        )
+        .into_diagnostic()
+        .wrap_err("event ingress construction failed")?;
+        // The poll task shares the daemon's lifetime: one conditional
+        // round per tick, sleeping the largest server-advised interval
+        // (never wider than the rate-limit feedback, §9.47(b)), racing
+        // the operator's shutdown signal.
+        let targets = orchestraitor_daemon::poll_targets(&ingress_repos, "https://api.github.com");
+        // The CI completions lane (§9.47(b)): conditional polls over
+        // the Actions-runs endpoint (workflow-run completions + the
+        // tracked head-SHA source) and per-SHA check-runs endpoints,
+        // over the SAME shared store and bounded queue.
+        let ci_lane = orchestraitor_daemon::ci_lane_module::CiLane::new(
+            Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
+            Arc::new(std::sync::Mutex::new(
+                orchestraitor_daemon::IngressStore::open(&config_dir.join("ingress-events.db"))
+                    .into_diagnostic()
+                    .wrap_err("CI lane ingress store open failed")?,
+            )),
+            Arc::clone(&ingress_queue),
+        )
+        .into_diagnostic()
+        .wrap_err("CI completions lane construction failed")?;
+        let ci_targets = orchestraitor_daemon::ci_targets(&ingress_repos, "https://api.github.com");
+        let ci_shutdown = signal_rx.clone();
+        let ci_queue = Arc::clone(&ingress_queue);
+        tokio::spawn(async move {
+            ci_lane_poll_loop(ci_lane, ci_targets, ci_queue, ci_shutdown).await;
+        });
+        let poll_shutdown = signal_rx.clone();
+        tokio::spawn(async move {
+            ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
+        });
+        Some(Arc::new(source))
+    } else {
+        None
+    };
     // The worker starter carries the SAME worker-side guardrail thresholds
     // the runner validates (from the loop config just built) — the daemon's
     // enforcement layers cannot drift from the foreground loop's (a PR #564
@@ -740,6 +762,98 @@ async fn ingress_poll_loop(
                 // (not looping) also keeps each later signal from
                 // triggering an extra immediate poll round (a gen-5
                 // review finding).
+                let _ = changed;
+                return;
+            }
+        }
+    }
+}
+
+/// The §9.47(b) CI completions lane loop (one per daemon lifetime): one
+/// conditional round per cycle — the repo Actions-runs poll plus one
+/// check-runs poll per tracked head SHA — sleeping the largest
+/// server-advised interval (never wider than the rate-limit feedback),
+/// racing the operator's shutdown signal. Surplus drops surface in the
+/// log exactly like the events lane (§7.3 — the marker is observable,
+/// never a silent drop).
+async fn ci_lane_poll_loop(
+    lane: orchestraitor_daemon::CiLane,
+    targets: Vec<orchestraitor_daemon::CiRepoTarget>,
+    queue: std::sync::Arc<orchestraitor_daemon::IngressQueue>,
+    mut shutdown: tokio::sync::watch::Receiver<u64>,
+) {
+    let mut degraded_logged = false;
+    loop {
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let mut wait_secs = 0_u64;
+        for target in &targets {
+            match lane.poll_repo(target, now_unix_secs).await {
+                Ok(outcomes) => {
+                    for outcome in outcomes {
+                        match outcome {
+                            Ok(poll_outcome) => {
+                                if poll_outcome.dropped > 0 {
+                                    tracing::warn!(
+                                        endpoint = %target.runs_key,
+                                        dropped = poll_outcome.dropped,
+                                        "orcd watch: ingress queue flooded; surplus \
+                                         CI events dropped (degraded)"
+                                    );
+                                }
+                                wait_secs = wait_secs.max(poll_outcome.poll_after_secs);
+                            }
+                            Err(
+                                orchestraitor_daemon::ingress::poller::PollError::RateLimited {
+                                    retry_after_secs,
+                                },
+                            ) => {
+                                tracing::warn!(
+                                    endpoint = %target.runs_key,
+                                    retry_after_secs,
+                                    "orcd watch: CI lane poll rate-limited; backing off"
+                                );
+                                wait_secs = wait_secs.max(retry_after_secs);
+                            }
+                            Err(orchestraitor_daemon::ingress::poller::PollError::Failed) => {
+                                tracing::warn!(
+                                    endpoint = %target.runs_key,
+                                    "orcd watch: CI lane poll failed; retrying after the \
+                                     advised interval"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("orcd watch: CI lane round failed: {error}");
+                }
+            }
+        }
+        let now_unix_secs_degraded = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let degraded_now = queue.degraded(now_unix_secs_degraded);
+        if degraded_now && !degraded_logged {
+            tracing::warn!(
+                "orcd watch: ingress queue DEGRADED (overflow, CI lane); surplus \
+                 events are being dropped until the flood-free window elapses"
+            );
+            degraded_logged = true;
+        } else if !degraded_now && degraded_logged {
+            tracing::info!(
+                "orcd watch: ingress queue degraded marker CLEARED after the \
+                 flood-free window"
+            );
+            degraded_logged = false;
+        }
+        let wait = std::time::Duration::from_secs(
+            wait_secs.max(orchestraitor_daemon::DEFAULT_POLL_AFTER_SECS),
+        );
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            changed = shutdown.changed() => {
                 let _ = changed;
                 return;
             }
