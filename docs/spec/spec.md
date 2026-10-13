@@ -104,6 +104,12 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.48.7 | `20-harness-worker.md#9487-classification-annotations-and-the-arbitraitor-boundary` |
 | §9.48.8 | `20-harness-worker.md#9488-persistence-agent-reasoning-events` |
 | §9.48.9 | `20-harness-worker.md#9489-implementation-notes-declared-tools-surface` |
+| §9.49 | `20-harness-worker.md#949-typed-provider-options-and-refusal` |
+| §9.49.1 | `20-harness-worker.md#9491-typed-options-surface` |
+| §9.49.2 | `20-harness-worker.md#9492-refusal-semantics-optionrefusal-and-the-dry-run-check` |
+| §9.49.3 | `20-harness-worker.md#9493-retryable-error-classification` |
+| §9.49.4 | `20-harness-worker.md#9494-per-model-catalog-rules-the-third-refusal-layer` |
+| §9.49.5 | `20-harness-worker.md#9495-roadmap-named-follow-on-sections` |
 | §9.22 | `50-contracts-data.md#922-customization-and-configuration` |
 | §9.22.1 | `50-contracts-data.md#9221-what-must-be-configurable-never-hardcoded` |
 | §9.22.2 | `50-contracts-data.md#9222-layered-configuration-precedence` |
