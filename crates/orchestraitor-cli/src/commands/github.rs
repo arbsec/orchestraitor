@@ -35,6 +35,7 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: GitHubCommand, writer: &mut W
         GitHubCommand::MintToken => mint_token(paths, writer),
         GitHubCommand::Api(args) => api(paths, &args, writer),
         GitHubCommand::GhEnv(args) => gh_env(paths, &args),
+        GitHubCommand::GhEnvPrCreateChain(args) => gh_env_pr_create_chain(paths, &args),
         GitHubCommand::CommitAuthor => commit_author(paths, writer),
         GitHubCommand::PushBranch(args) => push_branch(paths, &args),
         GitHubCommand::VerifyIdentity(args) => verify_identity(paths, &args),
@@ -349,12 +350,43 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     // the default source; `ORC_GITHUB_APP_ENFORCEMENT` (the wrapper-level
     // declaration used where the layered config cannot carry it) OVERRIDES it
     // — an env-pinned `required` must run the same identity gate, never a
-    // weaker layered value. Invalid env values fail closed.
+    // weaker layered value. Invalid env values fail closed. `gh pr create`
+    // children are REFUSED in required mode (the deterministic PR-labeling
+    // chain would be bypassed): the ONLY sanctioned path is the dedicated
+    // `gh-env-pr-create-chain` subcommand, which executes the labeling
+    // obligation ITSELF — a caller attestation (env var or flag) would be
+    // trivially forgeable and is not accepted. AMBIGUOUS argv is refused
+    // too (fail closed): an unparseable shape must never delegate with the
+    // minted token. In `recommended` mode the personal fallback is a
+    // documented, warned path and the guard does not fire.
+    if effective_required_mode(paths)?
+        && !matches!(child_command_is_pr_create(&args.command), PrCreateShape::No)
+    {
+        bail!(
+            "gh-env refuses to run `gh pr create`: in `required` enforcement mode PR \
+             creation MUST go through `orc github gh-env-pr-create-chain <owner/name> -- \
+             gh pr create …`, which executes the deterministic PR-labeling chain \
+             (`pr-labels`, `pr-labels-from-issue`) against the created PR — or use the \
+             `pr-create` lifecycle script, which calls it — or pass explicit `--label` \
+             flags to `pr-create`. See docs/cli/orc-github.md"
+        );
+    }
+    let (bot_identity, token) = gh_env_gates_and_mint(paths, &args.command)?;
+    gh_env_spawn_child(&args.command, &token, bot_identity.as_ref(), false)?;
+    Ok(())
+}
+
+/// Effective `required` enforcement decision, shared by the gh-env guard and
+/// the delegation gate so the two cannot diverge: the layered config value
+/// (`github_app.enforcement`) with the `ORC_GITHUB_APP_ENFORCEMENT` pin
+/// OVERRIDING it (an env-pinned `required` must run the same gate, never a
+/// weaker layered value). Invalid pin values fail closed.
+fn effective_required_mode(paths: &ConfigPaths) -> Result<bool> {
     let config = resolved_config(paths)?;
-    let mut required = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
+    let mut required_mode = enforcement_mode(&config) == ServiceIdentityEnforcement::Required;
     if let Ok(pinned) = std::env::var("ORC_GITHUB_APP_ENFORCEMENT") {
         match pinned.as_str() {
-            "required" => required = true,
+            "required" => required_mode = true,
             "recommended" => {}
             other => {
                 bail!(
@@ -365,22 +397,221 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
             }
         }
     }
+    Ok(required_mode)
+}
+
+/// `orc github gh-env-pr-create-chain`: the ONLY sanctioned `gh pr create`
+/// path in `required` enforcement. Executes the child `gh pr create` with
+/// the minted installation token (the same delegation semantics as
+/// `gh-env`), then ENFORCES the deterministic labeling obligation itself:
+/// `pr-labels` and `pr-labels-from-issue` run against the created PR. The
+/// obligation is executed here — never attested by a caller-supplied env
+/// var or flag, which would be trivially forgeable. A labeling-step failure
+/// never orphans the created PR: it is a loud typed warning naming the
+/// exact manual commands (the labeling scripts are non-fatal by contract),
+/// and gh-env-pr-create-chain still exits 0 after a successful creation.
+fn gh_env_pr_create_chain(
+    paths: &ConfigPaths,
+    args: &crate::cli::GhEnvPrCreateChainArgs,
+) -> Result<()> {
+    if args.command.is_empty() {
+        bail!(
+            "gh-env-pr-create-chain requires the child command after `--` (e.g. `orc github \
+             gh-env-pr-create-chain arbsec/orchestraitor -- gh pr create --draft`)"
+        );
+    }
+    if !matches!(
+        child_command_is_pr_create(&args.command),
+        PrCreateShape::Yes
+    ) {
+        bail!(
+            "gh-env-pr-create-chain runs ONLY `gh pr create` children (got `{:?}`); other \
+             commands go through plain `gh-env`",
+            args.command.first()
+        );
+    }
+    // The label scripts are repo skill scripts: resolve them relative to the
+    // repo root (git toplevel of the CWD), matching how the lifecycle skill
+    // invokes them.
+    let repo_root = git_repo_root()?;
+    let pr_labels = repo_root.join(".agents/skills/github-pr-lifecycle/scripts/pr-labels");
+    let pr_labels_from_issue =
+        repo_root.join(".agents/skills/github-pr-lifecycle/scripts/pr-labels-from-issue");
+    if !pr_labels.is_file() || !pr_labels_from_issue.is_file() {
+        bail!(
+            "gh-env-pr-create-chain requires the pr-lifecycle skill scripts at \
+             .agents/skills/github-pr-lifecycle/scripts/ (resolved from the repo root {}) — \
+             pr-labels: {}, pr-labels-from-issue: {}",
+            repo_root.display(),
+            pr_labels.display(),
+            pr_labels_from_issue.display()
+        );
+    }
+    // Delegate with the SAME enforcement gates as plain gh-env: this
+    // subcommand is itself a `gh pr create` child, so the required-mode
+    // gates (config completeness + canonical bot git identity) run before
+    // any mint — and the child command is validated to exist BEFORE minting
+    // (the documented no-token-for-a-missing-command rule). In
+    // `recommended` mode the personal fallback applies as documented.
+    let program = &args.command[0];
+    if which_executable(program).is_none() {
+        bail!("child command `{program}` not found on PATH");
+    }
+    let (bot_identity, token) = gh_env_gates_and_mint(paths, &args.command)?;
+    let pr_url = gh_env_spawn_child(&args.command, &token, bot_identity.as_ref(), true)?;
+    // The captured stdout IS the caller's business (the `pr-create` script
+    // reads the PR URL through command substitution) — re-emit it verbatim
+    // and flush BEFORE the labeling steps run.
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(pr_url.as_bytes()).into_diagnostic()?;
+    stdout.flush().into_diagnostic()?;
+
+    // --- The labeling obligation (executed and enforced HERE) --------------
+    // The URL carries BOTH the created PR's repository and its number:
+    // label ONLY the PR that was actually created (a `-R other/repo` child
+    // creates a PR elsewhere — labeling #N in `args.repo` would hit a
+    // different PR).
+    let url_parts: Vec<&str> = pr_url.trim().rsplit('/').collect();
+    let pr_number = url_parts.first().copied().unwrap_or_default();
+    let url_repo = match (url_parts.get(2), url_parts.get(3)) {
+        (Some(name), Some(owner)) => format!("{owner}/{name}"),
+        _ => String::new(),
+    };
+    if pr_number.is_empty() || !pr_number.chars().all(|c| c.is_ascii_digit()) {
+        writeln!(
+            std::io::stderr().lock(),
+            "WARNING: could not derive a PR number from '{pr_url}'; automatic labeling was \
+             skipped — apply manually with pr-labels and pr-labels-from-issue"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    if url_repo.is_empty() || !url_repo.eq_ignore_ascii_case(&args.repo) {
+        writeln!(
+            std::io::stderr().lock(),
+            "WARNING: the created PR ({pr_url}) is not in {}; automatic labeling was skipped — \
+             label the created PR manually with pr-labels and pr-labels-from-issue",
+            args.repo
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    run_labeling_chain(pr_number, &args.repo, &pr_labels, &pr_labels_from_issue)?;
+    Ok(())
+}
+
+/// Runs the two labeling scripts against the created PR — the enforced
+/// obligation of `gh-env-pr-create-chain`. A labeling failure (spawn
+/// failure included) NEVER fails the command after the PR exists: a
+/// non-zero exit would push callers into a retry that creates a duplicate
+/// PR. Every failure class is the same loud warning path naming the exact
+/// manual command. The child's stdout is CAPTURED (its JSON receipt must
+/// never leak into orc's stdout — `pr-create` reads THIS command's stdout
+/// as the PR URL) and forwarded to stderr; the child's stderr inherits,
+/// matching the pass-through contract.
+fn run_labeling_chain(
+    pr_number: &str,
+    repo: &str,
+    pr_labels: &std::path::Path,
+    pr_labels_from_issue: &std::path::Path,
+) -> Result<()> {
+    for (script, name) in [
+        (pr_labels, "pr-labels"),
+        (pr_labels_from_issue, "pr-labels-from-issue"),
+    ] {
+        let output = match Command::new("bash")
+            .arg(script)
+            .arg(pr_number)
+            .arg("--repo")
+            .arg(repo)
+            .stderr(std::process::Stdio::inherit())
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let mut stderr = std::io::stderr().lock();
+                writeln!(
+                    stderr,
+                    "WARNING: automatic labeling of PR #{pr_number} failed ({name}: {error}); \
+                     apply manually:"
+                )
+                .into_diagnostic()?;
+                writeln!(
+                    stderr,
+                    "  bash {} {pr_number} --repo {repo}",
+                    script.display()
+                )
+                .into_diagnostic()?;
+                continue;
+            }
+        };
+        if !output.stdout.is_empty() {
+            std::io::stderr()
+                .write_all(&output.stdout)
+                .into_diagnostic()?;
+        }
+        if !output.status.success() {
+            let mut stderr = std::io::stderr().lock();
+            writeln!(
+                stderr,
+                "WARNING: automatic labeling of PR #{pr_number} failed ({name}); apply manually:"
+            )
+            .into_diagnostic()?;
+            writeln!(
+                stderr,
+                "  bash {} {pr_number} --repo {repo}",
+                script.display()
+            )
+            .into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+/// Shared gh-env gates: enforcement resolution (`ORC_GITHUB_APP_ENFORCEMENT`
+/// pin honored), the required-mode service-identity + canonical bot
+/// git-identity checks, and the installation-token mint. Returns the
+/// resolved bot identity (for the child's git-identity env pin) and the
+/// minted token. Child existence on PATH must be checked by the caller
+/// (before minting).
+fn gh_env_gates_and_mint(
+    paths: &ConfigPaths,
+    command: &[String],
+) -> Result<(Option<(String, String)>, InstallationToken)> {
+    let config = resolved_config(paths)?;
     let mut bot_identity: Option<(String, String)> = None;
-    if required {
+    if effective_required_mode(paths)? {
         require_service_identity(&config, "delegate a gh-env child command")?;
         // Exact-identity check before delegating: the repo git identity must
         // equal the service-identity bot's canonical noreply email (resolved
         // from the live App) so any agent-driven `git commit` path cannot
         // stamp personal or look-alike attribution onto commits.
+        let program = command.first().map(String::as_str).unwrap_or_default();
         bot_identity = Some(require_bot_git_identity(paths, program)?);
     }
     let (_, token) = mint_installation_token(paths)?;
-    let Some(executable) = which else {
+    Ok((bot_identity, token))
+}
+
+/// Spawns the gh-env child with the minted token (and the pinned git
+/// identity env when in required mode), passing the child's stdout/stderr
+/// through. When `capture_stdout` is set the child's stdout is captured and
+/// returned (the PR-URL contract for the labeling chain); otherwise it passes
+/// through verbatim. The child's exit code propagates (a missing exit code
+/// maps to 1) BEFORE any captured-stdout value is meaningful: a failed child
+/// never returns.
+fn gh_env_spawn_child(
+    command: &[String],
+    token: &InstallationToken,
+    bot_identity: Option<&(String, String)>,
+    capture_stdout: bool,
+) -> Result<String> {
+    let program = command.first().map(String::as_str).unwrap_or_default();
+    let Some(executable) = which_executable(program) else {
         bail!("child command `{program}` not found on PATH");
     };
     let mut child = Command::new(executable);
     child
-        .args(&args.command[1..])
+        .args(&command[1..])
         .env("GH_TOKEN", token.token().expose_secret());
     // Pin the git identity for the child: `git -c user.email=… commit` beats
     // repo config but NOT the GIT_AUTHOR_*/GIT_COMMITTER_* environment
@@ -389,10 +620,23 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     // non-secret (public bot login + noreply email).
     if let Some((name, email)) = bot_identity {
         child
-            .env("GIT_AUTHOR_NAME", &name)
-            .env("GIT_AUTHOR_EMAIL", &email)
-            .env("GIT_COMMITTER_NAME", &name)
-            .env("GIT_COMMITTER_EMAIL", &email);
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email);
+    }
+    if capture_stdout {
+        // Pipe ONLY stdout (the PR URL); stderr inherits so child
+        // diagnostics stay visible (matching the pass-through contract),
+        // and the exit status still propagates before the URL is used.
+        let output = child
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .map_err(|error| miette!("failed to spawn child command `{program}`: {error}"))?;
+        if !output.status.success() {
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
     let status = child
         .status()
@@ -400,7 +644,145 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
-    Ok(())
+    Ok(String::new())
+}
+
+/// Resolves the enclosing git repository's working-tree root (typed error
+/// outside a repo or when `git` cannot run).
+fn git_repo_root() -> Result<std::path::PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|error| miette!("failed to run `git rev-parse --show-toplevel`: {error}"))?;
+    if !output.status.success() {
+        bail!(
+            "gh-env-pr-create-chain must run inside the target git repository (the pr-lifecycle \
+             skill scripts are resolved from the repo root)"
+        );
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        bail!("`git rev-parse --show-toplevel` returned an empty path");
+    }
+    Ok(std::path::PathBuf::from(root))
+}
+
+/// The detector's verdict for a gh-env child argv: proven `gh pr create`,
+/// proven NOT a `gh pr create`, or ambiguous (the shape cannot be proven
+/// either way from the argv — an unknown flag, a separator mid-shape). The
+/// caller's policy: `required` enforcement refuses BOTH `Yes` and
+/// `Ambiguous` (fail closed — the labeling chain must not be bypassable via
+/// an unparseable argv); the chain subcommand runs only a `Yes` child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrCreateShape {
+    Yes,
+    No,
+    Ambiguous,
+}
+
+/// Classifies the `gh pr create` shape in a gh-env child argv: getopt's
+/// first-two-positional convention (the first non-option token is the
+/// command — matched by basename, so `/usr/bin/gh` and `gh.exe` count — and
+/// the second is the subcommand) must yield `pr` followed by `create` (or
+/// its documented alias `new`). Shape-based, never a substring scan, and
+/// three-outcome on ambiguity: only KNOWN flags are skipped. `gh` (Cobra)
+/// accepts global/persistent flags interleaved with the subcommand
+/// (`gh -R o/r pr create`, `gh pr -R o/r create` both reach `pr create`);
+/// a flag the walk does not recognize makes the shape AMBIGUOUS — it can
+/// neither be confirmed nor excluded, so the caller must refuse (never
+/// silently delegate under required enforcement).
+fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape {
+    /// gh global flags consumed as `--flag value` (two argv tokens);
+    /// `=`-attached values never consume a token.
+    const VALUE_LONG_FLAGS: [&str; 4] = ["repo", "hostname", "jq", "template"];
+    /// gh boolean short flags (no value argument follows).
+    const BOOLEAN_SHORT_FLAGS: [char; 2] = ['h', 'v'];
+    /// gh short flags consumed as `-X value` (two argv tokens).
+    const VALUE_SHORT_FLAGS: [char; 2] = ['R', 'H'];
+
+    let mut depth = 0usize;
+    // 0 = expecting the `gh` command, 1 = `pr`, 2 = `create`
+    let mut stage = 0u8;
+    for arg in command {
+        let arg = arg.as_str();
+        if depth > 0 {
+            // Inside a value-taking flag's argument: never a command token.
+            depth -= 1;
+            continue;
+        }
+        if arg == "--" {
+            // End-of-flags separator: everything after is positional. The
+            // subcommand tokens seen so far decide (they must already be
+            // complete — tokens after `--` can never extend the shape).
+            return match stage {
+                2 => PrCreateShape::Yes,
+                _ => PrCreateShape::Ambiguous,
+            };
+        }
+        if let Some(name) = arg.strip_prefix("--") {
+            // An `=`-attached value (`--repo=o/r`) is complete in this token:
+            // it must NOT consume the next argv element as a value — gh
+            // accepts `gh --repo=o/r pr create`, and consuming `pr` here
+            // would hide the pr-create shape.
+            let bare = name.split('=').next().unwrap_or(name);
+            depth = if arg.contains('=') {
+                0
+            } else if VALUE_LONG_FLAGS.contains(&bare) {
+                1
+            } else {
+                // An unknown long flag makes the shape unprovable.
+                return PrCreateShape::Ambiguous;
+            };
+            continue;
+        }
+        if arg == "-" {
+            // gh treats a bare `-` as a positional operand; the shape
+            // cannot continue through it.
+            return PrCreateShape::Ambiguous;
+        }
+        if let Some(rest) = arg.strip_prefix('-') {
+            // Short-flag clusters: every char must be a KNOWN gh flag, and
+            // only a trailing value-taking flag consumes the next argv
+            // element. An unknown flag makes the shape unprovable — fail
+            // closed (ambiguous).
+            let mut value_flag = false;
+            for c in rest.chars() {
+                if BOOLEAN_SHORT_FLAGS.contains(&c) {
+                    continue;
+                }
+                if VALUE_SHORT_FLAGS.contains(&c) && c == rest.chars().next_back().unwrap_or(' ') {
+                    value_flag = true;
+                } else if VALUE_SHORT_FLAGS.contains(&c) {
+                    // A value-taking flag inside a cluster is ambiguous.
+                    return PrCreateShape::Ambiguous;
+                } else {
+                    return PrCreateShape::Ambiguous;
+                }
+            }
+            depth = usize::from(value_flag);
+            continue;
+        }
+        match stage {
+            0 if arg == "gh"
+                || std::path::Path::new(arg)
+                    .file_name()
+                    .is_some_and(|name| name == "gh" || name == "gh.exe") =>
+            {
+                stage = 1;
+            }
+            1 if arg == "pr" => stage = 2,
+            // `gh pr new` is a documented built-in alias of `gh pr create`.
+            2 => {
+                return if arg == "create" || arg == "new" {
+                    PrCreateShape::Yes
+                } else {
+                    PrCreateShape::No
+                };
+            }
+            _ => return PrCreateShape::No,
+        }
+    }
+    PrCreateShape::Ambiguous
 }
 
 /// Resolves a program name to an executable path on `PATH`. A file without
@@ -2398,6 +2780,139 @@ mod tests {
     }
 
     // --- gh-env child spawn ---------------------------------------------------
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one assertion per argv shape")]
+    fn child_command_is_pr_create_matches_shape_not_substrings() {
+        let argv = |parts: &[&str]| -> Vec<String> {
+            parts.iter().map(std::string::ToString::to_string).collect()
+        };
+        // The exact shape is CONFIRMED.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "create"])),
+            PrCreateShape::Yes
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "create", "--draft", "--title", "t",])),
+            PrCreateShape::Yes
+        );
+        // Leading global flags precede the command token.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "--repo", "o/r", "pr", "create",])),
+            PrCreateShape::Yes
+        );
+        // The command token matches by BASENAME: an absolute or relative
+        // path to gh has the same shape.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["/usr/bin/gh", "pr", "create",])),
+            PrCreateShape::Yes
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["./target/bin/gh", "pr", "create",])),
+            PrCreateShape::Yes
+        );
+        // A path to a DIFFERENT binary is confirmed NOT pr-create.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["/usr/bin/hub", "pr", "create",])),
+            PrCreateShape::No
+        );
+        // Other subcommands / single-token commands are confirmed No.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "view"])),
+            PrCreateShape::No
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr"])),
+            PrCreateShape::Ambiguous
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "issue", "create"])),
+            PrCreateShape::No
+        );
+        // `gh pr new` is a documented built-in alias of `gh pr create`:
+        // the alias fires the guard like the spelled-out form.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "new"])),
+            PrCreateShape::Yes
+        );
+        // `pr create` inside an `api` PATH or a flag VALUE is confirmed No:
+        // the shape walk stops at the first positional token.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "api", "repos/o/r/pr/create",])),
+            PrCreateShape::No
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "api", "-f", "title=pr create",])),
+            PrCreateShape::No
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&[
+                "gh",
+                "pr",
+                "edit",
+                "1",
+                "--add-label",
+                "pr create",
+            ])),
+            PrCreateShape::No
+        );
+        // An `=`-attached flag value is skipped, not read as a command token.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "--repo=o/r", "pr", "view",])),
+            PrCreateShape::No
+        );
+        // An attached value does NOT consume the next token: the
+        // `gh --repo=o/r pr create` form (accepted by gh) still fires.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "--repo=o/r", "pr", "create",])),
+            PrCreateShape::Yes
+        );
+        // A value-taking global flag consumes its VALUE argument.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "--jq", ".number", "pr", "create",])),
+            PrCreateShape::Yes
+        );
+        // Unknown leading flags before the command token are tolerated.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-R", "o/r", "pr", "create"])),
+            PrCreateShape::Yes
+        );
+        // Cobra accepts command-level persistent flags AFTER `pr` too:
+        // `gh pr -R o/r create` still reaches `pr create` and must fire.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "-R", "o/r", "create"])),
+            PrCreateShape::Yes
+        );
+        // AMBIGUOUS on unknown flags: the shape can neither be confirmed nor
+        // excluded — gh-env refuses these in required mode (fail closed).
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "pr", "--color", "always", "create",])),
+            PrCreateShape::Ambiguous
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-q", "pr", "create",])),
+            PrCreateShape::Ambiguous
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "--"])),
+            PrCreateShape::Ambiguous
+        );
+        // Known boolean short flags stay tolerated (`-h`/`-v` are gh's
+        // documented help/version flags — boolean, no value argument).
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-h", "pr", "create"])),
+            PrCreateShape::Yes
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-h", "-v", "pr", "create"])),
+            PrCreateShape::Yes
+        );
+        // A bare `-` or `--` separator mid-shape is ambiguous.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-", "pr", "create"])),
+            PrCreateShape::Ambiguous
+        );
+    }
 
     #[test]
     fn gh_env_child_receives_gh_token_without_it_appearing_in_output() -> Result<()> {

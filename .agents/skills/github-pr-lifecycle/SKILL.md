@@ -43,7 +43,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   (`Closes #N` for full-scope landings, bare `Refs #N` for
                   partial landings) and spec
                   references with `pr-create` (routes `gh pr create` through
-                  `orc_lib_gh_service`; never call `gh pr create` directly).
+                  `orc_lib_gh_service`; never call `gh pr create` directly —
+                  and never `gh-env -- gh pr create`, which is REFUSED in
+                  required enforcement and bypasses the labeling chain; in
+                  required mode `pr-create` routes through
+                  `gh-env-pr-create-chain`, where orc runs the labeling
+                  chain itself).
                   The body follows `.github/PULL_REQUEST_TEMPLATE.md`
                   (Summary, exactly ONE primary closing reference on its own
                   line early in the body — `Closes #N` for full-scope

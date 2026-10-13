@@ -168,6 +168,10 @@ orc_lib_resolve_my_login() {
 #   - recommended + absent/partial -> labelled personal-auth fallback, loud warning.
 #   - required + absent/partial    -> typed config failure (exit 2).
 #   - config resolution error      -> typed failure; never silently personal.
+# The labeling-chained pr-create route does NOT go through here: in required
+# enforcement pr-create calls `orc github gh-env-pr-create-chain` directly
+# (orc executes the labeling obligation itself); every OTHER mutating call
+# rides this wrapper.
 orc_lib_gh_service() {
   # `|| probe_status=$?` keeps the capture safe under `set -e` regardless of
   # the caller's context, and is always the status of THIS probe call.

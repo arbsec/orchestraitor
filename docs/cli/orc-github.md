@@ -171,14 +171,32 @@ orc github api POST repos/arbsec/orchestraitor/issues/<PR-NUMBER>/comments \
 ## `orc github gh-env`
 
 Executes ONE child command with `GH_TOKEN` set to a freshly minted
-installation token — the handoff for `gh`-based flows (PR creation, review
-threads) that predate the API passthrough:
+installation token — the handoff for `gh`-based flows (read-only queries,
+review threads) that predate the API passthrough:
 
 ```sh
-orc github gh-env -- gh pr create --draft --title "…" --body "…"
 orc github gh-env -- gh pr view 446 --json state
+orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
 ```
 
+- **`gh pr create` is refused in `required` enforcement mode.** PR creation
+  through gh-env bypasses the deterministic PR-labeling chain
+  (`pr-create` chains `pr-labels` + `pr-labels-from-issue` right after the
+  PR exists), so a bare `gh pr create` child produces an unlabeled PR. The
+  child command is detected by SHAPE — the `gh pr create` subcommand tokens
+  in the child argv, including a path-form `gh` — never by substring, so
+  `pr view` / `pr merge` / `pr comment` / `pr edit` and `gh api` calls are
+  unaffected, and the refusal fires BEFORE any token mint. Use the
+  `pr-create` lifecycle script
+  (`.agents/skills/github-pr-lifecycle/scripts/pr-create`) — it wraps the
+  same service-identity `gh pr create` call and executes the labeling
+  obligation ITSELF (the new `gh-env-pr-create-chain` subcommand): orc runs
+  `pr-labels` and `pr-labels-from-issue` against the created PR — failures
+  are loud warnings naming the exact manual commands, never silent drops.
+  The obligation is enforced by orc, never attested by a caller-supplied
+  environment variable or flag. In
+  `recommended` enforcement mode the guard does not fire (the labelled
+  personal fallback is a documented, warned path there).
 - The child's stdout/stderr pass through unchanged and the child's exit code
   propagates (a missing exit code maps to 1).
 - In `required` enforcement mode the child's git identity is PINNED via
