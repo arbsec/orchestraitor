@@ -270,6 +270,11 @@ pub struct CiLane {
     /// successful (ETag-bypassing) runs fetch for — after that, the
     /// persisted `ETag` rides normally.
     runs_initialized: Mutex<HashSet<String>>,
+    /// The last valid in-flight snapshot per repository: a runs `304`
+    /// confirms the stored representation is unchanged, so the snapshot
+    /// is reused for that round's quiet-SHA decisions instead of
+    /// treating the round as snapshot-less.
+    last_snapshot: Mutex<HashMap<String, Vec<String>>>,
     /// Per-repository tracked head SHAs, newest-first: the union of the
     /// in-flight run SHAs from the last runs response and the previously
     /// tracked SHAs (a SHA stays tracked until the cap evicts it, oldest
@@ -301,6 +306,7 @@ impl CiLane {
             store,
             queue,
             runs_initialized: Mutex::new(HashSet::new()),
+            last_snapshot: Mutex::new(HashMap::new()),
             tracked: Mutex::new(HashMap::new()),
         })
     }
@@ -461,12 +467,13 @@ impl CiLane {
         if status.as_u16() == 304 {
             self.record_conditional(&target.runs_key, etag.as_deref(), poll_after, true)
                 .map_err(|_| PollError::Failed)?;
-            // A 304 carries NO snapshot: the caller must restore the
-            // previous tracked set (an empty in-flight list here must
-            // never read as "nothing is in flight") and skip quiet-SHA
-            // pruning for this round — `Option::None` in_flight signals
-            // exactly that.
+            // A 304 confirms the previously stored runs representation is
+            // UNCHANGED: restore the previous tracked set and reuse the
+            // last valid in-flight snapshot for this round's quiet-SHA
+            // decisions (`None` only when no snapshot was ever fetched —
+            // the very first rounds, where pruning must not fire).
             self.set_tracked(target, previous_tracked.clone());
+            let snapshot = self.last_snapshot.lock().get(&target.repo).cloned();
             return Ok((
                 PollOutcome {
                     accepted: 0,
@@ -474,7 +481,7 @@ impl CiLane {
                     dropped: 0,
                     poll_after_secs: poll_after,
                 },
-                None,
+                snapshot,
             ));
         }
         if let Some(wait) = rate_limit_wait(response.headers(), status, now_secs) {
@@ -536,6 +543,9 @@ impl CiLane {
         }
         union.truncate(MAX_TRACKED_HEAD_SHAS);
         self.set_tracked(target, union);
+        self.last_snapshot
+            .lock()
+            .insert(target.repo.clone(), in_flight.clone());
         Ok((outcome, Some(in_flight)))
     }
 
