@@ -11,8 +11,8 @@ classification) borrows its design shape from rig 0.44.0 (0xPlaygrounds). Before
 specified, rig was re-evaluated as a candidate dependency — it had previously been rejected
 at 0.40.0 (tech-stack §4.4, "Here be dragons... breaking changes").
 
-Evaluation inputs (2026-10-13, preserved verbatim below with rig's MIT license permitting
-quotation):
+Evaluation inputs (2026-10-13; the full memo texts are preserved verbatim in the two
+evidence files linked below — rig's MIT license permits quoting):
 
 1. The dependency evaluation memo ([evidence 0025-a](0025-a-rig-0.44.0-dependency-evaluation.md))
    — what rig 0.44.0 is, its maintenance signals (MIT, MSRV 1.95.0, ~17 breaking changes per
