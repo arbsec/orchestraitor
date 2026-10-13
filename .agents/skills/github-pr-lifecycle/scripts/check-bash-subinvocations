@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Regression guard for #588: skill scripts may land as mode 100644 (the
+# App-signed createCommitOnBranch path cannot create 100755), so any direct
+# exec of a sibling script fails with exit 126. All intra-skill script
+# invocations must go through `bash "$SCRIPT_DIR/<script>"`.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+fail=0
+while IFS= read -r line; do
+  echo "direct exec of sibling script (must be \`bash \"$SCRIPT_DIR/<script>\"\`):"
+  echo "  $line"
+  fail=1
+done < <(grep -rn '\$SCRIPT_DIR/[a-z_-]' \
+           "$ROOT/github-pr-lifecycle/scripts" "$ROOT/github-project-workflow/scripts" \
+         | grep -v '/_lib\.sh' \
+         | grep -v 'bash "\?\$SCRIPT_DIR/' \
+         | grep -vE '(source|cp|echo) .*\$SCRIPT_DIR/' \
+         | grep -vE ':([[:space:]]*)"' )
+
+if [ "$fail" -eq 0 ]; then
+  echo "ok: all sibling script invocations use bash"
+fi
+exit "$fail"

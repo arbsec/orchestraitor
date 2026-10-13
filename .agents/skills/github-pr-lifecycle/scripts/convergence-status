@@ -24,7 +24,7 @@ orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
 # 1. Checks: all required + non-optional must pass.
-CHECKS_JSON="$("$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+CHECKS_JSON="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
   echo "error: failed to read PR checks" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
@@ -32,14 +32,14 @@ ALL_CHECKS_PASS="$(echo "$CHECKS_JSON" | jq -r '.all_passed')"
 CHECKS_PENDING="$(echo "$CHECKS_JSON" | jq -r '.any_pending')"
 
 # 2. Review threads: all actionable threads must be resolved.
-THREADS_JSON="$("$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+THREADS_JSON="$(bash "$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
   echo "error: failed to read review threads" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
 UNRESOLVED_THREADS="$(echo "$THREADS_JSON" | jq -r '.unresolved_actionable')"
 
 # 3. Checklist: all orc:* markers must be checked.
-CHECKLIST_JSON="$("$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+CHECKLIST_JSON="$(bash "$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
   echo "error: failed to reconcile checklist" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
