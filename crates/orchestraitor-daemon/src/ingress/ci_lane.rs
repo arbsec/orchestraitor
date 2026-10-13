@@ -380,24 +380,14 @@ impl CiLane {
             Err(error) => outcomes.push(Err(error)),
         }
         let tracked_after_runs = self.take_tracked(target);
-        // SHAs whose check-runs endpoint answered 304 this round: no new
-        // completions. A 304 SHA that also has no in-flight runs is QUIET —
-        // dropped from the tracked set (and its bookkeeping pruned), so a
-        // completed SHA stops costing a request per round instead of
-        // lingering until cap eviction.
-        // Quiet-SHA pruning (a review fix): a SHA whose check-runs endpoint
-        // answered 304 this round AND that this round's runs poll did NOT
-        // re-discover as in-flight has gone quiet — no completions can be
-        // pending on it. `tracked_after_runs` is the post-union set; a SHA
-        // that is in it only because of `previous` (not re-discovered) and
-        // answered 304 is dropped. The union-tracking design keeps a
-        // completed SHA across exactly the rounds it can still produce
-        // events; after one quiet round it stops costing a request.
-        // Every tracked SHA keeps its check-runs poll every round; but
-        // quiet-SHA pruning applies ONLY when this round supplied a valid
-        // runs snapshot: without one (runs 304/failure), a SHA absent from
-        // an empty list must never be treated as quiet — the previous set
-        // was restored and keeps its check-runs polls.
+        // Quiet-SHA pruning: every tracked SHA keeps its check-runs poll
+        // every round, but a SHA is pruned (set + bookkeeping) only when
+        // this round supplied a valid runs snapshot AND the SHA is not in
+        // its in-flight discovery AND its check-runs endpoint answered
+        // 304 (no completions pending). Without a snapshot — a runs
+        // 304/failure, whose `Option` is `None` — a SHA absent from an
+        // empty list must never be treated as quiet: the previous set was
+        // restored and keeps its polls.
         let mut quiet = HashSet::new();
         for head_sha in &tracked_after_runs {
             match self.poll_check_runs(target, head_sha, now_secs).await {
