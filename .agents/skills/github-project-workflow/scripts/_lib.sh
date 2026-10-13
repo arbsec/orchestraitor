@@ -62,6 +62,119 @@ Exit codes:
 EOF
 }
 
+# --- Body-argument resolution (@file expansion + path-shaped-arg guard) --------
+# Body values flowing into `gh -f body=...` / `--body ...` are CONTENT, but
+# operators (and agents) familiar with other tools' `@file` convention pass a
+# path — which used to be posted as the literal string (issue #587: PR #585
+# replies, issue #586's body, PR #596's double-encoded body). This helper makes
+# the convention explicit and fail-closed:
+#
+#   - `@<path>` with an existing readable file -> prints the file's content
+#     (documented expansion; the file must exist and be non-empty).
+#   - a value that is an EXISTING file path WITHOUT `@` -> typed error naming
+#     the argument and the file: this is the classic misuse; never silently
+#     post a path string. Use `@<path>` explicitly.
+#   - anything else -> printed verbatim (normal literal text).
+#
+# Usage: orc_lib_body_arg <arg-name> <value>   (prints the resolved body)
+# Exit 2 (ORC_ERR_CONFIG) on a misuse-shaped value.
+#
+# @file trust boundary (CodeRabbit PR #599): these scripts run with agent- and
+# tool-supplied arguments, so an @<path> value could exfiltrate an arbitrary
+# local file (e.g. @/etc/passwd) as a posted body. @file paths are therefore
+# resolved to a canonical absolute path and must fall inside one of the
+# trusted roots: the current workspace (git toplevel of the cwd) and the
+# system/user temp directories (TMPDIR, /tmp, /var/tmp). Everything else is
+# rejected with exit 2 BEFORE any file is read.
+orc_lib_body_arg() {
+  local arg_name="$1" value="$2"
+  if [ -z "$value" ]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  if [[ "$value" == @* ]]; then
+    local file="${value#@}"
+    if [ -z "$file" ]; then
+      echo "error: $arg_name: \`@\` with no path (expected \`@<path>\` to read the body from a file)" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    orc_lib_body_arg__check_trusted "$arg_name" "$file" || exit "$ORC_ERR_CONFIG"
+    if [ ! -f "$file" ]; then
+      echo "error: $arg_name: @file not found: $file" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    if [ ! -r "$file" ]; then
+      echo "error: $arg_name: @file is not readable: $file" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    if [ ! -s "$file" ]; then
+      echo "error: $arg_name: @file is empty: $file" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    cat "$file"
+    return 0
+  fi
+  if [ -e "$value" ]; then
+    echo "error: $arg_name: value \`$value\` is an existing file path, not body text — this would post the path string as content. Use \`@$value\` to load the file's content, or quote/inline the text." >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  printf '%s' "$value"
+}
+
+# Canonicalize an @file path and verify it falls inside a trusted root
+# (workspace git toplevel, or a system/user temp directory). Prints a typed
+# error and returns 1 when the path is outside every trusted root; returns 0
+# with no output otherwise. Symlink-safe: resolves the FULL TARGET with
+# `realpath -e` (every symlink in the path, including the final component, is
+# followed before the trusted-root check), so a symlink inside a trusted
+# directory pointing outside all trusted roots is refused — a directory-only
+# canonicalization once let such a link through and `cat` leaked the target's
+# content (CodeRabbit PR #599).
+orc_lib_body_arg__check_trusted() {
+  local arg_name="$1" file="$2" resolved root
+  if ! resolved="$(realpath -e -- "$file" 2>/dev/null)" || [ -z "$resolved" ]; then
+    # Unresolvable path (missing component or dangling symlink): let the
+    # caller's own not-found check produce the typed error.
+    return 0
+  fi
+  local roots=()
+  if root="$(git rev-parse --show-toplevel 2>/dev/null)" && [ -n "$root" ]; then
+    roots+=("$root")
+  fi
+  local t
+  for t in "${TMPDIR:-/tmp}" /tmp /var/tmp; do
+    if root="$(cd -- "$t" 2>/dev/null && pwd -P)" && [ -n "$root" ]; then
+      roots+=("$root")
+    fi
+  done
+  for root in "${roots[@]}"; do
+    case "$resolved" in
+      "$root"|"$root"/*) return 0 ;;
+    esac
+  done
+  echo "error: $arg_name: @file path is outside the trusted roots (workspace or temp directory): $file" >&2
+  return 1
+}
+
+# Guard for flows that pass a --body-file path straight to gh: the file must
+# exist, be readable, and be non-empty (gh would otherwise post an empty or
+# error out late with an ambiguous message).
+orc_lib_require_body_file() {
+  local arg_name="$1" file="$2"
+  if [ ! -f "$file" ]; then
+    echo "error: $arg_name: body file not found: $file" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  if [ ! -r "$file" ]; then
+    echo "error: $arg_name: body file is not readable: $file" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  if [ ! -s "$file" ]; then
+    echo "error: $arg_name: body file is empty: $file" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+}
+
 # --- Config loader -------------------------------------------------------------
 # Loads .agents/project/github-project.local.toml (preferred) or falls back to the
 # committed example ONLY for field/option NAME discovery (node IDs are never taken
@@ -168,6 +281,10 @@ orc_lib_resolve_my_login() {
 #   - recommended + absent/partial -> labelled personal-auth fallback, loud warning.
 #   - required + absent/partial    -> typed config failure (exit 2).
 #   - config resolution error      -> typed failure; never silently personal.
+# The labeling-chained pr-create route does NOT go through here: in required
+# enforcement pr-create calls `orc github gh-env-pr-create-chain` directly
+# (orc executes the labeling obligation itself); every OTHER mutating call
+# rides this wrapper.
 orc_lib_gh_service() {
   # `|| probe_status=$?` keeps the capture safe under `set -e` regardless of
   # the caller's context, and is always the status of THIS probe call.
