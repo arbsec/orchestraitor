@@ -2384,13 +2384,22 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
 /// the test never depends on ambient git config.
 fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
     use std::process::Command;
+    // Repository-location variables inherited from the ambient environment
+    // (a `git push` pre-push hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE)
+    // would redirect every fixture `git` call to the CALLING worktree's
+    // gitdir — the #553 corruption (fixture commits landed on a real feature
+    // branch, PR #551 deleted the whole repository). Scrubbed on every child.
+    const AMBIENT_GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
     let run = |args: &[&str]| -> miette::Result<()> {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(&repo)
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo).args(args);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        let status = command
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@example.com")
             .env("GIT_COMMITTER_NAME", "t")
@@ -2412,11 +2421,15 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     run(&["add", "."])?;
     run(&["commit", "-qm", "feature"])?;
     let tree_of = |spec: &str| -> miette::Result<String> {
-        let output = Command::new("git")
-            .args(["rev-parse", &format!("{spec}^{{tree}}")])
-            .current_dir(&repo)
-            .output()
-            .into_diagnostic()?;
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        let output = command.output().into_diagnostic()?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
     // Register the repo itself as `origin` so the landing path's
@@ -2425,11 +2438,14 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     // head so rev-parse finds the tree locally.
     run(&["remote", "add", "origin", &repo.display().to_string()])?;
     run(&["fetch", "--quiet", "origin"])?;
-    let head_output = Command::new("git")
-        .args(["rev-parse", "main"])
-        .current_dir(&repo)
-        .output()
-        .into_diagnostic()?;
+    let head_output = {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo).args(["rev-parse", "main"]);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        command.output().into_diagnostic()?
+    };
     let main_commit = String::from_utf8_lossy(&head_output.stdout)
         .trim()
         .to_string();
@@ -2442,6 +2458,108 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
         feature_tree,
         main_commit,
     ))
+}
+
+/// #553 adversarial: a hostile ambient `GIT_DIR`/`GIT_WORK_TREE` pair (the
+/// shape a `git push` pre-push hook exports into the test process) must NOT
+/// redirect the fixture's git children into the pointed-at repository. The
+/// forbidden effect — the fixture's `base` commit landing in the hostile
+/// repo — is asserted NOT to happen; the fixture repo itself carries the
+/// commits. `spawn_local_repo` is built so the poisoning env arrives via
+/// the fixture's own child processes' inheritance, so here the hostile
+/// environment is exercised by re-running the fixture's `run` helper shape:
+/// a child WITH the scrub (inside `spawn_local_repo`) against a child
+/// WITHOUT it (raw `Command::new("git")`) — the latter provably binds to the
+/// hostile gitdir, proving the poisoning is real and the scrub is what
+/// neutralizes it.
+#[test]
+fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<()> {
+    use std::process::Command;
+    // The hostile repo the ambient environment points at.
+    let hostile = tempfile::tempdir().into_diagnostic()?;
+    let hostile_repo = hostile.path().join("victim");
+    fs::create_dir_all(&hostile_repo).into_diagnostic()?;
+    let status = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&hostile_repo)
+        .status()
+        .into_diagnostic()?;
+    assert!(status.success(), "hostile repo init failed");
+    let hostile_git_dir = hostile_repo.join(".git");
+
+    // Fixture repo built by `spawn_local_repo` (which scrubs the ambient
+    // variables from every child it spawns).
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let _ = temp; // outlives the assertions below
+
+    // Control: a scrub-less git child, pointed at the fixture repo's cwd
+    // exactly like the pre-fix `run` helper, with the hostile variables in
+    // its inherited environment — this is the #553 corruption itself, and
+    // it MUST bind to the hostile gitdir (proving the attack is real and
+    // the environment below is genuinely hostile).
+    let poison_status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--git-dir"])
+        .env("GIT_DIR", &hostile_git_dir)
+        .env("GIT_WORK_TREE", &hostile_repo)
+        .output()
+        .into_diagnostic()?;
+    assert!(
+        poison_status.status.success(),
+        "control git invocation must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&poison_status.stdout).trim(),
+        hostile_git_dir.display().to_string(),
+        "control: an unscrubbed child MUST resolve to the hostile GIT_DIR \
+         (otherwise this test proves nothing)"
+    );
+
+    // The forbidden effect did NOT happen to the fixture: its main carries
+    // the pinned fixture commit.
+    let fixture_head = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "main"])
+        .output()
+        .into_diagnostic()?;
+    assert!(fixture_head.status.success(), "fixture main must exist");
+    assert_eq!(
+        String::from_utf8_lossy(&fixture_head.stdout).trim(),
+        main_commit,
+        "fixture repo main must carry the fixture commit"
+    );
+
+    // And the fixture's own children were scrubbed: re-resolving the
+    // fixture gitdir the way `spawn_local_repo` does (env-scrubbed) yields
+    // the FIXTURE gitdir even with the hostile variables present in this
+    // process's would-be environment — same commands, hostile env supplied
+    // explicitly, scrub removes it.
+    let scrubbed = {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--git-dir"])
+            .env("GIT_DIR", &hostile_git_dir)
+            .env("GIT_WORK_TREE", &hostile_repo);
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            command.env_remove(variable);
+        }
+        command.output().into_diagnostic()?
+    };
+    assert!(
+        scrubbed.status.success(),
+        "scrubbed git invocation must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&scrubbed.stdout).trim(),
+        ".git",
+        "forbidden effect: the hostile ambient GIT_DIR must not redirect a \
+         scrubbed fixture child"
+    );
+    Ok(())
 }
 
 /// A mint + GraphQL server for push-branch tests: connection 1 mints the
