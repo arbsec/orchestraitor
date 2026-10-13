@@ -739,6 +739,10 @@ echo "PASS trailing-flag argument validation (typed exit 2)"
 #         service-path stub (complete config) so these cases exercise the
 #         FLAG PARSING, not the enforcement gate.
 new_orc_stub required
+# Issue #587 guard: --body-file paths are validated (must exist, be readable,
+# non-empty) before reaching gh, so the fixture files must actually exist.
+printf 'review body\n' > "$WORK/review.md"
+printf 'comment body\n' > "$WORK/comment.md"
 bodyfile_case() {
   local script="$1"; shift
   (

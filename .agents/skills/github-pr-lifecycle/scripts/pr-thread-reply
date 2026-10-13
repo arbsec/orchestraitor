@@ -48,7 +48,7 @@ while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
     -f)
       [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: -f requires a key=value argument" >&2; exit "$ORC_ERR_CONFIG"; }
       case "${ORC_LIB_EXTRA_ARGS[1]}" in
-        body=*) BODY="${ORC_LIB_EXTRA_ARGS[1]#body=}" ;;
+        body=*) BODY="${ORC_LIB_EXTRA_ARGS[1]#body=}"; BODY="$(orc_lib_body_arg "-f body" "$BODY")" ;;
         *) echo "error: -f expects body=<text>, got \`${ORC_LIB_EXTRA_ARGS[1]}\`" >&2; exit "$ORC_ERR_CONFIG" ;;
       esac
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
@@ -57,7 +57,7 @@ while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
       # key=value contract as the bare `-f` form (reject non-body keys).
       kv="${ORC_LIB_EXTRA_ARGS[0]#-f=}"
       case "$kv" in
-        body=*) BODY="${kv#body=}" ;;
+        body=*) BODY="$(orc_lib_body_arg "-f body" "${kv#body=}")" ;;
         *) echo "error: -f expects body=<text>, got \`${ORC_LIB_EXTRA_ARGS[0]}\`" >&2; exit "$ORC_ERR_CONFIG" ;;
       esac
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
@@ -84,9 +84,8 @@ if [ -z "$BODY" ] && [ -z "$BODY_FILE" ]; then
   echo "error: a body file path or -f body=<text> is required" >&2
   exit "$ORC_ERR_CONFIG"
 fi
-if [ -n "$BODY_FILE" ] && [ ! -f "$BODY_FILE" ]; then
-  echo "error: body file not found: $BODY_FILE" >&2
-  exit "$ORC_ERR_CONFIG"
+if [ -n "$BODY_FILE" ]; then
+  orc_lib_require_body_file "body file" "$BODY_FILE"
 fi
 
 REPO="$(orc_lib_resolve_repo)"
