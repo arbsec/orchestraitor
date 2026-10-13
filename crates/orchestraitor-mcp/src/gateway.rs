@@ -868,6 +868,90 @@ mod tests {
         Ok(())
     }
 
+    /// Call-path counterpart of the disabled-route probe: a `tools/call`
+    /// for an unconfigured route must return the router's typed
+    /// "tool not found" invalid-params error — rmcp 3.5.1's
+    /// `ToolRouter::call` checks the disabled set before consulting the
+    /// route map. A regression that keeps `list_all`/`has_route`/
+    /// `is_disabled` intact but silently accepts `call` fails this
+    /// assertion.
+    #[tokio::test]
+    async fn disabled_board_query_call_is_rejected_as_tool_not_found() {
+        use rmcp::handler::server::tool::ToolCallContext;
+        use rmcp::model::{CallToolRequestParams, NumberOrString};
+        use rmcp::service::RequestContext;
+        use std::borrow::Cow;
+
+        let temp = tempfile::tempdir().unwrap();
+        let scope = ProjectScope::from_root(temp.path()).unwrap();
+        let unconfigured = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+            decision_store: None,
+            board_lease_registry: None,
+        });
+        assert!(unconfigured.tool_router.is_disabled("board.query"));
+
+        // Drive the same dispatch the macro-generated `call_tool` uses:
+        // `ToolCallContext::new(self, params, context)` ->
+        // `ToolRouter::call`. The peer is never reached on the
+        // disabled-route rejection path, but a live `Peer` keeps the
+        // context well-formed; the transport is an in-memory duplex whose
+        // client side is dropped unread.
+        let request = CallToolRequestParams::new(Cow::Borrowed("board.query")).with_arguments(
+            serde_json::json!({})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let context = RequestContext::<rmcp::RoleServer>::new(
+            NumberOrString::Number(1),
+            unused_server_peer(),
+        );
+        let call = unconfigured
+            .tool_router
+            .call(ToolCallContext::new(&unconfigured, request, context))
+            .await;
+        match call {
+            Ok(_) => panic!("disabled board.query route must reject, not succeed"),
+            Err(error) => {
+                assert_eq!(
+                    error.code,
+                    rmcp::model::ErrorCode::INVALID_PARAMS,
+                    "disabled route rejection must be the router's typed error: {error:?}"
+                );
+                assert_eq!(error.message, "tool not found");
+            }
+        }
+    }
+
+    /// Test-only `Peer<RoleServer>` over an in-memory duplex transport:
+    /// `Peer::new` is `pub(crate)` in rmcp, so the peer is built by
+    /// `serve_directly`-ing a no-op handler over a duplex stream whose
+    /// client side is dropped unread. The peer is never used by the
+    /// disabled-route rejection path; it only makes the request context
+    /// well-formed.
+    fn unused_server_peer() -> rmcp::Peer<rmcp::RoleServer> {
+        use rmcp::service::{RunningService, serve_directly};
+        struct NullHandler;
+        impl rmcp::ServerHandler for NullHandler {
+            fn get_info(&self) -> rmcp::model::ServerConfig {
+                rmcp::model::ServerConfig::new(rmcp::model::ServerCapabilities::default())
+            }
+        }
+        let (_server_io, client_io) = tokio::io::duplex(4096);
+        let running: RunningService<rmcp::RoleServer, NullHandler> =
+            serve_directly(NullHandler, client_io, None);
+        let peer = running.peer().clone();
+        tokio::spawn(async move {
+            running.cancel().await.ok();
+        });
+        peer
+    }
+
     /// A provider WITHOUT a lease registry also disables both board tools:
     /// `board.move` needs both, and a partial guard configuration fails
     /// closed rather than running unlease-checked.
