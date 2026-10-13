@@ -64,12 +64,12 @@ Concretely:
   `required_capabilities_reports_seven_independent_controls` — pins two
   properties of the contract: `caps.len() == 7` for all-available
   controls, and `caps.iter().all(|c| c.status == ControlStatus::Available)`.
-  Any future PR that drops a control, collapses two into one, or
-  substitutes a missing identifier for an empty placeholder breaks the
-  count assertion. The test does NOT pin the exact identifier set (a
-  duplicate identifier, or a rename to another valid identifier, would
-  still satisfy both checks) — extending the test to assert the canonical
-  identifier set is recorded as a follow-up, not part of this ADR.
+  The test detects cardinality changes (a future PR that drops a control
+  or collapses two into one breaks the count assertion) but does NOT
+  validate identifier values — a seven-entry vector of empty-string
+  identifiers would still satisfy both checks. Extending the test to
+  assert the canonical identifier set is recorded as a follow-up, not
+  part of this ADR.
 - The `ControlStatus::from(ControlState)` mapping
   (`capability.rs:64`) is `match`-exhaustive over the three
   `ControlState` variants — adding a fourth `ControlState` is a
@@ -78,9 +78,21 @@ Concretely:
 ## Consequences
 
 - **Positive:** the operator-visible `health` report and the
-  run-state `WorkerPreflight` record carry the same shape and the same
-  semantics. A control that is `Available` in `health` is `Available` in
-  the preflight that gates the next worker run.
+  run-state `WorkerPreflight` record both surface every required control
+  with its own `Available` / `Degraded` / `Unavailable` status, so a
+  downstream operator can correlate a `health` report against a
+  `WorkerPreflight` by control identifier. They are NOT shape-identical
+  — `health` is a `Vec<RequiredCapability>` (daemon
+  `crates/orchestraitor-daemon/src/capability.rs:191`), `WorkerPreflight`
+  carries `missing_controls` and `degraded_controls` as `ControlNames`
+  collections (worker `crates/orchestraitor-arb-client/src/mediation.rs:309-346`)
+  — and their semantics diverge in one place. On a supported Linux host
+  with no Landlock ABI the worker preflight records
+  `filesystem_isolation` as missing (the `#755 stopgap`,
+  `mediation.rs:310-311`), while the daemon reports the matrix state
+  directly without that override (`capability.rs:192-214`). A control
+  that is `Available` in `health` is therefore not necessarily
+  `Available` in the worker's view of the same host.
 - **Positive:** `Degraded` controls are reported distinctly from
   `Unavailable` controls. The aggregate-flag design would erase this
   distinction; the per-control design preserves it (spec
