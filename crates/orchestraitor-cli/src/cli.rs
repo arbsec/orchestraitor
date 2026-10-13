@@ -336,6 +336,17 @@ pub struct PushBranchArgs {
     /// (paths and statuses only — never blob contents), then exit 0.
     #[arg(long)]
     pub dry_run: bool,
+    /// Fail-closed repo-identity gate (#529): refuse to land unless the
+    /// local branch's tree equals this OID. The landing path resolves the
+    /// local branch and its tree from the AMBIENT process cwd — a wrong
+    /// cwd or a colonized branch ref would otherwise land a corrupted tree
+    /// (the caller's tree-equality gate compares against that same ref, so
+    /// it cannot catch this). Capture the intended tree BEFORE invoking
+    /// `orc github push-branch` (e.g. `git rev-parse <branch>^{tree}` from
+    /// the intended worktree) and pass it here; a mismatch exits with a
+    /// typed error and nothing is mutated on the remote.
+    #[arg(long)]
+    pub expect_tree: Option<String>,
 }
 
 /// Arguments for `orc github verify-identity`.

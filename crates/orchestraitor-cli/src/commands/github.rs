@@ -981,7 +981,16 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // 1. The intended tree: the branch's committed tree object (no index,
     //    no textconv) — exactly the identity the remote must match
     //    (`pr-convergence.md`).
-    let local_tree = git(&["rev-parse", &format!("{local_branch}^{{tree}}")])?;
+    let local_tree = git(None, &["rev-parse", &format!("{local_branch}^{{tree}}")])?;
+
+    // 1b. Fail-closed repo-identity gate (#529): the branch and its tree
+    //     were resolved from the AMBIENT process cwd — a wrong cwd (or an
+    //     ambient `GIT_DIR` redirect, or a colonized branch ref) silently
+    //     points the landing at a different tree, and the remote-side
+    //     tree-equality gate compares against that same (wrong) ref, so it
+    //     cannot catch the corruption. When the caller pins the tree it
+    //     intends to land, refuse on ANY divergence before mutating.
+    verify_expect_tree(&local_tree, args.expect_tree.as_deref(), &local_branch)?;
 
     // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
@@ -1041,14 +1050,13 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             // transport/HTTP/GraphQL errors propagate: an API failure must
             // never be mistaken for "no such branch" and diffed against a
             // possibly-stale local ref.
-            Ok(None) if args.base.is_some() => {
-                git(&["rev-parse", "--verify", &base_ref]).map_err(|_| {
+            Ok(None) if args.base.is_some() => git(None, &["rev-parse", "--verify", &base_ref])
+                .map_err(|_| {
                     miette!(
                         "cannot resolve the --base revision `{base_ref}`: it is neither a \
                          remote branch of {owner}/{repo} nor a local revision"
                     )
-                })?
-            }
+                })?,
             Ok(None) => {
                 bail!(
                     "the default branch of {owner}/{repo} resolved to {base_ref} but no such \
@@ -1062,7 +1070,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             // Fall through: the rev-parse below produces the typed error
             // when the object is truly unavailable.
         }
-        let tree = git(&["rev-parse", &format!("{base_head}^{{tree}}")]).map_err(|_| {
+        let tree = git(None, &["rev-parse", &format!("{base_head}^{{tree}}")]).map_err(|_| {
             miette!(
                 "cannot read the base {base_ref} head {base_head} tree locally after the fetch \
                  — run `git fetch {repo_url}` and retry"
@@ -1070,7 +1078,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         })?;
         (tree, Some(base_head))
     };
-    let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
+    let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
             std::io::stderr(),
@@ -1116,7 +1124,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
 
     // Build the fileChanges payload. Contents come from the branch's
     // committed blobs (`git cat-file blob`), never the working directory.
-    let file_changes = build_file_changes(&changes, &local_branch, &diff_base_tree)?;
+    let file_changes = build_file_changes(None, &changes, &local_branch, &diff_base_tree)?;
 
     // --dry-run: print the resolved landing plan and stop before any
     // mutation (the branch-ref read and — for a new branch — the
@@ -1287,7 +1295,7 @@ fn resolve_repo_slug(
 /// `None` on either side when the origin is absent or not that shape —
 /// callers decide whether that is fatal (no explicit `--owner`/`--repo`).
 fn origin_owner_repo() -> (Option<String>, Option<String>) {
-    let Ok(url) = git(&["remote", "get-url", "origin"]) else {
+    let Ok(url) = git(None, &["remote", "get-url", "origin"]) else {
         return (None, None);
     };
     match parse_github_owner_repo(&url) {
@@ -1337,7 +1345,7 @@ fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
 /// Resolves the current branch of the working directory (symbolic-ref).
 /// Detached HEAD is a typed error — the landing targets a branch.
 fn current_branch() -> Result<String> {
-    git(&["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
+    git(None, &["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
         miette!(
             "cannot resolve the current branch (detached HEAD or not a git repository) — \
              pass --branch <name>"
@@ -1514,18 +1522,26 @@ fn land_on_temp_branch(
 
 /// Runs `git diff-tree -r -z --no-renames --name-status` between two trees
 /// and parses the records; `--no-commit-id` against two trees means no
-/// leading oid field.
-fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
-    let raw = git_raw(&[
-        "diff-tree",
-        "-r",
-        "-z",
-        "--no-renames",
-        "--no-commit-id",
-        "--name-status",
-        base_tree,
-        tree,
-    ])?;
+/// leading oid field. `dir` anchors the invocation at a fixture repo (tests);
+/// `None` resolves the repo from the process cwd (production).
+fn diff_tree_changes(
+    dir: Option<&std::path::Path>,
+    base_tree: &str,
+    tree: &str,
+) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let raw = git_raw(
+        dir,
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--no-commit-id",
+            "--name-status",
+            base_tree,
+            tree,
+        ],
+    )?;
     Ok(parse_diff_tree_z(&raw))
 }
 
@@ -1599,7 +1615,7 @@ fn remote_head_tree(
     if !git_fetch_authenticated(token, owner, repo, head) {
         git_fetch_authenticated(token, owner, repo, remote_branch);
     }
-    if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
+    if let Ok(tree) = git(None, &["rev-parse", &format!("{head}^{{tree}}")]) {
         return Ok(tree);
     }
     // Last resort: fetch the explicit --base ref, then re-check the HEAD —
@@ -1610,8 +1626,8 @@ fn remote_head_tree(
     // mask remote-only paths as an empty diff).
     if let Some(base) = fallback_base
         && git_fetch_authenticated(token, owner, repo, base)
-        && git(&["rev-parse", "--verify", "--quiet", head]).is_ok()
-        && let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")])
+        && git(None, &["rev-parse", "--verify", "--quiet", head]).is_ok()
+        && let Ok(tree) = git(None, &["rev-parse", &format!("{head}^{{tree}}")])
     {
         return Ok(tree);
     }
@@ -1634,12 +1650,16 @@ fn remote_head_tree(
 /// That is warned about on stderr (tree gate then catches any mismatch);
 /// for a file that already exists in the diff base with 100755, the
 /// modification keeps GitHub's stored mode and no warning is needed.
+///
+/// `dir` anchors every git invocation at a fixture repo (tests); `None`
+/// resolves the repo from the process cwd (production).
 fn build_file_changes(
+    dir: Option<&std::path::Path>,
     changes: &[(String, std::path::PathBuf)],
     branch: &str,
     diff_base_tree: &str,
 ) -> Result<Value> {
-    let base_modes = base_tree_modes(diff_base_tree);
+    let base_modes = base_tree_modes(dir, diff_base_tree);
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
     for (status, path) in changes {
@@ -1650,7 +1670,7 @@ fn build_file_changes(
                 // submodules (160000) cannot be carried by the FileAddition
                 // contents payload — landing would silently materialize them
                 // as regular files or fail opaquely.
-                let object_type = git(&["cat-file", "-t", &spec])?;
+                let object_type = git(dir, &["cat-file", "-t", &spec])?;
                 if object_type != "blob" {
                     bail!(
                         "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
@@ -1658,10 +1678,10 @@ fn build_file_changes(
                          payload"
                     );
                 }
-                let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
+                let bytes = git_raw(dir, &["cat-file", "blob", &spec]).map_err(|error| {
                     miette!("failed to read blob `{spec}` for the landing commit: {error}")
                 })?;
-                let mode = tree_entry_mode(&local_tree_modes(branch)?, path);
+                let mode = tree_entry_mode(&local_tree_modes(dir, branch)?, path);
                 let path_key = path.display().to_string();
                 if status == "A"
                     && mode == "100755"
@@ -1701,19 +1721,29 @@ fn build_file_changes(
 /// Reads the local tree's entry modes (`git ls-tree -r -z <tree>`): path ->
 /// "100644"|"100755". Unreadable trees are a typed error (callers already
 /// validated the tree exists; only a concurrent object-store change fails).
-fn local_tree_modes(tree: &str) -> Result<std::collections::HashMap<String, String>> {
-    let raw = git_raw(&["ls-tree", "-r", "-z", tree])?;
+/// `dir` anchors the invocation at a fixture repo (tests); `None` resolves
+/// the repo from the process cwd (production).
+fn local_tree_modes(
+    dir: Option<&std::path::Path>,
+    tree: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let raw = git_raw(dir, &["ls-tree", "-r", "-z", tree])?;
     Ok(parse_ls_tree_z(&raw))
 }
 
 /// Reads the diff-base tree's entry modes, for the added-file mode check.
 /// An unreadable base tree is not fatal: the mode check then treats every
-/// added file as new (the conservative warning path).
-fn base_tree_modes(diff_base_tree: &str) -> std::collections::HashMap<String, String> {
+/// added file as new (the conservative warning path). `dir` anchors the
+/// invocation at a fixture repo (tests); `None` resolves the repo from the
+/// process cwd (production).
+fn base_tree_modes(
+    dir: Option<&std::path::Path>,
+    diff_base_tree: &str,
+) -> std::collections::HashMap<String, String> {
     if diff_base_tree.is_empty() {
         return std::collections::HashMap::new();
     }
-    match git_raw(&["ls-tree", "-r", "-z", diff_base_tree]) {
+    match git_raw(dir, &["ls-tree", "-r", "-z", diff_base_tree]) {
         Ok(raw) => parse_ls_tree_z(&raw),
         Err(_) => std::collections::HashMap::new(),
     }
@@ -1830,37 +1860,109 @@ fn commit_oid(commit: &Value) -> Result<&str> {
         .ok_or_else(|| miette!("landing commit response is malformed: missing commit.oid"))
 }
 
+/// Environment variables that redirect `git` away from the intended
+/// repository location or its object/ref store. Inherited values from a
+/// hook or wrapper shell (a pre-push hook exports `GIT_DIR`/
+/// `GIT_WORK_TREE`/`GIT_INDEX_FILE`) would otherwise bind every child
+/// `git` to the caller's ambient gitdir instead of the process cwd — the
+/// #553/#529 corruption class. `GIT_OBJECT_DIRECTORY`,
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and `GIT_COMMON_DIR` redirect
+/// object and ref lookups even when the gitdir itself resolves correctly,
+/// and `GIT_NAMESPACE` narrows refs to a namespace, so a landed tree and
+/// its blobs could silently come from a different store.
+const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
+/// Fail-closed repo-identity gate for `push-branch` (#529): the local
+/// branch and its tree are resolved from the AMBIENT process cwd, so a
+/// wrong cwd (or an inherited `GIT_DIR`, or a colonized branch ref) silently
+/// points the landing at a different tree — and the remote-side
+/// tree-equality gate compares against that same (wrong) ref, so it cannot
+/// catch the corruption. When the caller pins the tree it intends to land
+/// (`--expect-tree`), ANY divergence refuses the landing before anything is
+/// mutated. An empty/whitespace pin is treated as absent.
+///
+/// # Errors
+/// Typed diagnostic naming both trees when the gate refuses.
+fn verify_expect_tree(
+    local_tree: &str,
+    expect_tree: Option<&str>,
+    local_branch: &str,
+) -> Result<()> {
+    let Some(expect_tree) = expect_tree.map(str::trim).filter(|tree| !tree.is_empty()) else {
+        return Ok(());
+    };
+    if expect_tree.eq_ignore_ascii_case(local_tree) {
+        return Ok(());
+    }
+    bail!(
+        "expect-tree gate refused the landing: the local branch `{local_branch}` resolves \
+         to tree {local_tree} in the current directory, but the caller expects {expect_tree} \
+         — the ambient cwd (or an inherited GIT_DIR) is redirecting `git` away from the \
+         intended worktree; re-run from the intended worktree or pass --branch explicitly. \
+         Nothing was mutated."
+    );
+}
+
 /// Runs `git` with the given arguments and returns trimmed stdout; a non-zero
 /// exit is a typed error carrying stderr (never credential material).
-fn git(args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|error| miette!("failed to run `git {}`: {error}", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+///
+/// `dir` anchors the invocation at a repository directory (`git -C <dir>`);
+/// `None` resolves the repository from the process cwd, which is correct for
+/// the CLI. Tests pass a fixture directory so the real builder chain runs
+/// WITHOUT chdiring the whole process (#529: a concurrent worktree's branch
+/// would be colonized by the fixture's commits).
+fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
+    git_output(|command| {
+        if let Some(dir) = dir {
+            command.arg("-C").arg(dir);
+        }
+        command.args(args)
+    })
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Like [`git`], but returns raw bytes (for NUL-delimited output).
-fn git_raw(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .args(args)
+fn git_raw(dir: Option<&std::path::Path>, args: &[&str]) -> Result<Vec<u8>> {
+    git_output(|command| {
+        if let Some(dir) = dir {
+            command.arg("-C").arg(dir);
+        }
+        command.args(args)
+    })
+    .map(|output| output.stdout)
+}
+
+/// Spawns a scrubbed `git` child assembled by `assemble` and validates its
+/// exit status. Every production `git` invocation goes through here so an
+/// inherited repository-location variable (`GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+/// `GIT_COMMON_DIR`, `GIT_NAMESPACE` — a hook or wrapper shell exports them)
+/// can never redirect the child away from the intended repository or its
+/// object store (#553/#529 corruption class).
+fn git_output(assemble: impl FnOnce(&mut Command) -> &mut Command) -> Result<std::process::Output> {
+    let mut command = Command::new("git");
+    assemble(&mut command);
+    for variable in AMBIENT_GIT_LOCATION_VARS {
+        command.env_remove(variable);
+    }
+    let output = command
         .output()
-        .map_err(|error| miette!("failed to run `git {}`: {error}", args.join(" ")))?;
+        .map_err(|error| miette!("failed to run git: {error}"))?;
     if !output.status.success() {
         bail!(
-            "git {} failed: {}",
-            args.join(" "),
+            "git failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(output.stdout)
+    Ok(output)
 }
 
 /// Parses `git diff-tree -r -z --no-renames --name-status` output: NUL-
@@ -3062,6 +3164,7 @@ mod tests {
         // shape; an A record would need a real blob, so only D is exercised
         // here.
         let result = build_file_changes(
+            None,
             &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
             "any-branch",
             "",
@@ -3078,14 +3181,21 @@ mod tests {
     /// Builds a fixture repo whose base and branch trees differ by an added,
     /// a modified, and a deleted file, so the REAL builder runs against REAL
     /// git objects (the corruption bug was blob OIDs pasted as contents).
+    /// Every git child is anchored at the fixture repo and scrubbed of
+    /// inherited repository-location variables (#553): an ambient `GIT_DIR`
+    /// from a hook environment would otherwise redirect the fixture's
+    /// commits into the caller's real worktree.
     fn fixture_repo_with_changes() -> miette::Result<(tempfile::TempDir, String, String)> {
         let temp = tempfile::tempdir().into_diagnostic()?;
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).into_diagnostic()?;
         let run = |args: &[&str]| -> miette::Result<()> {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(&repo)
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&repo).args(args);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let status = command
                 .env("GIT_AUTHOR_NAME", "t")
                 .env("GIT_AUTHOR_EMAIL", "t@example.com")
                 .env("GIT_COMMITTER_NAME", "t")
@@ -3107,93 +3217,142 @@ mod tests {
         run(&["add", "-A"])?;
         run(&["commit", "-qm", "feature"])?;
         let tree = |spec: &str| -> miette::Result<String> {
-            let output = Command::new("git")
-                .args(["rev-parse", &format!("{spec}^{{tree}}")])
-                .current_dir(&repo)
-                .output()
-                .into_diagnostic()?;
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let output = command.output().into_diagnostic()?;
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         };
         Ok((temp, tree("main")?, tree("feature")?))
     }
 
-    /// Serializes tests that chdir into a fixture repo (the `git*` helpers
-    /// run against the process CWD; concurrent chdir corrupts siblings).
-    fn repo_cwd_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    // --- push-branch: expect-tree repo-identity gate (#529) -----------------
+
+    #[test]
+    fn expect_tree_gate_refuses_a_mismatched_tree_before_any_mutation() {
+        // The #529 corruption shape: the caller pinned the tree it intends
+        // to land, but the ambient cwd resolved the branch to a DIFFERENT
+        // (colonized) tree. The gate must refuse — fail closed.
+        let local_tree = "0123456789abcdef0123456789abcdef01234567";
+        let expect_tree = "fedcba9876543210fedcba9876543210fedcba98";
+        let error = format!(
+            "{}",
+            verify_expect_tree(local_tree, Some(expect_tree), "feature")
+                .expect_err("mismatched tree must refuse the landing")
+        );
+        assert!(error.contains("expect-tree gate refused"), "{error}");
+        assert!(error.contains(local_tree), "{error}");
+        assert!(error.contains(expect_tree), "{error}");
+        assert!(error.contains("Nothing was mutated"), "{error}");
+    }
+
+    #[test]
+    fn expect_tree_gate_accepts_exact_and_case_insensitive_matches() {
+        let local_tree = "0123456789abcdef0123456789abcdef01234567";
+        verify_expect_tree(local_tree, Some(local_tree), "feature")
+            .expect("identical tree must pass the gate");
+        verify_expect_tree(local_tree, Some(&local_tree.to_uppercase()), "feature")
+            .expect("the gate compares OIDs case-insensitively (git OIDs are hex)");
+    }
+
+    #[test]
+    fn expect_tree_gate_treats_absent_or_blank_pin_as_unchecked() {
+        verify_expect_tree("0123456789abcdef0123456789abcdef01234567", None, "feature")
+            .expect("no pin must pass the gate (back-compat)");
+        verify_expect_tree(
+            "0123456789abcdef0123456789abcdef01234567",
+            Some("   "),
+            "feature",
+        )
+        .expect("a blank pin is treated as absent");
+    }
+
+    #[test]
+    fn expect_tree_gate_error_names_the_redirect_cause() {
+        let error = format!(
+            "{}",
+            verify_expect_tree(
+                "0123456789abcdef0123456789abcdef01234567",
+                Some("fedcba9876543210fedcba9876543210fedcba98"),
+                "feature"
+            )
+            .expect_err("mismatch must error")
+        );
+        // The remediation hint must point at the ambient-cwd/GIT_DIR cause.
+        assert!(error.contains("GIT_DIR"), "{error}");
+        assert!(error.contains("intended worktree"), "{error}");
     }
 
     #[test]
     fn build_file_changes_carries_base64_blob_contents_not_blob_oids() -> miette::Result<()> {
         // THE corruption regression: FileAddition.contents must be the
         // base64 of the blob BYTES (`git cat-file blob`), never the blob
-        // OID string pasted as contents. The `git*` helpers run against the
-        // process CWD, so the test chdirs into the fixture repo (single-
-        // threaded via a mutex shared with the other repo-bound tests).
-        let _lock = repo_cwd_lock();
+        // OID string pasted as contents. The fixture is cwd-independent
+        // (`git`/`git_raw` operate on the caller's process cwd, so the
+        // gitdir is anchored with `git -C <repo>` — a process-wide chdir
+        // would colonize concurrent worktrees, the #529 incident).
         let (temp, base_tree, feature_tree) = fixture_repo_with_changes()?;
-        let previous = std::env::current_dir().into_diagnostic()?;
-        std::env::set_current_dir(temp.path().join("repo")).into_diagnostic()?;
-        let result = (|| -> miette::Result<()> {
-            let changes = diff_tree_changes(&base_tree, &feature_tree)?;
-            let payload = build_file_changes(&changes, "feature", &base_tree)?;
-            let additions = payload
-                .get("additions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| miette!("additions must be an array: {payload}"))?;
-            let added = additions
-                .iter()
-                .find(|entry| entry.get("path").and_then(Value::as_str) == Some("add.txt"))
-                .ok_or_else(|| miette!("add.txt must be in the payload: {payload}"))?;
-            let contents = added
-                .get("contents")
-                .and_then(Value::as_str)
-                .ok_or_else(|| miette!("addition is missing contents"))?;
-            assert_eq!(
-                BASE64_ENGINE.decode(contents).into_diagnostic()?,
-                b"added\n",
-                "contents must decode to the blob bytes, not contain an OID"
-            );
-            // A 40-hex blob OID pasted as contents would decode to 40 bytes
-            // of hex; the decoded payload must be the actual content.
-            assert!(!contents.chars().all(|c| c.is_ascii_hexdigit()));
-            // Modified and deleted records keep their shapes.
-            let modified = additions
-                .iter()
-                .find(|entry| entry.get("path").and_then(Value::as_str) == Some("mod.txt"))
-                .ok_or_else(|| miette!("mod.txt must be in the payload: {payload}"))?;
-            assert_eq!(
-                BASE64_ENGINE
-                    .decode(
-                        modified
-                            .get("contents")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                    )
-                    .into_diagnostic()?,
-                b"new\n"
-            );
-            let deletions = payload
-                .get("deletions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| miette!("deletions must be an array: {payload}"))?;
-            assert_eq!(deletions.len(), 1, "one deletion: {payload}");
-            assert_eq!(
-                deletions[0].get("path").and_then(Value::as_str),
-                Some("del.txt")
-            );
-            Ok(())
-        })();
-        std::env::set_current_dir(previous).into_diagnostic()?;
-        result
+        let repo = temp.path().join("repo");
+        let changes = diff_tree_changes(Some(&repo), &base_tree, &feature_tree)?;
+        let payload = build_file_changes(Some(&repo), &changes, "feature", &base_tree)?;
+        let additions = payload
+            .get("additions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette!("additions must be an array: {payload}"))?;
+        let added = additions
+            .iter()
+            .find(|entry| entry.get("path").and_then(Value::as_str) == Some("add.txt"))
+            .ok_or_else(|| miette!("add.txt must be in the payload: {payload}"))?;
+        let contents = added
+            .get("contents")
+            .and_then(Value::as_str)
+            .ok_or_else(|| miette!("addition is missing contents"))?;
+        assert_eq!(
+            BASE64_ENGINE.decode(contents).into_diagnostic()?,
+            b"added\n",
+            "contents must decode to the blob bytes, not contain an OID"
+        );
+        // A 40-hex blob OID pasted as contents would decode to 40 bytes
+        // of hex; the decoded payload must be the actual content.
+        assert!(!contents.chars().all(|c| c.is_ascii_hexdigit()));
+        // Modified and deleted records keep their shapes.
+        let modified = additions
+            .iter()
+            .find(|entry| entry.get("path").and_then(Value::as_str) == Some("mod.txt"))
+            .ok_or_else(|| miette!("mod.txt must be in the payload: {payload}"))?;
+        assert_eq!(
+            BASE64_ENGINE
+                .decode(
+                    modified
+                        .get("contents")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
+                .into_diagnostic()?,
+            b"new\n"
+        );
+        let deletions = payload
+            .get("deletions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette!("deletions must be an array: {payload}"))?;
+        assert_eq!(deletions.len(), 1, "one deletion: {payload}");
+        assert_eq!(
+            deletions[0].get("path").and_then(Value::as_str),
+            Some("del.txt")
+        );
+        Ok(())
     }
 
     #[test]
     fn build_file_changes_deletion_only_never_touches_git() -> Result<()> {
         // Deletions carry only the path — no blob read, no mode read.
         let payload = build_file_changes(
+            None,
             &[("D".to_string(), std::path::PathBuf::from("gone.txt"))],
             "any-branch",
             "",

@@ -333,6 +333,8 @@ The orchestration loop routes by ROLE. A role is a phase of work in the loop; th
 
 Users MAY define custom roles; the registry is configuration, not a hardcoded taxonomy (§9.22.4). Roles compose with the §9.19.1 `(domain, role)` catalog: a role resolves through the §9.19.2 precedence chain (`roles.<id>.routing.*` sub-keys carry the same layer semantics as `agents.domains.<id>.routing.*`), and a worker never selects its own model — the control plane resolves `(provider, model, routing_reason)` and records it in the per-call event.
 
+**The `think` tool in role presets (default-on).** All six built-in role presets (`explore`, `research`, `plan`, `implement`, `review`, `verify`) include the built-in `think` tool (spec `20-harness-worker.md` §9.48) in their default `internal_tools` surface; a preset MAY omit it, and a declared subagent tool's `internal_tools` allowlist controls sub-session exposure independently. `think` is default-on without configuration (the §9.48.2 deviation) — unlike the web tools, its presence in a preset is not gated on any `[tools.*]` config block, only on the trusted-layer kill-switch and the allowlists above; existing configs that enumerate `internal_tools` explicitly keep their exact surface.
+
 **Web tools in role presets (opt-in).** Role presets and per-role `internal_tools` allowlists MAY include the built-in `web_search`/`web_fetch` tools (spec `20-harness-worker.md` §9.19) — typically for `research` and `explore` roles. Default presets stay WITHOUT them: web access is opt-in via trusted-layer configuration, never a bundle default. Including a web tool in a preset or allowlist does not enable it — the tool still requires its `[tools.web_search]`/`[tools.web_fetch]` block at a trusted layer and fails closed without the Arbitraitor-mediated egress capability (arbsec/arbitraitor#797).
 
 **Sub-session roles (issue #535).** Declared subagent tools resolve their sub-session role through this same chain at spawn time; the resolved `(provider, model)` rides the spawn's decision record (§9.35 shape: role, provider, model, precedence path, fallback reason). A subagent tool whose role cannot route is a typed startup error — never a parent-chosen model. Role-level effort (`tools.<id>.effort = low|medium|high`), `max_summary_bytes`, and `structured_summary` resolve through the layered chain with provenance and are recorded with the decision; an unknown effort value is a typed config error.
@@ -348,7 +350,7 @@ Users MAY define custom roles; the registry is configuration, not a hardcoded ta
 A **role preset** is the built-in default value set for the subagent-relevant fields of a declared `[tools.<id>]` subagent tool (`20-harness-worker.md` §9.15, "Declared tools") whose `subagent_role` matches a built-in role. A preset bundles:
 
 - `instructions` — the operator-authored instruction body (§9.15.1 `origin = trusted-config`, `trust_class = trusted`) prepended to the sub-session prompt;
-- `internal_tools` — the scoped internal-tool allowlist (`read_file`, `search`, `bash`);
+- `internal_tools` — the scoped internal-tool allowlist (`read_file`, `search`, `bash`, and the default-on `think`, §9.48.2);
 - `effort` — the role-level reasoning-effort default (`low|medium|high`);
 - `max_summary_bytes` — the finish-summary cap;
 - `structured_summary` — whether the finish summary MUST be a compact fielded payload;
@@ -393,12 +395,12 @@ One built-in preset per §9.45 built-in role. Presets express read-only-ness **s
 
 | Preset | Purpose | `internal_tools` | `effort` | `structured_summary` | Output contract (fielded finish summary) |
 |---|---|---|---|---|---|
-| `explore` | Read-only codebase orientation: locate the code that answers the task's question | `read_file`, `search` | `low` | yes | `files` (path: relevance), `entry_points`, `open_questions`, `confidence` |
-| `research` | Context gathering from repository files and any declared external retrieval tools, with citations | `read_file`, `search` | `medium` | yes | `findings` (claim: source), `sources`, `gaps`, `confidence` |
-| `plan` | Produce or revise a work plan from a task description | `read_file`, `search` | `high` | no | plan document (prose, not a fielded summary): objective, steps, files touched, risks, verification |
-| `implement` | One bounded change: smallest defensible diff, verified behavior | `read_file`, `search`, `bash` | `medium` | yes | `changed_files`, `approach`, `verification_run`, `assumptions`, `success` |
-| `review` | Adversarial critique of a diff or code in a fresh context; report, never fix | `read_file`, `search` | `high` | yes | `findings` (severity, path:line, issue, evidence, suggestion), `verdict`, `residual_risks` |
-| `verify` | Run and interpret required checks; report status with evidence, never fix code | `read_file`, `search`, `bash` | `medium` | yes | `checks` (command, status, evidence), `failures`, `verdict` |
+| `explore` | Read-only codebase orientation: locate the code that answers the task's question | `read_file`, `search`, `think` | `low` | yes | `files` (path: relevance), `entry_points`, `open_questions`, `confidence` |
+| `research` | Context gathering from repository files and any declared external retrieval tools, with citations | `read_file`, `search`, `think` | `medium` | yes | `findings` (claim: source), `sources`, `gaps`, `confidence` |
+| `plan` | Produce or revise a work plan from a task description | `read_file`, `search`, `think` | `high` | no | plan document (prose, not a fielded summary): objective, steps, files touched, risks, verification |
+| `implement` | One bounded change: smallest defensible diff, verified behavior | `read_file`, `search`, `bash`, `think` | `medium` | yes | `changed_files`, `approach`, `verification_run`, `assumptions`, `success` |
+| `review` | Adversarial critique of a diff or code in a fresh context; report, never fix | `read_file`, `search`, `think` | `high` | yes | `findings` (severity, path:line, issue, evidence, suggestion), `verdict`, `residual_risks` |
+| `verify` | Run and interpret required checks; report status with evidence, never fix code | `read_file`, `search`, `bash`, `think` | `medium` | yes | `checks` (command, status, evidence), `failures`, `verdict` |
 
 The `verify` preset's `bash` is bound to the §9.5 mediated shell path with workspace-write denial enforced by the Arbitraitor sandbox filesystem policy — structural, never instructional (see §9.45.4 "Structural bound for `verify`'s shell access").
 
