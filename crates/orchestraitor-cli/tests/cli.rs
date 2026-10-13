@@ -2379,15 +2379,15 @@ fn spawn_graphql_server(rules: &'static [(&'static str, &'static str)]) -> miett
 // --- `orc github push-branch`: App-signed landing -----------------------------
 
 /// Repository-location variables inherited from the ambient environment
-/// (a `git push` pre-push hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE)
+/// (a `git push` pre-push hook exports `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`)
 /// would redirect every fixture `git` call to the CALLING worktree's
 /// gitdir — the #553 corruption (fixture commits landed on a real feature
 /// branch, PR #551 deleted the whole repository). Scrubbed on every child.
 /// The complete production set (mirrors `AMBIENT_GIT_LOCATION_VARS` in
-/// `src/commands/github.rs`; CodeRabbit review on PR #599). Lifted to
+/// `src/commands/github.rs`; `CodeRabbit` review on PR #599). Lifted to
 /// module level so the adversarial ambient-git test can reference the
 /// same list — duplicating the array inside the test let a partial scrub
-/// pass even when the fixture's full scrub regressed (CodeRabbit #629).
+/// pass even when the fixture's full scrub regressed (`CodeRabbit` #629).
 const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -2404,13 +2404,13 @@ const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
 /// the test never depends on ambient git config.
 ///
 /// `hostile_env` simulates a `git push` pre-push hook's exported
-/// GIT_DIR/GIT_WORK_TREE pair: every fixture `git` child receives these
+/// `GIT_DIR`/`GIT_WORK_TREE` pair: every fixture `git` child receives these
 /// vars BEFORE the scrub runs, so the fixture is exercised under the same
 /// poisoned ambient shape a real hook injection produces. The fixture
 /// scrubs them on every child; a regression in the scrub leaves the
 /// fixture bound to the hostile gitdir, which the
 /// `spawn_local_repo_ignores_hostile_ambient_git_environment` test asserts
-/// does NOT happen (CodeRabbit #629 — earlier test draft scrubbed on
+/// does NOT happen (`CodeRabbit` #629 — earlier test draft scrubbed on
 /// separate Commands that never reached the fixture's children, letting a
 /// regression pass).
 fn spawn_local_repo(
@@ -2507,7 +2507,7 @@ fn spawn_local_repo(
 /// `spawn_local_repo` is what neutralizes the redirect. A control
 /// assertion proves the env is genuinely hostile (an unscrubbed child with
 /// the same env resolves to the hostile gitdir, not the fixture's), so
-/// the test is not vacuous (CodeRabbit #629 — earlier draft scrubbed on
+/// the test is not vacuous (`CodeRabbit` #629 — earlier draft scrubbed on
 /// separate Commands that never reached the fixture's children, letting a
 /// regression pass).
 #[test]
@@ -2614,64 +2614,6 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
         }
         command.output().into_diagnostic()?
     };
-    assert!(
-        scrubbed.status.success(),
-        "scrubbed git invocation must succeed"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&scrubbed.stdout).trim(),
-        ".git",
-        "forbidden effect: the hostile ambient GIT_DIR must not redirect a \
-         scrubbed fixture child"
-    );
-    Ok(())
-}
-
-fn poison_status_and_assertion(
-    poison_status: &std::process::Output,
-    hostile_git_dir: &std::path::Path,
-) -> miette::Result<()> {
-    assert!(
-        poison_status.status.success(),
-        "control git invocation must succeed"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&poison_status.stdout).trim(),
-        hostile_git_dir.display().to_string(),
-        "control: an unscrubbed child MUST resolve to the hostile GIT_DIR \
-         (otherwise this test proves nothing)"
-    );
-    Ok(())
-}
-
-fn fixture_head_assertion(
-    fixture_head: &std::process::Output,
-    main_commit: &str,
-) -> miette::Result<()> {
-    assert!(fixture_head.status.success(), "fixture main must exist");
-    assert_eq!(
-        String::from_utf8_lossy(&fixture_head.stdout).trim(),
-        main_commit,
-        "fixture repo main must carry the fixture commit"
-    );
-    Ok(())
-}
-
-fn hostile_commits_assertion(hostile_commits: &std::process::Output) -> miette::Result<()> {
-    assert!(
-        hostile_commits.status.success(),
-        "hostile repo rev-list must succeed"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&hostile_commits.stdout).trim(),
-        "0",
-        "forbidden effect: the hostile repo must carry NO commits after the \
-         fixture ran under the hostile environment"
-    );
-    Ok(())
-}
-
-fn scrub_assertion(scrubbed: &std::process::Output) -> miette::Result<()> {
     assert!(
         scrubbed.status.success(),
         "scrubbed git invocation must succeed"
