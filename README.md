@@ -135,7 +135,7 @@ The cron-shaped `orc loop` runner and the always-on `orcd watch` daemon
 [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md). The daemon's kick-off conditions
 are operator-configurable through the new `[watch.kickoff]` layered block
 (new eligible work, unblocked promotion, slot released, budget-window reset,
-external event; #573). The §9.50(b) opt-in GitHub event ingress — the
+external event; #573). The §9.47(b) opt-in GitHub event ingress — the
 `[watch.ingress]` block (`enabled`, `queue_capacity`; #575) — feeds the
 `external_event` condition, but the two are **separate opt-ins**: enabling
 `[watch.ingress].enabled` polls and dedups events without kicking off a

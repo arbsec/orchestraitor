@@ -31,7 +31,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   surplus and records a `degraded` marker that clears only after a
   flood-free window. The board reconcile poll stays the completeness
   authority; events only accelerate kick-off. Documented in
-  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-950b-opt-in).
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-947b-opt-in).
 - **Configurable kick-off conditions for `orcd watch`**: the daemon now
   spawns a campaign session only when none is in flight and at least one
   kick-off condition holds — new eligible work appeared on the board, a

@@ -66,7 +66,7 @@ new_eligible_work = true      # ready-queue work the previous pass did not see r
 unblocked_promotion = true    # a blocked task became unblocked (§9.40 promotion)
 slot_released = true          # a lease or worker slot was released
 budget_window_reset = true    # a per-day budget window reset (§9.19.6)
-external_event = false        # an external GitHub event arrived (§9.50)
+external_event = false        # an external GitHub event arrived (§9.47)
 ```
 
 Notes:
@@ -74,7 +74,7 @@ Notes:
 - An absent `[watch.kickoff]` block (or absent key) inherits the built-in
   default shown above. Any higher layer (user, org, project, directory)
   overrides any key.
-- `external_event` ships **disarmed**: the §9.50 GitHub event ingress is
+- `external_event` ships **disarmed**: the §9.47 GitHub event ingress is
   opt-in (`[watch.ingress].enabled`, below). With the ingress disabled
   the condition can never fire. Arm it only together with the ingress.
 - **Disabling every condition yields an idle-but-healthy daemon**: the
@@ -99,7 +99,7 @@ Notes:
   gates starting a session from idle, not the in-flight session's own
   spawn decisions.
 
-## Event ingress (§9.50(b), opt-in)
+## Event ingress (§9.47(b), opt-in)
 
 The daemon can consume external GitHub activity — new issues and
 issue/PR comments, plus CI completions (check-run and workflow-run
@@ -109,7 +109,7 @@ kick-off acceleration, without a human translating it into board state.
 events feed this poller consumes does not carry that event.) The shipped
 mechanism is the POLL
 fallback only: a conditional-request poller over the GitHub REST API
-(the §9.50(a) Actions push relay stays blocked until Arbitraitor's
+(the §9.47(a) Actions push relay stays blocked until Arbitraitor's
 ingress-envelope authentication lands). The §9.43 reconcile poll stays
 the completeness authority either way: an event only makes the next
 kick-off evaluation fire sooner; a missed or delayed event never loses
