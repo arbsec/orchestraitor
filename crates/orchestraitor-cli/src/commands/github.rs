@@ -981,7 +981,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // 1. The intended tree: the branch's committed tree object (no index,
     //    no textconv) — exactly the identity the remote must match
     //    (`pr-convergence.md`).
-    let local_tree = git(&["rev-parse", &format!("{local_branch}^{{tree}}")])?;
+    let local_tree = git(None, &["rev-parse", &format!("{local_branch}^{{tree}}")])?;
 
     // 1b. Fail-closed repo-identity gate (#529): the branch and its tree
     //     were resolved from the AMBIENT process cwd — a wrong cwd (or an
@@ -1050,14 +1050,13 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             // transport/HTTP/GraphQL errors propagate: an API failure must
             // never be mistaken for "no such branch" and diffed against a
             // possibly-stale local ref.
-            Ok(None) if args.base.is_some() => {
-                git(&["rev-parse", "--verify", &base_ref]).map_err(|_| {
+            Ok(None) if args.base.is_some() => git(None, &["rev-parse", "--verify", &base_ref])
+                .map_err(|_| {
                     miette!(
                         "cannot resolve the --base revision `{base_ref}`: it is neither a \
                          remote branch of {owner}/{repo} nor a local revision"
                     )
-                })?
-            }
+                })?,
             Ok(None) => {
                 bail!(
                     "the default branch of {owner}/{repo} resolved to {base_ref} but no such \
@@ -1071,7 +1070,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             // Fall through: the rev-parse below produces the typed error
             // when the object is truly unavailable.
         }
-        let tree = git(&["rev-parse", &format!("{base_head}^{{tree}}")]).map_err(|_| {
+        let tree = git(None, &["rev-parse", &format!("{base_head}^{{tree}}")]).map_err(|_| {
             miette!(
                 "cannot read the base {base_ref} head {base_head} tree locally after the fetch \
                  — run `git fetch {repo_url}` and retry"
@@ -1079,7 +1078,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         })?;
         (tree, Some(base_head))
     };
-    let changes = diff_tree_changes(&diff_base_tree, &local_tree)?;
+    let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
             std::io::stderr(),
@@ -1125,7 +1124,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
 
     // Build the fileChanges payload. Contents come from the branch's
     // committed blobs (`git cat-file blob`), never the working directory.
-    let file_changes = build_file_changes(&changes, &local_branch, &diff_base_tree)?;
+    let file_changes = build_file_changes(None, &changes, &local_branch, &diff_base_tree)?;
 
     // --dry-run: print the resolved landing plan and stop before any
     // mutation (the branch-ref read and — for a new branch — the
@@ -1296,7 +1295,7 @@ fn resolve_repo_slug(
 /// `None` on either side when the origin is absent or not that shape —
 /// callers decide whether that is fatal (no explicit `--owner`/`--repo`).
 fn origin_owner_repo() -> (Option<String>, Option<String>) {
-    let Ok(url) = git(&["remote", "get-url", "origin"]) else {
+    let Ok(url) = git(None, &["remote", "get-url", "origin"]) else {
         return (None, None);
     };
     match parse_github_owner_repo(&url) {
@@ -1346,7 +1345,7 @@ fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
 /// Resolves the current branch of the working directory (symbolic-ref).
 /// Detached HEAD is a typed error — the landing targets a branch.
 fn current_branch() -> Result<String> {
-    git(&["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
+    git(None, &["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
         miette!(
             "cannot resolve the current branch (detached HEAD or not a git repository) — \
              pass --branch <name>"
@@ -1523,30 +1522,14 @@ fn land_on_temp_branch(
 
 /// Runs `git diff-tree -r -z --no-renames --name-status` between two trees
 /// and parses the records; `--no-commit-id` against two trees means no
-/// leading oid field.
-fn diff_tree_changes(base_tree: &str, tree: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
-    let raw = git_raw(&[
-        "diff-tree",
-        "-r",
-        "-z",
-        "--no-renames",
-        "--no-commit-id",
-        "--name-status",
-        base_tree,
-        tree,
-    ])?;
-    Ok(parse_diff_tree_z(&raw))
-}
-
-/// Test-only: [`diff_tree_changes`] anchored at a fixture repo (`git -C`),
-/// so the real builder chain runs WITHOUT chdiring the process (#529).
-#[cfg(test)]
-fn diff_tree_changes_dir(
-    dir: &std::path::Path,
+/// leading oid field. `dir` anchors the invocation at a fixture repo (tests);
+/// `None` resolves the repo from the process cwd (production).
+fn diff_tree_changes(
+    dir: Option<&std::path::Path>,
     base_tree: &str,
     tree: &str,
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
-    let raw = git_dir_raw(
+    let raw = git_raw(
         dir,
         &[
             "diff-tree",
@@ -1560,100 +1543,6 @@ fn diff_tree_changes_dir(
         ],
     )?;
     Ok(parse_diff_tree_z(&raw))
-}
-
-/// Test-only: [`build_file_changes`] anchored at a fixture repo (`git -C`),
-/// so the real builder chain runs WITHOUT chdiring the process (#529).
-#[cfg(test)]
-fn build_file_changes_dir(
-    dir: &std::path::Path,
-    changes: &[(String, std::path::PathBuf)],
-    branch: &str,
-    diff_base_tree: &str,
-) -> Result<Value> {
-    let base_modes = base_tree_modes_dir(dir, diff_base_tree);
-    let mut additions = Vec::new();
-    let mut deletions = Vec::new();
-    for (status, path) in changes {
-        match status.as_str() {
-            "A" | "M" => {
-                let spec = format!("{branch}:{}", path.display());
-                let object_type = git_dir(dir, &["cat-file", "-t", &spec])?;
-                if object_type != "blob" {
-                    bail!(
-                        "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
-                         symlinks and submodules are not supported by the GraphQL fileChanges \
-                         payload"
-                    );
-                }
-                let bytes = git_dir_raw(dir, &["cat-file", "blob", &spec]).map_err(|error| {
-                    miette!("failed to read blob `{spec}` for the landing commit: {error}")
-                })?;
-                let modes = local_tree_modes_dir(dir, branch)?;
-                let mode = modes
-                    .get(&path.display().to_string())
-                    .map_or_else(|| "100644".to_string(), Clone::clone);
-                if status == "A"
-                    && mode == "100755"
-                    && base_modes
-                        .get(&path.display().to_string())
-                        .map(String::as_str)
-                        != Some("100755")
-                {
-                    writeln!(
-                        std::io::stderr(),
-                        "WARNING: `{}` is executable (100755) locally but is being ADDED — \
-                         GitHub's createCommitOnBranch FileAddition always lands 100644, so the \
-                         remote tree will differ from the local tree (the tree gate below will \
-                         refuse the landing). Commit the file as 100644 locally, or land it \
-                         first with the mode already 100644 and chmod locally afterwards.",
-                        path.display()
-                    )
-                    .into_diagnostic()?;
-                }
-                additions.push(serde_json::json!({
-                    "path": path.display().to_string(),
-                    "contents": BASE64_ENGINE.encode(&bytes),
-                }));
-            }
-            "D" => {
-                deletions.push(serde_json::json!({"path": path.display().to_string()}));
-            }
-            other => {
-                bail!(
-                    "unexpected diff-tree status `{other}` for `{}` — refusing to land an ambiguous \
-                     change set",
-                    path.display()
-                );
-            }
-        }
-    }
-    Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
-}
-
-/// Test-only: [`local_tree_modes`] anchored at a fixture repo.
-#[cfg(test)]
-fn local_tree_modes_dir(
-    dir: &std::path::Path,
-    tree: &str,
-) -> Result<std::collections::HashMap<String, String>> {
-    let raw = git_dir_raw(dir, &["ls-tree", "-r", "-z", tree])?;
-    Ok(parse_ls_tree_z(&raw))
-}
-
-/// Test-only: [`base_tree_modes`] anchored at a fixture repo.
-#[cfg(test)]
-fn base_tree_modes_dir(
-    dir: &std::path::Path,
-    diff_base_tree: &str,
-) -> std::collections::HashMap<String, String> {
-    if diff_base_tree.is_empty() {
-        return std::collections::HashMap::new();
-    }
-    match git_dir_raw(dir, &["ls-tree", "-r", "-z", diff_base_tree]) {
-        Ok(raw) => parse_ls_tree_z(&raw),
-        Err(_) => std::collections::HashMap::new(),
-    }
 }
 
 /// Runs `git fetch` against `https://github.com/<owner>/<repo>.git`
@@ -1726,7 +1615,7 @@ fn remote_head_tree(
     if !git_fetch_authenticated(token, owner, repo, head) {
         git_fetch_authenticated(token, owner, repo, remote_branch);
     }
-    if let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")]) {
+    if let Ok(tree) = git(None, &["rev-parse", &format!("{head}^{{tree}}")]) {
         return Ok(tree);
     }
     // Last resort: fetch the explicit --base ref, then re-check the HEAD —
@@ -1737,8 +1626,8 @@ fn remote_head_tree(
     // mask remote-only paths as an empty diff).
     if let Some(base) = fallback_base
         && git_fetch_authenticated(token, owner, repo, base)
-        && git(&["rev-parse", "--verify", "--quiet", head]).is_ok()
-        && let Ok(tree) = git(&["rev-parse", &format!("{head}^{{tree}}")])
+        && git(None, &["rev-parse", "--verify", "--quiet", head]).is_ok()
+        && let Ok(tree) = git(None, &["rev-parse", &format!("{head}^{{tree}}")])
     {
         return Ok(tree);
     }
@@ -1761,12 +1650,16 @@ fn remote_head_tree(
 /// That is warned about on stderr (tree gate then catches any mismatch);
 /// for a file that already exists in the diff base with 100755, the
 /// modification keeps GitHub's stored mode and no warning is needed.
+///
+/// `dir` anchors every git invocation at a fixture repo (tests); `None`
+/// resolves the repo from the process cwd (production).
 fn build_file_changes(
+    dir: Option<&std::path::Path>,
     changes: &[(String, std::path::PathBuf)],
     branch: &str,
     diff_base_tree: &str,
 ) -> Result<Value> {
-    let base_modes = base_tree_modes(diff_base_tree);
+    let base_modes = base_tree_modes(dir, diff_base_tree);
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
     for (status, path) in changes {
@@ -1777,7 +1670,7 @@ fn build_file_changes(
                 // submodules (160000) cannot be carried by the FileAddition
                 // contents payload — landing would silently materialize them
                 // as regular files or fail opaquely.
-                let object_type = git(&["cat-file", "-t", &spec])?;
+                let object_type = git(dir, &["cat-file", "-t", &spec])?;
                 if object_type != "blob" {
                     bail!(
                         "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
@@ -1785,10 +1678,10 @@ fn build_file_changes(
                          payload"
                     );
                 }
-                let bytes = git_raw(&["cat-file", "blob", &spec]).map_err(|error| {
+                let bytes = git_raw(dir, &["cat-file", "blob", &spec]).map_err(|error| {
                     miette!("failed to read blob `{spec}` for the landing commit: {error}")
                 })?;
-                let mode = tree_entry_mode(&local_tree_modes(branch)?, path);
+                let mode = tree_entry_mode(&local_tree_modes(dir, branch)?, path);
                 let path_key = path.display().to_string();
                 if status == "A"
                     && mode == "100755"
@@ -1828,19 +1721,29 @@ fn build_file_changes(
 /// Reads the local tree's entry modes (`git ls-tree -r -z <tree>`): path ->
 /// "100644"|"100755". Unreadable trees are a typed error (callers already
 /// validated the tree exists; only a concurrent object-store change fails).
-fn local_tree_modes(tree: &str) -> Result<std::collections::HashMap<String, String>> {
-    let raw = git_raw(&["ls-tree", "-r", "-z", tree])?;
+/// `dir` anchors the invocation at a fixture repo (tests); `None` resolves
+/// the repo from the process cwd (production).
+fn local_tree_modes(
+    dir: Option<&std::path::Path>,
+    tree: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let raw = git_raw(dir, &["ls-tree", "-r", "-z", tree])?;
     Ok(parse_ls_tree_z(&raw))
 }
 
 /// Reads the diff-base tree's entry modes, for the added-file mode check.
 /// An unreadable base tree is not fatal: the mode check then treats every
-/// added file as new (the conservative warning path).
-fn base_tree_modes(diff_base_tree: &str) -> std::collections::HashMap<String, String> {
+/// added file as new (the conservative warning path). `dir` anchors the
+/// invocation at a fixture repo (tests); `None` resolves the repo from the
+/// process cwd (production).
+fn base_tree_modes(
+    dir: Option<&std::path::Path>,
+    diff_base_tree: &str,
+) -> std::collections::HashMap<String, String> {
     if diff_base_tree.is_empty() {
         return std::collections::HashMap::new();
     }
-    match git_raw(&["ls-tree", "-r", "-z", diff_base_tree]) {
+    match git_raw(dir, &["ls-tree", "-r", "-z", diff_base_tree]) {
         Ok(raw) => parse_ls_tree_z(&raw),
         Err(_) => std::collections::HashMap::new(),
     }
@@ -1958,11 +1861,24 @@ fn commit_oid(commit: &Value) -> Result<&str> {
 }
 
 /// Environment variables that redirect `git` away from the intended
-/// repository location. Inherited values from a hook or wrapper shell (a
-/// pre-push hook exports `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`) would
-/// otherwise bind every child `git` to the caller's ambient gitdir instead
-/// of the process cwd — the #553/#529 corruption class.
-const AMBIENT_GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+/// repository location or its object/ref store. Inherited values from a
+/// hook or wrapper shell (a pre-push hook exports `GIT_DIR`/
+/// `GIT_WORK_TREE`/`GIT_INDEX_FILE`) would otherwise bind every child
+/// `git` to the caller's ambient gitdir instead of the process cwd — the
+/// #553/#529 corruption class. `GIT_OBJECT_DIRECTORY`,
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and `GIT_COMMON_DIR` redirect
+/// object and ref lookups even when the gitdir itself resolves correctly,
+/// and `GIT_NAMESPACE` narrows refs to a namespace, so a landed tree and
+/// its blobs could silently come from a different store.
+const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
 
 /// Fail-closed repo-identity gate for `push-branch` (#529): the local
 /// branch and its tree are resolved from the AMBIENT process cwd, so a
@@ -1997,45 +1913,40 @@ fn verify_expect_tree(
 
 /// Runs `git` with the given arguments and returns trimmed stdout; a non-zero
 /// exit is a typed error carrying stderr (never credential material).
-fn git(args: &[&str]) -> Result<String> {
-    git_output(|command| command.args(args))
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+///
+/// `dir` anchors the invocation at a repository directory (`git -C <dir>`);
+/// `None` resolves the repository from the process cwd, which is correct for
+/// the CLI. Tests pass a fixture directory so the real builder chain runs
+/// WITHOUT chdiring the whole process (#529: a concurrent worktree's branch
+/// would be colonized by the fixture's commits).
+fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
+    git_output(|command| {
+        if let Some(dir) = dir {
+            command.arg("-C").arg(dir);
+        }
+        command.args(args)
+    })
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Like [`git`], but returns raw bytes (for NUL-delimited output).
-fn git_raw(args: &[&str]) -> Result<Vec<u8>> {
-    git_output(|command| command.args(args)).map(|output| output.stdout)
-}
-
-/// Runs `git` ANCHORED AT `dir` (`git -C <dir>`) with the given arguments,
-/// returning trimmed stdout. The whole production landing path resolves its
-/// repo from the process cwd, which is correct for the CLI, but tests that
-/// exercise the real builder against a fixture repo must not chdir the
-/// whole process (the #529 corruption: a concurrent worktree's branch is
-/// colonized by the fixture's commits). A non-zero exit is a typed error.
-#[cfg(test)]
-fn git_dir(dir: &std::path::Path, args: &[&str]) -> Result<String> {
-    let mut anchored_args = vec!["-C".to_string(), dir.display().to_string()];
-    anchored_args.extend(args.iter().map(ToString::to_string));
-    let refs: Vec<&str> = anchored_args.iter().map(String::as_str).collect();
-    git(&refs)
-}
-
-/// Like [`git`], but returns raw bytes (for NUL-delimited output) anchored
-/// at `dir` — see [`git_dir`].
-#[cfg(test)]
-fn git_dir_raw(dir: &std::path::Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut anchored_args = vec!["-C".to_string(), dir.display().to_string()];
-    anchored_args.extend(args.iter().map(ToString::to_string));
-    let refs: Vec<&str> = anchored_args.iter().map(String::as_str).collect();
-    git_raw(&refs)
+fn git_raw(dir: Option<&std::path::Path>, args: &[&str]) -> Result<Vec<u8>> {
+    git_output(|command| {
+        if let Some(dir) = dir {
+            command.arg("-C").arg(dir);
+        }
+        command.args(args)
+    })
+    .map(|output| output.stdout)
 }
 
 /// Spawns a scrubbed `git` child assembled by `assemble` and validates its
 /// exit status. Every production `git` invocation goes through here so an
-/// inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` (a hook or wrapper
-/// shell exports them) can never redirect the child away from the intended
-/// repository (#553/#529 corruption class).
+/// inherited repository-location variable (`GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+/// `GIT_COMMON_DIR`, `GIT_NAMESPACE` — a hook or wrapper shell exports them)
+/// can never redirect the child away from the intended repository or its
+/// object store (#553/#529 corruption class).
 fn git_output(assemble: impl FnOnce(&mut Command) -> &mut Command) -> Result<std::process::Output> {
     let mut command = Command::new("git");
     assemble(&mut command);
@@ -3253,6 +3164,7 @@ mod tests {
         // shape; an A record would need a real blob, so only D is exercised
         // here.
         let result = build_file_changes(
+            None,
             &[("D".to_string(), std::path::PathBuf::from("base.txt"))],
             "any-branch",
             "",
@@ -3386,8 +3298,8 @@ mod tests {
         // would colonize concurrent worktrees, the #529 incident).
         let (temp, base_tree, feature_tree) = fixture_repo_with_changes()?;
         let repo = temp.path().join("repo");
-        let changes = diff_tree_changes_dir(&repo, &base_tree, &feature_tree)?;
-        let payload = build_file_changes_dir(&repo, &changes, "feature", &base_tree)?;
+        let changes = diff_tree_changes(Some(&repo), &base_tree, &feature_tree)?;
+        let payload = build_file_changes(Some(&repo), &changes, "feature", &base_tree)?;
         let additions = payload
             .get("additions")
             .and_then(Value::as_array)
@@ -3440,6 +3352,7 @@ mod tests {
     fn build_file_changes_deletion_only_never_touches_git() -> Result<()> {
         // Deletions carry only the path — no blob read, no mode read.
         let payload = build_file_changes(
+            None,
             &[("D".to_string(), std::path::PathBuf::from("gone.txt"))],
             "any-branch",
             "",
