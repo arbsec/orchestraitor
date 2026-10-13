@@ -48,7 +48,8 @@ Required views:
 - receipts;
 - session logs;
 - policy trace;
-- context trace.
+- context trace;
+- reasoning trace (§9.48).
 
 Implementation recommendation:
 
@@ -228,7 +229,7 @@ test.run
 task.run
 ```
 
-**Declared tools (issue #535).** Beyond the default surface, tools are configuration: each `[tools.<id>]` entry in the layered config is either a `command` (a fixed argv dispatched through the same Arbitraitor-mediated bash seam as every other shell surface — one mediation path, no second executor) or a `subagent` (a cheap-model sub-session with a scoped internal-tool allowlist and operator-authored instructions). Tool definitions are honored from the trusted config layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in any untrusted layer (project, directory/domain, task/agent override, explicit CLI flag — §9.22.2 chain order) is a typed error naming the tool — never a silent drop (§9.22.9). This gate governs NEW tool definitions and the instruction-authority fields of existing ones: a definition of a new `[tools.<id>]` in an untrusted layer (project, directory/domain, task/agent, CLI flag), and any untrusted-layer override of `instructions` or `internal_tools` (including through a role preset, §9.45.2), is a typed error; the §9.22.2 override direction applies — a higher layer that sets a field overrides the lower one — and only trusted layers above the built-in defaults MAY override the non-security fields of an EXISTING built-in declaration or role preset (`effort`, `max_summary_bytes`, `structured_summary`, `output_contract`, `budget.*`) per §9.45.2. Every declared-tool call is receipted with static reason codes; sub-session output is worker output and begins untrusted (§9.14, no "trusted-role" exception). Sub-sessions cannot spawn sub-sessions (depth-1, structural, no config path raises it) and cannot deliver; their `finish` summary is a size-capped untrusted observation. Built-in declarations ship for `explore` and `review` (read-only, effort `low`). Built-in role presets (§9.45.1) supply the default values for these subagent fields at the built-in defaults layer — where a preset carries a different default (e.g. the §9.45.4 `review` preset's `high` effort), the preset value is the built-in default that the layered chain resolves and the ad-hoc declaration note above describes only the historical bootstrap declarations — and a preset's output contract — the fielded-payload shape a `structured_summary` finish summary MUST carry — is prescribed per preset in that same built-in layer, overridable only through the trusted layers the preset trust gate names.
+**Declared tools (issue #535).** Beyond the default surface, tools are configuration: each `[tools.<id>]` entry in the layered config is either a `command` (a fixed argv dispatched through the same Arbitraitor-mediated bash seam as every other shell surface — one mediation path, no second executor) or a `subagent` (a cheap-model sub-session with a scoped internal-tool allowlist and operator-authored instructions). Tool definitions are honored from the trusted config layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in any untrusted layer (project, directory/domain, task/agent override, explicit CLI flag — §9.22.2 chain order) is a typed error naming the tool — never a silent drop (§9.22.9). This gate governs NEW tool definitions and the instruction-authority fields of existing ones: a definition of a new `[tools.<id>]` in an untrusted layer (project, directory/domain, task/agent, CLI flag), and any untrusted-layer override of `instructions` or `internal_tools` (including through a role preset, §9.45.2), is a typed error; the §9.22.2 override direction applies — a higher layer that sets a field overrides the lower one — and only trusted layers above the built-in defaults MAY override the non-security fields of an EXISTING built-in declaration or role preset (`effort`, `max_summary_bytes`, `structured_summary`, `output_contract`, `budget.*`) per §9.45.2. Every declared-tool call is receipted with static reason codes; sub-session output is worker output and begins untrusted (§9.14, no "trusted-role" exception). Sub-sessions cannot spawn sub-sessions (depth-1, structural, no config path raises it) and cannot deliver; their `finish` summary is a size-capped untrusted observation. Built-in declarations ship for `explore` and `review` (read-only, effort `low`). The built-in internal tool `think` (§9.48) is part of the default worker surface WITHOUT a `[tools.<id>]` entry — the one deliberate default-on deviation (§9.48.2); a `[tools.think]` definition in an untrusted layer is a typed error under the same gate, and a trusted-layer `[tools.think] enabled = false` removes it. Built-in role presets (§9.45.1) supply the default values for these subagent fields at the built-in defaults layer — where a preset carries a different default (e.g. the §9.45.4 `review` preset's `high` effort), the preset value is the built-in default that the layered chain resolves and the ad-hoc declaration note above describes only the historical bootstrap declarations — and a preset's output contract — the fielded-payload shape a `structured_summary` finish summary MUST carry — is prescribed per preset in that same built-in layer, overridable only through the trusted layers the preset trust gate names.
 
 Every mutable file operation uses optimistic concurrency:
 
@@ -592,6 +593,7 @@ Core event categories:
 - process execution
 - network request
 - secret use
+- agent reasoning (externalized deliberation from the built-in `think` tool, §9.48; payload carries the step metadata and opt-in thought text — persisted only under payload recording consent, §9.48.8 — and redacted in privacy export like prompt/completion-class payloads, §9.48.4)
 - file observation
 - Git operation
 - output promotion
@@ -868,6 +870,114 @@ SECURITY.md + .github/SECURITY                                   → security (a
 ```
 
 Detection signals carry weights; a domain is enabled only above a configured threshold. Threshold, weights, and the rule table are all configurable so users and plugins can extend detection without code changes.
+
+---
+
+### 9.48 Sequential thinking (`think`)
+
+The harness ships a fifth built-in internal tool for externalized deliberation:
+
+```text
+think   # append one step of step-by-step reasoning to an in-session chain
+```
+
+`think` gives the model a structured scratchpad contract ("estimate the step count, reason one step at a time, revise explicitly, decide when to stop") and, critically, converts that deliberation into an observable artifact: every call is a receipted tool call whose audit metadata persists to the §9.17 event store and renders in the TUI — the step's `thought_text` is persisted and rendered only when payload recording is enabled (§9.48.8), and secret-shaped text is refused before anything is written (§9.48.4). The primary rationale is **auditability**, not filling a native-thinking gap: the routed models already expose native reasoning surfaces (interleaved thinking for the initial BYOK targets, `reasoning_tokens` in usage accounting, spec 30 §9.29 capability discovery), but provider-side native thinking is invisible to the harness — it never enters the event store, the TUI, or adversarial review. `think` puts the thinking the agent already does somewhere a reviewer session can read *why* an approach was chosen, not just what was done (spec 50 §21.1 independent review). A residual secondary benefit applies to local OpenAI-compatible endpoints (spec 30 transport priority list) that expose no reasoning surface at all: the tool gives those models a deliberation scaffold.
+
+#### 9.48.1 Tool contract
+
+The tool id is `think` (short lowercase snake_case verb, same convention as `read_file`/`search`/`bash`; the upstream MCP *server* name `sequentialthinking` is a vendor namespace and is not adopted). Implementation requirements:
+
+- `"think"` MUST be added to the reserved tool-id surface so no declared `[tools.think]` can shadow it (a project- or lower-layer `think` definition is a typed error, same gate as below).
+- The typed `UnknownInternalTool` error text MUST list `think` alongside the existing internal tool names so `internal_tools = ["think"]` type-checks.
+
+Parameters (fenced-JSON action protocol, same as every internal tool; all required unless noted):
+
+```text
+thought              string   — this step's deliberation (capped, §9.48.3)
+thought_number       u32 ≥ 1  — position in the sequence
+total_thoughts       u32 ≥ 1  — current estimate; adjustable up/down mid-sequence
+next_thought_needed  bool     — more steps coming?
+is_revision          bool     — optional; marks this call as revising earlier thinking
+revises_thought      u32 ≥ 1  — required when is_revision; which thought is reconsidered
+branch_from_thought  u32 ≥ 1  — optional; reserved for v2 (§9.48.5); if supplied, refused in v1
+branch_id            string   — optional; reserved for v2 (§9.48.5); if supplied, refused in v1
+```
+
+Output is a compact state echo — an audit line, NEVER the thought text (the model already holds its own thought in context; echoing it back doubles context cost, and the reference implementation likewise returns only state):
+
+```text
+[think 3/7 next=true] thoughts=3 budget=256
+```
+
+Every call produces a standard `ToolReceipt` (admitted/outcome/reason) under tool id `think` through the executor seam. Typed, receipted refusal reason codes: `thought-empty`; `thought-too-large`; `thought-number-regressed` (must advance past the previous number unless `is_revision`); `revision-target-unknown`; `thought-budget-exhausted` (§9.48.3); `secret-shaped-content` (§9.48.4); `branching-not-supported-in-v1` (§9.48.5). A refusal never ends the run and never raises an exception into the loop — the observation carries the reason code and the model corrects course.
+
+#### 9.48.2 Default-on — the one deliberate deviation from fail-closed-config
+
+Unlike every other admission surface in this spec, `think` is **present without configuration**: it joins the built-in internal-tool surface alongside `read_file`/`search`/`bash`, with no `[tools.think]` block required. This is a flagged deviation from the fail-closed-config posture (unconfigured built-ins do not exist today), justified because the failure mode fail-closed-config exists to prevent — an unconfigured tool acquiring I/O authority or spend — cannot occur here:
+
+- **Zero I/O**: no network, no filesystem, no process execution — nothing for Arbitraitor to mediate (§9.48.7).
+- **Zero external effect**: the tool appends to the session's own thought state and event store only.
+- **No additional provider round-trips**: a thought is output tokens of the model call that emitted it (§9.48.6); the tool adds no calls beyond the conversation the tool call is already part of, and the marginal token cost is bounded by the §9.48.3 budgets.
+
+The deviation is contained by three rings:
+
+1. **Trusted-layer kill-switch.** `[tools.think] enabled = false` in any trusted config layer (built-in defaults, plugin defaults, global user, organization/team) removes the tool. A `think` definition in the project layer or lower is a typed error naming the tool — never a silent drop (§9.48.9 gate, same as declared tools). Organization/team ceilings can force it off fleet-wide.
+2. **Role exposure via §9.45 presets.** All six built-in role presets include `think` by default; a role preset or a declared subagent tool's `internal_tools` allowlist MAY omit it. Existing configs that enumerate `internal_tools` explicitly keep their exact surface — adding the new internal-tool enum variant changes nothing for them (no implicit grant).
+3. **Sub-session depth rule unchanged.** Depth-0 workers get the built-in surface; depth ≥ 1 sub-sessions dispatch only what the spawning definition's `internal_tools` allowlist carved. The prompt never advertises a tool the executor would refuse — the `think` prompt line appears under the same admission condition as every other tool line.
+
+There is no other configuration surface — no provider/model/tuning block; there is nothing to configure. `orc config explain` documents the key, and `orc doctor` reports when the kill-switch or an organization ceiling disabled the tool.
+
+#### 9.48.3 Budgets and refusal semantics
+
+A thought call is a model-output parse, but the loop can still churn: every call feeds an observation back and extends the conversation, and the `tool-loop-churn` guard does not catch this — each thought's text differs, so the normalized tool-call shape may never repeat. Explicit budgets apply:
+
+| Guard | Default | Behavior at limit |
+|---|---|---|
+| Per-thought size | 8,192 chars (mirrors the existing `MAX_QUESTION_CHARS` / `MAX_OBSERVATION_CHARS` 8 KiB idiom) | receipted refusal `thought-too-large`; the model may continue with a shorter thought |
+| Sequence ceiling | 256 thoughts per sequence | `thought_number` above the ceiling ⇒ receipted refusal `thought-budget-exhausted` with an observation that **guides the agent to conclude now and finish** — a typed refusal, never a silent hang, never an exception |
+| `total_thoughts` adjustment | free up/down within `[1, 256]` | exceeding the clamp is clamped, not refused — estimate tweaking is part of the tool's contract |
+| Run-total budget | 512 thoughts per run across sequences (a fresh sequence starts when a closed sequence is followed by a new `thought_number = 1`) | same `thought-budget-exhausted` refusal; non-fatal and receipted — the run can still finish |
+
+Token cost is self-limiting: each thought is output tokens of the call that produced it, and the compact audit observation adds near-zero input on the next call; the tool adds no provider round-trips beyond the conversation the tool call is already part of, and the marginal token cost is bounded by this section's budgets (§9.48.6).
+
+#### 9.48.4 Secret-shaped thought text is refused, not redacted
+
+The model could write a secret into `thought`. The repo precedent is fail-closed refusal, not silent rewrite: decision records carrying secret-shaped material are REFUSED (spec `40-arbitraitor-integration.md` §9.23.4 heuristic classes — `secret://` URIs, `sk-`-prefixed keys, Bearer tokens, GitHub token shapes, long hex/base64 runs, credential-header shapes — implemented in `orchestraitor-mcp`'s decision-record validation, where "a decision record is an audit artifact and is never silently rewritten with redactions"). Thought text receives the same conservative scan: a thought matching the secret-shape heuristic is refused with `secret-shaped-content` **before any event carrying `thought_text` is written** — the refusal itself is still receipted and may append a refusal event (with the validation-time `thought_chars` and no text, per §9.17's receipt/refusal conventions; the refusal event never contains the rejected thought), with an observation guiding the model to rephrase. False refusal is recoverable (the model rephrases); a secret that persisted into an audit trail is not. A refusal event for this code carries `thought_chars` — the char count of the rejected `thought` **computed at validation time** (the scan measures the full input regardless of size, so the count is available without adding any field to the `ToolReceipt` contract).
+
+Redaction on privacy export (`PrivacyExportMode::Redacted` — the §9.17.1 redaction class covering prompt/completion-class payloads, with hash-chain relinking on redacted export) is the **third** layer of defense, not the first: the §9.48.4 refusal is first at the source, the §9.48.8 `[observability].record_payloads` consent gate is second, export redaction third. An export of a session whose reasoning events were refused at the source — or whose text was never persisted under the default consent setting — carries nothing to redact.
+
+#### 9.48.5 Branching: reserved but not supported in v1
+
+v1 is a **linear chain with explicit revisions** (`is_revision`/`revises_thought`). Branching is deferred: a branch forks the event trail into a tree that the TUI trace view, §9.17.1 replay, and a reviewing agent must all render — significant surface for a feature whose only upstream reference exposes branch *ids*, never branch content (branches are a naming convention, not an artifact).
+
+For schema stability, the parameter names are **reserved in the v1 schema**: `branch_from_thought` / `branch_id` are optional parameters (a call omitting them parses normally); when SUPPLIED they are rejected with the typed receipted refusal `branching-not-supported-in-v1` — parsing never fails on their presence. A future v2 that implements branching adds behavior to existing param names — no v1→v2 param-shape break.
+
+#### 9.48.6 Cost metering
+
+Thought text is produced *inside* the same model call that emitted the action JSON: it is already output tokens of that call, accrued by the existing usage totals and written to the cost ledger keyed by request id. The tool adds no provider round-trips beyond the conversation the tool call is already part of; the compact observation enters the next call as input tokens — also already metered, with the marginal token cost bounded by the §9.48.3 budgets. **The cost ledger is deliberately NOT changed**: its entries are model-call-shaped (keyed by request id); a non-model ledger row would be a schema stretch with nothing to bill. Run-result thought counters (calls, chars) derive from the receipts the executor already produces.
+
+#### 9.48.7 Classification, annotations, and the Arbitraitor boundary
+
+The tool is honestly classified — exactly as upstream corrected its own annotations (modelcontextprotocol/servers#4721: "every call appends to the server's in-memory thought history… so the tool is neither read-only nor idempotent"):
+
+- not read-only (each call appends audit state);
+- not idempotent (each call appends);
+- not destructive (nothing is removed or overwritten);
+- closed-world (no external system is consulted).
+
+Per §9.18.1 these annotations are ADVISORY input to policy; here there is no policy surface to fool — the tool performs no operation Arbitraitor mediates. **Arbitraitor needs nothing for this tool**: no network, filesystem, or exec surface, no capability request, no §16.2 gap. The one privileged-ish act is appending an event to Orchestraitor's own §9.17 store, which is operational/audit telemetry owned by Orchestraitor — the same ownership split as §20.4.4 of spec 50 (operational telemetry is Orchestraitor's; auditable enforcement receipts are Arbitraitor's). This statement is normative so no Arbitraitor gap issue is filed later. Injection boundary: thought text is model-authored content, the same trust class as completions (§9.15.1); when payload recording is enabled (§9.48.8), it is stored and replayed verbatim, never executed, and never replayed into another agent's prompt.
+
+#### 9.48.8 Persistence: `agent reasoning` events
+
+Every accepted call appends one event of a new core category **`agent reasoning`** to the §9.17 event store (hash-chained like every event; `schema_version` rides the envelope, so readers of a future schema flag it `uninterpreted` rather than drop it — §9.17.1). The payload always carries the audit metadata — `thought_number`, `total_thoughts`, `next_thought_needed`, `is_revision`, `revises_thought`, `thought_chars`, `sequence_id` — so the reasoning chain stays reviewable as structure; `revises_thought` is `null` when `is_revision` is `false` (the field is present in every event, populated only for revisions). `thought_text` is payload-class content and follows the existing consent control (spec 50 §20.4.2): it is persisted ONLY when `[observability].record_payloads = true`; when payload recording is disabled (the default), the event carries the metadata WITHOUT `thought_text`. The §9.2 reasoning-trace view renders whatever is persisted — the full chain with text under payload consent, the structural skeleton without it. Receipts carry provenance per §9.17 conventions.
+
+This payload-consent gate is the SECOND layer after the §9.48.4 secret-shaped refusal (which precedes the persistence of thought text under any consent setting — a secret-shaped thought's text is never written, and its refusal event carries no text); `PrivacyExportMode::Redacted` export remains the third. **Redaction parity for the new category ships with the producer**: the implementation PR MUST wire `agent reasoning` into the `PrivacyExportMode::Redacted` redaction class covering prompt/completion-class payloads (with hash-chain relinking on redacted export) — the category is not exempt from export redaction merely because consent gating already bounds what was written. Crash/cancellation behavior reuses §9.17's existing semantics rather than inventing new ones: the event append is part of the executor's receipted step, so a crash between the model call and the append loses at most the last step's record (the same gap class as any un-persisted receipt), and §9.24.2 checkpoint recovery treats the reasoning chain exactly like the rest of the event store — no new recovery path, no partial-step repair.
+
+The §9.2 TUI adds a **reasoning trace** view (alongside the policy trace and context trace) rendering the persisted chain, including revisions. The renderer MUST display `thought_text` as inert text and neutralize terminal control sequences, including ESC, CSI, and OSC sequences — model-authored text is untrusted data (§9.48.7) and never gains instruction authority or terminal-control effect by being rendered.
+
+#### 9.48.9 Implementation notes (declared-tools surface)
+
+The enum wiring, parser, executor dispatch, prompt lines, kill-switch key, and event-category variant are implementation-PR scope (feature PR; this section specifies only the surface). The declared-tools admission machinery is unchanged: `think` requires no `[tools.think]` entry, refuses one from untrusted layers, and slots into the existing receipted-refusal convention with static reason codes.
 
 ---
 

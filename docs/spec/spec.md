@@ -94,6 +94,16 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.19.7 | `30-model-routing.md#9197-surface-in-the-tui-and-via-the-daemon-api` |
 | §9.20 | `20-harness-worker.md#920-project-initialization-without-a-configured-provider` |
 | §9.21 | `20-harness-worker.md#921-domain-detection-heuristics` |
+| §9.48 | `20-harness-worker.md#948-sequential-thinking-think` |
+| §9.48.1 | `20-harness-worker.md#9481-tool-contract` |
+| §9.48.2 | `20-harness-worker.md#9482-default-on--the-one-deliberate-deviation-from-fail-closed-config` |
+| §9.48.3 | `20-harness-worker.md#9483-budgets-and-refusal-semantics` |
+| §9.48.4 | `20-harness-worker.md#9484-secret-shaped-thought-text-is-refused-not-redacted` |
+| §9.48.5 | `20-harness-worker.md#9485-branching-reserved-but-not-supported-in-v1` |
+| §9.48.6 | `20-harness-worker.md#9486-cost-metering` |
+| §9.48.7 | `20-harness-worker.md#9487-classification-annotations-and-the-arbitraitor-boundary` |
+| §9.48.8 | `20-harness-worker.md#9488-persistence-agent-reasoning-events` |
+| §9.48.9 | `20-harness-worker.md#9489-implementation-notes-declared-tools-surface` |
 | §9.22 | `50-contracts-data.md#922-customization-and-configuration` |
 | §9.22.1 | `50-contracts-data.md#9221-what-must-be-configurable-never-hardcoded` |
 | §9.22.2 | `50-contracts-data.md#9222-layered-configuration-precedence` |
