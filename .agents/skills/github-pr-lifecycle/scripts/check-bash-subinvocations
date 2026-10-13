@@ -18,7 +18,7 @@ while IFS= read -r line; do
   echo "direct exec of sibling script (must be \`bash \"$SCRIPT_DIR/<script>\"\`):"
   echo "  $line"
   fail=1
-done < <(grep -rEn '\$\{?SCRIPT_DIR\}?/[a-z_-]' \
+done < <(grep -rEn '\$\{?SCRIPT_DIR\}?"?/[a-z_-]' \
            "$ROOT/github-pr-lifecycle/scripts" "$ROOT/github-project-workflow/scripts" \
          | grep -v 'scripts/check-bash-subinvocations' \
          | grep -v 'scripts/test-check-bash-subinvocations' \
@@ -66,9 +66,9 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?/[a-z_-]' \
                    while IFS= read -r nested; do
                      [ -z "$nested" ] && continue
                      nested="$(printf '%s' "$nested" |
-                       sed -E 's/bash "?\$\{?SCRIPT_DIR\}?\/[a-z_.-]+//g' |
-                       sed -E 's/\$\{?SCRIPT_DIR\}?\/_lib\.sh//g')"
-                     if printf '%s' "$nested" | grep -qE '\$\{?SCRIPT_DIR\}?/[a-z_-]'; then
+                       sed -E 's/bash "?\$\{?SCRIPT_DIR\}?"?\/[a-z_.-]+//g' |
+                       sed -E 's/\$\{?SCRIPT_DIR\}?"?\/_lib\.sh//g')"
+                     if printf '%s' "$nested" | grep -qE '\$\{?SCRIPT_DIR\}?"?/[a-z_-]'; then
                        nested_direct=1
                        break
                      fi
@@ -83,13 +83,13 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?/[a-z_-]' \
                # remaining SCRIPT_DIR reference in the segment is a direct
                # exec.
                seg_wo_bash="$(printf '%s\n' "$seg" |
-                 sed -E 's/bash "?\$\{?SCRIPT_DIR\}?\/[a-z_.-]+/ORC_BASH_GUARD/g')"
+                 sed -E 's/bash "?\$\{?SCRIPT_DIR\}?"?\/[a-z_.-]+/ORC_BASH_GUARD/g')"
                seg_wo_bash="${seg_wo_bash//ORC_BASH_GUARD/}"
                # Strip _lib.sh references (both forms); they are never
                # sibling-script execs.
                seg_lib_stripped="$(printf '%s' "$seg_wo_bash" |
-                 sed -E 's/\$\{?SCRIPT_DIR\}?\/_lib\.sh//g')"
-               if printf '%s' "$seg_lib_stripped" | grep -qE '\$\{?SCRIPT_DIR\}?/[a-z_-]'; then
+                 sed -E 's/\$\{?SCRIPT_DIR\}?"?\/_lib\.sh//g')"
+               if printf '%s' "$seg_lib_stripped" | grep -qE '\$\{?SCRIPT_DIR\}?"?/[a-z_-]'; then
                  direct_exec=1
                fi
              done < <(printf '%s\n' "$seg_rest" | sed -E 's/([^>!])[;&|]+/\1\n/g; s/^[;&|]+//')

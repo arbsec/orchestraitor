@@ -80,6 +80,13 @@ expect_flagged "braced-direct-exec" \
 expect_flagged "echo-wrapping-nested-exec" \
   'echo "$("$SCRIPT_DIR/pr-checks" "$PR")"'
 
+# 6. quote-separated forms (CodeRabbit local review, head 2f3779e): Bash
+#    executes `"$SCRIPT_DIR"/pr-checks` as a direct sibling invocation.
+expect_flagged "quote-separated-direct-exec" \
+  'OUT=$("$SCRIPT_DIR"/pr-checks "$PR" 2>/dev/null) && echo "$OUT"'
+expect_flagged "braced-quote-separated-direct-exec" \
+  'OUT=$("${SCRIPT_DIR}"/pr-checks "$PR" 2>/dev/null) && echo "$OUT"'
+
 # --- CLEAN CASES: must remain unflagged (exit 0) ---
 
 # 4. bash-prefixed invocation (the required form).
