@@ -2389,7 +2389,17 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     // would redirect every fixture `git` call to the CALLING worktree's
     // gitdir — the #553 corruption (fixture commits landed on a real feature
     // branch, PR #551 deleted the whole repository). Scrubbed on every child.
-    const AMBIENT_GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+    // The complete production set (mirrors AMBIENT_GIT_LOCATION_VARS in
+    // src/commands/github.rs; CodeRabbit review on PR #599).
+    const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ];
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
@@ -2468,11 +2478,10 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
 /// carry NO commits after the fixture ran, and a scrub-less control git
 /// child with the hostile variables in its inherited environment provably
 /// binds to the hostile gitdir, proving the poisoning is real and the scrub
-/// inside `spawn_local_repo` is what neutralizes it. The hostile
-/// environment is hostile for `spawn_local_repo`'s children the same way
-/// (they inherit the process environment a hook would poison); the
-/// rev-list assertion also runs under the hostile variables themselves
-/// (local review, head 4b26b0e).
+/// inside `spawn_local_repo` is what neutralizes it. The hostile variables
+/// are applied per-`Command` (what a hook injection actually does to each
+/// child); the rev-list assertion runs under the hostile variables
+/// themselves (local review, head 4b26b0e).
 #[test]
 fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<()> {
     use std::process::Command;
