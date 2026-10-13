@@ -9,7 +9,7 @@
 
 > **Companion to:** [`docs/spec/spec.md`](spec.md). This document holds concrete crates, versions, license compatibility, runtime dependencies, platform support, and rejected alternatives. The spec holds product requirements, architecture, invariants, workflows, security boundaries, and user experience. Both files use the real Arbitraitor crate names, types, traits, and APIs (see §16 of the spec).
 >
-> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). Every dependency and architectural claim below was independently verified against crates.io metadata or upstream GitHub on 2026-07-23.
+> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). The document structure was verified against that file on 2026-07-23; dependency versions were re-verified against crates.io metadata on 2026-10-13 (see the versioning note above).
 
 ---
 
