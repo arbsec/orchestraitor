@@ -28,6 +28,7 @@
 //! orchestration acceleration, never a second trigger authority (spec
 //! §9.47); the sandbox boundary remains Arbitraitor's.
 
+pub mod ci_lane;
 pub mod poller;
 pub mod queue;
 pub mod store;

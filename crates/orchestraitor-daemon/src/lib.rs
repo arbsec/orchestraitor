@@ -36,8 +36,10 @@ pub use governance::{
     DataReleaseEnforcer, GovernanceError, GovernanceEventSink, GovernanceRouter, ReleaseVerdict,
     RetryPolicy, RetryScheduler, RoutingDecision,
 };
+pub use ingress::ci_lane as ci_lane_module;
 pub use ingress::{
     KickoffIngressSource, build_ingress,
+    ci_lane::{CHECK_RUN_COMPLETED, CiLane, CiRepoTarget, WORKFLOW_RUN_COMPLETED, ci_targets},
     poller::{DEFAULT_POLL_AFTER_SECS, EventPoller, PollTarget, poll_targets},
     queue::{DEFAULT_QUEUE_CAPACITY, DEGRADED_QUIET_WINDOW, IngressQueue, PushOutcome},
     store::{IngressEvent, IngressStore, REDELIVERY_WINDOW_SECS},

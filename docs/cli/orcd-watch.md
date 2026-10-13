@@ -102,10 +102,12 @@ Notes:
 ## Event ingress (§9.47(b), opt-in)
 
 The daemon can consume external GitHub activity — new issues and
-issue/PR comments — as kick-off acceleration, without a human
-translating it into board state. (PR ready-for-review is planned but not
-yet tracked: the repository events feed this poller consumes does not
-carry that event.) The shipped mechanism is the POLL
+issue/PR comments, plus CI completions (check-run and workflow-run
+completions for head SHAs the daemon actively tracks, below) — as
+kick-off acceleration, without a human translating it into board state.
+(PR ready-for-review is planned but not yet tracked: the repository
+events feed this poller consumes does not carry that event.) The shipped
+mechanism is the POLL
 fallback only: a conditional-request poller over the GitHub REST API
 (the §9.47(a) Actions push relay stays blocked until Arbitraitor's
 ingress-envelope authentication lands). The §9.43 reconcile poll stays
@@ -129,6 +131,24 @@ durable delivery key — the platform delivery id, repository, event type,
 and head SHA where present — with a 30-day redelivery window
 (`<config-dir>/ingress-events.db`), so a redelivery never produces a
 second kick-off.
+
+**CI completions lane.** The repository events feed carries no CI
+completions (no `CheckRunEvent`, no `WorkflowRunEvent`), so a second
+conditional poll lane covers them. The daemon polls
+`GET /repos/{owner}/{repo}/actions/runs` (filtered to
+`pull_request`-triggered runs) per repository — each completed run is
+an event keyed on run id + attempt + conclusion — and
+`GET /repos/{owner}/{repo}/commits/{sha}/check-runs` for each head SHA
+it actively tracks: every in-flight `pull_request`-triggered run
+carries the head SHA the daemon is waiting on, discovered from the same
+runs response, bounded (at most 16 tracked SHAs per repository) and
+pruned once its CI goes quiet. Check-run completions key on the
+check-run id + conclusion; a conclusion transition is a new delivery —
+the transition is exactly the signal — while a repeated poll of an
+unchanged run deduplicates inside the 30-day window. The lane shares
+the events lane's ETag store, dedup table, bounded queue, and cadence
+rules; CI state it misses still arrives on the next reconcile pass —
+the lane is acceleration, never a trigger authority.
 
 The ingress queue is bounded: sustained flooding drops surplus events
 and records the `degraded` marker (surfaced in the log; §7.3 — the bound
@@ -192,7 +212,8 @@ rows all behave exactly as documented for
 - Event ingress (when `[watch.ingress].enabled`): `<config-dir>/ingress-events.db`
   — the durable dedup table (30-day redelivery window) and the
   per-endpoint conditional-request bookkeeping (ETag, advised poll
-  interval).
+  interval) for the events feed, the CI completions lane's check-runs
+  endpoints (one per tracked head SHA), and the Actions-runs endpoint.
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme
