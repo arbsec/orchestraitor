@@ -35,7 +35,7 @@
 | CLI | clap 4.6.4 + clap_derive | MIT OR Apache-2.0 | crates.io |
 | Git (controller-owned) | gix 0.89.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
 | Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
-| MCP server + client | rmcp 2.2.0 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
+| MCP server + client | rmcp 3.5.1 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
 | Agent Client Protocol | agent-client-protocol 3.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
 | ACP ↔ MCP bridge | agent-client-protocol-rmcp 4.0.3 | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
@@ -242,7 +242,7 @@ The same TOML shape applies to other providers. For Z.ai the GLM Coding Plan exp
 
 ### 4.1 MCP
 
-`rmcp` 2.2.0 (Jul 8, 2026), maintained at `modelcontextprotocol/rust-sdk`, Apache-2.0. ~917k dl/wk. Features used: `server`, `client`, `macros`, `schemars`, `auth`, `transport-io`, `transport-streamable-http-server`, `transport-streamable-http-client-reqwest`, `reqwest`. TLS defaults to rustls via the reqwest feature.
+`rmcp` 3.5.1, maintained at `modelcontextprotocol/rust-sdk`, Apache-2.0. Features used: `server`, `client`, `macros`, `schemars`, `auth`, `transport-io`, `transport-streamable-http-server`, `transport-streamable-http-client-reqwest`, `reqwest`. TLS defaults to rustls via the reqwest feature.
 
 ### 4.2 ACP
 
