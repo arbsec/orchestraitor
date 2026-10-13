@@ -61,11 +61,15 @@ Concretely:
   record that persists the preflight output preserves every control's
   state.
 - The test at `crates/orchestraitor-daemon/src/capability.rs:430` —
-  `required_capabilities_reports_seven_independent_controls` — pins the
-  contract: `caps.len() == 7` for all-available controls and
-  `caps.iter().all(|c| c.status == ControlStatus::Available)`. Any future
-  PR that drops a control or collapses two controls into one fails the
-  test.
+  `required_capabilities_reports_seven_independent_controls` — pins two
+  properties of the contract: `caps.len() == 7` for all-available
+  controls, and `caps.iter().all(|c| c.status == ControlStatus::Available)`.
+  Any future PR that drops a control, collapses two into one, or
+  substitutes a missing identifier for an empty placeholder breaks the
+  count assertion. The test does NOT pin the exact identifier set (a
+  duplicate identifier, or a rename to another valid identifier, would
+  still satisfy both checks) — extending the test to assert the canonical
+  identifier set is recorded as a follow-up, not part of this ADR.
 - The `ControlStatus::from(ControlState)` mapping
   (`capability.rs:431`) is `match`-exhaustive over the three
   `ControlState` variants — adding a fourth `ControlState` is a
@@ -97,12 +101,22 @@ Concretely:
   test is the mechanism that prevents a future "simplification" from
   collapsing two controls.
 - **Recorded coupling:** the bootstrap-worker preflight
-  (`MediatedWorker::spawn`) and the daemon's `health` consume the same
-  Arbitraitor matrix and produce structurally similar reports. The
-  shapes are kept compatible by sharing the
-  `effective_controls_to_required_capabilities` translation; if the
-  shapes diverge in the future, this ADR must be amended or
-  superseded, not silently relaxed.
+  (`MediatedWorker::spawn`, `crates/orchestraitor-arb-client/src/mediation.rs`)
+  and the daemon's `health` (`crates/orchestraitor-daemon/src/capability.rs:191`)
+  consume the same `EffectiveControls` matrix and share the canonical seven
+  control identifiers, but they apply **separate translations** — the
+  daemon maps to a `Vec<RequiredCapability>` for the JSON-RPC `health`
+  report, the worker maps to `ControlNames` collections for
+  `missing_controls` and `degraded_controls` on the `WorkerPreflight`
+  record. The worker preflight additionally applies the
+  `arbsec/arbitraitor#755` Landlock-ABI stopgap: when the kernel probe
+  reports no Landlock ABI on the supported Linux platform, the worker
+  treats `filesystem_isolation` as `Unavailable` even though Arbitraitor's
+  matrix classifies it as `Available`; the daemon reports the matrix
+  state directly without that override. If the identifier set, the
+  per-path translation, or the Landlock-ABI override semantics diverge in
+  the future, this ADR must be amended or superseded — not silently
+  relaxed.
 
 ## Alternatives considered
 
