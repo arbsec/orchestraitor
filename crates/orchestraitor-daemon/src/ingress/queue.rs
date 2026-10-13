@@ -1,10 +1,10 @@
-//! The bounded §9.47 ingress queue (spec §7.3 resource-exhaustion class):
+//! The bounded §9.50 ingress queue (spec §7.3 resource-exhaustion class):
 //! sustained flooding drops surplus and records the `degraded` marker —
 //! never unbounded queue growth. `degraded` clears only after a
 //! flood-free window; it is observable, never a silent drop.
 //!
 //! The queue is ordering-insensitive input to kick-off evaluation (spec
-//! §9.47(b)): the §9.43 reconcile poll stays the completeness authority,
+//! §9.50(b)): the §9.43 reconcile poll stays the completeness authority,
 //! so a dropped surplus event never loses work — the board state the
 //! reconcile pass reads still describes it.
 
@@ -21,7 +21,7 @@ use crate::ingress::store::IngressEvent;
 pub const DEFAULT_QUEUE_CAPACITY: usize = 256;
 
 /// The flood-free window (seconds) after which the `degraded` marker
-/// clears: the overflow case per spec §9.47 failure behavior clears
+/// clears: the overflow case per spec §9.50 failure behavior clears
 /// "only after a flood-free window", never while surplus is still
 /// arriving.
 pub const DEGRADED_QUIET_WINDOW: Duration = Duration::from_mins(5);
@@ -31,7 +31,7 @@ pub const DEGRADED_QUIET_WINDOW: Duration = Duration::from_mins(5);
 pub enum PushOutcome {
     /// The event was enqueued.
     Accepted,
-    /// The event was a redelivery inside the §9.47 window: deduplicated,
+    /// The event was a redelivery inside the §9.50 window: deduplicated,
     /// never a second kick-off.
     Duplicate,
     /// The queue was at capacity: the surplus was DROPPED and the
@@ -40,7 +40,7 @@ pub enum PushOutcome {
     Dropped,
 }
 
-/// The bounded §9.47 ingress queue. Shared between the poll task
+/// The bounded §9.50 ingress queue. Shared between the poll task
 /// (producer) and the kick-off source (consumer) behind a mutex; the
 /// clock is injectable for deterministic tests.
 /// The bounded queue's state mutex is a `parking_lot::Mutex`: guards
@@ -108,7 +108,7 @@ impl IngressQueue {
     }
 
     /// Drains every pending event (kick-off consumption). The events are
-    /// ordering-insensitive input (spec §9.47): drain order is queue
+    /// ordering-insensitive input (spec §9.50): drain order is queue
     /// order, and consumers must not rely on it.
     pub fn take(&self) -> Vec<IngressEvent> {
         let mut state = self.inner.lock();

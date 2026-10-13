@@ -81,7 +81,7 @@ async fn watch_cycle() -> Result<ExitCode> {
     // The board client: the same reconciled read `orc loop` polls through.
     let (board_config_template, _path) =
         orchestraitor_board::BoardProjectConfig::load(&project_dir).into_diagnostic()?;
-    // The §9.47 event ingress polls these repositories (issue #504);
+    // The §9.50 event ingress polls these repositories (issue #504);
     // captured before the config template moves into the board poller.
     let ingress_repos = board_config_template.repos.clone();
     let token_uri = board_config_template
@@ -235,7 +235,7 @@ async fn watch_cycle() -> Result<ExitCode> {
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
-    // The §9.47 event ingress (issue #504): opt-in via
+    // The §9.50 event ingress (issue #504): opt-in via
     // `[watch.ingress].enabled`. When enabled, the conditional-request
     // poller feeds the bounded queue and the kick-off source drains it —
     // the operator arms the condition separately via
@@ -268,10 +268,10 @@ async fn watch_cycle() -> Result<ExitCode> {
         .wrap_err("event ingress construction failed")?;
         // The poll task shares the daemon's lifetime: one conditional
         // round per tick, sleeping the largest server-advised interval
-        // (never wider than the rate-limit feedback, §9.47(b)), racing
+        // (never wider than the rate-limit feedback, §9.50(b)), racing
         // the operator's shutdown signal.
         let targets = orchestraitor_daemon::poll_targets(&ingress_repos, "https://api.github.com");
-        // The CI completions lane (§9.47(b)): conditional polls over
+        // The CI completions lane (§9.50(b)): conditional polls over
         // the Actions-runs endpoint (workflow-run completions + the
         // tracked head-SHA source) and per-SHA check-runs endpoints,
         // over the SAME shared store and bounded queue.
@@ -657,10 +657,10 @@ fn primary_and_shards(
     Ok(files)
 }
 
-/// The §9.47(b) ingress poll loop (issue #504): one conditional-request
+/// The §9.50(b) ingress poll loop (issue #504): one conditional-request
 /// round per tick over every target, sleeping the largest server-advised
 /// interval across the endpoints (the honored `X-Poll-Interval`, widened
-/// ONLY by rate-limit feedback — never beyond it, §9.47(b)). Runs for
+/// ONLY by rate-limit feedback — never beyond it, §9.50(b)). Runs for
 /// the daemon's lifetime; the operator's shutdown signal ends it.
 ///
 /// Failures are per-endpoint and logged — a failed or rate-limited poll
@@ -769,7 +769,7 @@ async fn ingress_poll_loop(
     }
 }
 
-/// The §9.47(b) CI completions lane loop (one per daemon lifetime): one
+/// The §9.50(b) CI completions lane loop (one per daemon lifetime): one
 /// conditional round per cycle — the repo Actions-runs poll plus one
 /// check-runs poll per tracked head SHA — sleeping the largest
 /// server-advised interval (never wider than the rate-limit feedback),

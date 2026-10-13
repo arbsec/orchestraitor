@@ -1,4 +1,4 @@
-//! The §9.47 GitHub event ingress (issue #504): the poll-only fallback
+//! The §9.50 GitHub event ingress (issue #504): the poll-only fallback
 //! that feeds external GitHub activity (new issues, issue/PR comments)
 //! into the §9.36 kick-off evaluation. PR ready-for-review is planned
 //! but not yet tracked: the repository events feed this poller consumes
@@ -19,14 +19,14 @@
 //!   operator can arm the external-event kick-off condition
 //!   (`[watch.kickoff].external_event`).
 //!
-//! The push relay (§9.47(a)) is intentionally absent: it stays
+//! The push relay (§9.50(a)) is intentionally absent: it stays
 //! `blocked:arbitraitor` until ingress-envelope authentication exists
-//! (arbsec/arbitraitor#787). Poll-only is complete ingress per §9.47(b);
+//! (arbsec/arbitraitor#787). Poll-only is complete ingress per §9.50(b);
 //! the §9.43 reconcile poll stays the completeness authority either way.
 //!
 //! This crate implements no security primitive: event ingestion is
 //! orchestration acceleration, never a second trigger authority (spec
-//! §9.47); the sandbox boundary remains Arbitraitor's.
+//! §9.50); the sandbox boundary remains Arbitraitor's.
 
 pub mod ci_lane;
 pub mod poller;
@@ -40,7 +40,7 @@ use orchestraitor_campaign::KickoffExternalEvent;
 use crate::error::DaemonError;
 use crate::ingress::queue::IngressQueue;
 
-/// The production §9.47 external-event source (issue #504): drains the
+/// The production §9.50 external-event source (issue #504): drains the
 /// bounded ingress queue into the kick-off seam. Events carry
 /// identifiers only — never board or PR content.
 #[derive(Debug, Clone)]

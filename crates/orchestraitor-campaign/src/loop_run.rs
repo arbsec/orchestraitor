@@ -610,7 +610,7 @@ pub struct LoopRunner<'a, P: BoardPoller, S: LoopWorkerStarter> {
     /// budget window). `None` before the first pass. A moved boundary is
     /// a budget-window reset — condition 4.
     last_pass_day: Option<u64>,
-    /// The §9.47 external-event source (issue #504): the bounded ingress
+    /// The §9.50 external-event source (issue #504): the bounded ingress
     /// queue the poll fallback feeds. `None` keeps the shipped empty
     /// behavior byte-identical (the external-event condition can never
     /// fire). The source is only CONSULTED when the operator armed
@@ -692,7 +692,7 @@ fn kick_off_rationale(
 /// One §9.36 kick-off gate decision for a pass (issue #505).
 enum KickoffGate {
     /// The pass proceeds to plan (a campaign is in flight or a
-    /// condition fired). `peeked_ids` are the §9.47 event ids the gate
+    /// condition fired). `peeked_ids` are the §9.50 event ids the gate
     /// peeked this pass (empty when the condition is disarmed, the
     /// source is absent, or a campaign is in flight): the durable drain
     /// runs after planning — selection or typed no-op, either way the
@@ -786,7 +786,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         self.last_pass_day
     }
 
-    /// Attaches the §9.47 external-event source (issue #504): the bounded
+    /// Attaches the §9.50 external-event source (issue #504): the bounded
     /// ingress queue the conditional-request poll fallback feeds. The
     /// kick-off gate consults the source ONLY when the operator armed the
     /// `external_event` condition — a disarmed condition never drains the
@@ -1405,7 +1405,7 @@ impl<'a, P: BoardPoller, S: LoopWorkerStarter> LoopRunner<'a, P, S> {
         excluded: &HashSet<String>,
     ) -> KickoffGate {
         let campaign_in_flight = !self.slots.is_empty();
-        // The §9.47 source (issue #504): the source is CONSULTED (a
+        // The §9.50 source (issue #504): the source is CONSULTED (a
         // non-destructive peek) only when the operator armed the
         // external-event condition AND no campaign is in flight — when
         // a campaign IS in flight the gate proceeds on other grounds

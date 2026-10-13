@@ -1,4 +1,4 @@
-//! Fixture-driven integration tests for the §9.47 event ingress (issue
+//! Fixture-driven integration tests for the §9.50 event ingress (issue
 //! #504, spec §21.3): the conditional-request poller runs against a
 //! scripted in-process HTTP server — no live network in CI. Negative
 //! and adversarial cases (§21.4) pin the dedup, flood, and rate-limit
@@ -607,7 +607,7 @@ async fn retry_after_hint_drives_the_cadence() {
 }
 
 /// The event filter: untracked platform event types never reach the
-/// dedup table or the queue (the operator's filter is the fixed §9.47
+/// dedup table or the queue (the operator's filter is the fixed §9.50
 /// set); a baseline poll first, then a delta with HIGHER raw ids, so
 /// `process_items` is exercised past the baseline.
 #[tokio::test(flavor = "current_thread")]
@@ -670,7 +670,7 @@ async fn untracked_event_verbs_are_filtered_before_dedup() {
 /// PR comment events (`IssueCommentEvent` whose `payload.issue` carries
 /// the `pull_request` marker) normalize with the head SHA in the delivery key:
 /// a new push (new head SHA) on the same PR comment event is a NEW
-/// delivery (spec §9.47: head SHA where present is part of the key).
+/// delivery (spec §9.50: head SHA where present is part of the key).
 #[tokio::test(flavor = "current_thread")]
 async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
     let body = json!([{
@@ -748,7 +748,7 @@ async fn pr_events_carry_the_head_sha_in_the_delivery_key() {
 }
 
 /// The poll targets are repository-scoped: one documented issue-events
-/// endpoint per repository, keyed by its own repo (§9.47(b): complete
+/// endpoint per repository, keyed by its own repo (§9.50(b): complete
 /// over the same event filter; the dedup key and event repo field
 /// carry exactly one repository).
 #[test]
@@ -860,7 +860,7 @@ async fn items_without_a_delivery_id_are_skipped_never_shared() {
     assert_eq!(drained[0].number, 1, "the control's event");
 }
 
-/// Gen-13 cloud review (§21.4 negative): only the documented §9.47
+/// Gen-13 cloud review (§21.4 negative): only the documented §9.50
 /// actions pass the filter — a `closed` `IssuesEvent` and a
 /// `synchronize` `PullRequestEvent` (both with distinct delivery keys)
 /// produce nothing; untracked actions never multiply kick-offs. A
