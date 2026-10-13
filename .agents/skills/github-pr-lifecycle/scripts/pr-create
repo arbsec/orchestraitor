@@ -88,6 +88,11 @@ fi
 # Normalize "origin/main" style values to the branch name gh pr create expects.
 PR_CREATE_TARGET_BASE="${PR_CREATE_TARGET_BASE#origin/}"
 PR_CREATE_MERGE_BASE="$(git merge-base "$PR_CREATE_TARGET_BASE" HEAD 2>/dev/null)" || PR_CREATE_MERGE_BASE=""
+if [ -z "$PR_CREATE_MERGE_BASE" ] && [ "$PR_CREATE_TARGET_BASE" = "$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" ]; then
+  # The resolved default branch may exist only as a remote ref (fresh clone
+  # without a local branch of the same name) — retry with the remote form.
+  PR_CREATE_MERGE_BASE="$(git merge-base "origin/$PR_CREATE_TARGET_BASE" HEAD 2>/dev/null)" || PR_CREATE_MERGE_BASE=""
+fi
 if [ -z "$PR_CREATE_MERGE_BASE" ]; then
   echo "pre-review-gate: cannot compute a merge-base with base branch '$PR_CREATE_TARGET_BASE' — is the branch based on it?" >&2
   exit "$ORC_ERR_CONFIG"
