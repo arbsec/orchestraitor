@@ -4673,6 +4673,9 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "jsonrpsee",
  "miette",
  "orchestraitor-adapter-api",
@@ -4688,6 +4691,8 @@ dependencies = [
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-worker",
+ "parking_lot",
+ "reqwest",
  "rusqlite",
  "secrecy",
  "serde",

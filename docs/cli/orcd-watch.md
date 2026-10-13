@@ -74,10 +74,9 @@ Notes:
 - An absent `[watch.kickoff]` block (or absent key) inherits the built-in
   default shown above. Any higher layer (user, org, project, directory)
   overrides any key.
-- `external_event` ships **disarmed**: the §9.47 GitHub event source
-  (relay PUSH + conditional POLL ingress) is not implemented yet — the
-  condition type and its config key exist, but the wired source is empty,
-  so the condition can never fire. It lands with issue #504.
+- `external_event` ships **disarmed**: the §9.47 GitHub event ingress is
+  opt-in (`[watch.ingress].enabled`, below). With the ingress disabled
+  the condition can never fire. Arm it only together with the ingress.
 - **Disabling every condition yields an idle-but-healthy daemon**: the
   tick keeps polling and supervising, run state stays durable and
   reconciled — but no campaign session is ever kicked off. Every skipped
@@ -99,6 +98,49 @@ Notes:
   scheduling continues under the concurrency cap; the kick-off evaluation
   gates starting a session from idle, not the in-flight session's own
   spawn decisions.
+
+## Event ingress (§9.47(b), opt-in)
+
+The daemon can consume external GitHub activity — new issues and
+issue/PR comments — as kick-off acceleration, without a human
+translating it into board state. (PR ready-for-review is planned but not
+yet tracked: the repository events feed this poller consumes does not
+carry that event.) The shipped mechanism is the POLL
+fallback only: a conditional-request poller over the GitHub REST API
+(the §9.47(a) Actions push relay stays blocked until Arbitraitor's
+ingress-envelope authentication lands). The §9.43 reconcile poll stays
+the completeness authority either way: an event only makes the next
+kick-off evaluation fire sooner; a missed or delayed event never loses
+work.
+
+```toml
+[watch.ingress]
+enabled = true           # default false — the operator opts in
+queue_capacity = 256     # bounded queue (§7.3); zero is rejected
+```
+
+When enabled, the daemon polls each configured board repository's
+repository-events feed (`GET /repos/{owner}/{repo}/events`) for issue
+opened and issue/PR commented activity, with `If-None-Match`
+conditional requests (a 304 costs no quota), honors the
+server's `X-Poll-Interval`, and adapts the cadence to rate-limit
+feedback — the poll never widens beyond it. Events deduplicate on a
+durable delivery key — the platform delivery id, repository, event type,
+and head SHA where present — with a 30-day redelivery window
+(`<config-dir>/ingress-events.db`), so a redelivery never produces a
+second kick-off.
+
+The ingress queue is bounded: sustained flooding drops surplus events
+and records the `degraded` marker (surfaced in the log; §7.3 — the bound
+exists so a flood hits the drop, never unbounded growth). The marker
+clears only after a flood-free window. A dropped event is never lost
+work: the board state the reconcile poll reads still describes it.
+
+The ingress alone does not arm the kick-off condition — enable
+`[watch.kickoff].external_event = true` (above) to let drained events
+kick off a campaign session. Events carry identifiers only (delivery
+key, repository, event type, number, head SHA), never board or PR
+content.
 
 The pinned guard set (concurrency 2, stall 10m, worker timeout 45m,
 backoff 10s·2^n capped 5m, $10/day spend soft cap, 4h run budget) is
@@ -147,6 +189,10 @@ rows all behave exactly as documented for
 - Decision records: `<config-dir>/campaign.db` — unchanged.
 - Reconcile events: `<config-dir>/watch-events.db` — append-only,
   hash-chain validated (`orchestraitor-events`).
+- Event ingress (when `[watch.ingress].enabled`): `<config-dir>/ingress-events.db`
+  — the durable dedup table (30-day redelivery window) and the
+  per-endpoint conditional-request bookkeeping (ETag, advised poll
+  interval).
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme

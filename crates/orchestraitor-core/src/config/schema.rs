@@ -71,6 +71,26 @@ pub struct WatchConfigBlock {
     /// armed; the external-event condition disarmed until the §9.47
     /// source exists).
     pub kickoff: Option<WatchKickoffConfig>,
+    /// §9.47 event-ingress settings (issue #504). Absent block keeps the
+    /// built-in defaults (ingress disabled: the shipped posture is
+    /// poll-only, opt-in).
+    pub ingress: Option<WatchIngressConfig>,
+}
+
+/// Event-ingress settings (`[watch.ingress]`; spec `10-orchestrator.md`
+/// §9.47(b), issue #504). The poll fallback is complete ingress on its
+/// own (the push relay stays `blocked:arbitraitor`); the operator opts
+/// in by enabling the block, then arms the kick-off condition through
+/// `[watch.kickoff].external_event`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchIngressConfig {
+    /// Enable the conditional-request event poller (default: false —
+    /// the shipped posture keeps the daemon's trigger set
+    /// board/reconcile-derived only).
+    pub enabled: Option<bool>,
+    /// Bounded ingress-queue capacity (default 256; §7.3 — a zero
+    /// capacity is rejected fail-closed: every push would be a drop).
+    pub queue_capacity: Option<usize>,
 }
 
 /// Kick-off condition enables (`[watch.kickoff]`; spec
@@ -88,9 +108,11 @@ pub struct WatchKickoffConfig {
     pub slot_released: Option<bool>,
     /// Arm the budget-window-reset condition (§9.19.6; default: true).
     pub budget_window_reset: Option<bool>,
-    /// Arm the external-event condition (§9.47; default: false — the
-    /// event source lands with issue #504, so the shipped source is
-    /// empty and the condition can never fire).
+    /// Arm the external-event condition (§9.47; default: false). The
+    /// event source is the §9.47 poll-only ingress (issue #504): arm it
+    /// ONLY together with `[watch.ingress].enabled = true` — with the
+    /// ingress disabled the condition can never fire (the shipped
+    /// default source is empty).
     pub external_event: Option<bool>,
 }
 

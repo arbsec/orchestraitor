@@ -696,3 +696,72 @@ fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<(), Box<dyn std::erro
     }
     Ok(())
 }
+
+/// §9.47 layered config (issue #504): the `[watch.ingress]` block
+/// resolves with built-in defaults (disabled, capacity 256); a higher
+/// layer overrides; a zero capacity is rejected fail-closed.
+#[test]
+fn watch_ingress_resolves_from_layers_with_built_in_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    // No configuration: the built-in defaults (ingress disabled).
+    let resolver = ConfigResolver::new();
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(
+        !config.ingress.enabled,
+        "the §9.47 poll ingress ships disabled (opt-in per #573's posture)"
+    );
+    assert_eq!(
+        config.ingress.queue_capacity,
+        orchestraitor_daemon::DEFAULT_QUEUE_CAPACITY,
+        "the documented bounded-queue default"
+    );
+
+    // A configured block: enabled with a custom capacity.
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::Project,
+            name: "test-project".to_string(),
+        },
+        "[watch.ingress]\nenabled = true\nqueue_capacity = 64\n",
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(config.ingress.enabled);
+    assert_eq!(config.ingress.queue_capacity, 64);
+
+    // A zero capacity makes every push a drop: rejected fail-closed.
+    let zero = WatchConfig::with_ingress(
+        60,
+        orchestraitor_campaign::KickoffSettings::builtin_defaults(),
+        orchestraitor_daemon::IngressSettings {
+            enabled: true,
+            queue_capacity: 0,
+        },
+    );
+    assert!(zero.is_err(), "a zero queue capacity must be rejected");
+    Ok(())
+}
+
+/// §9.22.1 (issue #504): the built-in defaults TOML data carries the
+/// ingress block (disabled, capacity 256) and still agrees with the
+/// resolver fallback defaults.
+#[test]
+fn the_built_in_defaults_carry_the_ingress_block() -> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::BuiltInDefaults,
+            name: "built-in watch defaults".to_string(),
+        },
+        orchestraitor_daemon::WATCH_BUILT_IN_DEFAULTS_TOML,
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert_eq!(
+        config.ingress,
+        orchestraitor_daemon::IngressSettings::builtin_defaults(),
+        "the shipped TOML data and the fallback defaults agree"
+    );
+    Ok(())
+}

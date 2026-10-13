@@ -132,8 +132,24 @@ pub struct KickoffExternalEvent {
 /// #504; until then the shipped implementation is [`EmptyKickoffEvents`],
 /// the documented empty source, so the condition is wired but never fires.
 pub trait KickoffEventSource: Send + Sync {
-    /// Drains the currently pending external events (identifiers only).
+    /// Peeks the currently pending external events (identifiers only).
+    /// A PEEK is non-destructive: the events stay pending until
+    /// [`Self::drain_pending`] removes them. Implementations must
+    /// return the same events for repeated peeks until a drain.
     fn pending(&self) -> Vec<KickoffExternalEvent>;
+
+    /// Destructively removes exactly the events whose ids are in
+    /// `ids` (the ids the gate peeked this pass). The runner calls it
+    /// after EVERY pass that passed the gate and planned — selection or
+    /// typed no-op: either way the board state was evaluated, and the
+    /// event must not re-arm on later passes. Returns the drained
+    /// events. REQUIRED: a source whose `pending` is a non-destructive
+    /// peek MUST implement the matching selective drain — a
+    /// drain-everything implementation would drop events that arrived
+    /// after the peek (a gen-7 cloud review finding), and a
+    /// drain-nothing implementation would re-fire the condition every
+    /// later pass (a gen-11 review finding).
+    fn drain_pending(&self, ids: &[String]) -> Vec<KickoffExternalEvent>;
 }
 
 /// The shipped empty §9.47 source (issue #504 pending): the external-event
@@ -143,6 +159,10 @@ pub struct EmptyKickoffEvents;
 
 impl KickoffEventSource for EmptyKickoffEvents {
     fn pending(&self) -> Vec<KickoffExternalEvent> {
+        Vec::new()
+    }
+
+    fn drain_pending(&self, _ids: &[String]) -> Vec<KickoffExternalEvent> {
         Vec::new()
     }
 }
@@ -436,9 +456,10 @@ mod tests {
         assert_eq!(verdict.fired, vec![KickoffCondition::ExternalEvent]);
     }
 
-    /// §9.36 condition 5, non-trigger (§21.4): the shipped source is the
-    /// EMPTY no-op (#504 pending) — an armed condition with an empty
-    /// source never fires, so wiring the type now cannot kick off.
+    /// §9.36 condition 5, non-trigger (§21.4): the shipped EMPTY no-op
+    /// source ([`EmptyKickoffEvents`], the no-ingress fallback the
+    /// daemon hands the runner when `[watch.ingress].enabled` is false)
+    /// never fires the condition even when armed.
     #[test]
     fn external_event_never_fires_on_the_shipped_empty_source() {
         let settings = KickoffSettings {

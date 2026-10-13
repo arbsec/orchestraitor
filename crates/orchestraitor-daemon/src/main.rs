@@ -81,6 +81,9 @@ async fn watch_cycle() -> Result<ExitCode> {
     // The board client: the same reconciled read `orc loop` polls through.
     let (board_config_template, _path) =
         orchestraitor_board::BoardProjectConfig::load(&project_dir).into_diagnostic()?;
+    // The §9.47 event ingress polls these repositories (issue #504);
+    // captured before the config template moves into the board poller.
+    let ingress_repos = board_config_template.repos.clone();
     let token_uri = board_config_template
         .token_uri
         .clone()
@@ -232,6 +235,49 @@ async fn watch_cycle() -> Result<ExitCode> {
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
+    // The §9.47 event ingress (issue #504): opt-in via
+    // `[watch.ingress].enabled`. When enabled, the conditional-request
+    // poller feeds the bounded queue and the kick-off source drains it —
+    // the operator arms the condition separately via
+    // `[watch.kickoff].external_event`. Disabled (the default) keeps the
+    // trigger set board/reconcile-derived only.
+    if watch_config.ingress.enabled && !watch_config.kickoff.external_event {
+        // Enabled ingress with a disarmed consumer: the queue fills to
+        // capacity, drops surplus, and stays `degraded` permanently (a
+        // gen-13 review finding). The poller still runs (polling is the
+        // operator's explicit opt-in and the reconcile poll remains the
+        // completeness authority), but the operator must see the
+        // mismatched configuration.
+        tracing::warn!(
+            "orcd watch: watch.ingress.enabled is true but \
+             watch.kickoff.external_event is false - the ingress queue \
+             has no kick-off consumer and will fill, drop surplus, and \
+             stay degraded; arm external_event or disable the ingress"
+        );
+    }
+    let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> =
+        if watch_config.ingress.enabled {
+            let (ingress_queue, ingress_poller, source) = orchestraitor_daemon::build_ingress(
+                &config_dir.join("ingress-events.db"),
+                Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
+                watch_config.ingress.queue_capacity,
+            )
+            .into_diagnostic()
+            .wrap_err("event ingress construction failed")?;
+            // The poll task shares the daemon's lifetime: one conditional
+            // round per tick, sleeping the largest server-advised interval
+            // (never wider than the rate-limit feedback, §9.47(b)), racing
+            // the operator's shutdown signal.
+            let targets =
+                orchestraitor_daemon::poll_targets(&ingress_repos, "https://api.github.com");
+            let poll_shutdown = signal_rx.clone();
+            tokio::spawn(async move {
+                ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
+            });
+            Some(Arc::new(source))
+        } else {
+            None
+        };
     // The worker starter carries the SAME worker-side guardrail thresholds
     // the runner validates (from the loop config just built) — the daemon's
     // enforcement layers cannot drift from the foreground loop's (a PR #564
@@ -313,6 +359,7 @@ async fn watch_cycle() -> Result<ExitCode> {
             start_unix_secs,
             &invocation_id,
             previous_budget_day,
+            event_source.clone(),
         )
         .await
         .into_diagnostic()?;
@@ -586,4 +633,116 @@ fn primary_and_shards(
     shards.sort();
     files.extend(shards);
     Ok(files)
+}
+
+/// The §9.47(b) ingress poll loop (issue #504): one conditional-request
+/// round per tick over every target, sleeping the largest server-advised
+/// interval across the endpoints (the honored `X-Poll-Interval`, widened
+/// ONLY by rate-limit feedback — never beyond it, §9.47(b)). Runs for
+/// the daemon's lifetime; the operator's shutdown signal ends it.
+///
+/// Failures are per-endpoint and logged — a failed or rate-limited poll
+/// backs off on the advised interval and never retries in a tight loop;
+/// the §9.43 reconcile poll stays the completeness authority, so a
+/// missed event never loses work.
+async fn ingress_poll_loop(
+    poller: orchestraitor_daemon::EventPoller,
+    targets: Vec<orchestraitor_daemon::PollTarget>,
+    queue: std::sync::Arc<orchestraitor_daemon::IngressQueue>,
+    mut shutdown: tokio::sync::watch::Receiver<u64>,
+) {
+    // The observable `degraded` marker (§7.3): entered on overflow,
+    // cleared after the flood-free window. Transitions are logged once.
+    let mut degraded_logged = false;
+    loop {
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let poll_outcomes = match poller.poll_all(&targets, now_unix_secs).await {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                tracing::warn!("orcd watch: ingress poll round failed: {error}");
+                // The bounded fallback keeps the loop bounded (never a
+                // tight retry): the documented default cadence.
+                Vec::new()
+            }
+        };
+        let mut wait_secs = 0_u64;
+        for (target, outcome) in targets.iter().zip(poll_outcomes.iter()) {
+            match outcome {
+                Ok(poll_outcome) => {
+                    if poll_outcome.dropped > 0 {
+                        // §7.3: the queue dropped surplus — the degraded
+                        // marker is already recorded by the queue; surface
+                        // it in the log so the operator sees it.
+                        tracing::warn!(
+                            endpoint = %target.key,
+                            dropped = poll_outcome.dropped,
+                            "orcd watch: ingress queue flooded; surplus events \
+                             dropped (degraded)"
+                        );
+                    }
+                    wait_secs = wait_secs.max(poll_outcome.poll_after_secs);
+                }
+                Err(orchestraitor_daemon::ingress::poller::PollError::RateLimited {
+                    retry_after_secs,
+                }) => {
+                    // Rate-limit feedback (§9.43): the wait adapts —
+                    // never wider than the reset, never a silent retry.
+                    tracing::warn!(
+                        endpoint = %target.key,
+                        retry_after_secs,
+                        "orcd watch: ingress poll rate-limited; backing off"
+                    );
+                    wait_secs = wait_secs.max(*retry_after_secs);
+                }
+                Err(orchestraitor_daemon::ingress::poller::PollError::Failed) => {
+                    tracing::warn!(
+                        endpoint = %target.key,
+                        "orcd watch: ingress poll failed; retrying after the \
+                         advised interval"
+                    );
+                }
+            }
+        }
+        // The observable degraded marker: log the ENTER and CLEAR
+        // transitions once each (§7.3 — the marker is observable, never
+        // a silent drop).
+        let now_unix_secs_degraded = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let degraded_now = queue.degraded(now_unix_secs_degraded);
+        if degraded_now && !degraded_logged {
+            tracing::warn!(
+                "orcd watch: ingress queue DEGRADED (overflow); surplus \
+                 events are being dropped until the flood-free window \
+                 elapses"
+            );
+            degraded_logged = true;
+        } else if !degraded_now && degraded_logged {
+            tracing::info!(
+                "orcd watch: ingress queue degraded marker CLEARED after \
+                 the flood-free window"
+            );
+            degraded_logged = false;
+        }
+        // The stored per-endpoint intervals already include this round's
+        // feedback; the loop's wait is the largest across endpoints, at
+        // least the documented default.
+        let wait = std::time::Duration::from_secs(
+            wait_secs.max(orchestraitor_daemon::DEFAULT_POLL_AFTER_SECS),
+        );
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            changed = shutdown.changed() => {
+                // A shutdown signal — or a closed sender (the daemon is
+                // exiting) — ends the ingress loop at once. Returning
+                // (not looping) also keeps each later signal from
+                // triggering an extra immediate poll round (a gen-5
+                // review finding).
+                let _ = changed;
+                return;
+            }
+        }
+    }
 }

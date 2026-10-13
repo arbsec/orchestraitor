@@ -43,6 +43,14 @@ orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 # orchestraitor-worker (MIT OR Apache-2.0): the pinned guard set and the
 # bootstrap transport the watch mode's direct-path starter wires.
 orchestraitor-worker = { path = "../orchestraitor-worker" }
+# reqwest (MIT OR Apache-2.0): the §9.47(b) conditional-request poller's
+# HTTP client (issue #504); the same transport stack the board client
+# uses, already in the workspace lock.
+reqwest = { workspace = true }
+# parking_lot (MIT OR Apache-2.0): guard-returning mutexes for the
+# ingress queue's short critical sections — no poisoning boilerplate at
+# the call sites.
+parking_lot = { workspace = true }
 rusqlite = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -56,4 +64,14 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 tracing = { workspace = true }
 
 [dev-dependencies]
+# async-trait (MIT OR Apache-2.0): the test BoardAuth stub implements the
+# board crate's async trait.
+async-trait = "0.1"
+# hyper / hyper-util / http-body-util (MIT): the §21.3 fixture HTTP
+# server the ingress poller tests run against (no network in CI);
+# already in the workspace lock via the testkit/proxy crates.
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }

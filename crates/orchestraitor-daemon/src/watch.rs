@@ -64,6 +64,35 @@ pub const POLL_INTERVAL_CONFIG_KEY: &str = "watch.poll_interval_secs";
 /// kick-off condition enables (issue #505).
 pub const KICKOFF_CONFIG_KEY_PREFIX: &str = "watch.kickoff";
 
+/// The §9.22 layered configuration key prefix carrying the §9.47
+/// event-ingress settings (issue #504).
+pub const INGRESS_CONFIG_KEY_PREFIX: &str = "watch.ingress";
+
+/// Operator-configurable §9.47 event-ingress settings (issue #504).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressSettings {
+    /// Enable the conditional-request event poller (default OFF: the
+    /// shipped posture keeps the trigger set board/reconcile-derived
+    /// only — the operator opts in, consistent with the kick-off
+    /// conditions' #573 posture).
+    pub enabled: bool,
+    /// Bounded ingress-queue capacity (§7.3): sustained flooding drops
+    /// surplus and records `degraded` — never unbounded growth. A zero
+    /// capacity is rejected fail-closed.
+    pub queue_capacity: usize,
+}
+
+impl IngressSettings {
+    /// The built-in default: ingress disabled, documented queue bound.
+    #[must_use]
+    pub const fn builtin_defaults() -> Self {
+        Self {
+            enabled: false,
+            queue_capacity: crate::ingress::queue::DEFAULT_QUEUE_CAPACITY,
+        }
+    }
+}
+
 /// The built-in defaults TOML data for the `[watch]` block (§9.22.1:
 /// built-in defaults ship as TOML data, never as compile-time constants
 /// in business logic). Layered under `ConfigLayer::BuiltInDefaults`, so
@@ -78,6 +107,10 @@ unblocked_promotion = true
 slot_released = true
 budget_window_reset = true
 external_event = false
+
+[watch.ingress]
+enabled = false
+queue_capacity = 256
 ";
 
 /// Operator-configurable watch settings (spec §9.22 via §9.36).
@@ -92,6 +125,10 @@ pub struct WatchConfig {
     /// `[watch.kickoff]` layered block; absent keys inherit the built-in
     /// defaults.
     pub kickoff: orchestraitor_campaign::KickoffSettings,
+    /// The §9.47 event-ingress settings (issue #504): the poll fallback
+    /// runs when the operator enables it, feeding the bounded queue the
+    /// external-event kick-off condition drains.
+    pub ingress: IngressSettings,
 }
 
 impl WatchConfig {
@@ -105,24 +142,51 @@ impl WatchConfig {
         poll_interval_secs: u64,
         kickoff: orchestraitor_campaign::KickoffSettings,
     ) -> Result<Self, DaemonError> {
+        Self::with_ingress(
+            poll_interval_secs,
+            kickoff,
+            IngressSettings::builtin_defaults(),
+        )
+    }
+
+    /// Builds and validates the watch configuration with explicit
+    /// §9.47 event-ingress settings (issue #504). Fail-closed: a zero
+    /// interval is a runaway poll loop and a zero queue capacity makes
+    /// every push a drop — both are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] naming the rejected value.
+    pub fn with_ingress(
+        poll_interval_secs: u64,
+        kickoff: orchestraitor_campaign::KickoffSettings,
+        ingress: IngressSettings,
+    ) -> Result<Self, DaemonError> {
         if poll_interval_secs == 0 {
             return Err(DaemonError::WatchConfig(format!(
                 "{POLL_INTERVAL_CONFIG_KEY} must be at least 1 second (got 0)"
             )));
         }
+        if ingress.queue_capacity == 0 {
+            return Err(DaemonError::WatchConfig(format!(
+                "{INGRESS_CONFIG_KEY_PREFIX}.queue_capacity must be at least 1 (got 0)"
+            )));
+        }
         Ok(Self {
             poll_interval_secs,
             kickoff,
+            ingress,
         })
     }
 
     /// The documented fixed default cadence (§9.36) with the built-in
-    /// default kick-off enables.
+    /// default kick-off enables and ingress settings.
     #[must_use]
     pub const fn default_cadence() -> Self {
         Self {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             kickoff: orchestraitor_campaign::KickoffSettings::builtin_defaults(),
+            ingress: IngressSettings::builtin_defaults(),
         }
     }
 
@@ -147,13 +211,19 @@ impl WatchConfig {
                 DaemonError::WatchConfig(format!("{POLL_INTERVAL_CONFIG_KEY}: {error}"))
             })?;
         match configured {
-            Some(resolved_value) => {
-                Self::new(resolved_value.value, Self::resolve_kickoff(resolver)?)
-            }
-            None => Ok(Self {
-                poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
-                kickoff: Self::resolve_kickoff(resolver)?,
-            }),
+            Some(resolved_value) => Self::with_ingress(
+                resolved_value.value,
+                Self::resolve_kickoff(resolver)?,
+                Self::resolve_ingress(resolver)?,
+            ),
+            // Routed through the same constructor as the configured arm:
+            // the zero-capacity rejection must hold whether or not the
+            // cadence key is present (a gen-5 review finding).
+            None => Self::with_ingress(
+                DEFAULT_POLL_INTERVAL_SECS,
+                Self::resolve_kickoff(resolver)?,
+                Self::resolve_ingress(resolver)?,
+            ),
         }
     }
 
@@ -192,6 +262,34 @@ impl WatchConfig {
                 .budget_window_reset
                 .unwrap_or(defaults.budget_window_reset),
             external_event: block.external_event.unwrap_or(defaults.external_event),
+        })
+    }
+
+    /// Resolves the §9.47 event-ingress settings (issue #504) from the
+    /// layered `[watch.ingress]` block. Every absent key inherits the
+    /// built-in default (ingress disabled, capacity 256).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] when the layered config
+    /// cannot be resolved.
+    fn resolve_ingress(
+        resolver: &orchestraitor_core::config::ConfigResolver,
+    ) -> Result<IngressSettings, DaemonError> {
+        let merged = resolver.resolve_config().map_err(|error| {
+            DaemonError::WatchConfig(format!("{INGRESS_CONFIG_KEY_PREFIX}: {error}"))
+        })?;
+        let defaults = IngressSettings::builtin_defaults();
+        let Some(block) = merged
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.ingress.as_ref())
+        else {
+            return Ok(defaults);
+        };
+        Ok(IngressSettings {
+            enabled: block.enabled.unwrap_or(defaults.enabled),
+            queue_capacity: block.queue_capacity.unwrap_or(defaults.queue_capacity),
         })
     }
 }
@@ -866,6 +964,7 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     start_unix_secs: u64,
     invocation_id: &str,
     previous_budget_day: Option<u64>,
+    event_source: Option<std::sync::Arc<dyn orchestraitor_campaign::KickoffEventSource>>,
 ) -> Result<LoopSummary, DaemonError> {
     // §9.24.2 restart recovery BEFORE the first tick: running → orphaned.
     let recovered = runs
@@ -904,6 +1003,14 @@ pub async fn run_watch<P: BoardPoller + SetWatchInvocation, S: LoopWorkerStarter
     // pass after a day boundary observes the budget-window-reset kick-off
     // condition (issue #505, gen-4 review fix).
     .with_previous_budget_day(previous_budget_day);
+    // The §9.47 event source (issue #504): attached when the operator
+    // enabled the ingress; the gate consults it only when the
+    // external-event condition is ARMED, so a disarmed condition never
+    // drains the queue.
+    let runner = match event_source {
+        Some(source) => runner.with_event_source(source),
+        None => runner,
+    };
     let summary = runner
         .run(shutdown)
         .await

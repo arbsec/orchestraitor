@@ -72,4 +72,17 @@ pub enum DaemonError {
     /// The event store rejected a reconcile record.
     #[error("event store rejected a reconcile record: {0}")]
     EventStore(String),
+
+    /// The §9.47 ingress store (dedup table, `ETag` bookkeeping) failed.
+    #[error("ingress store at {path} failed: {reason}")]
+    IngressStore {
+        /// Store file path (or `<shared>` for the mutex guard).
+        path: String,
+        /// Log-safe failure reason.
+        reason: String,
+    },
+
+    /// The §9.47 ingress HTTP client could not be constructed.
+    #[error("ingress HTTP setup failed: {0}")]
+    IngressHttp(String),
 }
