@@ -1029,3 +1029,77 @@ async fn a_304_check_runs_sha_still_in_flight_is_not_pruned() {
     // `703:failure` check completion: two pending events.
     assert_eq!(queue.take().len(), 2);
 }
+
+/// Regression (review finding): a runs 304 restores the previous tracked
+/// set and does NOT treat the unavailable snapshot as an empty in-flight
+/// list — a quiet-SHA prune must not fire on a snapshot-less round.
+#[tokio::test(flavor = "current_thread")]
+async fn a_runs_304_restores_the_tracked_set_and_skips_quiet_pruning() {
+    let etag = "\"runs-snap\"";
+    let server = FixtureServer::start(vec![
+        // Round 1: 200 with beef34 in-flight -> tracked; checks baseline 200.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(704, "success"),
+            headers: vec![("ETag", "\"w1\"".to_string())],
+        },
+        // Round 2: runs 304 (no snapshot); checks 304.
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"w1\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        // Round 3: the tracked set SURVIVED the snapshot-less round —
+        // beef34's check-runs poll fires again (and delivers).
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"w1\"".to_string()),
+            status: 200,
+            body: check_runs_body(705, "failure"),
+            headers: vec![("ETag", "\"w2\"".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let mut third = lane.poll_repo(&target, 1_200).await.expect("round 3");
+    assert_eq!(
+        third.len(),
+        2,
+        "the tracked set survived the snapshot-less round: beef34 is polled again"
+    );
+    let checks = third.remove(1).expect("check-runs poll ok");
+    assert_eq!(
+        (checks.accepted, checks.duplicates),
+        (1, 0),
+        "the completion that arrived during the snapshot-less rounds is delivered"
+    );
+    assert_eq!(queue.take().len(), 2); // round-1 run 900 + this check 705
+}

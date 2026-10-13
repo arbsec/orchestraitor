@@ -355,7 +355,11 @@ impl CiLane {
         // ETag rides normally. `insert` returns true when the key was new
         // (this IS the first poll) — bypass exactly then.
         let bypass_etag = !self.runs_initialized.lock().contains(&target.runs_key);
-        let mut current_in_flight: Vec<String> = Vec::new();
+        // `Some(in_flight)` = this round supplied a valid runs snapshot
+        // (quiet-SHA pruning may apply); `None` = a 304/failure carried no
+        // snapshot (previous set restored; pruning must not treat an
+        // unavailable snapshot as an empty in-flight set).
+        let mut current_in_flight: Option<Vec<String>> = None;
         match self
             .poll_runs(target, previous.clone(), bypass_etag, now_secs)
             .await
@@ -383,20 +387,25 @@ impl CiLane {
         // answered 304 is dropped. The union-tracking design keeps a
         // completed SHA across exactly the rounds it can still produce
         // events; after one quiet round it stops costing a request.
+        // Every tracked SHA keeps its check-runs poll every round; but
+        // quiet-SHA pruning applies ONLY when this round supplied a valid
+        // runs snapshot: without one (runs 304/failure), a SHA absent from
+        // an empty list must never be treated as quiet — the previous set
+        // was restored and keeps its check-runs polls.
         let mut quiet = HashSet::new();
         for head_sha in &tracked_after_runs {
             match self.poll_check_runs(target, head_sha, now_secs).await {
                 Ok(outcome) => {
-                    let not_modified = self
-                        .lock_store()?
-                        .not_modified(&check_runs_key(&target.repo, head_sha))?;
-                    // Quiet = 304 AND the SHA is NOT in this round's
-                    // in-flight discovery (an in-flight run can still
-                    // produce completions after its runs finish; a 304
-                    // only prunes SHAs with nothing pending).
-                    let still_in_flight = current_in_flight.iter().any(|sha| sha == head_sha);
-                    if not_modified && !still_in_flight {
-                        quiet.insert(head_sha.clone());
+                    let quiet_eligible = current_in_flight
+                        .as_ref()
+                        .is_some_and(|in_flight| !in_flight.iter().any(|sha| sha == head_sha));
+                    if quiet_eligible {
+                        let not_modified = self
+                            .lock_store()?
+                            .not_modified(&check_runs_key(&target.repo, head_sha))?;
+                        if not_modified {
+                            quiet.insert(head_sha.clone());
+                        }
                     }
                     outcomes.push(Ok(outcome));
                 }
@@ -435,7 +444,7 @@ impl CiLane {
         previous_tracked: Vec<String>,
         bypass_etag: bool,
         now_secs: u64,
-    ) -> Result<(PollOutcome, Vec<String>), PollError> {
+    ) -> Result<(PollOutcome, Option<Vec<String>>), PollError> {
         let etag = if bypass_etag {
             None
         } else {
@@ -452,6 +461,12 @@ impl CiLane {
         if status.as_u16() == 304 {
             self.record_conditional(&target.runs_key, etag.as_deref(), poll_after, true)
                 .map_err(|_| PollError::Failed)?;
+            // A 304 carries NO snapshot: the caller must restore the
+            // previous tracked set (an empty in-flight list here must
+            // never read as "nothing is in flight") and skip quiet-SHA
+            // pruning for this round — `Option::None` in_flight signals
+            // exactly that.
+            self.set_tracked(target, previous_tracked.clone());
             return Ok((
                 PollOutcome {
                     accepted: 0,
@@ -459,7 +474,7 @@ impl CiLane {
                     dropped: 0,
                     poll_after_secs: poll_after,
                 },
-                Vec::new(),
+                None,
             ));
         }
         if let Some(wait) = rate_limit_wait(response.headers(), status, now_secs) {
@@ -521,7 +536,7 @@ impl CiLane {
         }
         union.truncate(MAX_TRACKED_HEAD_SHAS);
         self.set_tracked(target, union);
-        Ok((outcome, in_flight))
+        Ok((outcome, Some(in_flight)))
     }
 
     /// The conditional check-runs poll for one tracked head SHA. The
