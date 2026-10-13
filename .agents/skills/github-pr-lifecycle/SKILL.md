@@ -171,6 +171,14 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                    Replies to inline review comments go through `pr-thread-reply`
                    on the comment's thread — never as new main-thread comments
                    (owner directive 2026-10-07; see references/review-thread-reply.md).
+                   Body arguments across this skill's scripts (`--body <text>`,
+                   `-f body=<text>`) accept `@<path>` to load the body from a
+                   file; a value that is an existing file path without `@` is
+                   a typed error (issue #587 — never post a path string as
+                   content). `@<path>` resolves only inside trusted roots —
+                   the workspace and temp directories; anything else is a
+                   typed error before the file is read (agent-supplied
+                   arguments must not exfiltrate local files).
                    Each new commit INVALIDATES earlier review convergence — the next
                    review generation targets the CURRENT HEAD, not the prior diff.
                    This loop is AUTOMATIC: every review generation's findings are

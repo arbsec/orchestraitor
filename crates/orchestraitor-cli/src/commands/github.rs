@@ -1561,7 +1561,8 @@ fn git_fetch_authenticated(token: &str, owner: &str, repo: &str, what: &str) -> 
         "basic {}",
         base64_encode(format!("x-access-token:{token}").as_bytes())
     );
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args([
             "fetch",
             "--quiet",
@@ -1570,8 +1571,16 @@ fn git_fetch_authenticated(token: &str, owner: &str, repo: &str, what: &str) -> 
         ])
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", URL_PREFIX)
-        .env("GIT_CONFIG_VALUE_0", authorization)
-        .output();
+        .env("GIT_CONFIG_VALUE_0", authorization);
+    // Same ambient-location scrub as `git_output`: a hook-exported GIT_DIR or
+    // GIT_OBJECT_DIRECTORY must not redirect the fetch's object writes away
+    // from the intended repository (#553/#529 corruption class) — otherwise
+    // the fetched objects land in the hook's gitdir while the scrubbed
+    // rev-parse calls read the cwd repo and never see them.
+    for variable in AMBIENT_GIT_LOCATION_VARS {
+        command.env_remove(variable);
+    }
+    let output = command.output();
     matches!(output, Ok(out) if out.status.success())
 }
 
@@ -1887,18 +1896,31 @@ const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
 /// tree-equality gate compares against that same (wrong) ref, so it cannot
 /// catch the corruption. When the caller pins the tree it intends to land
 /// (`--expect-tree`), ANY divergence refuses the landing before anything is
-/// mutated. An empty/whitespace pin is treated as absent.
+/// mutated. A missing flag (`None`) means the caller opted out; an explicitly
+/// provided EMPTY or whitespace-only pin is a misuse (e.g. a failed
+/// command substitution) and is a typed error — silently treating it as
+/// absent would disable the fail-closed gate (#529 intent; local review,
+/// head 4b26b0e).
 ///
 /// # Errors
-/// Typed diagnostic naming both trees when the gate refuses.
+/// Typed diagnostic naming both trees when the gate refuses, or a typed
+/// error when the pin is present but blank.
 fn verify_expect_tree(
     local_tree: &str,
     expect_tree: Option<&str>,
     local_branch: &str,
 ) -> Result<()> {
-    let Some(expect_tree) = expect_tree.map(str::trim).filter(|tree| !tree.is_empty()) else {
+    let Some(expect_tree) = expect_tree else {
         return Ok(());
     };
+    let expect_tree = expect_tree.trim();
+    if expect_tree.is_empty() {
+        bail!(
+            "expect-tree gate: `--expect-tree` was passed but is empty/whitespace — a failed \
+             command substitution would silently disable the repo-identity gate (#529). Pass \
+             the intended tree OID explicitly, or omit the flag to opt out. Nothing was mutated."
+        );
+    }
     if expect_tree.eq_ignore_ascii_case(local_tree) {
         return Ok(());
     }
@@ -3261,15 +3283,27 @@ mod tests {
     }
 
     #[test]
-    fn expect_tree_gate_treats_absent_or_blank_pin_as_unchecked() {
+    fn expect_tree_gate_treats_absent_pin_as_unchecked_but_blank_pin_as_error() {
         verify_expect_tree("0123456789abcdef0123456789abcdef01234567", None, "feature")
             .expect("no pin must pass the gate (back-compat)");
-        verify_expect_tree(
-            "0123456789abcdef0123456789abcdef01234567",
-            Some("   "),
-            "feature",
-        )
-        .expect("a blank pin is treated as absent");
+        // A PRESENT-but-blank pin is a misuse (e.g. a failed command
+        // substitution): it must be a typed error, never a silent
+        // opt-out — that would disable the fail-closed gate (#529 intent;
+        // local review, head 4b26b0e).
+        let error = format!(
+            "{}",
+            verify_expect_tree(
+                "0123456789abcdef0123456789abcdef01234567",
+                Some("   "),
+                "feature"
+            )
+            .expect_err("a blank pin must be a typed error, not a silent opt-out")
+        );
+        assert!(
+            error.contains("empty/whitespace"),
+            "blank-pin error must name the misuse: {error}"
+        );
+        assert!(error.contains("Nothing was mutated"), "{error}");
     }
 
     #[test]

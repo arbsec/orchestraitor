@@ -49,6 +49,26 @@ if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ]; then
   exit "$ORC_ERR_CONFIG"
 fi
 
+# Body-flow validation (issue #587): `edit --body <value>`/`--body-file <path>`
+# pass through to gh; resolve `@file` expansion and refuse path-shaped values
+# before the flag ever reaches gh — never post a path string as PR content.
+if [ "$ACTION" = "edit" ]; then
+  index=0
+  while [ "$index" -lt "${#REST[@]}" ]; do
+    case "${REST[$index]}" in
+      --body)
+        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+        REST[$((index + 1))]="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"; index=$((index + 2)) ;;
+      --body=*) REST[$index]="--body=$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")"; index=$((index + 1)) ;;
+      --body-file)
+        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+        orc_lib_require_body_file "--body-file" "${REST[$((index + 1))]}"; index=$((index + 2)) ;;
+      --body-file=*) orc_lib_require_body_file "--body-file" "${REST[$index]#--body-file=}"; index=$((index + 1)) ;;
+      *) index=$((index + 1)) ;;
+    esac
+  done
+fi
+
 REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 [ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")

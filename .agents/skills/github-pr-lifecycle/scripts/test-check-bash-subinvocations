@@ -93,6 +93,11 @@ expect_flagged "braced-quote-separated-direct-exec" \
 expect_flagged "exec-after-nested-substitution" \
   'echo "$(VAR=$(printf ok) "$SCRIPT_DIR/pr-checks")"'
 
+# 8. exec hidden inside a BACKTICK substitution wrapped by an exempt command
+#    (CodeRabbit review round on f11db93c).
+expect_flagged "backtick-wrapped-direct-exec" \
+  'echo "`"$SCRIPT_DIR/pr-checks" \"$PR\"`"'
+
 # --- CLEAN CASES: must remain unflagged (exit 0) ---
 
 # 4. bash-prefixed invocation (the required form).

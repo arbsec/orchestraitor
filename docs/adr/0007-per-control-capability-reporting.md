@@ -54,7 +54,12 @@ Concretely:
 - The `CapabilityReport` (`capability.rs:179`) embeds the
   `required_capabilities` vector verbatim. The daemon's `health` JSON-RPC
   response (`crates/orchestraitor-daemon/src/rpc.rs:55`) surfaces the report
-  to operators.
+  to operators. Scope note: `health` reports the DAEMON STARTUP probe state
+  — what the daemon observed about the machine when it started. It is
+  distinct from per-run evidence: the bootstrap-worker preflight's
+  `WorkerPreflight` (`orchestraitor-arb-client/src/mediation.rs`) records the
+  controls ACTUALLY applied to a specific worker run, and the two can differ
+  (the daemon and the worker report different filesystem-isolation states).
 - The bootstrap-worker preflight's `WorkerPreflight`
   (`orchestraitor-arb-client/src/mediation.rs`) carries the same shape:
   a `controls` matrix and a `degraded_controls` vector, so a run-state
