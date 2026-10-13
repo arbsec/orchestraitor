@@ -366,8 +366,39 @@ impl CiLane {
             Err(error) => outcomes.push(Err(error)),
         }
         let tracked_after_runs = self.take_tracked(target);
+        // SHAs whose check-runs endpoint answered 304 this round: no new
+        // completions. A 304 SHA that also has no in-flight runs is QUIET —
+        // dropped from the tracked set (and its bookkeeping pruned), so a
+        // completed SHA stops costing a request per round instead of
+        // lingering until cap eviction.
+        // Quiet-SHA pruning (a review fix): a SHA whose check-runs endpoint
+        // answered 304 this round AND that this round's runs poll did NOT
+        // re-discover as in-flight has gone quiet — no completions can be
+        // pending on it. `tracked_after_runs` is the post-union set; a SHA
+        // that is in it only because of `previous` (not re-discovered) and
+        // answered 304 is dropped. The union-tracking design keeps a
+        // completed SHA across exactly the rounds it can still produce
+        // events; after one quiet round it stops costing a request.
+        let mut quiet = HashSet::new();
         for head_sha in &tracked_after_runs {
-            outcomes.push(self.poll_check_runs(target, head_sha, now_secs).await);
+            match self.poll_check_runs(target, head_sha, now_secs).await {
+                Ok(outcome) => {
+                    let not_modified = self
+                        .lock_store()?
+                        .not_modified(&check_runs_key(&target.repo, head_sha))?;
+                    let rediscovered_in_flight = self
+                        .tracked
+                        .lock()
+                        .get(&target.repo)
+                        .is_some_and(|shas| shas.contains(head_sha))
+                        && !previous.contains(head_sha);
+                    if not_modified && !rediscovered_in_flight {
+                        quiet.insert(head_sha.clone());
+                    }
+                    outcomes.push(Ok(outcome));
+                }
+                Err(error) => outcomes.push(Err(error)),
+            }
         }
         // Prune per-SHA bookkeeping for SHAs the lane no longer tracks.
         // The prefix is repository-scoped: `check-runs|<repo>/` matches
@@ -377,10 +408,17 @@ impl CiLane {
         // never emit).
         let keep: Vec<String> = tracked_after_runs
             .iter()
+            .filter(|sha| !quiet.contains(*sha))
             .map(|sha| check_runs_key(&target.repo, sha))
             .collect();
         let prune_prefix = format!("check-runs|{}/", target.repo);
         self.lock_store()?.prune_endpoints(&prune_prefix, &keep)?;
+        if !quiet.is_empty() {
+            let mut tracked = self.tracked.lock();
+            if let Some(shas) = tracked.get_mut(&target.repo) {
+                shas.retain(|sha| !quiet.contains(sha));
+            }
+        }
         Ok(outcomes)
     }
 

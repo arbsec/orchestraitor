@@ -704,10 +704,9 @@ async fn a_sha_whose_run_completes_stays_tracked() {
 /// in-flight SHAs are deduplicated BEFORE the 16-SHA cap.
 #[tokio::test(flavor = "current_thread")]
 async fn duplicate_in_flight_shas_do_not_spend_the_cap() {
-    // 20 rows, all in-flight, but only 17 distinct SHAs: two SHAs repeat
-    // 2x and 3x. The cap is 16 — with dedup-before-cap all 17 distinct
-    // SHAs... no: cap keeps 16 of the 17 distinct. Assert exactly 16
-    // distinct SHAs are tracked (deduped), not 16 rows-worth with dupes.
+    // 20 rows, all in-flight, but only 17 distinct SHAs. Dedup-before-cap
+    // keeps 16 of the 17 DISTINCT SHAs tracked (never 16 rows-worth with
+    // duplicates).
     let mut runs = Vec::new();
     for i in 0..20u64 {
         let sha = format!("sha{:02}", i % 17); // 17 distinct, 20 rows

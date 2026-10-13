@@ -407,6 +407,32 @@ impl IngressStore {
         Ok(stored.flatten())
     }
 
+    /// Whether this endpoint's LAST response was a `304 Not Modified`
+    /// (informational bookkeeping; the CI lane's quiet-SHA pruning reads
+    /// it: a 304 check-runs endpoint has no new completions pending).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn not_modified(&self, endpoint: &str) -> Result<bool, DaemonError> {
+        let stored: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT not_modified FROM ingress_etags WHERE endpoint = ?1",
+                [endpoint],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(DaemonError::IngressStore {
+                    path: self.path_label.clone(),
+                    reason: format!("not-modified read failed: {other}"),
+                }),
+            })?;
+        Ok(stored.is_some_and(|flag| flag == 1))
+    }
+
     /// Reads the server-advised minimum wait (seconds) before the next
     /// poll of one endpoint. Zero when no response advised one yet.
     ///
