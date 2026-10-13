@@ -104,12 +104,6 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.48.7 | `20-harness-worker.md#9487-classification-annotations-and-the-arbitraitor-boundary` |
 | §9.48.8 | `20-harness-worker.md#9488-persistence-agent-reasoning-events` |
 | §9.48.9 | `20-harness-worker.md#9489-implementation-notes-declared-tools-surface` |
-| §9.49 | `20-harness-worker.md#949-typed-provider-options-and-refusal` |
-| §9.49.1 | `20-harness-worker.md#9491-typed-options-surface` |
-| §9.49.2 | `20-harness-worker.md#9492-refusal-semantics-optionrefusal-and-the-dry-run-check` |
-| §9.49.3 | `20-harness-worker.md#9493-retryable-error-classification` |
-| §9.49.4 | `20-harness-worker.md#9494-per-model-catalog-rules-the-third-refusal-layer` |
-| §9.49.5 | `20-harness-worker.md#9495-roadmap-named-follow-on-sections` |
 | §9.22 | `50-contracts-data.md#922-customization-and-configuration` |
 | §9.22.1 | `50-contracts-data.md#9221-what-must-be-configurable-never-hardcoded` |
 | §9.22.2 | `50-contracts-data.md#9222-layered-configuration-precedence` |
@@ -330,7 +324,7 @@ file and anchor. New references should cite the target document directly, for ex
 | --- | --- |
 | `00-overview.md` | Executive summary, product thesis and identity, goals and non-goals, adversarial assessment, existing landscape, research sources (§1-§5, §26). |
 | `10-orchestrator.md` | Orchestration and delivery: task/session lifecycle, principal identity, retry and failure semantics, resource governance, spec-driven autonomous delivery, error taxonomy (§9.24-§9.27, §9.33, §9.34). |
-| `20-harness-worker.md` | Harness and worker surfaces: core daemon, TUI/GUI, workspace and Git controller, filesystem transactions, context compiler, project initialization, platform parity, typed provider options and refusal, agent integration modes, adapters, IDE, plugins, user workflows (§9.1-§9.5, §9.7, §9.15-§9.21, §9.32, §9.49, §10, §11, §12, §15, appendices A/D/E). |
+| `20-harness-worker.md` | Harness and worker surfaces: core daemon, TUI/GUI, workspace and Git controller, filesystem transactions, context compiler, project initialization, platform parity, agent integration modes, adapters, IDE, plugins, user workflows (§9.1-§9.5, §9.7, §9.15-§9.18, §9.20-§9.21, §9.32, §10, §11, §12, §15, appendices A/D/E). |
 | `30-model-routing.md` | Model routing and providers: agent catalog and domain routing, cost ledger, data-governance routing, provider capability verification, conformance and regression evaluation, provider transport, model discovery (§9.19, §9.28-§9.31, §10.2-§10.5, appendix B). |
 | `40-arbitraitor-integration.md` | Security: ownership invariant, system principles, threat model, trust boundaries, Arbitraitor sandbox/policy/approval/command/package/network/secret/quarantine integration, authentication, security modes, ownership plan (§2.2, §6-§8, §9.6, §9.8-§9.14, §9.23, §14, §16, appendix C). |
 | `50-contracts-data.md` | Contracts and data: configuration, performance budgets, daemon API and protocol, data model, storage, observability, quality and CI (§9.22, §13, §17-§21, appendix F). |
