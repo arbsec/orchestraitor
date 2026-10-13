@@ -747,8 +747,8 @@ Each tool is enabled by a `[tools.web_search]` / `[tools.web_fetch]` block in th
 ```toml
 [tools.web_search]                     # absent by default
 engines = []                           # ILLUSTRATIVE ONLY: empty = typed startup error
-                                       # (no engine ships in v1, §9.19.3; "kagi" is the
-                                       # first candidate once mediated-POST is ruled in, §9.19.6)
+                                       # (no engine ships until the mediated egress +
+                                       # brokered-credential capabilities exist, §9.19.3/§9.19.6)
 max_results = 5                        # post-merge cap; hard maximum 10
 max_content_tokens = 2_000             # per-hit token cap
 max_total_tokens = 8_000               # per-call budget across hits
