@@ -19,7 +19,13 @@ if [ -z "$ISSUE" ]; then
   exit "$ORC_ERR_CONFIG"
 fi
 
-REASON="${ORC_LIB_EXTRA_ARGS[1]:-released by agent}"
+if [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ]; then
+  # Only a user-supplied reason goes through body_arg; the default must not
+  # trip the existing-file guard if a file named "released by agent" exists.
+  REASON="$(orc_lib_body_arg "release reason" "${ORC_LIB_EXTRA_ARGS[1]}")"
+else
+  REASON="released by agent"
+fi
 
 orc_lib_require_gh_scope "project"
 REPO="$(orc_lib_resolve_repo)"
