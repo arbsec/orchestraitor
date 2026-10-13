@@ -433,4 +433,56 @@ impl IngressStore {
             .and_then(|secs| u64::try_from(secs).ok())
             .unwrap_or(0))
     }
+
+    /// Deletes per-endpoint bookkeeping rows whose key starts with
+    /// `prefix` and is NOT in `keep`: the CI lane's pruning of tracked
+    /// head SHAs that stopped being polled (their runs completed and
+    /// the check-runs endpoint went quiet). The delivery keys these
+    /// rows' polls recorded are NOT touched — the 30-day dedup window
+    /// is ingress-wide, independent of what is currently tracked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressStore`] on sqlite failure.
+    pub fn prune_endpoints(&self, prefix: &str, keep: &[String]) -> Result<(), DaemonError> {
+        let survivors: Vec<String> = self
+            .all_endpoints()?
+            .into_iter()
+            .filter(|endpoint| endpoint.starts_with(prefix) && !keep.contains(endpoint))
+            .collect();
+        for endpoint in survivors {
+            self.conn
+                .execute("DELETE FROM ingress_etags WHERE endpoint = ?1", [&endpoint])
+                .map_err(|error| DaemonError::IngressStore {
+                    path: self.path_label.clone(),
+                    reason: format!("endpoint prune failed: {error}"),
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Every endpoint key currently in the bookkeeping table.
+    fn all_endpoints(&self) -> Result<Vec<String>, DaemonError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT endpoint FROM ingress_etags")
+            .map_err(|error| DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: format!("endpoint scan prepare failed: {error}"),
+            })?;
+        let rows = stmt
+            .query_map([], |row| row.get::<usize, String>(0))
+            .map_err(|error| DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: format!("endpoint scan failed: {error}"),
+            })?;
+        let mut endpoints = Vec::new();
+        for row in rows {
+            endpoints.push(row.map_err(|error| DaemonError::IngressStore {
+                path: self.path_label.clone(),
+                reason: format!("endpoint scan row failed: {error}"),
+            })?);
+        }
+        Ok(endpoints)
+    }
 }

@@ -135,18 +135,20 @@ second kick-off.
 **CI completions lane.** The repository events feed carries no CI
 completions (no `CheckRunEvent`, no `WorkflowRunEvent`), so a second
 conditional poll lane covers them. The daemon polls
-`GET /repos/{owner}/{repo}/commits/{sha}/check-runs` for each head SHA
-it actively tracks — head SHAs of the open agent PRs and in-flight
-tasks waiting on CI that the reconcile poll already reads — plus
 `GET /repos/{owner}/{repo}/actions/runs` (filtered to
-`event=pull_request` workflow runs) per repository, each with its own
-stored `ETag`, the same 304/`X-Poll-Interval`/rate-limit cadence rules,
-and the same 30-day delivery-key dedup (`check-run-completed` keys on
-the check-run id + head SHA; `workflow-run-completed` keys on the run
-id + attempt + head SHA). A SHA not tracked by any open agent PR or
-CI-waiting task is never polled, so the lane's cost stays proportional
-to active work. CI state the lane misses still arrives on the next
-reconcile pass — the lane is acceleration, never a trigger authority.
+`pull_request`-triggered runs) per repository — each completed run is
+an event keyed on run id + attempt + conclusion — and
+`GET /repos/{owner}/{repo}/commits/{sha}/check-runs` for each head SHA
+it actively tracks: every in-flight `pull_request`-triggered run
+carries the head SHA the daemon is waiting on, discovered from the same
+runs response, bounded (at most 16 tracked SHAs per repository) and
+pruned once its CI goes quiet. Check-run completions key on the
+check-run id + conclusion; a conclusion transition is a new delivery —
+the transition is exactly the signal — while a repeated poll of an
+unchanged run deduplicates inside the 30-day window. The lane shares
+the events lane's ETag store, dedup table, bounded queue, and cadence
+rules; CI state it misses still arrives on the next reconcile pass —
+the lane is acceleration, never a trigger authority.
 
 The ingress queue is bounded: sustained flooding drops surplus events
 and records the `degraded` marker (surfaced in the log; §7.3 — the bound
