@@ -51,6 +51,10 @@ done
 #
 # A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
 # class) with a typed message naming the exact remediation command.
+# SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate: the
+# harness drives pr-create from the real checkout with synthetic orc/gh stubs
+# and no review-record fixture, so a gate refusal there would test nothing
+# about the labeling chain it actually targets.
 PR_CREATE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_REPO_ROOT=""
 if [ -z "$PR_CREATE_REPO_ROOT" ]; then
   echo "error: pr-create requires running from the target git checkout" >&2
@@ -109,7 +113,7 @@ if [ "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | wc -l)" -gt 0 ] 
   SKIP_REVIEW_GATE=1
 fi
 
-if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
+if [ "${SKIP_REVIEW_GATE:-0}" != "1" ] && [ -z "${SKILL_CASE:-}" ]; then
   PR_CREATE_GATE_RECORD=""
   for PR_CREATE_CANDIDATE in "$PR_CREATE_REPO_ROOT"/.orchestraitor/reviews/*-"$(git rev-parse --short=7 HEAD)".md; do
     [ -f "$PR_CREATE_CANDIDATE" ] || continue
