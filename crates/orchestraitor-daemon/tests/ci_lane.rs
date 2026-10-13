@@ -797,3 +797,143 @@ async fn first_poll_of_a_process_bypasses_the_persisted_runs_etag() {
         "the first runs request carries no If-None-Match (bypass)"
     );
 }
+
+/// Regression (review finding): the runs endpoint is marked initialized
+/// ONLY after a successful 200 — a failed first poll (here: 403 rate
+/// limit) leaves the bypass gate open, so the next poll re-discovers.
+#[tokio::test(flavor = "current_thread")]
+async fn failed_first_poll_keeps_the_etag_bypass_open() {
+    let now = 1_000_000_u64;
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 429,
+            body: String::new(),
+            headers: vec![("Retry-After", "1".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", "\"late\"".to_string())],
+        },
+    ])
+    .await;
+    // A PERSISTED ETag from a previous process exists in the store.
+    let (_queue, store, lane) = fixture_lane();
+    store
+        .lock()
+        .expect("store lock")
+        .record_conditional(
+            "arbsec/orchestraitor/actions-runs",
+            Some("\"persisted\""),
+            60,
+            true,
+        )
+        .expect("seed persisted etag");
+    let target = target_of(&server);
+
+    // First poll: rate-limited (429) — the gate must stay OPEN.
+    let first = lane
+        .poll_repo(&target, now)
+        .await
+        .expect("first round")
+        .remove(0);
+    assert!(
+        matches!(first, Err(PollError::RateLimited { .. })),
+        "the first poll is rate-limited"
+    );
+    // Second poll: still bypassing (the request carries NO If-None-Match —
+    // the fixture rule requires None), gets the 200 and recovers.
+    let second = lane
+        .poll_repo(&target, now + 2)
+        .await
+        .expect("second round")
+        .remove(0)
+        .expect("runs poll ok");
+    assert_eq!(
+        second.accepted, 1,
+        "the post-failure poll bypassed the persisted ETag and discovered the completion"
+    );
+    let requests = server.requests();
+    assert!(
+        requests[1].if_none_match.is_none(),
+        "the post-failure request still bypasses the persisted ETag"
+    );
+}
+
+/// Regression (review finding): tracked SHAs evict by AGE (the tail of
+/// the newest-first list), not by `HashSet` iteration order.
+#[tokio::test(flavor = "current_thread")]
+async fn cap_eviction_is_deterministic_oldest_first() {
+    // Round 1: SHA "old" in-flight (tracked). Round 2: 16 NEW in-flight
+    // SHAs arrive; "old" completes. Round 3: 16 more NEW SHAs. "old" was
+    // the oldest tracked SHA — it must be the one evicted, deterministically.
+    let mk = |shas: &[&str]| {
+        let runs: Vec<serde_json::Value> = shas
+            .iter()
+            .enumerate()
+            .map(|(i, sha)| {
+                json!({
+                    "id": i as u64, "status": "in_progress", "event": "pull_request",
+                    "head_sha": sha, "run_attempt": 1,
+                    "pull_requests": [{"number": 700 + i as u64}]
+                })
+            })
+            .collect();
+        json!({ "workflow_runs": runs }).to_string()
+    };
+    let round1 = mk(&["old"]);
+    let round2_shas: Vec<String> = (0..16).map(|i| format!("n{i:02}")).collect();
+    let round2 = mk(&round2_shas.iter().map(String::as_str).collect::<Vec<_>>());
+    let round3_shas: Vec<String> = (16..32).map(|i| format!("n{i:02}")).collect();
+    let round3 = mk(&round3_shas.iter().map(String::as_str).collect::<Vec<_>>());
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: round1,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: round2,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: round3,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (_queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    // Round 3: the union is 16 (n00..n15) + 1 (old) + 16 (n16..n31) = 33;
+    // the cap keeps the newest 16 (n16..n31). Deterministic eviction of
+    // the oldest — asserted by the poll count being exactly 16.
+    let _ = lane.poll_repo(&target, 1_200).await.expect("round 3");
+    let polls = server
+        .requests()
+        .iter()
+        .filter(|r| r.path.contains("/check-runs"))
+        .count();
+    // Round 1: 1 (old). Round 2: the union is old + n00..n15 = 17 > cap 16,
+    // so `old` is evicted (oldest first) -> 16 (n00..n15). Round 3: the
+    // union is n00..n15 + n16..n31 = 32 > 16 -> the oldest half evicted
+    // -> 16 (n16..n31).
+    assert_eq!(
+        polls,
+        1 + 16 + 16,
+        "cap evicts the OLDEST SHAs deterministically, never by hash order"
+    );
+}

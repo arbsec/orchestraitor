@@ -267,13 +267,14 @@ pub struct CiLane {
     store: Arc<std::sync::Mutex<IngressStore>>,
     queue: Arc<IngressQueue>,
     /// Repository runs endpoints this process has completed its first
-    /// (ETag-bypassing) runs fetch for — after that, the persisted `ETag`
-    /// rides normally.
+    /// successful (ETag-bypassing) runs fetch for — after that, the
+    /// persisted `ETag` rides normally.
     runs_initialized: Mutex<HashSet<String>>,
-    /// Per-repository tracked head SHAs: the union of the in-flight run
-    /// SHAs from the last runs response and the previously tracked SHAs
-    /// (kept until the cap evicts them).
-    tracked: Mutex<HashMap<String, HashSet<String>>>,
+    /// Per-repository tracked head SHAs, newest-first: the union of the
+    /// in-flight run SHAs from the last runs response and the previously
+    /// tracked SHAs (a SHA stays tracked until the cap evicts it, oldest
+    /// evicted first).
+    tracked: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl CiLane {
@@ -353,20 +354,15 @@ impl CiLane {
         // ETag (a 200 is the tracked-set source of truth); afterwards the
         // ETag rides normally. `insert` returns true when the key was new
         // (this IS the first poll) — bypass exactly then.
-        let bypass_etag = self.runs_initialized.lock().insert(target.runs_key.clone());
+        let bypass_etag = !self.runs_initialized.lock().contains(&target.runs_key);
         match self
-            .poll_runs(
-                target,
-                previous.iter().cloned().collect(),
-                bypass_etag,
-                now_secs,
-            )
+            .poll_runs(target, previous.clone(), bypass_etag, now_secs)
             .await
         {
             Ok(outcome) => outcomes.push(Ok(outcome)),
             Err(error) => {
                 outcomes.push(Err(error));
-                self.set_tracked(target, previous.iter().cloned().collect());
+                self.set_tracked(target, previous.clone());
             }
         }
         let tracked_after_runs = self.take_tracked(target);
@@ -395,7 +391,7 @@ impl CiLane {
     async fn poll_runs(
         &self,
         target: &CiRepoTarget,
-        previous_tracked: HashSet<String>,
+        previous_tracked: Vec<String>,
         bypass_etag: bool,
         now_secs: u64,
     ) -> Result<PollOutcome, PollError> {
@@ -461,13 +457,18 @@ impl CiLane {
         let outcome = self.process_events(&derived, now_secs)?;
         self.record_conditional(&target.runs_key, new_etag.as_deref(), poll_after, false)
             .map_err(|_| PollError::Failed)?;
+        // Initialized ONLY after a successful 200 round trip (a CodeRabbit
+        // review fix): a failed first poll (transport, 5xx, rate limit,
+        // parse) leaves the gate open, so the NEXT poll still bypasses the
+        // persisted ETag and re-discovers the tracked set.
+        self.runs_initialized.lock().insert(target.runs_key.clone());
         // The tracked set is the UNION of the previously tracked SHAs and
-        // the newly in-flight SHAs: a SHA whose last workflow run just
-        // completed still has check runs that may complete after the run
-        // (third-party checks included) — it stays tracked until its
-        // check-runs endpoint answers 304 quiet. The cap applies to the
-        // union (newest-first: in-flight SHAs first, then previously
-        // tracked), so a flood cannot grow the fan-out unboundedly.
+        // the newly in-flight SHAs, ordered newest-first: a SHA whose last
+        // workflow run just completed still has check runs that may
+        // complete after the run (third-party checks included). The cap
+        // applies to the union by EVICTING THE OLDEST (the tail) — never
+        // by HashSet iteration order — so eviction order is deterministic
+        // and a freshly-completed SHA survives over stale ones.
         let mut union = in_flight.clone();
         for sha in previous_tracked {
             if !union.contains(&sha) {
@@ -666,7 +667,7 @@ impl CiLane {
             .record_conditional(key, etag, poll_after_secs, not_modified)
     }
 
-    fn take_tracked(&self, target: &CiRepoTarget) -> HashSet<String> {
+    fn take_tracked(&self, target: &CiRepoTarget) -> Vec<String> {
         self.tracked
             .lock()
             .get(&target.repo)
@@ -675,9 +676,7 @@ impl CiLane {
     }
 
     fn set_tracked(&self, target: &CiRepoTarget, shas: Vec<String>) {
-        self.tracked
-            .lock()
-            .insert(target.repo.clone(), shas.into_iter().collect());
+        self.tracked.lock().insert(target.repo.clone(), shas);
     }
 
     fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, IngressStore>, DaemonError> {
