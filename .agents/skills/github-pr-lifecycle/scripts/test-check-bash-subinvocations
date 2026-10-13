@@ -70,6 +70,11 @@ expect_flagged "cp-then-&&-direct-exec" \
 expect_flagged "direct-exec-then-echo" \
   'OUT=$("$SCRIPT_DIR/pr-checks" "$PR" 2>/dev/null) && echo "$OUT"'
 
+# 4. braced `${SCRIPT_DIR}` variable form with a direct exec (CodeRabbit local
+#    review, head 8e85f52: the initial grep only matched the unbraced form).
+expect_flagged "braced-direct-exec" \
+  'OUT=$("${SCRIPT_DIR}/pr-checks" "$PR" 2>/dev/null) && echo "$OUT"'
+
 # --- CLEAN CASES: must remain unflagged (exit 0) ---
 
 # 4. bash-prefixed invocation (the required form).
@@ -92,6 +97,13 @@ expect_clean "echo-usage-hint" \
 #    (mixed line stays clean because the invocation itself is guarded).
 expect_clean "echo-then-bash-invocation" \
   'echo "running checks" >&2; OUT="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --json)"'
+
+# 9. braced form, clean shapes: `source` of the lib and a bash-prefixed
+#    invocation written with `${SCRIPT_DIR}`.
+expect_clean "braced-source-of-lib" \
+  'source "${SCRIPT_DIR}/_lib.sh"'
+expect_clean "braced-bash-prefixed-invocation" \
+  'OUT="$(bash "${SCRIPT_DIR}/pr-checks" "$PR" --json)" || exit 1'
 
 echo
 echo "check-bash-subinvocations regression: $pass passed, $fail failed"

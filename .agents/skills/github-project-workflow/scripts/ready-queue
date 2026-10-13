@@ -64,7 +64,7 @@ fi
 # read Project v2 field values yet.
 MVP_LABEL="${ORC_MVP_LABEL:-MVP}"
 
-JQ_FILTER="${BASH_SOURCE[0]%/*}/ready-queue.jq"
+JQ_FILTER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ready-queue.jq"
 
 FILTERED="$(echo "$ISSUES_JSON" | jq --arg mvp "$MVP_LABEL" --argjson service "$SERVICE_JSON" -f "$JQ_FILTER")"
 

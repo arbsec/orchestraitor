@@ -18,7 +18,7 @@ while IFS= read -r line; do
   echo "direct exec of sibling script (must be \`bash \"$SCRIPT_DIR/<script>\"\`):"
   echo "  $line"
   fail=1
-done < <(grep -rn '\$SCRIPT_DIR/[a-z_-]' \
+done < <(grep -rEn '\$\{?SCRIPT_DIR\}?/[a-z_-]' \
            "$ROOT/github-pr-lifecycle/scripts" "$ROOT/github-project-workflow/scripts" \
          | grep -v 'scripts/check-bash-subinvocations' \
          | grep -v 'scripts/test-check-bash-subinvocations' \
@@ -29,9 +29,10 @@ done < <(grep -rn '\$SCRIPT_DIR/[a-z_-]' \
              #   - is empty, or
              #   - starts with `source`/`cp`/`echo` (not script invocations:
              #     sourcing the shared lib, fixture copies, usage hints), or
-             #   - contains no `$SCRIPT_DIR/` reference at all, or
-             #   - contains only `$SCRIPT_DIR/_lib.sh` references (the
-             #     shared library is sourced/copied, never executed, and
+             #   - contains no `$SCRIPT_DIR/` reference at all (either the
+             #     `$SCRIPT_DIR/` or the braced `${SCRIPT_DIR}/` form), or
+             #   - contains only `_lib.sh` references (the shared library
+             #     is sourced/copied, never executed, and
              #     `bash "$SCRIPT_DIR/_lib.sh"` is not meaningful), or
              #   - contains a `bash "...$SCRIPT_DIR/..."` invocation (the
              #     required form).
@@ -55,18 +56,17 @@ done < <(grep -rn '\$SCRIPT_DIR/[a-z_-]' \
                case "$seg" in
                  source\ *|source|cp\ *|cp|echo\ *|echo) continue ;;
                esac
-               # Strip bash-prefixed invocations; a remaining $SCRIPT_DIR/
-               # reference in the segment is a direct exec.
+               # Strip bash-prefixed invocations (both variable forms); a
+               # remaining SCRIPT_DIR reference in the segment is a direct
+               # exec.
                seg_wo_bash="$(printf '%s\n' "$seg" |
-                 sed -E 's/bash "\$\{?SCRIPT_DIR\}?\/[a-z_.-]+/\$(ORC_BASH_GUARD)/g')"
-               seg_wo_bash="${seg_wo_bash//\$\(ORC_BASH_GUARD\)/}"
-               if printf '%s' "$seg_wo_bash" | grep -q '\$SCRIPT_DIR/_lib\.sh'; then
-                 # only-lib references remain? strip them and re-check
-                 seg_lib_stripped="${seg_wo_bash//\$SCRIPT_DIR\/_lib.sh/}"
-                 if printf '%s' "$seg_lib_stripped" | grep -q '\$SCRIPT_DIR/[a-z_-]'; then
-                   direct_exec=1
-                 fi
-               elif printf '%s' "$seg_wo_bash" | grep -q '\$SCRIPT_DIR/[a-z_-]'; then
+                 sed -E 's/bash "?\$\{?SCRIPT_DIR\}?\/[a-z_.-]+/ORC_BASH_GUARD/g')"
+               seg_wo_bash="${seg_wo_bash//ORC_BASH_GUARD/}"
+               # Strip _lib.sh references (both forms); they are never
+               # sibling-script execs.
+               seg_lib_stripped="$(printf '%s' "$seg_wo_bash" |
+                 sed -E 's/\$\{?SCRIPT_DIR\}?\/_lib\.sh//g')"
+               if printf '%s' "$seg_lib_stripped" | grep -qE '\$\{?SCRIPT_DIR\}?/[a-z_-]'; then
                  direct_exec=1
                fi
              done < <(printf '%s\n' "$seg_rest" | sed -E 's/([^>!])[;&|]+/\1\n/g; s/^[;&|]+//')
