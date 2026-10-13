@@ -75,6 +75,11 @@ expect_flagged "direct-exec-then-echo" \
 expect_flagged "braced-direct-exec" \
   'OUT=$("${SCRIPT_DIR}/pr-checks" "$PR" 2>/dev/null) && echo "$OUT"'
 
+# 5. direct exec hidden INSIDE a command substitution wrapped by an exempt
+#    command (CodeRabbit local review, head b1c2451).
+expect_flagged "echo-wrapping-nested-exec" \
+  'echo "$("$SCRIPT_DIR/pr-checks" "$PR")"'
+
 # --- CLEAN CASES: must remain unflagged (exit 0) ---
 
 # 4. bash-prefixed invocation (the required form).
@@ -104,6 +109,13 @@ expect_clean "braced-source-of-lib" \
   'source "${SCRIPT_DIR}/_lib.sh"'
 expect_clean "braced-bash-prefixed-invocation" \
   'OUT="$(bash "${SCRIPT_DIR}/pr-checks" "$PR" --json)" || exit 1'
+
+# 10. exempt command whose substitution body holds no direct exec (usage hints
+#     with helper substitutions stay clean).
+expect_clean "echo-hint-with-helper-substitution" \
+  'echo "  bash $SCRIPT_DIR/pr-labels $PR_NUMBER --repo $(orc_lib_resolve_repo)" >&2'
+expect_clean "echo-wrapping-bash-substitution" \
+  'echo "result: $(bash "$SCRIPT_DIR/pr-checks" "$PR" --json)"'
 
 echo
 echo "check-bash-subinvocations regression: $pass passed, $fail failed"

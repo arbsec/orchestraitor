@@ -54,7 +54,30 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?/[a-z_-]' \
                seg="${part#\!}"
                seg="${seg#"${seg%%[![:space:]]*}"}"
                case "$seg" in
-                 source\ *|source|cp\ *|cp|echo\ *|echo) continue ;;
+                 source\ *|source|cp\ *|cp|echo\ *|echo)
+                   # The command is exempt, but a direct sibling exec can
+                   # still hide INSIDE a command substitution
+                   # (e.g. `echo "$("$SCRIPT_DIR/pr-checks" ...)"` — local
+                   # review at b1c2451). Extract each `$( ... )` body and run
+                   # the same checks on it: strip bash-prefixed invocations
+                   # and `_lib.sh` references, then flag any remaining
+                   # SCRIPT_DIR reference as a direct exec.
+                   nested_direct=0
+                   while IFS= read -r nested; do
+                     [ -z "$nested" ] && continue
+                     nested="$(printf '%s' "$nested" |
+                       sed -E 's/bash "?\$\{?SCRIPT_DIR\}?\/[a-z_.-]+//g' |
+                       sed -E 's/\$\{?SCRIPT_DIR\}?\/_lib\.sh//g')"
+                     if printf '%s' "$nested" | grep -qE '\$\{?SCRIPT_DIR\}?/[a-z_-]'; then
+                       nested_direct=1
+                       break
+                     fi
+                   done < <(printf '%s\n' "$seg" | grep -oE '\$\([^)]*\)' | sed -E 's/^\$\(|\)$//g')
+                   if [ "$nested_direct" -eq 1 ]; then
+                     direct_exec=1
+                     break
+                   fi
+                   continue ;;
                esac
                # Strip bash-prefixed invocations (both variable forms); a
                # remaining SCRIPT_DIR reference in the segment is a direct
