@@ -92,6 +92,7 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
 ## Inputs
 
 - **Issue identifier**: number, URL, or JSON from stdin (for piping).
+- **Body arguments**: body/reason values in this skill's scripts (`release-issue <issue> <reason>`, comment bodies) accept `@<path>` to load the text from a file; a value that is an existing file path without `@` is a typed error (issue #587 — never post a path string as content). `@<path>` resolves only inside trusted roots — the workspace and temp directories; anything else is a typed error before the file is read.
 - **Project config**: `.agents/project/github-project.local.toml` (copy of the example). If absent, scripts exit `2` with an actionable message — **never guess** org/project/field/option identity.
 - **`gh` identity**: all writes run as the GitHub App service identity — ambient `gh auth status` is NOT a meaningful check (an installation token does not appear there, and a personal login is not a valid route). Before field writes, verify the service route resolves: `orc config get github_app.client_id` (and `installation_id`, `private_key_uri`) must return values, i.e. `orc_lib_gh_service` will route through `orc github gh-env --`; missing/invalid App permissions for board field writes surface as typed failures from the wrapper. `orc` must be on the worker `PATH` (or point `ORC_BIN` at the binary, e.g. the repo's `target/release/orc` from `cargo build --release -p orchestraitor-cli`); without it, mutating operations fail closed when enforcement is `required`.
 
