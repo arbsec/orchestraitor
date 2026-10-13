@@ -1194,6 +1194,71 @@ No feature is complete until its threat model, negative tests, Arbitraitor integ
 
 > Safe defaults should be easy; weaker guarantees should remain possible but never accidental or invisible.
 
+### 21.15 Adversarial review panels and per-finding fix re-verification
+
+The §9.33.4 review loop critiques a change with independent reviewer contexts until convergence (one full generation against the current HEAD finds no new noteworthy findings). This section specifies two structural extensions — **multi-model review panels** and **per-finding fix re-verification** — and the honest-accounting rule that keeps both from weakening convergence. They compose with, and never replace, the existing mechanism: the fresh-context `review` role (§9.45.4), the finding taxonomy and dedup rules of the pr-lifecycle skill, and the (base, head)-anchored convergence evidence.
+
+#### 21.15.1 Existing coverage (what this section does and does not specify)
+
+The following already exists and is NOT respecified here: the `review` built-in role and its preset (§9.45, §9.45.4 — adversarial critique, read-only, fresh context, fielded findings output contract); reviewer selection by changed area and required domains (§9.33.4; `.agents/project/orchestraitor-workflow.md` "Required review domains"); the fresh-context and self-review prohibitions (§21.1, §9.33.3); the finding shape, severity taxonomy, cross-loop deduplication, and convergence rule (the `github-pr-lifecycle` skill: `pr-convergence.md`, `review-findings.md`, `agent-review.md`); the review-loop configuration knobs `max_reviewers`, `allow_same_model`, and `require_provider_diversity` (§9.33.4, defaults `5`/`false`/`false`). This section specifies how MULTIPLE routed reviewer instances form a panel, how their findings aggregate, when a panel is warranted, and how a single finding's FIX is re-verified without a full new generation.
+
+#### 21.15.2 Multi-model review panels
+
+A **review panel** is a set of 2..=`max_reviewers` reviewer instances for one review generation, each an independent `(provider, model)` resolution of the `review` role routed through the §9.45 registry. Panel membership comes from the existing selection inputs (§9.33.4) plus an optional provider-diversity constraint: when `require_provider_diversity = true`, panel members MUST resolve to distinct providers (the router records `skipped-because-diversity` in the decision record's alternatives when a candidate collapses onto an already-selected provider). `allow_same_model = false` (the §9.33.4 default) already forbids two panel members on the same `(provider, model)`; a panel that cannot satisfy its diversity constraints after the heuristic chain degrades to the largest panel that satisfies them and records the shortfall — it never fails the generation.
+
+Each panel member runs the SAME review contract (the §9.45.4 `review` preset output contract: fielded findings, verdict, residual risks) against the same (base, head) pair, in its own fresh context. Panel findings aggregate into one finding set before entering the ordinary remediation loop:
+
+- **Attribution.** Every aggregated finding records which panel member(s) reported it (`reported_by: [(provider, model)]`). Attribution is evidence for triage, never a substitution for it.
+- **Deduplication.** Findings from different members describing the same issue at the same path/rule merge into one finding with multi-member attribution (the skill's existing `(path, line, rule)` dedup key). Multi-member agreement is an input to triage priority, not an automatic severity upgrade.
+- **Severity union.** An aggregated finding's severity is the MAXIMUM across members. A downgrade below a member's reported severity is a recorded triage decision with reasoning, never a silent merge artifact.
+- **Conflict handling.** When one member reports a finding and another member affirmatively reviewed the same code region without reporting it, the finding is NOT dismissed — dissent is recorded on the finding (`contested: true`) and triaged like any other finding; the reporting member's evidence rule (§9.45.4: evidence actually read) governs. A contested finding that survives triage is blocking per its severity; one that is resolved-with-reasoning records BOTH positions. Silence (a member that never reached the region) is not dissent.
+- **Cost control.** A panel multiplies review cost by the member count. Default policy: single reviewer for routine changes; a panel is WARRANTED when (a) the change touches a §21.1 security-sensitive class or is otherwise classified `needs-human-review` (the §9.33.4 risk classification drives this, not the label), (b) the previous generation's findings were contested or sev-CRITICAL, or (c) `require_provider_diversity = true` for the task class. Panels are configured per task class, never globally forced: a policy that runs a panel on every generation of every PR is rejected as a default.
+
+A panel does not change the convergence rule: convergence still requires ONE full generation against the current HEAD with zero actionable findings (§21.1 workflow; the pr-lifecycle convergence rule). When a panel ran, that final clean generation may be the panel's aggregate verdict only if EVERY member reports clean; any member reporting findings keeps the loop open.
+
+#### 21.15.3 Per-finding fix re-verification
+
+When a remediation lands for a finding, a full new review generation re-reviews the entire diff even though most of it is unchanged. A **fix re-verification** is the scoped alternative: the SAME reviewer resolution that reported the finding re-examines ONLY that finding against the new HEAD. Its scope is the fix's diff (the commit range since the reported head) plus a bounded context window around the finding's location — the finding's file, the directly implicated call sites and callees, and the tests covering the affected behavior — never the implementer's reasoning about the fix (the §21.1/`agent-review.md` rule that reviewer input is diff + repo, nothing else, applies verbatim; the fix author's justification is untrusted framing).
+
+The re-verification verdict is one of:
+
+- `verified-fixed` — the finding no longer reproduces at the new HEAD within the scoped context; the finding's `status` moves to `fixed` (skill taxonomy: "the code is fixed AND the reviewer confirms the fix"). This is finding-level closure ONLY.
+- `not-fixed` — the finding still reproduces; the finding stays `open` and the remediation loop continues.
+- `fix-regressed` — the fix itself introduces a NEW finding (a new finding is recorded in the ordinary finding set, attributed to the re-verifying reviewer, and enters the ordinary loop).
+
+The fast path is SUFFICIENT only when ALL hold: (a) the fix is finding-local — the diff since the reported head touches only the finding's blast radius as scoped above, with no interaction with other open findings' code regions; (b) the finding is not in a §21.1 security-sensitive class (those classes always require a full generation, and their PRs already require human review); (c) the (base, head) divergence since the last full generation stays within a configured bound (a cumulative-diff-size limit — beyond it, "only the fix changed" is no longer verifiable and the re-verification would rubber-stamp a diff it did not see). When ANY condition fails — fix touches outside the blast radius, multiple findings interact, the divergence bound is exceeded, or the finding is security-sensitive — a full review generation is REQUIRED.
+
+**Convergence accounting stays honest.** A fix re-verification NEVER upgrades convergence. A converged-at-HEAD claim always means "a full review generation against the current HEAD found no new noteworthy findings" (pr-convergence rule, both anchors: head SHA and base OID). The fast path only moves individual findings to `fixed`/`stale`; the loop still owes a full generation at the final HEAD before any converged claim, and `convergence-status`/`merge-gate` validate the full-generation record exactly as before. The re-verification record is finding-level evidence bound to (finding id, reported head, verified head) — it is never a convergence record.
+
+#### 21.15.4 Reviewer-model self-confirmation bias
+
+The fast path re-verifies a fix with the model that reported the finding — the model is asked to confirm its own claim, the exact confirmation-bias shape fresh contexts exist to prevent (§9.33.3). This failure mode is named so it can be mitigated, not ignored:
+
+- **Prompt hygiene.** The re-verification prompt contains the ORIGINAL finding text (severity, evidence, path, violated rule) and the fix diff — never the implementer's fix description, commit-message rationale beyond the diff itself, or remediation reasoning. The verifier re-derives the verdict from the code, not from the fixer's narrative.
+- **Adversarial framing.** The re-verification contract frames the task as "demonstrate the finding still reproduces OR the fix is incomplete" — a hunt for residual defects, not an approval step. A `verified-fixed` verdict that cannot cite what it checked (the scoped tests run, the call sites read) is a typed format error, like any other invalid verdict.
+- **Panel cross-check.** When the finding was reported by a panel, the re-verification MAY be assigned to a DIFFERENT panel member (the reporter's identity is retained for attribution; the verifier's independence is preferred). When the finding is in a contested state (§21.15.2), the cross-check is REQUIRED, not optional.
+- **Escalation asymmetry.** `not-fixed` and `fix-regressed` verdicts from the fast path always route back to the full loop; only `verified-fixed` is a fast-path outcome. A model that rubber-stamps produces false `verified-fixed` verdicts — the counterweight is condition (a)/(c) of §21.15.3 plus the mandatory final full generation, which re-examines the whole diff including every fast-path-closed region.
+
+#### 21.15.5 Model identity pinning for re-verification
+
+"Re-verify with the SAME model as the reporter" must survive across sessions, worktrees, and days, so the finding record carries a typed reviewer-identity block:
+
+```text
+reviewer_identity:
+  provider          # the resolved provider id (§9.45 registry key)
+  model             # the resolved model id
+  resolution_digest # SHA-256 over the routing decision record (§9.45) for
+                    # the reporting call: precedence path, preset id +
+                    # preset_instructions_digest, effort, and the resolved
+                    # generation options (20-harness-worker.md §9.49)
+```
+
+Semantics and fallback:
+
+- **Exact-match first.** Re-verification routes through the §9.45 registry requesting the pinned `(provider, model)`. The registry honors the pin when the model is still routable (configured, capability-verified per §10.4 discovery, not subscription-exhausted per §9.46).
+- **Reproducibility caveat.** A provider MAY update a model behind a stable id; a pin guarantees identity of the ROUTING TARGET, never bit-identical behavior across provider-side updates. The `resolution_digest` makes the original resolution replayable-auditable; the re-verification record carries the digest it verified under so a drifted model is detectable after the fact. Behavioral drift is otherwise out of scope — it is a provider-side property, handled (if at all) by §9.31 regression evaluation.
+- **Unavailable-model fallback.** When the pinned model is unavailable (decommissioned, quota-exhausted, capability-regressed), the re-verification does NOT silently substitute a different model: the finding either (a) routes to a different panel member's pinned identity when one exists (independence-preferred anyway), or (b) degrades to a full review generation, which is always a valid substitute for re-verification. The fallback choice is recorded in the finding record. Silent model substitution is prohibited — a `verified-fixed` from an unpinned, unrecorded model is worthless as evidence.
+
 ---
 
 ## Appendix F: Performance CI gates
