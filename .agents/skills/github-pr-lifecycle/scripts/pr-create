@@ -29,8 +29,8 @@ while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
     --title=*) TITLE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --body)
       [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body=*)  BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body=*)  BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
