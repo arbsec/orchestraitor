@@ -16,8 +16,7 @@ done < <(grep -rn '\$SCRIPT_DIR/[a-z_-]' \
            "$ROOT/github-pr-lifecycle/scripts" "$ROOT/github-project-workflow/scripts" \
          | grep -v '/_lib\.sh' \
          | grep -v 'bash "\?\$SCRIPT_DIR/' \
-         | grep -vE '(source|cp|echo) .*\$SCRIPT_DIR/' \
-         | grep -vE ':([[:space:]]*)"' )
+         | grep -vE '(source|cp|echo) .*\$SCRIPT_DIR/' )
 
 if [ "$fail" -eq 0 ]; then
   echo "ok: all sibling script invocations use bash"

@@ -16,8 +16,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/scripts" "$TMP/bin" "$TMP/files"
 git -C "$TMP/repo" init -q
-cp -L "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" \
-  "$SCRIPT_DIR/pr-labels" "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" "$SCRIPT_DIR/pr-labels" \
+  "$TMP/repo/scripts/"
+cp -L -- "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"* 2>/dev/null || true
 
 # gh stub: records argv, serves PR body / PR labels / issue labels from env.
