@@ -20,6 +20,17 @@ A PR has converged ONLY when ALL hold, checked against the **current HEAD** (not
 
 **Every new commit invalidates earlier convergence.** A review generation run against commit A says nothing about commit A+1. The next generation re-examines the full diff at the new HEAD.
 
+**Pre-PR generations count (no doubling).** The pre-PR local review gate
+in `pr-create` requires a CLEAN local review generation at the exact
+(head, base) pair being proposed — that same generation IS the PR's
+"first required generation": the pre-create run satisfies step 6's
+clean-at-HEAD requirement and no additional generation is needed before
+the first review loop, as long as neither anchor has moved. The usual
+invalidation rule applies unchanged: any post-PR commit (or base
+advance) creates a new (head, base) pair and the pre-create evidence is
+stale from that point — the next generation must run against the new
+HEAD/base like any other.
+
 **Every base advance invalidates earlier convergence too.** The reviewed diff is head-vs-base: a review generation run against (base A, head H) says nothing about the diff after base moves to A+1 — new content enters the comparison even with an unchanged HEAD. Convergence evidence therefore records BOTH anchors: the command, the HEAD SHA, and the **base OID** the diff was reviewed against. `convergence-status` and `merge-gate` validate both: a clean record whose base OID differs from the PR's current base OID does not converge, and a base advance between the convergence check and the merge is rejected the same way a head movement is. Whenever the base advances, a new local review generation runs against the new (base, head) pair before the merge gate.
 
 **Exception: verified-commit ref swing.** A force-swing of the branch ref (replaying the same commits as GitHub-signed commits — see [verified-commit-path.md](verified-commit-path.md)) does **not** invalidate convergence by itself, **if** BOTH hold: (a) the resulting tree is byte-identical to the reviewed head — `git rev-parse <old-oid>^{tree}` and `git rev-parse <new-oid>^{tree}` must return the same tree object ID (tree identity, not `git diff` emptiness: `git diff` can run configured `textconv` filters, which may be one-way and lossy, so different trees can display no diff); AND (b) the comparison base and base-to-head diff are unchanged — the replay base is the PR's recorded base (see [verified-commit-path.md](verified-commit-path.md)): the reviewed-base OID and the current-base OID MUST be recorded explicitly (never inferred from a branch name), and the base-to-head diff is evidenced by a content hash recorded verbatim alongside the old/new head tree IDs — `git diff <reviewed-base> <old-oid> | sha256sum` and `git diff <current-base> <new-oid> | sha256sum` — with both hashes equal (diff content, not `git diff` output emptiness: the same textconv caveats as (a) apply, and a bare `git diff` yields no tree or content ID to compare). The reviewer/orchestrator MUST verify all recorded OIDs, tree IDs, and hashes and record them on the PR; an unverified swing, a changed comparison base, a hash mismatch, or any tree difference invalidates convergence as with any push.

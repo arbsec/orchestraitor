@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --). A pre-PR local review gate runs before creation: a CLEAN pr-review-local generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only."
   exit "$ORC_OK"
 fi
 
@@ -31,9 +31,79 @@ while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
       [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
       BODY="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --body=*)  BODY="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
 done
+
+# --- Pre-PR local review gate ----------------------------------------------------
+# Before creating the PR, verify a recorded CLEAN local review generation exists
+# for the CURRENT (head, base) pair. The gate runs BEFORE any PR creation: a
+# refusal here leaves no partial PR behind. It reads only local state (git +
+# .orchestraitor/reviews/) and never depends on the orc gh-env chain route.
+#
+# Escapes:
+#   --skip-review-gate  explicit override (docs-only PRs where CodeRabbit is
+#                       not applicable, or an explicit owner directive) —
+#                       prints a loud notice and proceeds.
+#   docs-only diff      automatic skip when `git diff --name-only
+#                       <merge-base>..HEAD` contains only *.md files.
+#
+# A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
+# class) with a typed message naming the exact remediation command.
+PR_CREATE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_REPO_ROOT=""
+if [ -z "$PR_CREATE_REPO_ROOT" ]; then
+  echo "error: pr-create requires running from the target git checkout" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+PR_CREATE_TARGET_BASE="${PR_CREATE_BASE_BRANCH:-}"
+if [ -z "$PR_CREATE_TARGET_BASE" ]; then
+  # No explicit --base: default to the branch's upstream, else the repo default branch.
+  PR_CREATE_TARGET_BASE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | sed 's|^origin/||')" || true
+fi
+if [ -z "$PR_CREATE_TARGET_BASE" ]; then
+  PR_CREATE_TARGET_BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" || true
+fi
+if [ -z "$PR_CREATE_TARGET_BASE" ]; then
+  echo "pre-review-gate: cannot resolve the target base branch (no --base, no upstream, no origin/HEAD) — pass --base explicitly" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+PR_CREATE_MERGE_BASE="$(git merge-base "$PR_CREATE_TARGET_BASE" HEAD 2>/dev/null)" || PR_CREATE_MERGE_BASE=""
+if [ -z "$PR_CREATE_MERGE_BASE" ]; then
+  echo "pre-review-gate: cannot compute a merge-base with base branch '$PR_CREATE_TARGET_BASE' — is the branch based on it?" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+PR_CREATE_HEAD_SHA="$(git rev-parse HEAD)"
+
+# Docs-only auto-skip: every changed path vs the merge-base ends in .md
+# (or the diff is empty — a no-diff PR carries nothing for CodeRabbit to review).
+if [ "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | wc -l)" -gt 0 ] &&
+   [ -z "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | grep -v '\.md$')" ]; then
+  echo "pre-review-gate: docs-only diff (only *.md changed vs $PR_CREATE_TARGET_BASE) — local review gate skipped" >&2
+  SKIP_REVIEW_GATE=1
+fi
+
+if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
+  PR_CREATE_GATE_RECORD=""
+  for PR_CREATE_CANDIDATE in "$PR_CREATE_REPO_ROOT"/.orchestraitor/reviews/*-"$(git rev-parse --short=7 HEAD)".md; do
+    [ -f "$PR_CREATE_CANDIDATE" ] || continue
+    if grep -q "^- verdict: CLEAN$" "$PR_CREATE_CANDIDATE" &&
+       grep -q "^- head SHA: $PR_CREATE_HEAD_SHA$" "$PR_CREATE_CANDIDATE" &&
+       grep -q "^- base OID: $PR_CREATE_MERGE_BASE$" "$PR_CREATE_CANDIDATE"; then
+      PR_CREATE_GATE_RECORD="$PR_CREATE_CANDIDATE"
+      break
+    fi
+  done
+  if [ -z "$PR_CREATE_GATE_RECORD" ]; then
+    echo "pre-review-gate: no clean local review generation at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_MERGE_BASE) — run pr-review-local first" >&2
+    echo "  bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  echo "pre-review-gate: clean local review generation found at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_MERGE_BASE)" >&2
+elif [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
+  echo "NOTICE: pre-PR local review gate SKIPPED via --skip-review-gate (per owner directive or docs-only policy)" >&2
+  echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
+fi
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
 [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
