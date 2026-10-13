@@ -1,4 +1,4 @@
-//! The §9.47(b) CI completions conditional poll lane: check-run and
+//! The §9.50(b) CI completions conditional poll lane: check-run and
 //! workflow-run completions for head SHAs the daemon actively tracks.
 //!
 //! The repository events feed carries no CI completions (no
@@ -256,7 +256,7 @@ fn is_in_flight(status: Option<&str>) -> bool {
     status != Some("completed")
 }
 
-/// The §9.47(b) CI completions lane poller. Auth, the ETag/dedup store,
+/// The §9.50(b) CI completions lane poller. Auth, the ETag/dedup store,
 /// and the bounded queue are SHARED with the events lane (one ingress
 /// queue, one dedup table, one rule set); the tracked head-SHA sets are
 /// the lane's own in-memory bookkeeping (a restart re-discovers them
