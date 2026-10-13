@@ -1103,3 +1103,85 @@ async fn a_runs_304_restores_the_tracked_set_and_skips_quiet_pruning() {
     );
     assert_eq!(queue.take().len(), 2); // round-1 run 900 + this check 705
 }
+
+/// Regression (review finding): a runs 304 REUSES the last valid
+/// snapshot — a SHA that went quiet under the last snapshot (not
+/// re-discovered in-flight) is pruned on the 304 round's matching
+/// check-runs 304.
+#[tokio::test(flavor = "current_thread")]
+async fn a_runs_304_reuses_the_last_snapshot_for_quiet_pruning() {
+    let etag = "\"snap-x\"";
+    // Round 1: beef34 in-flight -> tracked; checks baseline.
+    // Round 2: beef34 NOT in the runs response (its run finished), check-runs 200
+    //          (not quiet yet — the run just completed).
+    // Round 3: runs 304 (snapshot reused: beef34 absent -> NOT in-flight);
+    //          check-runs 304 -> quiet prune fires.
+    // Round 4: beef34 no longer polled (bookkeeping pruned).
+    let empty_runs = json!({ "workflow_runs": [] }).to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: None,
+            status: 200,
+            body: runs_body(),
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: None,
+            status: 200,
+            body: check_runs_body(706, "success"),
+            headers: vec![("ETag", "\"y1\"".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 200,
+            body: empty_runs,
+            headers: vec![("ETag", etag.to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"y1\"".to_string()),
+            status: 200,
+            body: check_runs_body(707, "success"),
+            headers: vec![("ETag", "\"y2\"".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "commits/beef34/check-runs",
+            requires_etag: Some("\"y2\"".to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+        Rule {
+            path_needle: "actions/runs",
+            requires_etag: Some(etag.to_string()),
+            status: 304,
+            body: String::new(),
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (_queue, _store, lane) = fixture_lane();
+    let target = target_of(&server);
+    let _ = lane.poll_repo(&target, 1_000).await.expect("round 1");
+    let _ = lane.poll_repo(&target, 1_100).await.expect("round 2");
+    let _ = lane
+        .poll_repo(&target, 1_200)
+        .await
+        .expect("round 3 (304 + 304 -> quiet)");
+    let fourth = lane.poll_repo(&target, 1_300).await.expect("round 4");
+    assert_eq!(
+        fourth.len(),
+        1,
+        "the quiet SHA was pruned on the 304 round: only the runs poll fires in round 4"
+    );
+}
