@@ -50,7 +50,9 @@ done
 #                       <merge-base>..HEAD` contains only *.md files.
 #
 # A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
-# class) with a typed message naming the exact remediation command.
+# class) with a typed message naming the exact remediation command. The gate
+# has NO env-var bypass: the SKILL_CASE harness contract below is scoped to
+# the gh-env-wrapper test suite only.
 # SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate
 # ENTIRELY — including base resolution — before any git probing: the harness
 # drives pr-create from a SHALLOW checkout (no origin/HEAD symref, no
