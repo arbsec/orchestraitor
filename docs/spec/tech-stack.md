@@ -5,22 +5,22 @@
 **Research date:** 2026-07-23
 **Scope:** Rust implementation, dependencies, repository architecture, CI/CD, OSS governance, Arbitraitor integration surface, and MVP milestone scope.
 
-> **Versioning note.** Crate versions and the Arbitraitor git revision listed below were verified against crates.io metadata, GitHub, and the Arbitraitor repository on 2026-07-23. They go stale quickly. Before starting implementation, re-verify every version against the latest crates.io / GitHub and update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and updated weekly thereafter; the CI "Arbitraitor bump" job (§17) catches API drift.
+> **Versioning note.** Crate versions and the Arbitraitor git revision listed below were verified against crates.io metadata, GitHub, and the Arbitraitor repository on 2026-10-13. They go stale quickly. Before starting implementation, re-verify every version against the latest crates.io / GitHub and update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and updated weekly thereafter; the CI "Arbitraitor bump" job (§17) catches API drift.
 
 > **Companion to:** [`docs/spec/spec.md`](spec.md). This document holds concrete crates, versions, license compatibility, runtime dependencies, platform support, and rejected alternatives. The spec holds product requirements, architecture, invariants, workflows, security boundaries, and user experience. Both files use the real Arbitraitor crate names, types, traits, and APIs (see §16 of the spec).
 >
-> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). Every dependency and architectural claim below was independently verified against crates.io metadata or upstream GitHub on 2026-07-23.
+> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). The document structure was verified against that file on 2026-07-23; dependency versions were re-verified against crates.io metadata on 2026-10-13 (see the versioning note above).
 
 ---
 
 ## 1. Recommended baseline
 
-> **Versions verified on 2026-07-23.** Re-verify against crates.io / GitHub before implementation; update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and weekly thereafter.
+> **Versions verified on 2026-10-13.** Re-verify against crates.io / GitHub before implementation; update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and weekly thereafter.
 
 | Concern | Recommendation | License | Verified |
 |---|---|---|---|
 | Language | Rust 2024 edition | — | — |
-| Bootstrap toolchain | Rust 1.96.0, pinned in `rust-toolchain.toml` | — | matches Arbitraitor MSRV |
+| Bootstrap toolchain | Rust 1.98.1, pinned in `rust-toolchain.toml` | — | matches Arbitraitor host toolchain (MSRV declaration stays 1.96) |
 | Workspace resolver | Cargo resolver 3 | — | — |
 | Async runtime | Tokio (current_thread default for the daemon) | MIT | crates.io, 17M dl/wk |
 | TUI framework | Ratatui 0.30.2 + crossterm 0.29 | MIT | crates.io, ratatui-org |
@@ -33,11 +33,11 @@
 | Layered config | figment 0.10.19 (maintenance mode; serde+toml escape hatch planned) | MIT OR Apache-2.0 | crates.io |
 | Receipt canonicalization | serde_json_canonicalizer 0.3.2 (RFC 8785 JCS) | MIT | crates.io |
 | CLI | clap 4.6.4 + clap_derive | MIT OR Apache-2.0 | crates.io |
-| Git (controller-owned) | gix 0.85.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
+| Git (controller-owned) | gix 0.89.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
 | Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
-| MCP server + client | rmcp 2.2.0 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
-| Agent Client Protocol | agent-client-protocol 1.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
-| ACP ↔ MCP bridge | agent-client-protocol-rmcp 1.3.0 | Apache-2.0 | crates.io |
+| MCP server + client | rmcp 3.5.1 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
+| Agent Client Protocol | agent-client-protocol 3.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
+| ACP ↔ MCP bridge | agent-client-protocol-rmcp 4.0.3 | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
 | PTY | portable-pty 0.9.0 | MIT | crates.io |
 | Errors (lib) | thiserror 2 | MIT OR Apache-2.0 | crates.io |
@@ -242,11 +242,11 @@ The same TOML shape applies to other providers. For Z.ai the GLM Coding Plan exp
 
 ### 4.1 MCP
 
-`rmcp` 2.2.0 (Jul 8, 2026), maintained at `modelcontextprotocol/rust-sdk`, Apache-2.0. ~917k dl/wk. Features used: `server`, `client`, `macros`, `schemars`, `auth`, `transport-io`, `transport-streamable-http-server`, `transport-streamable-http-client-reqwest`, `reqwest`. TLS defaults to rustls via the reqwest feature.
+`rmcp` 3.5.1, maintained at `modelcontextprotocol/rust-sdk`, Apache-2.0. Features used: `server`, `client`, `macros`, `schemars`, `auth`, `transport-io`, `transport-streamable-http-server`, `transport-streamable-http-client-reqwest`, `reqwest`. TLS defaults to rustls via the reqwest feature.
 
 ### 4.2 ACP
 
-`agent-client-protocol` 1.3.0 (Jul 20, 2026), maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. ~102k dl/wk. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
+`agent-client-protocol` 3.3.0, maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
 
 > Verify the pinned release before implementation. The plan calls for a release pin and a CI gate (cargo-deny + a custom smoke check that issues an ACP `initialize` against the bundled conductor stub).
 
@@ -288,7 +288,7 @@ No external `models-dev` Rust crate is used. The published `models-dev 0.1.1` (v
 | `keyring` | 4.1.5 (2026-07-14) | MIT OR Apache-2.0 | OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service) behind optional `secrets-keyring` Cargo feature. MSRV 1.88.0. |
 
 **Rejected** (all license-OK per Arbitraitor conventions but rejected for substantive reasons):
-- `rig-core 0.40.0` — README: "Here be dragons! … breaking changes." Overlaps with §9.19.1 domain catalog. Reference only.
+- `rig-core` (0.40.0 evaluated, then 0.44.0 re-evaluated 2026-10-13) — README: "Here be dragons! … breaking changes." Overlaps with §9.19.1 domain catalog. Reference only. Re-evaluation verdict: still REJECTED as a dependency — see §16 (typed generation options are adopted as a design donor, reimplemented natively per spec `20-harness-worker.md` §9.49).
 - `llm` (rustformers, 0.1.1 crates.io) — ARCHIVED upstream.
 - `llm` (graniet, 1.3.8) — author README self-declares unmaintained.
 - `async-anthropic 0.6.0` — stale since 2025-05-03; `claude-api` supersedes.
@@ -536,6 +536,7 @@ Scheduled CI includes: full cross-platform matrix (Linux + macOS MVP), extended 
 - **Exa as a v1 web-search engine** — excluded from v1 on transport grounds, not quality: every search-relevant Exa endpoint (`/search`, `/findSimilar`, `/contents`, `/answer`) is POST-with-JSON-body per Exa's published OpenAPI spec, and the v1 egress scope is GET-only (spec §9.19.3, §9.19.6). Exa returns with a mediated-POST capability under an explicit policy ruling, or a verified GET-conformant access mode. The same transport finding applies to Kagi's current v1 API (POST-only `/search` + `/extract`; GET exists only in the deprecated v0 legacy API) — Kagi is the intended first engine once a mediated-POST ruling lands.
 - **Adding new dependencies for the web tools** — no new deps. The engine adapters are plain REST/JSON over the already-pinned `reqwest 0.13.4` (rustls default), caching uses the already-pinned `rusqlite`, URL canonicalization uses the already-pinned `url` crate, wire mapping uses the already-pinned `serde_json`; no `scraper`/`html5ever` dependency is introduced (JSON APIs only).
 - **Depending on the MCP `sequentialthinking` server (`@modelcontextprotocol/server-sequential-thinking`) for the `think` tool (spec `20-harness-worker.md` §9.48)** — rejected. The reference implementation is a thin stdio MCP server that carries no intelligence; its value is the param contract and state-echo shape, which is implemented natively in `orchestraitor-worker` (MIT-licensed reference consulted for semantics only). No new crate and no new dependency: the tool is a pure in-process state append plus an event-store write, with no wire protocol, no process spawn, and no Arbitraitor mediation surface.
+- **`rig-core` / `rig` (0xPlaygrounds) as a provider/LLM dependency** — rejected (0.40.0 initially, §4.4; re-evaluated at 0.44.0 on 2026-10-13 with the same verdict). The compliance gates all pass (MIT license; MSRV 1.95.0 vs our 1.96.0 pin; zero `unsafe`; resolved tree license-allowlisted) — the disqualifiers are architectural and economic: (1) rig's differentiating layers (agent/tool loop, model catalog, USD cost auto-fill, RAG/vector stores) are precisely the layers spec `30-model-routing.md` §9.19.4 and §9.29 assign to project-owned, Arbitraitor-mediated code — the catalog collides head-on with `orchestraitor-provider-meta` (a second, un-governable capability-metadata copy), and the USD cost auto-fill fights the `monetary_cost_{measured,estimated,basis}` / subscription-utilization separation; (2) breaking-change churn of ~17 breaking changes per release (171 `[breaking]` markers across the 10 releases from 0.37.1 to 0.44.0) is un-payable under the exact-minor pinning policy; (3) a minimal rig-core resolves to a measured ~150-crate dependency tree — roughly doubling the audit/vet surface for a wire layer genai already occupies. Behind the project-owned `ProviderTransport` trait only the HTTP wires would be retained, at higher dependency weight and with a recurring breakage tax. **Adopted as design donor, not dependency:** the typed generation options with per-provider refusal (rig's `GenerationOptions` + `UnsupportedOption` + exhaustive `Mapping::{Send, Omit, Unsupported}` per-wire mapping and `OptionFields` compile-time exhaustiveness) and the retryable-error classification (`ErrorReport{retryable, http_status, request_id}` decided once at conversion time) are reimplemented natively per spec `20-harness-worker.md` §9.49 — per the borrow analysis (`docs/adr/0025-b-rig-0.44.0-design-borrow-memo.md`) and adoption evaluation (`docs/adr/0025-a-rig-0.44.0-dependency-evaluation.md`, verdict REJECT dependency / borrow ideas; ADR 0025, 2026-10-13). Revisit trigger: only if rig reaches semver-stable 1.x with a measurably lower breaking-change rate AND demonstrates a concrete spec-30 provider feature genai and the native escape hatches lack — and then rig-core wires only, feature-gated, never the agent/catalog/cost layers.
 
 ---
 

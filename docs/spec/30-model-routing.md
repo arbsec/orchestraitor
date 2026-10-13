@@ -269,8 +269,8 @@ The repository MUST maintain recorded fixtures (cassettes + event traces) for su
 
 - OpenAI-compatible endpoints (Neuralwatt + Z.ai + OpenAI reference + at least one self-hosted vLLM/llama.cpp);
 - Anthropic-compatible endpoints (Anthropic reference + Z.ai `api.z.ai/api/anthropic`);
-- MCP versions (`rmcp 2.2` baseline);
-- ACP versions (`agent-client-protocol 1.3` baseline, `1.0` + `1.x` migration against future versions);
+- MCP versions (`rmcp 3.5` baseline);
+- ACP versions (`agent-client-protocol 3.3` baseline, `1.0` + `1.x` migration against future versions);
 - wrapped CLIs (Claude Code, Codex CLI, Gemini CLI, OpenCode, Pi — when adopted, Phase 1+);
 - IDEs (JetBrains, VS Code, Zed — Phase 2+);
 - external harnesses integration (per `docs/spec/tech-stack.md:§4` versions).

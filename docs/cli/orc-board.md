@@ -82,7 +82,7 @@ orc board guarded-move <item-id> --status "<Status option name>" --session <sess
   `GatewayContext.board` provider is configured. When none is configured, the gateway's
   tool router DISABLES the route (rmcp `disable_route`): `board.query` is hidden from
   `tools/list` and invoking it is rejected with the router's typed "tool not found" error —
-  the additive disable path (verified against rmcp 2.2.0 and asserted in a probe test).
+  the additive disable path (verified against rmcp 3.5.1 and asserted in a probe test).
   **Event persistence note:** in this slice the invocation event is written and
   hash-chain-validated but the store is per-invocation (CLI: per process) — durable
   persistence lands with the daemon event-store wiring (§9.17).
