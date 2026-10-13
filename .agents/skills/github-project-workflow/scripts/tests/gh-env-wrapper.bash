@@ -550,13 +550,15 @@ EOF
 }
 
 # --- 12. enforcement=required + complete config: pr-create routes through
-#         `orc github gh-env --` (service path); the stub gh is never invoked
-#         directly, so no personal-auth write can happen.
+#         the DEDICATED `gh-env-pr-create-chain` subcommand (orc executes
+#         the labeling obligation itself — see the gh-env guard); the stub
+#         gh is never invoked directly, so no personal-auth write can
+#         happen.
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub required
 OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
-grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
-  || fail "pr-create must take the service path: orc=[$(cat "$ORC_LOG")]"
+grep -qx 'orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
+  || fail "pr-create must take the labeling-chain service path: orc=[$(cat "$ORC_LOG")]"
 if [ "$(grep -c '^gh:' "$GH_LOG")" -gt 1 ]; then
   fail "pr-create reached gh more than the one gh-env child call: $(cat "$GH_LOG")"
 fi

@@ -367,12 +367,29 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
-  A `--re-land` flag re-signs a rebased PR branch whose tree already matches the
-  remote head: it lands one empty App-signed commit on top of the remote head so
+- **`orc github gh-env` refuses `gh pr create` in `required` enforcement**:
+  PR creation through gh-env bypasses the deterministic PR-labeling chain,
+  so the child command is classified by argv shape — the `gh pr create`
+  subcommand tokens (the `gh pr new` alias and a path-form `gh` included),
+  never by substring — and the typed refusal fires before any token mint.
+  AMBIGUOUS child argv (flags the classifier cannot resolve) is refused
+  too, fail closed. `pr view` / `pr merge` / `pr comment` / `gh api`
+  children are unaffected. The ONLY sanctioned path is the new
+  `orc github gh-env-pr-create-chain <owner/name> -- gh pr create …`
+  subcommand: it creates the PR as the App installation AND applies the
+  deterministic attribution/labeling set to the created PR itself —
+  failures are loud warnings naming the exact manual retry commands, never
+  silent drops; the obligation is enforced by orc, never attested by a
+  caller-supplied environment variable or flag. In `recommended`
+  enforcement the guard does not fire — the labelled personal fallback
+  stays a documented, warned path. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
+- **`push-branch --re-land`**: A `--re-land` flag re-signs a rebased PR branch
+  whose tree already matches the remote head: it lands one empty App-signed
+  commit on top of the remote head so
   the evaluated head chain is fully verified (fixing the unsigned-head case that
   forced plain pushes after conflict rebases); it is a no-op on an already
   verified head and fails closed if the landing is not verified.
-
 - **Service-identity enforcement is now pinned to `required` for this
   repository** (owner mandate, 2026-10-02: no GitHub writes under the
   personal account, ever). `github_app.enforcement = "required"` in

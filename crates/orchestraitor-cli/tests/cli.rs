@@ -1480,6 +1480,416 @@ fn github_gh_env_env_pinned_invalid_value_fails_closed() -> miette::Result<()> {
     Ok(())
 }
 
+// The `pr create` guard needs App config that RESOLVES (so the failure is
+// the pr-create refusal, not the required-mode config gate) and needs the
+// child to exist (the guard fires before the PATH check and before minting,
+// but a resolvable stub proves the child would otherwise have RUN). The
+// stub child records its argv, so a successful run is direct evidence the
+// guard did NOT fire. The stub is installed as `gh` on a PATH that leads
+// the system gh — the wrapper's real invocation shape (`gh pr create …`) —
+// and the helpers return the PATH prefix to prepend.
+#[cfg(unix)]
+fn gh_env_pr_create_guard_child(temp: &tempfile::TempDir) -> miette::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    write_github_app_project_config(temp)?;
+    // `required` is what arms the guard; the App block itself resolves (so a
+    // firing refusal is the pr-create guard, never the required-mode config
+    // gate). The helper's callers that test the NON-required path overwrite
+    // the enforcement key explicitly.
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nclient_id = \"Iv1.cli-e2e\"\ninstallation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n\
+         enforcement = \"required\"\n",
+    )
+    .into_diagnostic()?;
+    let child = temp.path().join("gh");
+    let out_file = temp.path().join("child.out");
+    // GUARD_OUT (set by tests that need per-invocation files) overrides the
+    // default output path; the fallback keeps simple callers working.
+    fs::write(
+        &child,
+        format!(
+            "#!/bin/sh\nOUT=\"${{GUARD_OUT:-{}}}\"; for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > \"$OUT\"\n",
+            out_file.display()
+        ),
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    Ok(temp.path().display().to_string())
+}
+
+// Creates a fixture git repo inside `temp` with the canonical service-identity
+// bot email configured — the required-mode gate reads `git config user.email`
+// from the CWD, so tests that must PASS that gate use this repo as their CWD
+// regardless of the runner's ambient git configuration. Returns the repo path.
+#[cfg(unix)]
+fn gh_env_guard_bot_identity_repo(temp: &tempfile::TempDir) -> miette::Result<std::path::PathBuf> {
+    use std::process::Command;
+
+    let repo = temp.path().join("bot-identity-repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(["-C", &repo.display().to_string()])
+            .args(args)
+            .output()
+            .into_diagnostic()
+    };
+    assert!(git(&["init", "-q"])?.status.success());
+    assert!(
+        git(&[
+            "config",
+            "user.email",
+            "334074867+arbsec-agent[bot]@users.noreply.github.com"
+        ])?
+        .status
+        .success()
+    );
+    Ok(repo)
+}
+
+// Prepends the stub `gh` directory to PATH for one github_cli invocation.
+// `guard_out` overrides the stub's argv-record file via GUARD_OUT.
+#[cfg(unix)]
+fn github_cli_with_gh_stub(
+    temp: &tempfile::TempDir,
+    stub_dir: &str,
+    endpoint: &str,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    github_cli_with_gh_stub_out(temp, stub_dir, endpoint, None, args)
+}
+
+#[cfg(unix)]
+fn github_cli_with_gh_stub_out(
+    temp: &tempfile::TempDir,
+    stub_dir: &str,
+    endpoint: &str,
+    guard_out: Option<&std::path::Path>,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    github_cli_with_gh_stub_out_in(temp, stub_dir, endpoint, guard_out, None, args)
+}
+
+// `work_dir` sets the child CWD (the required-mode gate reads
+// `git config user.email` from there).
+#[cfg(unix)]
+fn github_cli_with_gh_stub_out_in(
+    temp: &tempfile::TempDir,
+    stub_dir: &str,
+    endpoint: &str,
+    guard_out: Option<&std::path::Path>,
+    work_dir: Option<&std::path::Path>,
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut split = std::env::split_paths(&path).collect::<Vec<_>>();
+    split.insert(0, std::path::PathBuf::from(stub_dir));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orc"));
+    command
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            endpoint,
+        ])
+        .args(args)
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .env("PATH", std::env::join_paths(&split).into_diagnostic()?)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(out) = guard_out {
+        command.env("GUARD_OUT", out);
+    }
+    if let Some(dir) = work_dir {
+        command.current_dir(dir);
+    }
+    command.output().into_diagnostic()
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_refuses_pr_create_in_required_enforcement() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+    // The guard must fire BEFORE minting, so the endpoint points at a closed
+    // port: any mint attempt would fail with a transport error instead of
+    // the typed refusal, making the "refused before minting" property part
+    // of the assertion itself.
+    let endpoint = "http://127.0.0.1:1";
+
+    let output = github_cli_with_gh_stub(
+        &temp,
+        &stub_dir,
+        endpoint,
+        &[
+            "github",
+            "gh-env",
+            "--",
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--title",
+            "t",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    // The forbidden effect (the PR-creation child running) did NOT happen:
+    // the stub child never wrote its argv file.
+    let out_file = temp.path().join("child.out");
+    assert!(
+        !out_file.exists(),
+        "the gh pr create child must never run under the guard"
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("gh-envrefusestorun`ghprcreate`"),
+        "the typed refusal must name the refused command: {stderr}"
+    );
+    // The refusal names BOTH alternative paths: the pr-create lifecycle
+    // script (which chains labeling) and explicit --label flags.
+    assert!(
+        flat.contains("pr-create") && flat.contains("pr-labels"),
+        "the refusal must point at the pr-create lifecycle script and its labeling chain: {stderr}"
+    );
+    assert!(
+        flat.contains("--label"),
+        "the refusal must mention explicit --label flags as the alternative: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_pr_create_guard_does_not_fire_for_other_pr_subcommands() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+    // The required-mode gate reads `git config user.email` from the CWD;
+    // run from a fixture repo pinned to the canonical bot identity so the
+    // test passes regardless of the runner's ambient git configuration.
+    let repo = gh_env_guard_bot_identity_repo(&temp)?;
+    // `pr view` / `pr merge` / `pr comment` are unaffected: the guard is
+    // scoped to PR CREATION only. Each invocation runs the full required
+    // gate (mint + GET /app + GET /users/{slug}[bot]) against its OWN
+    // server (one connection each), then the stub `gh` child records its
+    // argv (per-subcommand file, keyed by an env var the stub reads) — no
+    // further GitHub traffic.
+    for subcommand in ["view", "merge", "comment"] {
+        let server = spawn_mint_then_two_api_server(
+            r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+            r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+        )?;
+        let out_path = temp.path().join(format!("child-{subcommand}.out"));
+        let output = github_cli_with_gh_stub_out_in(
+            &temp,
+            &stub_dir,
+            &server.endpoint,
+            Some(&out_path),
+            Some(&repo),
+            &["github", "gh-env", "--", "gh", "pr", subcommand, "446"],
+        )?;
+        assert!(
+            output.status.success(),
+            "`gh pr {subcommand}` must not be refused: stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let observed = fs::read(&out_path).into_diagnostic()?;
+        let observed: Vec<String> = observed
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(String::from_utf8_lossy)
+            .map(std::borrow::Cow::into_owned)
+            .collect();
+        assert_eq!(observed, vec!["pr", subcommand, "446"]);
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_pr_create_guard_does_not_fire_outside_required_enforcement() -> miette::Result<()>
+{
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+    // Enforcement UNSET (`recommended`): the personal fallback is a
+    // documented, warned path there — `gh pr create` through gh-env must
+    // keep working. The App block stays COMPLETE (the guard tests the
+    // enforcement mode, not the config gate); only the enforcement key is
+    // dropped.
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nclient_id = \"Iv1.cli-e2e\"\ninstallation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n",
+    )
+    .into_diagnostic()?;
+    // Recommended mode still mints (the App config resolves) and pins the
+    // git identity env — the endpoint must serve mint + the two identity
+    // responses; the stub `gh` child then records its argv.
+    let server = spawn_mint_then_two_api_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+    let endpoint = &server.endpoint;
+    let output = github_cli_with_gh_stub(
+        &temp,
+        &stub_dir,
+        endpoint,
+        &[
+            "github",
+            "gh-env",
+            "--",
+            "gh",
+            "pr",
+            "create",
+            "--draft",
+            "--label",
+            "agent-created",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "recommended mode must not refuse `gh pr create`: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out_file = temp.path().join("child.out");
+    let raw = fs::read(&out_file).into_diagnostic()?;
+    let observed: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf8_lossy)
+        .map(std::borrow::Cow::into_owned)
+        .collect();
+    assert_eq!(observed.len(), 5);
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_pr_create_chain_runs_labeling_scripts() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+    // The dedicated chain subcommand is the ONLY sanctioned `gh pr create`
+    // path in required enforcement: orc executes the labeling obligation
+    // ITSELF — no caller attestation. The identity gate runs first (live
+    // identity server + the canonical bot git identity in the fixture repo
+    // CWD); the stub `gh` "creates" PR #999 (prints the URL), then orc runs
+    // the labeling scripts against that number.
+    let server = spawn_mint_then_two_api_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+    let repo = gh_env_guard_bot_identity_repo(&temp)?;
+    // The chain subcommand resolves the lifecycle scripts from the repo
+    // root; provide skill-script STAND-INS that record their argv (the real
+    // scripts would need GitHub reads — the contract under test is that orc
+    // RUNS the chain, with the created PR number and repo).
+    let scripts = repo.join(".agents/skills/github-pr-lifecycle/scripts");
+    fs::create_dir_all(&scripts).into_diagnostic()?;
+    let labels_log = temp.path().join("labels.log");
+    for script in ["pr-labels", "pr-labels-from-issue"] {
+        fs::write(
+            scripts.join(script),
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"{script}:$*\" >> \"{}\"\n",
+                labels_log.display()
+            ),
+        )
+        .into_diagnostic()?;
+        fs::set_permissions(scripts.join(script), fs::Permissions::from_mode(0o755))
+            .into_diagnostic()?;
+    }
+
+    let out_path = temp.path().join("child-chain.out");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut split = std::env::split_paths(&path).collect::<Vec<_>>();
+    split.insert(0, std::path::PathBuf::from(&stub_dir));
+    // The stub `gh` records its argv and prints a PR URL (the contract
+    // gh-env-pr-create-chain parses for the created PR number).
+    fs::write(
+        temp.path().join("gh"),
+        format!(
+            "#!/bin/sh\nOUT=\"${{GUARD_OUT:-{}}}\"; for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > \"$OUT\"\necho https://github.com/arbsec/orchestraitor/pull/999\n",
+            temp.path().join("child.out").display()
+        ),
+    )
+    .into_diagnostic()?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &server.endpoint,
+            "github",
+            "gh-env-pr-create-chain",
+            "arbsec/orchestraitor",
+            "--",
+            "gh",
+            "pr",
+            "create",
+            "--draft",
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .env("PATH", std::env::join_paths(&split).into_diagnostic()?)
+        .env("GUARD_OUT", &out_path)
+        .current_dir(&repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "the chain subcommand must create the PR and run the labeling chain: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The creation child RAN.
+    let observed = fs::read(&out_path).into_diagnostic()?;
+    let observed: Vec<String> = observed
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf8_lossy)
+        .map(std::borrow::Cow::into_owned)
+        .collect();
+    assert_eq!(observed, vec!["pr", "create", "--draft"]);
+    // The PR URL is re-emitted on stdout (the `pr-create` script reads it
+    // through command substitution) BEFORE the labeling steps run.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "https://github.com/arbsec/orchestraitor/pull/999",
+        "the created PR URL must be re-emitted on stdout: {stdout}"
+    );
+    // AND the labeling chain RAN — both steps, with the parsed PR number
+    // and the repo slug. This is the property the env-var attestation
+    // could not prove: the obligation is EXECUTED by orc.
+    let labels = fs::read_to_string(&labels_log).into_diagnostic()?;
+    let lines: Vec<&str> = labels.lines().collect();
+    assert_eq!(lines.len(), 2, "both labeling steps must run: {labels}");
+    assert!(
+        lines[0].starts_with("pr-labels:999 --repo arbsec/orchestraitor"),
+        "{labels}"
+    );
+    assert!(
+        lines[1].starts_with("pr-labels-from-issue:999 --repo arbsec/orchestraitor"),
+        "{labels}"
+    );
+    Ok(())
+}
+
 #[test]
 #[cfg(unix)]
 fn github_gh_env_required_mode_pins_git_identity_env_for_child() -> miette::Result<()> {

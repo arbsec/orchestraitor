@@ -206,6 +206,14 @@ pub enum GitHubCommand {
     /// the child's responsibility). Child stdout/stderr pass through and the
     /// child's exit code propagates.
     GhEnv(GhEnvArgs),
+    /// Labeling-chained PR creation for the `pr-create` lifecycle script:
+    /// runs `gh pr create` as the App installation AND executes the
+    /// deterministic labeling steps (`pr-labels`, `pr-labels-from-issue`)
+    /// against the created PR — the labeling obligation is executed and
+    /// enforced HERE, never attested by the caller. argv: `<repo> -- <child
+    /// gh pr create args...>`; `<repo>` is the `owner/name` slug the
+    /// labeling steps target.
+    GhEnvPrCreateChain(GhEnvPrCreateChainArgs),
     /// Print the App's canonical commit identity as `name=…` / `email=…`
     /// lines, derived from the authenticated App (`GET /app`) — never
     /// hardcoded.
@@ -260,6 +268,17 @@ pub struct ApiArgs {
 #[derive(Debug, Clone, Args)]
 pub struct GhEnvArgs {
     /// Child command and arguments, after `--`.
+    #[arg(last = true)]
+    pub command: Vec<String>,
+}
+
+/// Arguments for `orc github gh-env-pr-create-chain`.
+#[derive(Debug, Clone, Args)]
+pub struct GhEnvPrCreateChainArgs {
+    /// The `owner/name` repository the PR is created in (the labeling steps
+    /// target the same repo).
+    pub repo: String,
+    /// The child `gh pr create …` arguments, after `--`.
     #[arg(last = true)]
     pub command: Vec<String>,
 }

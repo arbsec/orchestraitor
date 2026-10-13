@@ -47,7 +47,22 @@ if [ "$OPT_DRY_RUN" = true ]; then
 fi
 
 # Mutating call: service route or typed failure — never silent personal auth.
-PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
+# In REQUIRED enforcement with a COMPLETE github_app config the dedicated
+# `gh-env-pr-create-chain` subcommand is used: orc executes the labeling
+# obligation ITSELF after the PR exists — no caller attestation. Every other
+# shape (absent/partial config, enforcement read failure) keeps the plain
+# service/fallback routing with the wrapper's own fail-closed gates.
+if orc_lib_has_github_app_config &&
+   orc_lib_enforcement_required &&
+   [ "$(orc_lib_enforcement_probe_status)" -eq 0 ]; then
+  PR_URL="$("${ORC_BIN:-orc}" github gh-env-pr-create-chain "$(orc_lib_resolve_repo)" -- "${GH_BIN:-gh}" "${ARGS[@]}")"
+  # The chain subcommand ALREADY ran both labeling steps; the shell-side
+  # chain below must not rerun them (idempotent, but the warnings would
+  # double).
+  CHAINED=1
+else
+  PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
+fi
 echo "Created PR: $PR_URL" >&2
 
 # --- Deterministic labeling chain (arbsec/orchestraitor#469) --------------------
@@ -57,11 +72,15 @@ echo "Created PR: $PR_URL" >&2
 # issues) right here. The PR already exists, so a labeling failure must
 # never orphan it — each step is non-fatal: on failure it prints a warning
 # naming the PR and the exact manual command, and pr-create still succeeds.
+# SKIPPED when the chain route above ran: `gh-env-pr-create-chain` already
+# executed both steps (CHAINED=1) — rerunning would only double warnings.
 PR_NUMBER="${PR_URL##*/}"
 case "$PR_NUMBER" in
   ''|*[!0-9]*) PR_NUMBER="" ;;
 esac
-if [ -n "$PR_NUMBER" ]; then
+if [ "${CHAINED:-0}" = "1" ]; then
+  : # labeling already enforced by gh-env-pr-create-chain
+elif [ -n "$PR_NUMBER" ]; then
   if ! bash "$SCRIPT_DIR/pr-labels" "$PR_NUMBER" --repo "$(orc_lib_resolve_repo)" >&2; then
     echo "WARNING: automatic labeling of PR #$PR_NUMBER failed (pr-labels); apply manually:" >&2
     echo "  bash $SCRIPT_DIR/pr-labels $PR_NUMBER --repo $(orc_lib_resolve_repo)" >&2
