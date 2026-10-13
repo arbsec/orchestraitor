@@ -5,22 +5,22 @@
 **Research date:** 2026-07-23
 **Scope:** Rust implementation, dependencies, repository architecture, CI/CD, OSS governance, Arbitraitor integration surface, and MVP milestone scope.
 
-> **Versioning note.** Crate versions and the Arbitraitor git revision listed below were verified against crates.io metadata, GitHub, and the Arbitraitor repository on 2026-07-23. They go stale quickly. Before starting implementation, re-verify every version against the latest crates.io / GitHub and update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and updated weekly thereafter; the CI "Arbitraitor bump" job (§17) catches API drift.
+> **Versioning note.** Crate versions and the Arbitraitor git revision listed below were verified against crates.io metadata, GitHub, and the Arbitraitor repository on 2026-10-13. They go stale quickly. Before starting implementation, re-verify every version against the latest crates.io / GitHub and update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and updated weekly thereafter; the CI "Arbitraitor bump" job (§17) catches API drift.
 
 > **Companion to:** [`docs/spec/spec.md`](spec.md). This document holds concrete crates, versions, license compatibility, runtime dependencies, platform support, and rejected alternatives. The spec holds product requirements, architecture, invariants, workflows, security boundaries, and user experience. Both files use the real Arbitraitor crate names, types, traits, and APIs (see §16 of the spec).
 >
-> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). Every dependency and architectural claim below was independently verified against crates.io metadata or upstream GitHub on 2026-07-23.
+> **Structural inspiration:** [arbsec/arbitraitor `docs/spec/tech-stack.md`](https://github.com/arbsec/arbitraitor/blob/main/docs/spec/tech-stack.md). The document structure was verified against that file on 2026-07-23; dependency versions were re-verified against crates.io metadata on 2026-10-13 (see the versioning note above).
 
 ---
 
 ## 1. Recommended baseline
 
-> **Versions verified on 2026-07-23.** Re-verify against crates.io / GitHub before implementation; update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and weekly thereafter.
+> **Versions verified on 2026-10-13.** Re-verify against crates.io / GitHub before implementation; update if they don't match. The Arbitraitor git revision should be bumped to the latest `main` HEAD before starting work and weekly thereafter.
 
 | Concern | Recommendation | License | Verified |
 |---|---|---|---|
 | Language | Rust 2024 edition | — | — |
-| Bootstrap toolchain | Rust 1.96.0, pinned in `rust-toolchain.toml` | — | matches Arbitraitor MSRV |
+| Bootstrap toolchain | Rust 1.98.1, pinned in `rust-toolchain.toml` | — | matches Arbitraitor host toolchain (MSRV declaration stays 1.96) |
 | Workspace resolver | Cargo resolver 3 | — | — |
 | Async runtime | Tokio (current_thread default for the daemon) | MIT | crates.io, 17M dl/wk |
 | TUI framework | Ratatui 0.30.2 + crossterm 0.29 | MIT | crates.io, ratatui-org |
@@ -33,11 +33,11 @@
 | Layered config | figment 0.10.19 (maintenance mode; serde+toml escape hatch planned) | MIT OR Apache-2.0 | crates.io |
 | Receipt canonicalization | serde_json_canonicalizer 0.3.2 (RFC 8785 JCS) | MIT | crates.io |
 | CLI | clap 4.6.4 + clap_derive | MIT OR Apache-2.0 | crates.io |
-| Git (controller-owned) | gix 0.85.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
+| Git (controller-owned) | gix 0.89.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
 | Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
 | MCP server + client | rmcp 2.2.0 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
-| Agent Client Protocol | agent-client-protocol 1.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
-| ACP ↔ MCP bridge | agent-client-protocol-rmcp 1.3.0 | Apache-2.0 | crates.io |
+| Agent Client Protocol | agent-client-protocol 3.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
+| ACP ↔ MCP bridge | agent-client-protocol-rmcp 4.0.3 | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
 | PTY | portable-pty 0.9.0 | MIT | crates.io |
 | Errors (lib) | thiserror 2 | MIT OR Apache-2.0 | crates.io |
@@ -246,7 +246,7 @@ The same TOML shape applies to other providers. For Z.ai the GLM Coding Plan exp
 
 ### 4.2 ACP
 
-`agent-client-protocol` 1.3.0 (Jul 20, 2026), maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. ~102k dl/wk. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
+`agent-client-protocol` 3.3.0, maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
 
 > Verify the pinned release before implementation. The plan calls for a release pin and a CI gate (cargo-deny + a custom smoke check that issues an ACP `initialize` against the bundled conductor stub).
 
