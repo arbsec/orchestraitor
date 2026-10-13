@@ -26,6 +26,10 @@ for LIB in "$HERE/../_lib.sh" "$HERE/../../../github-pr-lifecycle/scripts/_lib.s
   (
     # shellcheck source=../_lib.sh
     source "$LIB"
+    # Pin TMPDIR to $WORK: the trust-boundary tests assert /etc is OUTSIDE
+    # every trusted root; a caller-exported TMPDIR resolving to /etc would
+    # make that a trusted root and flip the expectation. Deterministic.
+    export TMPDIR="$WORK"
 
     printf 'line one\nline two\n' > "$WORK/body.md"
     : > "$WORK/empty.md"

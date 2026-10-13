@@ -94,6 +94,26 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?"?/[a-z_-]' \
                          s = substr(s, i)
                        }
                      }')
+                   # Backtick substitutions too (CodeRabbit review round):
+                   # `echo \`\`"$SCRIPT_DIR/pr-checks" ...\`\`` hides a direct
+                   # exec just like `$( ... )` does.
+                   while IFS= read -r nested; do
+                     [ -z "$nested" ] && continue
+                     nested="$(printf '%s' "$nested" |
+                       sed -E 's/bash "?\$\{?SCRIPT_DIR\}?"?\/[a-z_.-]+//g' |
+                       sed -E 's/\$\{?SCRIPT_DIR\}?"?\/_lib\.sh//g')"
+                     if printf '%s' "$nested" | grep -qE '\$\{?SCRIPT_DIR\}?"?/[a-z_-]'; then
+                       nested_direct=1
+                       break
+                     fi
+                   done < <(printf '%s\n' "$seg" | awk '
+                       {
+                         s = $0
+                         while (match(s, /`[^`]*`/)) {
+                           print substr(s, RSTART+1, RLENGTH-2)
+                           s = substr(s, RSTART + RLENGTH)
+                         }
+                       }')
                    if [ "$nested_direct" -eq 1 ]; then
                      direct_exec=1
                      break
