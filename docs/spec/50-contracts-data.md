@@ -1241,7 +1241,7 @@ The fast path re-verifies a fix with the model that reported the finding — the
 
 - **Prompt hygiene.** The re-verification prompt contains the ORIGINAL finding text (severity, evidence, path, violated rule) and the fix diff — never the implementer's fix description, commit-message rationale beyond the diff itself, or remediation reasoning. The verifier re-derives the verdict from the code, not from the fixer's narrative.
 - **Adversarial framing.** The re-verification contract frames the task as "demonstrate the finding still reproduces OR the fix is incomplete" — a hunt for residual defects, not an approval step. A `verified-fixed` verdict that cannot cite what it checked (the scoped tests run, the call sites read) is a typed format error, like any other invalid verdict.
-- **Panel cross-check.** When the finding was reported by a panel, the re-verification MAY be assigned to a DIFFERENT panel member (the reporter's identity is retained for attribution; the verifier's independence is preferred). When the finding is in a contested state (§21.15.2), the cross-check is REQUIRED, not optional — and the requirement OVERRIDES the reporter's available pin (§21.15.5): a different panel member's pinned identity is used even though the reporter's model is routable, recorded on the re-verification record as `fallback: pinned-panel-member` (the "how the verifier was chosen" discriminator covers any non-reporter selection, not only pin-unavailability; `none` is reserved for verifier = original reporter). If NO other panel member's identity is available, the cross-check degrades to a full review generation — recorded as `fallback: pinned-unavailable-full-generation` — never to the contested reporter re-verifying its own claim.
+- **Panel cross-check.** When the finding was reported by a panel, the re-verification MAY be assigned to a DIFFERENT panel member (the reporter's identity is retained for attribution; the verifier's independence is preferred). When the finding is in a contested state (§21.15.2), the cross-check is REQUIRED, not optional — and the requirement OVERRIDES the reporter's available pin (§21.15.5): the verifier MUST be a panel member with a DIFFERENT `(provider, model)` than the reporter's (a same-model different-member selection does not satisfy the cross-check), used even though the reporter's model is routable, recorded on `finding.reverification_record` as `fallback: pinned-panel-member` (the "how the verifier was chosen" discriminator covers any non-reporter selection, not only pin-unavailability; `none` is reserved for verifier = original reporter). If NO panel member with a different `(provider, model)` is available, the cross-check degrades to a full review generation — recorded as `fallback: pinned-unavailable-full-generation` — never to the contested reporter re-verifying its own claim.
 - **Escalation asymmetry.** `not-fixed` and `fix-regressed` verdicts from the fast path always route back to the full loop; only `verified-fixed` is a fast-path outcome. A model that rubber-stamps produces false `verified-fixed` verdicts — the counterweight is condition (a)/(c) of §21.15.3 plus the mandatory final full generation, which re-examines the whole diff including every fast-path-closed region.
 
 #### 21.15.5 Model identity pinning for re-verification
@@ -1255,21 +1255,27 @@ reviewer_identity:
   resolution_digest # SHA-256 over the routing decision record (§9.45) for
                     # the reporting call: precedence path, preset id +
                     # preset_instructions_digest, effort, and the resolved
-                    # generation options (20-harness-worker.md §9.49)
+                    # generation options (20-harness-worker.md §9.49);
+                    # plus the provider-reported immutable model
+                    # revision/snapshot id when the provider exposes one.
+                    # The digest captures ROUTING + CONFIGURATION inputs
+                    # only - it is NOT a behavioral fingerprint of the
+                    # model weights.
 ```
 
-The `reviewer_identity` block records WHO reported (or verifies) — it carries no outcome state. How an identity was chosen for a re-verification is OUTCOME state and lives on the re-verification record (§21.15.3), not inside `reviewer_identity`: a re-verification record carries the verifier's `reviewer_identity` PLUS a typed `fallback` discriminator —
+The `reviewer_identity` block records WHO reported (or verifies) — it carries no outcome state. How an identity was chosen for a re-verification is OUTCOME state and lives on the canonical nested path `finding.reverification_record` (the finding's re-verification outcome record; §21.15.3), not inside `reviewer_identity`: `finding.reverification_record` carries the verifier's `reviewer_identity` PLUS a typed `fallback` discriminator —
 
 ```text
-reverification_record.fallback:   # how the verifier identity was chosen
+finding.reverification_record.fallback:  # how the verifier identity was chosen
   none                              - verifier = original reporter; the
                                       exact pin was honored
   pinned-panel-member               - the verifier is a DIFFERENT panel
                                       member's pinned identity (either
                                       the reporter's pin is unavailable,
                                       or the §21.15.4 cross-check
-                                      requires independence even though
-                                      the reporter's pin is available)
+                                      requires a different
+                                      (provider, model) even though the
+                                      reporter's pin is available)
   pinned-unavailable-full-generation - no usable pin; degraded to a full
                                       review generation
 ```
@@ -1279,8 +1285,8 @@ This keeps report-time and verify-time records honestly populable: a `reported_b
 Semantics and fallback:
 
 - **Exact-match first.** Re-verification routes through the §9.45 registry requesting the pinned `(provider, model)`. The registry honors the pin when the model is still routable (configured, capability-verified per §10.4 discovery, not subscription-exhausted per §9.46).
-- **Reproducibility caveat.** A provider MAY update a model behind a stable id; a pin guarantees identity of the ROUTING TARGET, never bit-identical behavior across provider-side updates. The `resolution_digest` makes the original resolution replayable-auditable; the re-verification record carries the digest it verified under so a drifted model is detectable after the fact. Behavioral drift is otherwise out of scope — it is a provider-side property, handled (if at all) by §9.31 regression evaluation.
-- **Unavailable-model fallback.** When the pinned model is unavailable (decommissioned, quota-exhausted, capability-regressed), the re-verification does NOT silently substitute a different model: the finding either (a) routes to a different panel member's pinned identity when one exists (independence-preferred anyway) — the re-verification record carries `fallback: pinned-panel-member` with BOTH the original reporter's `reviewer_identity`/`resolution_digest` (preserved verbatim, for attribution and drift auditing) and the substitute's — or (b) degrades to a full review generation, which is always a valid substitute for re-verification — `fallback: pinned-unavailable-full-generation`, again with the original identity preserved. `pinned-panel-member` is the outcome for ANY verifier ≠ original reporter selection (the §21.15.4 cross-check uses the same value even when the reporter's pin is available); `none` is reserved for verifier = original reporter. The three outcomes are DISTINCT typed values on the re-verification record (`none` / `pinned-panel-member` / `pinned-unavailable-full-generation`); the §9.45.5 decision record carries the matching `pinned-exact` / `pinned-unavailable` resolution reason. Silent model substitution is prohibited — a `verified-fixed` from an unpinned, unrecorded model is worthless as evidence.
+- **Reproducibility caveat.** A provider MAY update a model behind a stable id; a pin guarantees identity of the ROUTING TARGET, never bit-identical behavior across provider-side updates. The `resolution_digest` makes the original ROUTING + CONFIGURATION resolution replayable-auditable, and it detects a drift in those inputs (different model id, preset, effort, or generation options) between report and re-verification; when the provider exposes an immutable model revision/snapshot id it is folded into the digest, giving after-the-fact detection of provider-side model swaps. The digest does NOT fingerprint model weights: silent provider-side behavior changes behind a stable, revision-less id are OUT of the digest's reach — they are a provider-side property, handled (if at all) by §9.31 regression evaluation, and `finding.reverification_record`'s stated guarantee is limited accordingly (routing/config fidelity + best-effort revision identity, never behavioral equivalence).
+- **Unavailable-model fallback.** When the pinned model is unavailable (decommissioned, quota-exhausted, capability-regressed), the re-verification does NOT silently substitute a different model: the finding either (a) routes to a different panel member's pinned identity when one exists (independence-preferred anyway) — `finding.reverification_record` carries `fallback: pinned-panel-member` with BOTH the original reporter's `reviewer_identity`/`resolution_digest` (preserved verbatim, for attribution and drift auditing) and the substitute's — or (b) degrades to a full review generation, which is always a valid substitute for re-verification — `fallback: pinned-unavailable-full-generation`, again with the original identity preserved. `pinned-panel-member` is the outcome for ANY verifier ≠ original reporter selection (the §21.15.4 cross-check uses the same value even when the reporter's pin is available); `none` is reserved for verifier = original reporter. The three outcomes are DISTINCT typed values on `finding.reverification_record` (`none` / `pinned-panel-member` / `pinned-unavailable-full-generation`); the §9.45.5 decision record carries the matching `pinned-exact` / `pinned-unavailable` resolution reason. Silent model substitution is prohibited — a `verified-fixed` from an unpinned, unrecorded model is worthless as evidence.
 
 ---
 
