@@ -87,6 +87,12 @@ expect_flagged "quote-separated-direct-exec" \
 expect_flagged "braced-quote-separated-direct-exec" \
   'OUT=$("${SCRIPT_DIR}"/pr-checks "$PR" 2>/dev/null) && echo "$OUT"'
 
+# 7. exec AFTER a nested substitution inside one outer substitution (CodeRabbit
+#    remote review thread PRRT_kwDOTg8Oms6r3Mfl): flat `[^)]*` extraction ended
+#    at the inner `)` and missed the exec.
+expect_flagged "exec-after-nested-substitution" \
+  'echo "$(VAR=$(printf ok) "$SCRIPT_DIR/pr-checks")"'
+
 # --- CLEAN CASES: must remain unflagged (exit 0) ---
 
 # 4. bash-prefixed invocation (the required form).

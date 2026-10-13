@@ -58,10 +58,13 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?"?/[a-z_-]' \
                    # The command is exempt, but a direct sibling exec can
                    # still hide INSIDE a command substitution
                    # (e.g. `echo "$("$SCRIPT_DIR/pr-checks" ...)"` — local
-                   # review at b1c2451). Extract each `$( ... )` body and run
-                   # the same checks on it: strip bash-prefixed invocations
-                   # and `_lib.sh` references, then flag any remaining
-                   # SCRIPT_DIR reference as a direct exec.
+                   # review at b1c2451). Extract each `$( ... )` body —
+                   # with balanced-paren depth tracking so nested
+                   # substitutions (`$(VAR=$(printf ok) exec)`) yield their
+                   # COMPLETE body — and run the same checks on it: strip
+                   # bash-prefixed invocations and `_lib.sh` references,
+                   # then flag any remaining SCRIPT_DIR reference as a
+                   # direct exec.
                    nested_direct=0
                    while IFS= read -r nested; do
                      [ -z "$nested" ] && continue
@@ -72,7 +75,25 @@ done < <(grep -rEn '\$\{?SCRIPT_DIR\}?"?/[a-z_-]' \
                        nested_direct=1
                        break
                      fi
-                   done < <(printf '%s\n' "$seg" | grep -oE '\$\([^)]*\)' | sed -E 's/^\$\(|\)$//g')
+                   done < <(printf '%s\n' "$seg" | awk '
+                     {
+                       s = $0
+                       while (match(s, /\$\(/)) {
+                         body = ""
+                         depth = 1
+                         i = RSTART + RLENGTH
+                         while (i <= length(s) && depth > 0) {
+                           c = substr(s, i, 1)
+                           two = substr(s, i, 2)
+                           if (two == "$(") { depth++; body = body two; i += 2; continue }
+                           if (c == "(") { depth++; body = body c; i++; continue }
+                           if (c == ")") { depth--; if (depth > 0) body = body c; i++; continue }
+                           body = body c; i++
+                         }
+                         print body
+                         s = substr(s, i)
+                       }
+                     }')
                    if [ "$nested_direct" -eq 1 ]; then
                      direct_exec=1
                      break
