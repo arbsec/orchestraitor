@@ -2402,7 +2402,20 @@ const AMBIENT_GIT_LOCATION_VARS: [&str; 7] = [
 /// changes a file; returns the temp dir (must outlive the test), the repo
 /// path, and the base branch's tree oid. Uses a pinned author identity so
 /// the test never depends on ambient git config.
-fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
+///
+/// `hostile_env` simulates a `git push` pre-push hook's exported
+/// GIT_DIR/GIT_WORK_TREE pair: every fixture `git` child receives these
+/// vars BEFORE the scrub runs, so the fixture is exercised under the same
+/// poisoned ambient shape a real hook injection produces. The fixture
+/// scrubs them on every child; a regression in the scrub leaves the
+/// fixture bound to the hostile gitdir, which the
+/// `spawn_local_repo_ignores_hostile_ambient_git_environment` test asserts
+/// does NOT happen (CodeRabbit #629 — earlier test draft scrubbed on
+/// separate Commands that never reached the fixture's children, letting a
+/// regression pass).
+fn spawn_local_repo(
+    hostile_env: &[(&str, &std::path::Path)],
+) -> miette::Result<(tempfile::TempDir, String, String, String, String)> {
     use std::process::Command;
     let temp = tempfile::tempdir().into_diagnostic()?;
     let repo = temp.path().join("repo");
@@ -2410,6 +2423,9 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     let run = |args: &[&str]| -> miette::Result<()> {
         let mut command = Command::new("git");
         command.arg("-C").arg(&repo).args(args);
+        for (key, value) in hostile_env {
+            command.env(key, value);
+        }
         for variable in AMBIENT_GIT_LOCATION_VARS {
             command.env_remove(variable);
         }
@@ -2440,6 +2456,9 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
             .arg("-C")
             .arg(&repo)
             .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+        for (key, value) in hostile_env {
+            command.env(key, value);
+        }
         for variable in AMBIENT_GIT_LOCATION_VARS {
             command.env_remove(variable);
         }
@@ -2455,6 +2474,9 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
     let head_output = {
         let mut command = Command::new("git");
         command.arg("-C").arg(&repo).args(["rev-parse", "main"]);
+        for (key, value) in hostile_env {
+            command.env(key, value);
+        }
         for variable in AMBIENT_GIT_LOCATION_VARS {
             command.env_remove(variable);
         }
@@ -2479,13 +2501,15 @@ fn spawn_local_repo() -> miette::Result<(tempfile::TempDir, String, String, Stri
 /// redirect the fixture's git children into the pointed-at repository. The
 /// forbidden effect — the fixture's `base` commit landing in the hostile
 /// repo — is asserted NOT to happen: the hostile repository is asserted to
-/// carry NO commits after the fixture ran, and a scrub-less control git
-/// child with the hostile variables in its inherited environment provably
-/// binds to the hostile gitdir, proving the poisoning is real and the scrub
-/// inside `spawn_local_repo` is what neutralizes it. The hostile variables
-/// are applied per-`Command` (what a hook injection actually does to each
-/// child); the rev-list assertion runs under the hostile variables
-/// themselves (local review, head 4b26b0e).
+/// carry NO commits after the fixture ran. The hostile variables are
+/// injected into every fixture child BEFORE the scrub runs (the same
+/// shape a real hook injection would produce), and the scrub inside
+/// `spawn_local_repo` is what neutralizes the redirect. A control
+/// assertion proves the env is genuinely hostile (an unscrubbed child with
+/// the same env resolves to the hostile gitdir, not the fixture's), so
+/// the test is not vacuous (CodeRabbit #629 — earlier draft scrubbed on
+/// separate Commands that never reached the fixture's children, letting a
+/// regression pass).
 #[test]
 fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<()> {
     use std::process::Command;
@@ -2500,17 +2524,24 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
         .into_diagnostic()?;
     assert!(status.success(), "hostile repo init failed");
     let hostile_git_dir = hostile_repo.join(".git");
+    let hostile_env: [(&str, &std::path::Path); 2] = [
+        ("GIT_DIR", &hostile_git_dir),
+        ("GIT_WORK_TREE", &hostile_repo),
+    ];
 
-    // Fixture repo built by `spawn_local_repo` (which scrubs the ambient
-    // variables from every child it spawns).
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    // Fixture repo built by `spawn_local_repo` under the hostile ambient
+    // env (every fixture child receives GIT_DIR/GIT_WORK_TREE before the
+    // internal scrub). The fixture's scrub is what neutralizes the
+    // redirect; a regression lets the fixture bind to the hostile gitdir.
+    let (temp, repo, _base_tree, _feature_tree, main_commit) =
+        spawn_local_repo(&hostile_env)?;
     let _ = temp; // outlives the assertions below
 
     // Control: a scrub-less git child, pointed at the fixture repo's cwd
-    // exactly like the pre-fix `run` helper, with the hostile variables in
-    // its inherited environment — this is the #553 corruption itself, and
-    // it MUST bind to the hostile gitdir (proving the attack is real and
-    // the environment below is genuinely hostile).
+    // exactly like a pre-fix `run` helper, with the hostile env injected
+    // per-Command — this IS the #553 corruption, and it MUST bind to the
+    // hostile gitdir (proving the env is genuinely hostile and the test
+    // is not vacuous).
     let poison_status = Command::new("git")
         .arg("-C")
         .arg(&repo)
@@ -2545,15 +2576,9 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
         "fixture repo main must carry the fixture commit"
     );
 
-    // And the FIXTURE ITSELF is exercised under the hostile environment:
-    // a scrub-less control git child with the hostile variables in ITS
-    // inherited environment binds to the hostile gitdir (proven above);
-    // `spawn_local_repo`'s children face the same inheritance and are
-    // scrubbed by the fixture itself. Assert the hostile repository has
-    // NO commits after the fixture ran under this poisoned environment —
-    // the forbidden effect did not happen. (Child-process re-invocation
-    // shape replaced: the fixture children already receive the hostile
-    // env through inheritance; the assertions below prove the outcome.)
+    // The hostile repository must carry NO commits after the fixture ran
+    // under the hostile ambient env — the scrub inside `spawn_local_repo`
+    // is what prevented the fixture's children from binding to it.
     let hostile_commits = Command::new("git")
         .arg("-C")
         .arg(&hostile_repo)
@@ -2573,11 +2598,9 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
          fixture ran under the hostile environment"
     );
 
-    // And the fixture's own children were scrubbed: re-resolving the
-    // fixture gitdir the way `spawn_local_repo` does (env-scrubbed) yields
-    // the FIXTURE gitdir even with the hostile variables present in this
-    // process's would-be environment — same commands, hostile env supplied
-    // explicitly, scrub removes it.
+    // The fixture's own children were scrubbed end-to-end: re-resolving the
+    // fixture gitdir from a scrubbed child yields the FIXTURE gitdir even
+    // with the hostile env supplied explicitly.
     let scrubbed = {
         let mut command = Command::new("git");
         command
@@ -2591,6 +2614,64 @@ fn spawn_local_repo_ignores_hostile_ambient_git_environment() -> miette::Result<
         }
         command.output().into_diagnostic()?
     };
+    assert!(
+        scrubbed.status.success(),
+        "scrubbed git invocation must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&scrubbed.stdout).trim(),
+        ".git",
+        "forbidden effect: the hostile ambient GIT_DIR must not redirect a \
+         scrubbed fixture child"
+    );
+    Ok(())
+}
+
+fn poison_status_and_assertion(
+    poison_status: &std::process::Output,
+    hostile_git_dir: &std::path::Path,
+) -> miette::Result<()> {
+    assert!(
+        poison_status.status.success(),
+        "control git invocation must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&poison_status.stdout).trim(),
+        hostile_git_dir.display().to_string(),
+        "control: an unscrubbed child MUST resolve to the hostile GIT_DIR \
+         (otherwise this test proves nothing)"
+    );
+    Ok(())
+}
+
+fn fixture_head_assertion(
+    fixture_head: &std::process::Output,
+    main_commit: &str,
+) -> miette::Result<()> {
+    assert!(fixture_head.status.success(), "fixture main must exist");
+    assert_eq!(
+        String::from_utf8_lossy(&fixture_head.stdout).trim(),
+        main_commit,
+        "fixture repo main must carry the fixture commit"
+    );
+    Ok(())
+}
+
+fn hostile_commits_assertion(hostile_commits: &std::process::Output) -> miette::Result<()> {
+    assert!(
+        hostile_commits.status.success(),
+        "hostile repo rev-list must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&hostile_commits.stdout).trim(),
+        "0",
+        "forbidden effect: the hostile repo must carry NO commits after the \
+         fixture ran under the hostile environment"
+    );
+    Ok(())
+}
+
+fn scrub_assertion(scrubbed: &std::process::Output) -> miette::Result<()> {
     assert!(
         scrubbed.status.success(),
         "scrubbed git invocation must succeed"
@@ -2744,7 +2825,7 @@ fn push_branch_cli(
 
 #[test]
 fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
     let repo_id_rule = (
         r"name:$repo){id}".to_string(),
         r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
@@ -2828,7 +2909,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
 
 #[test]
 fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
     // The mutation succeeds but reports an UNSIGNED commit (null signature):
     // the ref must NOT be moved and the command must fail with a typed
     // error — no `git push` fallback, no partial success.
@@ -2892,7 +2973,7 @@ fn github_push_branch_fails_closed_when_landed_commit_is_not_verified() -> miett
 
 #[test]
 fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     // The mutation reports a DIFFERENT tree than the local branch: the ref
     // must NOT be moved even though the commit claims success.
     let commit_payload = r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"4444444444444444444444444444444444444444","tree":{"oid":"9999999999999999999999999999999999999999"},"signature":{"isValid":true}}}}}"#;
@@ -2953,7 +3034,7 @@ fn github_push_branch_fails_closed_on_tree_mismatch() -> miette::Result<()> {
 
 #[test]
 fn github_push_branch_required_enforcement_fails_closed_without_config() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo(&[])?;
     // enforcement = required, incomplete github_app block: the command must
     // refuse BEFORE any network call (typed error naming the missing keys).
     fs::write(
@@ -2998,7 +3079,7 @@ fn github_push_branch_required_enforcement_fails_closed_without_config() -> miet
 
 #[test]
 fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
-    let (temp, repo, base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     // The remote branch head equals the local branch tree (everything
     // already landed): the diff against the remote head is empty. The
     // branch-ref probe (the ONLY request) answers with the local tree as the
@@ -3064,7 +3145,7 @@ fn github_push_branch_empty_diff_is_a_no_op() -> miette::Result<()> {
 
 #[test]
 fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
     // The landing commit verifies, but the real ref moved concurrently: the
     // beforeOid precondition FAILS, the command exits typed, and the temp
     // branch is deleted — the concurrent commit is NOT overwritten (works
@@ -3152,7 +3233,7 @@ fn github_push_branch_fast_forward_conflict_fails_without_overwrite() -> miette:
 #[test]
 fn github_push_branch_lands_committed_content_not_dirty_worktree() -> miette::Result<()> {
     use std::process::Command;
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     // Dirty the working copy of the feature file AND add an untracked file;
     // neither may leak into the landing payload.
     fs::write(format!("{repo}/feature.txt"), "DIRTY working-copy edit\n").into_diagnostic()?;
@@ -3270,7 +3351,7 @@ fn github_push_branch_re_land_signs_an_unsigned_head() -> miette::Result<()> {
     // real ref moves): probe -> head-commit (unsigned) -> repo id -> temp
     // probe (null) -> createRef -> createCommitOnBranch (empty fileChanges,
     // signed) -> updateRefs CAS -> post-move read -> deleteRef.
-    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo(&[])?;
     let unsigned_head = {
         use std::process::Command;
         let output = Command::new("git")
@@ -3403,7 +3484,7 @@ fn github_push_branch_re_land_is_a_no_op_on_a_verified_head() -> miette::Result<
     // the head-commit query (no createCommitOnBranch — the empty rules list
     // makes any further request fail the test with an unmatched-request
     // error) and exit 0.
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     let rules = vec![
         (
             "name:$repo){id}".to_string(),
@@ -3457,7 +3538,7 @@ fn github_push_branch_re_land_fails_closed_on_unsigned_landing() -> miette::Resu
     // real ref never moves (the landing goes to a temporary branch and the
     // gate fails before the updateRefs swing), so no manual restore is
     // needed — the typed error reports the untouched remote head.
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     let local_tree = fixture_main_tree(&repo)?;
     let rules = vec![
         (
@@ -3541,7 +3622,7 @@ fn github_push_branch_warns_when_adding_a_locally_executable_file() -> miette::R
     // createCommitOnBranch FileAddition always lands 100644: adding a file
     // that is 100755 locally must print a WARNING on stderr before any
     // mutation, and the landing itself proceeds (the tree gate decides).
-    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     {
         use std::process::Command;
         // Make the feature file executable in the branch's committed tree.
@@ -3635,7 +3716,7 @@ fn github_push_branch_dry_run_prints_plan_without_mutation() -> miette::Result<(
     // --dry-run: the branch probe and (for a new branch) the default-branch
     // read happen, but NO createRef/createCommitOnBranch/updateRefs — the
     // empty rules list makes any further request fail the test.
-    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),
@@ -3900,7 +3981,7 @@ fn stub_home(repo_temp: &tempfile::TempDir) -> miette::Result<String> {
 
 #[test]
 fn github_push_branch_new_branch_accepts_explicit_sha_base() -> miette::Result<()> {
-    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
     // New remote branch with an explicit --base given as a raw SHA: the API
     // ref probe (refs/heads/<sha>) does NOT match a branch, so the base must
     // fall back to a local `git rev-parse` instead of failing typed. The
@@ -3994,7 +4075,7 @@ fn github_push_branch_new_branch_accepts_explicit_sha_base() -> miette::Result<(
 
 #[test]
 fn github_push_branch_unreadable_remote_head_fails_even_with_explicit_base() -> miette::Result<()> {
-    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo()?;
+    let (temp, repo, _base_tree, _feature_tree, _main_commit) = spawn_local_repo(&[])?;
     // The remote head oid is an object this repo does NOT have and the fetch
     // cannot bring it in (the stub serves nothing to fetch from — origin is
     // the local repo itself, which does not contain the oid). An explicit
