@@ -57,11 +57,16 @@ Concretely:
   (`mediation.rs:431` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
   — `UnsupportedPlatform` is returned before Arbitraitor is probed at all.
   On a supported platform, `spawn` then performs the Arbitraitor preflight
-  and `gate_preflight` (mediation.rs:438-439) before any execution surface
-  exists — no child process, no temporary execution directory, no
-  run-state row. The `gate_preflight` inner platform check
-  (`is_supported_platform`, mediation.rs:282) is a defense-in-depth second
-  gate, not the first refusal path readers encounter.
+  and `gate_preflight` (mediation.rs:438-439) before it creates an execution
+  surface — no child process or temporary execution directory is created by
+  this call. The campaign may already have persisted the run-state row
+  before the lazy preflight runs (`crates/orchestraitor-campaign/src/loop_run.rs:1585-1595`
+  inserts the `running` row first, then calls `self.starter.start(...)`;
+  `MediatedBashMediator::worker` defers `MediatedWorker::spawn` until the
+  first bash call — `crates/orchestraitor-worker/src/mediator.rs:60-72`). The
+  `gate_preflight` inner platform check (`is_supported_platform`,
+  mediation.rs:282) is a defense-in-depth second gate, not the first
+  refusal path readers encounter.
 - `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:146`)
   is the typed refusal; its `Display` impl explicitly cites
   "ADR-0024 fails closed; no non-secure mode" so the diagnostic anchors
