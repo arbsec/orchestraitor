@@ -922,18 +922,34 @@ async fn cap_eviction_is_deterministic_oldest_first() {
     // the cap keeps the newest 16 (n16..n31). Deterministic eviction of
     // the oldest — asserted by the poll count being exactly 16.
     let _ = lane.poll_repo(&target, 1_200).await.expect("round 3");
-    let polls = server
+    let check_paths: Vec<String> = server
         .requests()
         .iter()
         .filter(|r| r.path.contains("/check-runs"))
-        .count();
+        .map(|r| r.path.clone())
+        .collect();
     // Round 1: 1 (old). Round 2: the union is old + n00..n15 = 17 > cap 16,
     // so `old` is evicted (oldest first) -> 16 (n00..n15). Round 3: the
     // union is n00..n15 + n16..n31 = 32 > 16 -> the oldest half evicted
     // -> 16 (n16..n31).
     assert_eq!(
-        polls,
+        check_paths.len(),
         1 + 16 + 16,
         "cap evicts the OLDEST SHAs deterministically, never by hash order"
+    );
+    // Round 3 polled EXACTLY n16..n31 — not `old`, not n00..n15.
+    let round3 = &check_paths[17..];
+    for i in 16..32 {
+        let expected = format!("/repos/arbsec/orchestraitor/commits/n{i:02}/check-runs");
+        assert!(
+            round3.iter().any(|p| p.contains(&expected)),
+            "round 3 polled {expected}"
+        );
+    }
+    assert!(
+        round3
+            .iter()
+            .all(|p| { (16..32).any(|i| p.contains(&format!("/commits/n{i:02}/check-runs"))) }),
+        "round 3 never polled the evicted SHAs: {round3:?}"
     );
 }
