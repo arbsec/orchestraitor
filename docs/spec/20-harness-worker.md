@@ -742,12 +742,13 @@ Both are **opt-in and fail-closed**. A built-in internal tool that is not config
 
 #### 9.19.1 Opt-in configuration (trusted layers only)
 
-Each tool is enabled by a `[tools.web_search]` / `[tools.web_fetch]` block in the layered config. The block is honored from trusted layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in the project or a lower layer is a typed error naming the tool — never a silent drop (§9.22.9, same gate as declared tools). Absence of the block disables the tool entirely.
+Each tool is enabled by a `[tools.web_search]` / `[tools.web_fetch]` block in the layered config. The block is honored from trusted layers only (built-in defaults, plugin defaults, global user, organization/team); a definition in the project or a lower layer is a typed error naming the tool — never a silent drop (§9.22.9, same gate as declared tools). Absence of the block disables the tool entirely. An enabled `[tools.web_search]` block with an empty `engines` list is a typed startup error — a configured search tool MUST have at least one engine; until an engine ships (§9.19.3), any `[tools.web_search]` block fails closed at startup exactly like a missing capability (§9.19.6).
 
 ```toml
 [tools.web_search]                     # absent by default
-engines = []                           # NO engine ships in v1 (§9.19.3); "kagi" is the first
-                                       # candidate once mediated-POST is ruled in (§9.19.6)
+engines = []                           # ILLUSTRATIVE ONLY: empty = typed startup error
+                                       # (no engine ships in v1, §9.19.3; "kagi" is the
+                                       # first candidate once mediated-POST is ruled in, §9.19.6)
 max_results = 5                        # post-merge cap; hard maximum 10
 max_content_tokens = 2_000             # per-hit token cap
 max_total_tokens = 8_000               # per-call budget across hits
@@ -783,7 +784,12 @@ Aggregation is built in-repo (worker module — no new crate, §16.6 layout; tec
 
 #### 9.19.3 Engine set (v1) and the scraping boundary
 
-The v1 engine set is APIs-only. As of this writing, NO current paid search API of the candidate providers conforms to the GET-only transport scope of §9.19.6 — Kagi's current v1 API is POST-only (`POST /search`, `POST /extract` per Kagi's official OpenAPI reference and generated clients); its GET-only `/search` exists only in the deprecated v0 (Legacy) API; Exa's `/search`, `/findSimilar`, `/contents`, and `/answer` are all POST-with-JSON-body per Exa's published OpenAPI spec (the only GET endpoints are research-task status polling). The v1 engine set is therefore EMPTY pending the first compliant capability combination:
+The v1 engine set is APIs-only. As of this writing, NO current paid search API of the candidate providers conforms to the GET-only transport scope of §9.19.6:
+
+- **Kagi** — v1 Search is POST-only (`POST /search`, `POST /extract`). Evidence conflict, resolved: Kagi's help page carries a stale GET-style `curl` example against `/api/v1/search?q=…`, but the authoritative surfaces all specify POST — Kagi's own OpenAPI reference (`kagi.com/api/docs/openapi/search/search`: "Endpoint: POST /search"), the official generated clients (`kagisearch/kagi-openapi-python` SearchApi: `POST /search`; `kagisearch/kagimcp`'s vendored client: `method='POST', resource_path='/search'`), and a live probe (2026-10-13): `GET /api/v1/search` returns a 404 HTML error page (no route) while `POST /api/v1/search` reaches the API handler (structured `general.invalid_token` error envelope). A GET `/search` exists only in the deprecated v0 (Legacy) API, which is explicitly marked deprecated by Kagi.
+- **Exa** — `/search`, `/findSimilar`, `/contents`, and `/answer` are all POST-with-JSON-body per Exa's published OpenAPI spec (`exa-labs/openapi-spec`); the only GET endpoints are research-task status polling.
+
+The v1 engine set is therefore EMPTY pending the first compliant capability combination:
 
 - **Kagi** — intended primary quality provider (official REST/JSON API; search $12/1k requests, Extract $4/1k pages; no ads, no scraping anywhere in the retrieval chain). Ships as the first engine once a mediated-POST capability lands under an explicit policy ruling (§9.19.6) — or a GET-conformant Kagi access mode is verified and approved.
 
