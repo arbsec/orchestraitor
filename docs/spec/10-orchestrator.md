@@ -586,7 +586,78 @@ search           # filtered queries over items and fields
 
 `orc chat` is a CLI session backed by the same coordinator decision tools (§9.39) under this narrower profile; TUI and daemon surfaces expose equivalent views.
 
-### 9.47 GitHub event ingress and agent-authored PR attribution
+### 9.48 PR status aggregation tool
+
+`pr.status` is a coordinator decision tool (§9.39) that answers ONE question — "is PR N mergeable right now, and if not, why not?" — from a single invocation. It exists because the §9.33.4 review pipeline's merge decision is currently spread across five skill scripts (`.agents/skills/github-pr-lifecycle/scripts/`: `pr-checks`, `review-threads`, `reconcile-checklist`, `convergence-status`, `merge-gate`) plus raw `gh pr view`/`gh api` calls; every agent re-derives the interpretation of check states, thread resolvability, and checklist markers independently, which is slow, token-heavy, and the place where agents re-derive it differently.
+
+**One engine, three surfaces.** The aggregation engine is a typed read of the SAME facts the scripts read today, re-implemented in-process (Rust) against the GitHub App service identity — the scripts stay the shell-level operators' surface and remain the normative definition of the classification rules; the engine consumes their semantics, never a second interpretation:
+
+- `orc pr status <N> --repo <slug>` — CLI subcommand (human one-pager by default, `--json` for machines).
+- the `pr.status` coordinator decision tool (§9.39) — daemon/MCP surface, same engine, same typed output.
+- `pr status` in `orc chat` (§9.44) — the read-only chat view of the same verdict, stamped with the §9.44 last-synced caveat.
+
+A PR-status answer that arrives through any of the three surfaces is a read-only view of provider state; the tool NEVER mutates anything (no labels, no comments, no review requests — those are `pr-labels`, `pr-request-review`, and the other wrappers' jobs) and never merges (`merge-gate` remains the mutating gate; `pr.status` reports what `merge-gate` would decide without performing it).
+
+**Aggregate verdict.** The tool computes, at the PR's current head, all of the following in ONE pass:
+
+```text
+pr.status <N> -> {
+  number, repository,
+  head_sha, base_oid,                # both full OIDs (the two convergence anchors,
+                                     # references/pr-convergence.md)
+  is_draft, review_decision,         # gh pr view fields, verbatim
+  merge_state,                       # mergeStateStatus (CLEAN|DIRTY|BLOCKED|UNSTABLE|HAS_HOOKS|UNKNOWN)
+  checks: [ { name, state, bucket, classification, workflow, link } ],
+                                     # classification: pass|fail|pending|skip|not-applicable|unknown,
+                                     # including the KNOWN_DISABLED_JOBS semantics ("Docs
+                                     # Consistency", "Documentation") copied from pr-checks — a
+                                     # known-disabled job exempts only while bucket == "skipping";
+                                     # the same job actually failing is a failure, never a pass
+  checks_all_passed, checks_any_failing, checks_any_pending,
+  threads: {
+    total, unresolved_actionable, resolved, outdated,
+    items: [ { id, is_resolved, is_outdated, path, line, authors, last_comment_excerpt } ]
+  },                                 # actionable = !isResolved && !isOutdated (review-threads rule);
+                                     # excerpts are size-capped (see below), never full bodies
+  checklist: { items: [ { marker, checked, description } ], all_checked, unchecked_count },
+  review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
+    present, verdict, head_sha_match, base_oid_match
+  },                                 # CLEAN record must match BOTH anchors exactly
+  convergence: {
+    mergeable: bool,
+    reasons: [ string ]              # stable machine codes: agent_review_not_clean_at_head,
+                                     # checks_not_passing, checks_pending, unresolved_threads(n),
+                                     # unchecked_items(n), review_required, is_draft,
+                                     # merge_state_conflicting — the same code set
+                                     # convergence-status emits today, extended only additively
+  },
+  fetched_at                         # provider-clock timestamp of the snapshot
+}
+```
+
+The single human one-pager renders the same verdict as verdict-first prose (`MERGEABLE` / `BLOCKED`), then the reason codes, then one line per failing/pending check, one line per unresolved actionable thread, and the checklist delta — a screen, not a transcript.
+
+**Exit-code contract (CLI).** `0` mergeable; `1` unrecoverable error (network, auth, malformed provider output); `2` config/state error (PR not found, missing project config, `orc github` service identity unresolved); `3` never used by this read-only tool (reserved for policy violations, parity with the other scripts); `4` concurrent edit detected (head or base moved between the aggregated reads — re-read and retry). The verdict itself is NOT an error: a BLOCKED answer is a successful read and exits 0 with `mergeable: false` — the operator decides what to do, exactly like `gh pr checks` reporting red is still a successful query.
+
+**Invariants.** Typed output only, no prose in the JSON mode; fail-closed on provider error (a sub-check that cannot be read makes the whole verdict carry an explicit `unread` reason, never a silently-passed gate); reads run through the service identity (`orc github gh-env` route) so rate limits and visibility are the installation's, never a personal token's; tool arguments are §6.1 untrusted input; no secrets in output (§9.23.4 — the token lives only inside the gh-env child). The reason-code vocabulary is the one contract between the engine and every consumer; renaming or removing a code is a breaking change and ships only additively.
+
+### 9.49 Reference expansion for worker-bound chat references
+
+Chat and delegation flows carry entity references — `pr://<N>`, `issue://<N>` — that the orchestration layer already resolves for itself (§9.44 reads the same provider state the §9.43 board provider holds). When such a reference is delivered to a WORKER agent inside a task payload, the worker currently re-fetches the same metadata itself through its own tool calls: duplicated latency, duplicated tokens, and a second, uncontrolled exposure of provider state to the model context.
+
+**Mechanism: pre-send expansion at the delegation boundary, not agent-side fetching.** Expansion is performed by the ORCHESTRATION LAYER at the moment a payload crosses into a worker's task context (the §9.25.2 delegation boundary), never by the worker and never by the model deciding to fetch more:
+
+1. **Grammar.** `pr://<number>`, `issue://<number>` — bare integer keys, the shape this repo's own harness and the chat layer already use; `cr://<thread-id>` is RESERVED for a review-conversation expansion shape (the same review-threads content §9.48 reads) and is not specified for MVP. Unrecognized schemes (`issue:/`, `pr:/x`, `fixes://`) are NOT references: they pass through as literal text, never best-effort expanded.
+2. **Bounded payload.** An expansion inlines a FIXED field set only: `number, title, state, author, labels, head_sha + base_oid (PRs), CI verdict summary (the §9.48 checks_all_passed/checks_any_pending booleans + failing-check names, never the full check array), unresolved-thread count, one-line URL`. Titles and labels are size-capped; full bodies, comments, and review text are NEVER inlined — the worker fetches deeper content itself, on demand, if the bounded summary is insufficient for the assigned task. The default budget is 2 KiB per expanded reference and 8 KiB per payload expansion pass in total; a payload with more references than fit in the budget expands the highest-priority ones and leaves the rest as literal text with an expansion notice — never truncated mid-reference, never dropped silently.
+3. **Data, never instructions (§6.1).** Everything the expansion carries — titles, labels, state names — is UNTRUSTED PROVIDER CONTENT quoted as data in the expanded block: fenced, labelled `expanded pr://N (untrusted content below)`, with no instruction-bearing framing. The layer performs no interpretation of body/comment content and does not scan for "the PR says to do X" — the quoted-fence boundary IS the containment (§9.38's proxy posture: transport and presentation, never authority). Secrets discovered in an expanded field (token-shaped strings matched by the same §9.23 secret-detection posture) are REDACTED before the block leaves the layer; a redaction is announced as `redacted (N instance(s))` — never a silent pass, never the secret itself.
+4. **Surfaces.** Expansion runs at exactly two places: (a) the daemon's task-payload assembly when it delegates to a worker (the same place the worker task contract is built), and (b) `orc chat` when the operator's message is drafted INTO a task (§9.44 — drafting, not the operator's own chat view, which shows references as typed links). It does NOT run inside worker tool output or inside §9.39 tool results — those are already typed surfaces.
+5. **Failure semantics (typed, never silent).** Unknown reference (no such PR/issue, or not in the configured repository scope): the reference is left as literal text and an expansion notice with the typed reason `not-found` is attached; the payload is still delivered. Private repo / unauthorized for the service identity: `forbidden`, same pass-through-with-notice behavior. Rate-limited or provider error: `rate-limited` / `provider-error`, and the layer does NOT retry synchronously (delegation latency must not absorb a backoff loop; §9.26.1) — the notice tells the worker the reference exists but could not be expanded. A reference that resolves but is DELETED between resolution and payload assembly re-runs the resolution; a second failure downgrades to `not-found`. An expansion failure NEVER blocks delegation: the worker always gets the payload, with the notice.
+
+**Why pre-send, not MCP resources.** An MCP resource template (`pr://{owner}/{repo}/{number}`) in the §9.38 proxy would make the DATA available but leave the WHEN to the agent — the agent must notice the reference, decide to fetch it, and pay the round-trip, which is exactly the waste this mechanism removes (the MCP resources spec itself is explicit that resource inclusion is application-driven, not agent-driven: modelcontextprotocol.io, "User Interaction Model", 2025-11-25). Pre-send expansion moves the fetch to the one component that already holds the credentials, the repository scope, and the moment of delegation; the worker-side surface stays plain, bounded, typed text. An optional read-only resource template MAY still be exposed later for on-demand deep reads (full thread bodies, file contents); it is complementary, not the mechanism.
+
+**Relationship to §9.48.** The PR flavor of the expansion consumes the §9.48 engine's typed output (state, head/base OIDs, CI booleans, thread counts) — one aggregation engine, two consumers; the expansion layer adds only the bounding, fencing, and redaction. A PR reference expanded for a worker therefore carries exactly the same reason codes the §9.48 verdict carries, never a second vocabulary.
+
+### 9.50 GitHub event ingress and agent-authored PR attribution
 
 The daemon is a local, NAT'd process and exposes no public endpoint. GitHub events (PR opened, updated, ready-for-review, commented; issue commented) reach it through two converging paths: an event-relay PUSH for low latency and a conditional POLL for completeness. Both feed the same ingress queue and the same kick-off evaluation as §9.36 — event ingestion accelerates kick-off and the §9.33.4 review pipeline; it never creates a second trigger authority, and a missed or delayed event never loses work (the §9.43 reconcile poll is the completeness authority, board-wins).
 
