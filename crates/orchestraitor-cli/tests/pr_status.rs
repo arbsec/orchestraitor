@@ -1139,6 +1139,117 @@ fn pr_status_closed_pr_never_reports_mergeable() -> miette::Result<()> {
 }
 
 #[test]
+fn pr_status_null_review_decision_without_errors_is_no_requirement() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // A base branch that does not require reviews: reviewDecision null is a
+    // normal provider state — every gate green stays MERGEABLE, exit 0.
+    let view = |decision: serde_json::Value| {
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "number": 614, "state": "OPEN",
+                "headRefOid": HEAD, "baseRefOid": BASE,
+                "isDraft": false, "reviewDecision": decision,
+                "mergeStateStatus": "CLEAN",
+            }}}
+        })
+        .to_string()
+    };
+    let payloads = vec![
+        view(serde_json::Value::Null),
+        checks_all_pass(),
+        threads_none(),
+        body_all_checked(),
+        view(serde_json::Value::Null),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], true);
+    assert_eq!(verdict["convergence"]["reasons"], serde_json::json!([]));
+    Ok(())
+}
+
+#[test]
+fn pr_status_null_review_decision_with_partial_error_is_unread() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // reviewDecision null WITH a partial field error: unread(review-decision),
+    // mergeable false, exit 1 after the typed JSON.
+    let view = || {
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "number": 614, "state": "OPEN",
+                "headRefOid": HEAD, "baseRefOid": BASE,
+                "isDraft": false, "reviewDecision": null,
+                "mergeStateStatus": "CLEAN",
+            }}},
+            "errors": [{"message": "reviewDecision is unavailable",
+                        "path": ["repository", "pullRequest", "reviewDecision"]}]
+        })
+        .to_string()
+    };
+    let payloads = vec![
+        view(),
+        checks_all_pass(),
+        threads_none(),
+        body_all_checked(),
+        view(),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let json_line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| miette::miette!("expected partial JSON on stderr: {stderr}"))?;
+    let partial: serde_json::Value = serde_json::from_str(json_line).into_diagnostic()?;
+    assert_eq!(partial["convergence"]["mergeable"], false);
+    assert!(
+        partial["convergence"]["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .any(|reason| reason.as_str() == Some("unread(review-decision)"))
+    );
+    Ok(())
+}
+
+#[test]
 fn pr_status_no_secrets_in_output() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_project_config(&temp)?;

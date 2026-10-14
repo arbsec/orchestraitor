@@ -506,8 +506,10 @@ impl Engine {
     }
 
     /// Executes one GraphQL operation; transport/HTTP/shape failures are
-    /// typed unrecoverable errors.
-    fn graphql(&self, operation: &str, query: &str, variables: &Value) -> Result<Value> {
+    /// typed unrecoverable errors. Returns the `data` object plus whether
+    /// the envelope carried partial-error entries (data present, errors
+    /// alongside — e.g. FORBIDDEN on a sub-field).
+    fn graphql(&self, operation: &str, query: &str, variables: &Value) -> Result<(Value, bool)> {
         let response = self
             .transport
             .request_bearer(
@@ -593,7 +595,11 @@ impl Engine {
                 message: format!("github api response is malformed: missing data ({operation})"),
                 partial_json: String::new(),
             })?;
-        Ok(data)
+        let had_errors = envelope
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty());
+        Ok((data, had_errors))
     }
 
     /// Aggregates the full §9.48 verdict for one PR.
@@ -609,7 +615,7 @@ impl Engine {
         repo_root: &std::path::Path,
     ) -> Result<PrStatus> {
         // 1. The pre-read PR view: identity fields + the two anchors.
-        let initial = self.pr_view(owner, repo, number)?;
+        let (initial, view_had_errors) = self.pr_view(owner, repo, number)?;
         let head_sha = oid_field(&initial, "headRefOid", "head")?;
         let base_oid = oid_field(&initial, "baseRefOid", "base")?;
 
@@ -634,6 +640,7 @@ impl Engine {
                 checklist,
                 review_record,
             },
+            view_had_errors,
         )
     }
 
@@ -648,7 +655,7 @@ impl Engine {
         head_sha: &str,
         base_oid: &str,
     ) -> Result<()> {
-        let final_view = self.pr_view(owner, repo, number)?;
+        let (final_view, _post_errors) = self.pr_view(owner, repo, number)?;
         let final_head = oid_field(&final_view, "headRefOid", "head")?;
         let final_base = oid_field(&final_view, "baseRefOid", "base")?;
         if final_head == head_sha && final_base == base_oid {
@@ -670,12 +677,12 @@ impl Engine {
 
     /// The PR view: number, headRefOid, baseRefOid, isDraft, reviewDecision,
     /// mergeStateStatus — the fields pr-state and convergence-status read.
-    fn pr_view(&self, owner: &str, repo: &str, number: u64) -> Result<Value> {
+    fn pr_view(&self, owner: &str, repo: &str, number: u64) -> Result<(Value, bool)> {
         let query = "query($owner:String!,$name:String!,$number:Int!){\
 repository(owner:$owner,name:$name){\
 pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDecision mergeStateStatus}}}\
 ";
-        let data = self.graphql(
+        let (data, had_errors) = self.graphql(
             "pr view",
             query,
             &serde_json::json!({"owner": owner, "name": repo, "number": number}),
@@ -686,7 +693,10 @@ pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDec
             .ok_or_else(|| PrStatusConfigError {
                 message: format!("PR #{number} not found in {owner}/{repo}"),
             })?;
-        Ok(pr.clone())
+        // Whether the response carried partial-error entries: a null field
+        // WITH errors is an unread sub-field; a null field WITHOUT errors is
+        // a legitimate provider state (e.g. no reviews yet).
+        Ok((pr.clone(), had_errors))
     }
 
     /// The checks rollup: the exact GraphQL shape `gh pr checks` reads
@@ -718,12 +728,12 @@ __typename\
         // Try the event-including shape first; a query-level rejection
         // (unsupported field on older GHES) falls back to the event-less
         // shape once — the same includeEvent detection gh applies.
-        let data = match self.graphql(
+        let (data, _had_errors) = match self.graphql(
             "checks",
             query_with_event,
             &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
         ) {
-            Ok(data) => data,
+            Ok(pair) => pair,
             Err(_) => self
                 .graphql(
                     "checks",
@@ -788,7 +798,7 @@ reviewThreads(first:100){pageInfo{hasNextPage}nodes{\
 id isResolved isOutdated path line\
 comments(first:50){totalCount nodes{body author{login}}}\
 }}}}}";
-        let data = self
+        let (data, _had_errors) = self
             .graphql(
                 "review threads",
                 query,
@@ -887,7 +897,7 @@ comments(first:50){totalCount nodes{body author{login}}}\
     fn read_body(&self, owner: &str, repo: &str, number: u64) -> Result<Checklist, String> {
         let query = "query($owner:String!,$name:String!,$number:Int!){\
 repository(owner:$owner,name:$name){pullRequest(number:$number){body}}}";
-        let data = self
+        let (data, _had_errors) = self
             .graphql(
                 "pr body",
                 query,
@@ -961,14 +971,25 @@ fn apply_review_state_gates(
     initial: &Value,
     reasons: &mut Vec<String>,
     unread_subcheck: &mut Option<&'static str>,
+    view_had_errors: bool,
 ) -> bool {
     // An unreadable (null/absent) reviewDecision is an unread sub-field —
     // fail closed (a partial field error must never masquerade as "no
     // review requirement").
     match initial.get("reviewDecision").and_then(Value::as_str) {
         Some("REVIEW_REQUIRED") => reasons.push("review_required".to_string()),
+        // A decision is present: no additional reason.
         Some(decision) if !decision.is_empty() => {}
-        _ => *unread_subcheck = Some("review-decision"),
+        // A null/empty decision WITH partial errors is an unread sub-field:
+        // record the stable reason (forcing mergeable false) AND flag the
+        // exit-1 path.
+        None | Some("") if view_had_errors => {
+            reasons.push("unread(review-decision)".to_string());
+            *unread_subcheck = Some("review-decision");
+        }
+        // A null/empty decision WITHOUT errors is the legitimate "no review
+        // required" provider state — no reason, never unread.
+        _ => {}
     }
     let is_draft = initial.get("isDraft").and_then(Value::as_bool) == Some(true);
     if is_draft {
@@ -1013,6 +1034,7 @@ fn assemble_verdict(
     repo: &str,
     number: u64,
     reads: SubReads,
+    view_had_errors: bool,
 ) -> Result<PrStatus> {
     let SubReads {
         checks,
@@ -1075,7 +1097,8 @@ fn assemble_verdict(
     {
         reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
     }
-    let is_draft = apply_review_state_gates(initial, &mut reasons, &mut unread_subcheck);
+    let is_draft =
+        apply_review_state_gates(initial, &mut reasons, &mut unread_subcheck, view_had_errors);
 
     let verdict = build_verdict(
         initial,
