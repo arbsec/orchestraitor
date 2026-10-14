@@ -117,3 +117,33 @@ GraphQL transport AND the CLEAN-record root; otherwise the route is disabled
 entirely (hidden from `tools/list`, calls rejected — the same posture as
 `board.query`). The engine is blocking, so the gateway runs it inside
 `tokio::task::spawn_blocking`.
+
+## The `pr.status` coordinator decision tool (daemon/MCP surface)
+
+The MCP gateway exposes the same verdict as the `pr.status` decision tool
+(spec §9.39, §9.48 "one engine, three surfaces" — the tool consumes the
+shared engine module, so the typed output and reason codes are identical
+to the CLI subcommand by construction). The tool is READ-ONLY: it never
+labels, comments, reviews, or merges.
+
+**Enabling the tool requires ALL THREE gateway context values** — an
+operator who sets only a subset gets a hidden, uncallsable tool (the same
+`disable_route` posture as `board.query`), never a partially scoped one:
+
+1. `pr_status` — the GraphQL transport reading through the configured
+   `github_app` service identity (the same mint path the CLI uses).
+2. `pr_status_repo_root` — the workspace root the tool reads
+   `.orchestraitor/reviews/` under (the CLEAN-review-record store).
+3. `pr_status_allowed_repo` — the single `owner/name` repository the tool
+   may read. Tool arguments are untrusted input (§6.1): a request naming
+   any OTHER repository is refused BEFORE the engine runs with the typed
+   `pr_status_out_of_scope` payload (naming the configured scope), and the
+   refusal is recorded in the audit store with the `out_of_scope` outcome
+   class — scope-boundary probes leave an audit trail.
+
+Every invocation — verdict, typed error, or scope refusal — records a
+`ToolRequest` event in the shared audit store with the §9.25.1
+delegation chain (client-asserted labels, `claimed:`-prefixed and
+truncated) and an outcome class (`verdict` / `unrecoverable` / `config` /
+`concurrent_edit` / `out_of_scope`). An unread sub-check returns the
+typed error with the degraded `partial_verdict` field (§9.48 invariant).

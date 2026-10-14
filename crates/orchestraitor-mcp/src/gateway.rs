@@ -479,6 +479,32 @@ impl McpGateway {
         // the configured slug; the mismatch payload names the configured
         // scope, never echoes the refused request values back as authority.
         if format!("{}/{}", input.owner, input.repo) != allowed_repo {
+            // Refused scope-boundary probes are the events an auditor needs
+            // most: record the refusal with the out_of_scope outcome class
+            // before returning the typed payload. The refused request values
+            // ride the payload as data (truncated), never as authority.
+            let shared = self.context.board_audit_store.clone();
+            let correlation_id = OperationId::new();
+            let chain = DelegationChain {
+                correlation_id: correlation_id.clone(),
+                parent_op_id: None,
+                principals: input.delegation_chain.clone(),
+            };
+            if let Some(shared) = shared.as_ref()
+                && let Ok(mut store) = shared.lock()
+            {
+                let seq_base = store.records().len();
+                let prev_base = store.records().last().map(|record| record.hash.clone());
+                if let Ok(event) = build_pr_status_refusal_event(
+                    &input,
+                    &chain,
+                    &allowed_repo,
+                    seq_base,
+                    prev_base,
+                ) {
+                    let _ = store.append(event);
+                }
+            }
             return Ok(CallToolResult::structured_error(serde_json::json!({
                 "error": format!(
                     "pr.status is bound to {allowed_repo}; the requested repository is \
@@ -859,6 +885,66 @@ fn truncate_pr_status_value(value: &str) -> String {
 /// Builds the `ToolRequest` envelope for one `pr.status` invocation,
 /// continuing the chain at `(seq_base, prev_base)` (mirrors
 /// `board_query::build_invocation_event`; issues #458-gen2 N1/N2).
+/// Builds the `ToolRequest` event for one OUT-OF-SCOPE refusal: the
+/// refused request values ride as truncated data, the outcome class is
+/// `out_of_scope`, and the configured scope is recorded — the audit trail
+/// shows the scope-boundary probe without echoing the request as authority.
+fn build_pr_status_refusal_event(
+    request: &PrStatusRequest,
+    chain: &DelegationChain,
+    allowed_repo: &str,
+    seq_base: usize,
+    prev_base: Option<orchestraitor_events::HashDigest>,
+) -> Result<orchestraitor_events::EventEnvelope, McpGatewayError> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("tool".to_string(), Value::String(String::from("pr.status")));
+    payload.insert(
+        "request".to_string(),
+        serde_json::json!({
+            "number": request.number,
+            "owner": truncate_pr_status_value(&request.owner),
+            "repo": truncate_pr_status_value(&request.repo),
+        }),
+    );
+    payload.insert(
+        "result_summary".to_string(),
+        serde_json::json!({
+            "outcome": "out_of_scope",
+            "allowed": allowed_repo,
+        }),
+    );
+    payload.insert(
+        "chain_source".to_string(),
+        Value::String(String::from("client-asserted")),
+    );
+    let mut principals: Vec<Value> = chain
+        .principals
+        .iter()
+        .take(crate::board_query::MAX_CHAIN_PRINCIPALS)
+        .map(|principal| truncate_pr_status_value(principal))
+        .map(|truncated| Value::String(format!("claimed:{truncated}")))
+        .collect();
+    if chain.principals.len() > crate::board_query::MAX_CHAIN_PRINCIPALS {
+        principals.push(Value::String(String::from(
+            crate::board_query::CHAIN_TRUNCATION_MARKER,
+        )));
+    }
+    payload.insert("delegation_chain".to_string(), Value::Array(principals));
+
+    let monotonic_seq = u64::try_from(seq_base).map_or(u64::MAX, |base| base.saturating_add(1));
+    orchestraitor_events::EventEnvelope::try_new(orchestraitor_events::EventEnvelopeInput {
+        schema_version: orchestraitor_events::CURRENT_SCHEMA_VERSION,
+        monotonic_seq,
+        wall_clock_ts: rfc3339_now(),
+        correlation_id: chain.correlation_id.clone(),
+        parent_op_id: chain.parent_op_id.clone(),
+        category: orchestraitor_events::EventCategory::ToolRequest,
+        payload: Value::Object(payload),
+        prev_hash: prev_base,
+    })
+    .map_err(|_| McpGatewayError::PrStatus(String::from("refusal event construction failed")))
+}
+
 fn build_pr_status_invocation_event(
     request: &PrStatusRequest,
     chain: &DelegationChain,
@@ -2067,6 +2153,88 @@ mod tests {
         assert!(!partial.tool_router.has_route("pr.status"));
         assert!(partial.tool_router.is_disabled("pr.status"));
         Ok(())
+    }
+
+    /// (a3) A transport + repo root WITHOUT the allowed repository ALSO
+    /// disables the route: all three context values are required — an
+    /// operator who sets only two gets a hidden tool, never a partially
+    /// scoped one.
+    #[test]
+    fn pr_status_is_disabled_without_allowed_repo() -> McpGatewayResult<()> {
+        let temp = tempfile::tempdir()?;
+        let scope = ProjectScope::from_root(temp.path())?;
+        let partial = McpGateway::new(GatewayContext {
+            scope,
+            servers: ResolvedMcpServers::default(),
+            arbitraitor: ArbitraitorClient::default(),
+            board: None,
+            board_audit_store: None,
+            decision_store: None,
+            board_lease_registry: None,
+            pr_status: Some(std::sync::Arc::new(StubTransport::new(Vec::new()))),
+            pr_status_repo_root: Some(temp.path().to_path_buf()),
+            pr_status_allowed_repo: None,
+        });
+        assert!(!partial.tool_router.has_route("pr.status"));
+        assert!(partial.tool_router.is_disabled("pr.status"));
+        Ok(())
+    }
+
+    /// (e) An out-of-scope request (owner/repo outside the configured
+    /// slug) is refused with the typed `pr_status_out_of_scope` payload
+    /// BEFORE the engine runs, AND the refusal is recorded in the audit
+    /// store with the `out_of_scope` outcome class — scope-boundary probes
+    /// are the events an auditor needs most.
+    #[tokio::test]
+    async fn pr_status_out_of_scope_request_is_refused_and_recorded() {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::InMemoryAuditStore::default(),
+        ));
+        let (gateway, _root, _temp) = pr_status_gateway(
+            Some(std::sync::Arc::new(StubTransport::new(Vec::new()))),
+            Some(shared.clone()),
+        );
+
+        let result = gateway
+            .pr_status_tool(Parameters(PrStatusRequest {
+                number: 1,
+                owner: String::from("evil"),
+                repo: String::from("scope-probe"),
+                delegation_chain: vec![String::from("user:test")],
+            }))
+            .await
+            .expect("tool call returns a structured result");
+
+        // The refusal is the typed payload, never prose-only, and names the
+        // configured scope — it does NOT echo the refused values as
+        // authority.
+        let text = result
+            .content
+            .first()
+            .and_then(|content| content.as_text().map(|text| text.text.clone()))
+            .unwrap_or_default();
+        assert!(text.contains("pr_status_out_of_scope"), "{text}");
+        assert!(text.contains("arbsec/orchestraitor"), "{text}");
+
+        // The refusal is recorded with the out_of_scope outcome class.
+        let records = shared
+            .lock()
+            .map_err(|_| String::from("audit lock poisoned"))
+            .map(|store| store.records().to_vec())
+            .unwrap();
+        assert_eq!(records.len(), 1, "one refusal event recorded");
+        assert_eq!(records[0].envelope.payload["tool"], "pr.status");
+        assert_eq!(
+            records[0].envelope.payload["result_summary"]["outcome"],
+            "out_of_scope"
+        );
+        assert_eq!(
+            records[0].envelope.payload["result_summary"]["allowed"],
+            "arbsec/orchestraitor"
+        );
+        assert_eq!(records[0].envelope.payload["request"]["owner"], "evil");
+        orchestraitor_events::validate_hash_chain(&records)
+            .expect("the refusal event continues the shared chain");
     }
 
     /// (b) Configured happy path: a stub transport serving a mergeable

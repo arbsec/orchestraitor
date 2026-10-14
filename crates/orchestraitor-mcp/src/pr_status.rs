@@ -375,10 +375,27 @@ pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDec
         )?;
         let pr = data
             .pointer("/repository/pullRequest")
-            .filter(|pr| !pr.is_null())
-            .ok_or_else(|| PrStatusError::Config {
-                message: format!("PR #{number} not found in {owner}/{repo}"),
-            })?;
+            .filter(|pr| !pr.is_null());
+        let Some(pr) = pr else {
+            // A null pullRequest WITHOUT errors is the provider's
+            // not-found shape (config/state, exit 2); WITH partial errors
+            // it is an unread PR view (unrecoverable, exit 1) — the field
+            // error may be scope/transient, never laundered into
+            // not-found.
+            return Err(if had_errors {
+                PrStatusError::Unrecoverable {
+                    message: format!(
+                        "pr view is unreadable for PR #{number} in {owner}/{repo} (partial \
+                         errors on the response)"
+                    ),
+                    partial_json: String::new(),
+                }
+            } else {
+                PrStatusError::Config {
+                    message: format!("PR #{number} not found in {owner}/{repo}"),
+                }
+            });
+        };
         // Whether the response carried partial-error entries: a null field
         // WITH errors is an unread sub-field; a null field WITHOUT errors is
         // a legitimate provider state (e.g. no reviews yet).
