@@ -227,6 +227,46 @@ impl WatchConfig {
         }
     }
 
+    /// Returns the operator-facing startup warnings for the §9.50 event
+    /// ingress / §9.36 kick-off configuration pair (issues #504, #505,
+    /// #603). Symmetric: both directions of the enabled/arm mismatch are
+    /// checked. Each entry is emitted once at startup via
+    /// `tracing::warn!("orcd watch: {warning}")`.
+    ///
+    /// - **Forward mismatch** (ingress enabled, condition disarmed):
+    ///   the queue fills to capacity, drops surplus, and stays `degraded`
+    ///   permanently (a gen-13 review finding). The poller still runs
+    ///   (polling is the operator's explicit opt-in and the reconcile
+    ///   poll remains the completeness authority), but the operator must
+    ///   see the mismatched configuration.
+    /// - **Reverse mismatch** (condition armed, ingress disabled): the
+    ///   external-event kick-off condition has no ingress feeding it, so
+    ///   the armed condition can never fire. This direction was silent
+    ///   before issue #603; the operator was armed against a trigger
+    ///   source that does not exist. Symmetric with the forward warning.
+    ///
+    /// Returns an empty `Vec` for the consistent pair (both enabled or
+    /// both disabled) — no warning is appropriate there.
+    #[must_use]
+    pub fn ingress_kickoff_warnings(&self) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+        if self.ingress.enabled && !self.kickoff.external_event {
+            warnings.push(
+                "watch.ingress.enabled is true but watch.kickoff.external_event is false - \
+                 the ingress queue has no kick-off consumer and will fill, drop surplus, and \
+                 stay degraded; arm external_event or disable the ingress",
+            );
+        }
+        if !self.ingress.enabled && self.kickoff.external_event {
+            warnings.push(
+                "watch.kickoff.external_event is true but watch.ingress.enabled is false - \
+                 the external-event kick-off condition is armed but the ingress that feeds it \
+                 is disabled, so it can never fire; enable the ingress or disarm external_event",
+            );
+        }
+        warnings
+    }
+
     /// Resolves the §9.36 kick-off condition enables (issue #505) from
     /// the layered `[watch.kickoff]` block. Every absent key inherits the
     /// built-in default; the resolved enables are the effective AND of
