@@ -948,11 +948,28 @@ mod tests {
         };
 
         // When: asking the child for its environment.
-        let run = worker.run_bash(b"env -0\n")?;
+        //
+        // The previous form `env -0` required bash to fork the external
+        // `env` binary. Inside the mediated execution context — network
+        // namespace + Landlock ruleset — fork can fail with
+        // `fork: retry: Resource temporarily unavailable` on hosts where
+        // cgroup/RLIMIT_NPROC pressure is tight even though a bare
+        // `worker.run_bash(b"true\n")` succeeds (the `true` builtin
+        // forks nothing). The upstream `arbitraitor-exec` tests exercise
+        // the same shape and pass in CI but reproduce the same failure
+        // locally; the test is not specifically a sandbox-mediation
+        // regression — it is an ambient-env hygiene gap. Use bash's
+        // built-in `compgen -e` to enumerate exported variable NAMES
+        // (no fork; one stdout write from bash itself) and assert against
+        // the same allowlist + presence checks. The semantics the test
+        // pins — "no unmediated env var reaches the child" + "PATH and
+        // HOME are present" — are exactly what `compgen -e` reports.
+        let run = worker.run_bash(b"compgen -e\n")?;
         let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
         let names: Vec<&str> = stdout
-            .split('\0')
-            .filter_map(|pair| pair.split_once('=').map(|(name, _)| name))
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
             .collect();
 
         // Then: every child variable is either allowlisted by the mediated
