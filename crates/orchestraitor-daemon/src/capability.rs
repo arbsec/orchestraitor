@@ -36,7 +36,7 @@ pub const MIN_ARBITRAITOR_API_VERSION: &str = "0.1.0";
 /// The linked Arbitraitor MUST provide at least this schema version. The check
 /// is meaningful: if the pinned Arbitraitor revision is downgraded to one with
 /// an older receipt schema, this check fails at runtime.
-pub const REQUIRED_RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const REQUIRED_RECEIPT_SCHEMA_VERSION: u32 = 3;
 
 /// The sandbox mode probed at daemon startup (spec §9.6).
 ///
