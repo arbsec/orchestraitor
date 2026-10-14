@@ -119,6 +119,8 @@ pub(crate) fn exec_reason(error: &ExecError) -> &'static str {
         ExecError::NativeQuarantineMissing { .. } => "native-quarantine-missing",
         ExecError::ResourceLimit { .. } => "resource-limit",
         ExecError::OutputExceeded { .. } => "output-exceeded",
+        ExecError::WallClockExpired { .. } => "wall-clock-expired",
+        ExecError::WallClockKillFailed { .. } => "wall-clock-kill-failed",
         ExecError::Store { .. } => "store",
         ExecError::MissingContainmentProof { .. } => "missing-containment-proof",
     }
