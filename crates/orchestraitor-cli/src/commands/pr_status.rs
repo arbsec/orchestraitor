@@ -92,8 +92,11 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
             build_engine(paths, repo_root).and_then(|engine| {
                 // `PrStatusError` is a plain std error (the mcp crate has no
                 // miette dependency): `Report::new` requires `Diagnostic`, so
-                // the typed error is wrapped as a std-error report instead —
-                // `is::<PrStatusError>()`/`downcast_ref` below still match.
+                // the typed error is wrapped in the [`PrStatusDiagnostic`]
+                // newtype — the exit-code mapping in `main.rs` and the
+                // diagnostic-printing branch below match THAT wrapper
+                // (`is::<PrStatusDiagnostic>()` / `downcast_ref`), never the
+                // bare `PrStatusError`.
                 engine
                     .aggregate(&owner, &repo, args.number)
                     .map_err(typed_report)

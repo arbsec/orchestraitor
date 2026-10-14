@@ -79,6 +79,13 @@ pub struct GatewayContext {
     /// records it (the CLI passes its checkout toplevel). REQUIRED together
     /// with `pr_status` for the tool to be usable.
     pub pr_status_repo_root: Option<std::path::PathBuf>,
+    /// The `owner/name` repository the `pr.status` tool may read (the
+    /// workspace config's project scope). REQUIRED together with
+    /// `pr_status`: tool arguments are untrusted input (§6.1), so a request
+    /// naming any OTHER repository is refused with a typed payload before
+    /// the engine runs — the tool's read authority is bounded to the
+    /// configured project scope, never the request's claim.
+    pub pr_status_allowed_repo: Option<String>,
 }
 
 /// rmcp server exposing Orchestraitor built-in tools for one project scope.
@@ -123,7 +130,10 @@ impl McpGateway {
         if context.decision_store.is_none() {
             tool_router.disable_route(Self::DECISION_RECORD_NAME);
         }
-        if context.pr_status.is_none() || context.pr_status_repo_root.is_none() {
+        if context.pr_status.is_none()
+            || context.pr_status_repo_root.is_none()
+            || context.pr_status_allowed_repo.is_none()
+        {
             // `pr.status` needs BOTH the transport and the CLEAN-record
             // root: either missing disables the route — the tool never runs
             // against a partial configuration (fail closed).
@@ -453,15 +463,31 @@ impl McpGateway {
         &self,
         Parameters(input): Parameters<PrStatusRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (Some(transport), Some(repo_root)) = (
+        let (Some(transport), Some(repo_root), Some(allowed_repo)) = (
             self.context.pr_status.clone(),
             self.context.pr_status_repo_root.clone(),
+            self.context.pr_status_allowed_repo.clone(),
         ) else {
             return Ok(CallToolResult::structured_error(serde_json::json!({
                 "error": "pr.status is not configured for this project scope",
                 "code": "pr_status_unconfigured"
             })));
         };
+        // Scope binding (§6.1): the request's owner/repo are UNTRUSTED —
+        // refuse any repository outside the configured project scope before
+        // the engine runs. The comparison is exact (case-sensitive) against
+        // the configured slug; the mismatch payload names the configured
+        // scope, never echoes the refused request values back as authority.
+        if format!("{}/{}", input.owner, input.repo) != allowed_repo {
+            return Ok(CallToolResult::structured_error(serde_json::json!({
+                "error": format!(
+                    "pr.status is bound to {allowed_repo}; the requested repository is \
+                     outside this project scope"
+                ),
+                "code": "pr_status_out_of_scope",
+                "allowed": allowed_repo,
+            })));
+        }
         let shared = self.context.board_audit_store.clone();
         match run_pr_status_shared(transport, repo_root, input, shared).await {
             Ok(verdict) => {
@@ -806,6 +832,11 @@ struct PrStatusInvocationSummary {
     mergeable: bool,
     /// Count of stable machine reason codes.
     reason_count: usize,
+    /// The invocation's outcome class: `verdict` for a successful read,
+    /// otherwise the error variant name (`unrecoverable`, `config`,
+    /// `concurrent_edit`) — the audit trail shows what kind of answer the
+    /// caller got without parsing payloads.
+    outcome: String,
 }
 
 /// Truncates an untrusted value for the event payload (mirrors
@@ -943,13 +974,15 @@ pub(crate) async fn run_pr_status_shared(
         Ok(verdict) => PrStatusInvocationSummary {
             mergeable: verdict.convergence.mergeable,
             reason_count: verdict.convergence.reasons.len(),
+            outcome: String::from("verdict"),
         },
         // A failed read still records its outcome class: the reason count
         // is unavailable, so the summary names zero reasons with
         // mergeable false (never a fabricated green light).
-        Err(_) => PrStatusInvocationSummary {
+        Err(error) => PrStatusInvocationSummary {
             mergeable: false,
             reason_count: 0,
+            outcome: String::from(error_outcome_class(error)),
         },
     };
 
@@ -1003,6 +1036,17 @@ pub(crate) async fn run_pr_status_shared(
 pub(crate) struct PrStatusToolError {
     /// The structured error payload for `CallToolResult::structured_error`.
     pub payload: serde_json::Value,
+}
+
+/// The audit outcome class for one [`PrStatusError`] (static variant
+/// labels — never error message text, §9.23.4).
+fn error_outcome_class(error: &crate::pr_status::PrStatusError) -> &'static str {
+    use crate::pr_status::PrStatusError as E;
+    match error {
+        E::Unrecoverable { .. } => "unrecoverable",
+        E::Config { .. } => "config",
+        E::ConcurrentEdit { .. } => "concurrent_edit",
+    }
 }
 
 /// Maps a typed [`PrStatusError`](crate::pr_status::PrStatusError) onto the
@@ -1172,6 +1216,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let _ = gateway;
         Ok(())
@@ -1195,6 +1240,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -1250,6 +1296,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         assert!(unconfigured.tool_router.is_disabled("board.query"));
 
@@ -1329,6 +1376,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         assert!(!partial.tool_router.has_route("board.move"));
         assert!(partial.tool_router.is_disabled("board.move"));
@@ -1356,6 +1404,7 @@ mod tests {
             ))),
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -1400,6 +1449,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -1431,6 +1481,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let listed: Vec<String> = configured
             .tool_router
@@ -1504,6 +1555,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let input = DecisionRecordInput {
             kind: DecisionRecordKind::NoOp,
@@ -1941,7 +1993,7 @@ mod tests {
     fn pr_status_gateway(
         transport: Option<std::sync::Arc<dyn crate::pr_status::PrStatusTransport>>,
         shared: Option<std::sync::Arc<std::sync::Mutex<orchestraitor_events::InMemoryAuditStore>>>,
-    ) -> (McpGateway, std::path::PathBuf) {
+    ) -> (McpGateway, std::path::PathBuf, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().to_path_buf();
         let scope = ProjectScope::from_root(&root).unwrap();
@@ -1955,8 +2007,9 @@ mod tests {
             board_lease_registry: None,
             pr_status: transport,
             pr_status_repo_root: Some(root.clone()),
+            pr_status_allowed_repo: Some(String::from("arbsec/orchestraitor")),
         });
-        (gateway, root)
+        (gateway, root, temp)
     }
 
     /// (a) With no transport + CLEAN-record root, `pr.status` is DISABLED:
@@ -1976,6 +2029,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: None,
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         let listed: Vec<String> = unconfigured
             .tool_router
@@ -2008,6 +2062,7 @@ mod tests {
             board_lease_registry: None,
             pr_status: Some(std::sync::Arc::new(StubTransport::new(Vec::new()))),
             pr_status_repo_root: None,
+            pr_status_allowed_repo: None,
         });
         assert!(!partial.tool_router.has_route("pr.status"));
         assert!(partial.tool_router.is_disabled("pr.status"));
@@ -2023,7 +2078,7 @@ mod tests {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(
             orchestraitor_events::InMemoryAuditStore::default(),
         ));
-        let (_gateway, root) = pr_status_gateway(None, Some(shared.clone()));
+        let (_gateway, root, _temp) = pr_status_gateway(None, Some(shared.clone()));
 
         // A CLEAN review record at the head: the convergence gate requires
         // it for a mergeable verdict.
@@ -2086,7 +2141,7 @@ mod tests {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(
             orchestraitor_events::InMemoryAuditStore::default(),
         ));
-        let (_gateway, root) = pr_status_gateway(None, Some(shared.clone()));
+        let (_gateway, root, _temp) = pr_status_gateway(None, Some(shared.clone()));
 
         let outcome = run_pr_status_shared(
             std::sync::Arc::new(StubTransport::new(vec![
@@ -2146,7 +2201,7 @@ mod tests {
             mergeable_payloads()[3].clone(),
             moved_head.to_string(),
         ];
-        let (_gateway, root) = pr_status_gateway(None, None);
+        let (_gateway, root, _temp) = pr_status_gateway(None, None);
         let tool_error = run_pr_status_shared(
             std::sync::Arc::new(StubTransport::new(payloads)),
             root,
@@ -2175,7 +2230,7 @@ mod tests {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(
             orchestraitor_events::InMemoryAuditStore::default(),
         ));
-        let (_gateway, root) = pr_status_gateway(None, Some(shared.clone()));
+        let (_gateway, root, _temp) = pr_status_gateway(None, Some(shared.clone()));
         let long_owner = "o".repeat(500);
         let long_repo = "r".repeat(500);
 
