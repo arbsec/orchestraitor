@@ -24,6 +24,10 @@ orc pr status 614 --repo arbsec/orchestraitor --json     # typed §9.48 JSON
 
 - **`--repo owner/name`** targets the repository explicitly; without it the
   `origin` remote of the current checkout is used (never guessed beyond that).
+  The CLEAN-review-record read ALWAYS resolves the git toplevel of the current
+  working directory (the records live in `<repo-root>/.orchestraitor/reviews/`,
+  exactly as `convergence-status` reads them) — run from the target checkout
+  even with an explicit `--repo`; outside any checkout the command exits 2.
 - **Read-only.** The tool never labels, comments, reviews, or merges.
   `merge-gate` remains the mutating gate; `pr status` reports what it would
   decide without performing it.

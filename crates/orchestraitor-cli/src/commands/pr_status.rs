@@ -467,8 +467,18 @@ impl Engine {
                 let base = endpoint.trim_end_matches("/graphql").trim_end_matches('/');
                 Some(base.to_string())
             }
-            // API root: ApiTransport appends "graphql" itself.
-            other => other.map(str::to_string),
+            // Explicit GraphQL override that does NOT end in /graphql: an
+            // API root — ApiTransport appends "graphql" itself.
+            Some(endpoint) => Some(endpoint.trim_end_matches('/').to_string()),
+            // No GraphQL override: fall back to the REST override so GHES
+            // stays on one host (REST /api/v3, GraphQL /api/graphql — strip
+            // /v3).
+            None => paths.github_api_endpoint.as_deref().map(|endpoint| {
+                endpoint
+                    .trim_end_matches('/')
+                    .trim_end_matches("/v3")
+                    .to_string()
+            }),
         };
         let transport = super::github::ApiTransport::new(graphql_base)?;
         Ok(Self {
@@ -560,7 +570,7 @@ impl Engine {
         let review_record = read_review_record(&repo_root()?, number, &head_sha, &base_oid);
 
         // 3. The post-read anchor check BEFORE any verdict is emitted.
-        self.check_anchors_stable(&initial, owner, repo, number, &head_sha, &base_oid)?;
+        self.check_anchors_stable(owner, repo, number, &head_sha, &base_oid)?;
 
         // 4. Verdict assembly (see `assemble_verdict`).
         assemble_verdict(
@@ -582,7 +592,6 @@ impl Engine {
     /// movement — never a verdict assembled from a mixed snapshot.
     fn check_anchors_stable(
         &self,
-        initial: &Value,
         owner: &str,
         repo: &str,
         number: u64,
@@ -600,7 +609,7 @@ impl Engine {
         } else {
             ("head", head_sha.to_string(), final_head)
         };
-        let _ = (initial, number);
+        let _ = number;
         Err(PrStatusConcurrentEdit {
             anchor,
             before,
@@ -639,7 +648,7 @@ pullRequest(number:$number){number headRefOid baseRefOid isDraft reviewDecision 
         repo: &str,
         head_oid: &str,
     ) -> Result<ChecksAggregate, String> {
-        let query = "query($owner:String!,$name:String!,$oid:String!){\
+        let query = "query($owner:String!,$name:String!,$oid:GitObjectID!){\
 repository(owner:$owner,name:$name){\
 object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
 __typename\
@@ -709,7 +718,7 @@ __typename\
 repository(owner:$owner,name:$name){pullRequest(number:$number){\
 reviewThreads(first:100){pageInfo{hasNextPage}nodes{\
 id isResolved isOutdated path line\
-comments(first:50){nodes{body author{login}}}\
+comments(first:50){totalCount nodes{body author{login}}}\
 }}}}}";
         let data = self
             .graphql(
@@ -760,11 +769,26 @@ comments(first:50){nodes{body author{login}}}\
                     authors.push(login.to_string());
                 }
             }
+            // Bounded read (review-threads shape): the excerpt comes from the
+            // last FETCHED comment; with >50 comments the excerpt notes the
+            // truncation instead of silently presenting a stale comment as
+            // the latest.
+            let more_comments = node
+                .pointer("/comments/totalCount")
+                .and_then(Value::as_i64)
+                .is_some_and(|total| total > 50);
             let last_comment_excerpt = comments
                 .last()
                 .and_then(|comment| comment.get("body"))
                 .and_then(Value::as_str)
-                .map(|body| cap_excerpt(body, THREAD_EXCERPT_CAP));
+                .map(|body| {
+                    let capped = cap_excerpt(body, THREAD_EXCERPT_CAP);
+                    if more_comments {
+                        format!("{capped} … (+ more comments)")
+                    } else {
+                        capped
+                    }
+                });
             items.push(ThreadItem {
                 id: node
                     .get("id")
@@ -1224,19 +1248,11 @@ fn read_review_record(
 /// Resolves the enclosing git repository's working-tree root (the scripts'
 /// `git rev-parse --show-toplevel`).
 fn repo_root() -> Result<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|error| miette!("failed to run `git rev-parse --show-toplevel`: {error}"))?;
-    if !output.status.success() {
-        return Err(PrStatusConfigError {
-            message: "pr status requires running from the target git checkout (the review \
-                      records live in <repo-root>/.orchestraitor/reviews/)"
-                .to_string(),
-        }
-        .into());
-    }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // The shared scrubbed-git helper: ambient GIT_DIR/GIT_WORK_TREE (hook
+    // exports) must never redirect the record lookup away from the intended
+    // checkout (#553/#529 corruption class — same scrub every other
+    // production git call in this crate uses).
+    let root = super::github::git(None, &["rev-parse", "--show-toplevel"])?;
     if root.is_empty() {
         return Err(PrStatusConfigError {
             message: "`git rev-parse --show-toplevel` returned an empty path".to_string(),
@@ -1352,9 +1368,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_check_name_classifies_unknown() {
-        // A bucket value gh never produces (defensive): classification falls
-        // to `unknown`, never silently to pass.
+    fn pending_status_context_classifies_pending() {
+        // StatusContext state PENDING → bucket pending (gh's default arm).
         let item = classify_check(&json!({
             "__typename": "StatusContext",
             "context": "a status",

@@ -1941,7 +1941,7 @@ fn verify_expect_tree(
 /// the CLI. Tests pass a fixture directory so the real builder chain runs
 /// WITHOUT chdiring the whole process (#529: a concurrent worktree's branch
 /// would be colonized by the fixture's commits).
-fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
     git_output(|command| {
         if let Some(dir) = dir {
             command.arg("-C").arg(dir);

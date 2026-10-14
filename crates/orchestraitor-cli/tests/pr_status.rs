@@ -680,9 +680,9 @@ fn pr_status_missing_github_app_config_exits_two() -> miette::Result<()> {
 #[test]
 fn pr_status_malformed_config_toml_exits_two() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
-    // Malformed script-equivalent config: github_app present but the key
-    // URI references an env var that never resolves — a mint failure is
-    // exit 1; a MISSING required key is config/state exit 2.
+    // Partial github_app block (client_id only; installation_id and
+    // private_key_uri missing) — an incomplete service identity is
+    // config/state exit 2, not a mint failure.
     fs::write(
         temp.path().join("orchestraitor.toml"),
         "[github_app]\nclient_id = \"Iv1.cli-e2e\"\n",
