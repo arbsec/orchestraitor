@@ -13,6 +13,22 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **`orc pr status <N>`** — a read-only PR-mergeability verdict in ONE
+  invocation (spec `10-orchestrator.md` §9.48). One command replaces the
+  five pr-lifecycle script reads an agent previously ran to answer "is my
+  PR mergeable?": the in-process engine consumes `pr-checks`,
+  `review-threads`, `reconcile-checklist`, `convergence-status`, and
+  `merge-gate` semantics verbatim (same check classifications, same
+  reason-code vocabulary, known-disabled-job SKIP semantics included) and
+  emits the typed §9.48 JSON (`--json`) or a human one-pager. A BLOCKED PR
+  is a successful read (exit 0 with `mergeable: false` + reasons); exit 1
+  covers unrecoverable failures (network, auth, malformed provider output),
+  config/state problems exit 2, and a moved
+  head/base anchor between the pre- and post-reads exits 4 (concurrent
+  edit) — never a verdict from a mixed snapshot. Read-only: the tool never
+  labels, comments, reviews, or merges, and reads run through the GitHub App
+  service identity. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **CI completions for the `orcd watch` event ingress**: when
   `[watch.ingress].enabled = true`, a second conditional poll lane now
   covers check-run and workflow-run completions, which the repository

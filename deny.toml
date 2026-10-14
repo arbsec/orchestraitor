@@ -26,6 +26,9 @@ ignore = [
     { id = "RUSTSEC-2026-0269", reason = "yara-x 1.19.0 requires wasmtime ^43.0.2, resolving the transitive copy to 43.0.2; no patched 43.x exists and yara-x cannot be bumped without an upstream wasmtime requirement change. Matches arbitraitor's ignore at the pinned revision; drop when yara-x requires a patched wasmtime." },
     "RUSTSEC-2026-0316",
     { id = "RUSTSEC-2026-0327", reason = "Unvalidated async-lifted component-model callback result count (native stack buffer overflow). yara-x 1.19.0 requires wasmtime ^43.0.2 and even the latest yara-x 1.21.0 requires ^45.0.3, below every patched range (>=48.0.4,<49 or >=49.0.2), so no dependency resolution reaches patched wasmtime. The vulnerable path (async component-model callbacks) is unreachable: yara-x embeds wasmtime as a synchronous engine for self-compiled YARA rule modules and never loads untrusted components. Drop when yara-x requires wasmtime >=48.0.4." },
+    { id = "RUSTSEC-2026-0359", reason = "wasmtime 43.0.2 copy via yara-x 1.19.0 (wasmtime ^43.0.2); no patched 43.x exists. Same reachability analysis as RUSTSEC-2026-0327: yara-x embeds wasmtime synchronously for self-compiled rule modules and never loads untrusted components. Drop when yara-x requires patched wasmtime." },
+    { id = "RUSTSEC-2026-0362", reason = "wasmtime 43.0.2 copy via yara-x 1.19.0 (wasmtime ^43.0.2); no patched 43.x exists. Same reachability analysis as RUSTSEC-2026-0327: yara-x embeds wasmtime synchronously for self-compiled rule modules and never loads untrusted components. Drop when yara-x requires patched wasmtime." },
+    { id = "RUSTSEC-2026-0363", reason = "wasmtime 43.0.2 copy via yara-x 1.19.0 (wasmtime ^43.0.2); no patched 43.x exists. Same reachability analysis as RUSTSEC-2026-0327: yara-x embeds wasmtime synchronously for self-compiled rule modules and never loads untrusted components. Drop when yara-x requires patched wasmtime." },
 ]
 
 [licenses]

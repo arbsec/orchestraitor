@@ -63,7 +63,7 @@ fn mint_token<W: Write>(paths: &ConfigPaths, writer: &mut W) -> Result<()> {
 
 /// Resolves the layered config (same path the mint commands use) so
 /// enforcement decisions read the effective `github_app` values.
-fn resolved_config(paths: &ConfigPaths) -> Result<OrchestraitorConfig> {
+pub(crate) fn resolved_config(paths: &ConfigPaths) -> Result<OrchestraitorConfig> {
     let layers = load_layers(paths)?;
     layers.resolver.resolve_config().map_err(|error| {
         miette!(
@@ -192,7 +192,7 @@ fn require_bot_git_identity(paths: &ConfigPaths, program: &str) -> Result<(Strin
 /// Resolves the `github_app` config and mints one installation token. The
 /// token value stays a `SecretString` and is only ever injected into an
 /// `Authorization` header or a child environment — never printed or logged.
-fn mint_installation_token(paths: &ConfigPaths) -> Result<(u64, InstallationToken)> {
+pub(crate) fn mint_installation_token(paths: &ConfigPaths) -> Result<(u64, InstallationToken)> {
     let config = resolved_config(paths)?;
     let auth = github_app_auth(&config)?;
     let github_app = config
@@ -1294,7 +1294,7 @@ fn resolve_repo_slug(
 /// current directory (`git@github.com:owner/repo.git` or an https URL).
 /// `None` on either side when the origin is absent or not that shape —
 /// callers decide whether that is fatal (no explicit `--owner`/`--repo`).
-fn origin_owner_repo() -> (Option<String>, Option<String>) {
+pub(crate) fn origin_owner_repo() -> (Option<String>, Option<String>) {
     let Ok(url) = git(None, &["remote", "get-url", "origin"]) else {
         return (None, None);
     };
@@ -1941,7 +1941,7 @@ fn verify_expect_tree(
 /// the CLI. Tests pass a fixture directory so the real builder chain runs
 /// WITHOUT chdiring the whole process (#529: a concurrent worktree's branch
 /// would be colonized by the fixture's commits).
-fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String> {
     git_output(|command| {
         if let Some(dir) = dir {
             command.arg("-C").arg(dir);
@@ -2357,13 +2357,13 @@ const BASE64_ENGINE: base64::engine::GeneralPurpose = base64::engine::general_pu
 /// minted App JWT for `GET /app` — and returns raw response bodies. Error
 /// paths carry only transport classification and status codes — never
 /// headers or credential material.
-struct ApiTransport {
+pub(crate) struct ApiTransport {
     client: reqwest::blocking::Client,
     base_url: String,
 }
 
 impl ApiTransport {
-    fn new(endpoint_override: Option<String>) -> Result<Self> {
+    pub(crate) fn new(endpoint_override: Option<String>) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("orchestraitor-cli/", env!("CARGO_PKG_VERSION")))
@@ -2394,7 +2394,7 @@ impl ApiTransport {
     /// injected only into the `Authorization` header; it is never written to
     /// the URL, the error paths, or the response body. An empty credential
     /// sends no `Authorization` header at all (unauthenticated request).
-    fn request_bearer(
+    pub(crate) fn request_bearer(
         &self,
         method: &str,
         path: &str,
