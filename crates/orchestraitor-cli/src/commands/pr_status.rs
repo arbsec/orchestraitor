@@ -583,13 +583,17 @@ impl Engine {
                 .into());
             }
         }
-        envelope.get("data").cloned().ok_or_else(|| {
-            PrStatusUnrecoverable {
+        // `data: null` (explicit null, no errors) is malformed for every
+        // operation this engine issues — same exit-1 path as an absent key.
+        let data = envelope
+            .get("data")
+            .filter(|data| !data.is_null())
+            .cloned()
+            .ok_or_else(|| PrStatusUnrecoverable {
                 message: format!("github api response is malformed: missing data ({operation})"),
                 partial_json: String::new(),
-            }
-            .into()
-        })
+            })?;
+        Ok(data)
     }
 
     /// Aggregates the full §9.48 verdict for one PR.
