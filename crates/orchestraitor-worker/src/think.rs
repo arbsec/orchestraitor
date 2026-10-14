@@ -36,6 +36,11 @@ pub const MAX_THOUGHTS_PER_RUN: u32 = 512;
 /// always carried; `thought_text` rides only under payload-recording consent.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ReasoningRecord {
+    /// Whether the call was accepted (`true`) or receipted-refused
+    /// (`false`, with the typed reason in `refusal_reason`, §9.48.1).
+    pub accepted: bool,
+    /// The static refusal reason code; `None` on an accepted step.
+    pub refusal_reason: Option<&'static str>,
     /// Position in the sequence (1-based).
     pub thought_number: u32,
     /// Current step-count estimate.
@@ -111,11 +116,20 @@ impl ThoughtChain {
         }
         if is_revision {
             // A revision must name its target, and the target must have
-            // been accepted at some point in the run.
+            // been accepted at some point in the run. The revision's own
+            // position stays bounded by the accepted chain (it revisits
+            // `revises_thought`, it cannot invent step 1000 of a 3-step
+            // chain) and by the sequence ceiling (§9.48.3).
             let Some(target) = revises_thought else {
                 return Err(REASON_REVISION_TARGET_UNKNOWN);
             };
-            if target == 0 || self.highest_number == 0 || target > self.highest_number {
+            if target == 0
+                || self.highest_number == 0
+                || target > self.highest_number
+                || thought_number == 0
+                || thought_number > self.highest_number
+                || thought_number > MAX_THOUGHTS_PER_SEQUENCE
+            {
                 return Err(REASON_REVISION_TARGET_UNKNOWN);
             }
             return Ok(());

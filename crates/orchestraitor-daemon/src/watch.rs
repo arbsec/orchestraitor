@@ -670,8 +670,9 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
-/// Appends one hash-chained `agent reasoning` event per accepted reasoning
-/// step (§9.48.8) to the daemon's §9.17 event store. The payload always
+/// Appends one hash-chained `agent reasoning` event per reasoning step,
+/// accepted or refused (§9.48.8), to the daemon's §9.17 event store. The
+/// payload always
 /// carries the audit metadata (`thought_number`, `total_thoughts`,
 /// `next_thought_needed`, `is_revision`, `revises_thought`, `thought_chars`,
 /// `sequence_id`, `task_id`); `thought_text` rides ONLY under
@@ -719,6 +720,8 @@ pub fn append_reasoning_events<S: orchestraitor_events::AuditStore>(
             "thought_chars": record.thought_chars,
             "sequence_id": record.sequence_id,
             "thought_text": thought_text,
+            "accepted": record.accepted,
+            "refusal_reason": record.refusal_reason,
         });
         let head = store.head()?;
         let envelope = EventEnvelope::try_new(EventEnvelopeInput {

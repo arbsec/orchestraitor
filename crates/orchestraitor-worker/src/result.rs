@@ -85,6 +85,12 @@ pub struct WorkerConfig {
     /// it. Sub-sessions inherit the parent's gate and are additionally
     /// bound by the spawning definition's `internal_tools` allowlist.
     pub think_enabled: bool,
+    /// Payload-recording consent (spec 50 §20.4.2): `thought_text` rides the
+    /// run result and any persisted `agent reasoning` event ONLY when the
+    /// operator enabled `[observability].record_payloads`. Default `false`:
+    /// the audit metadata persists, the text does not. Enforced at the
+    /// SOURCE — the executor strips text before it can enter any serializer.
+    pub record_payloads: bool,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -125,6 +131,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("profile", &self.profile)
             .field("structured_summary", &self.structured_summary)
             .field("think_enabled", &self.think_enabled)
+            .field("record_payloads", &self.record_payloads)
             .finish()
     }
 }
@@ -151,6 +158,7 @@ impl WorkerConfig {
             profile: None,
             structured_summary: false,
             think_enabled: true,
+            record_payloads: false,
         }
     }
 
@@ -201,6 +209,15 @@ impl WorkerConfig {
     #[must_use]
     pub const fn with_think_enabled(mut self, think_enabled: bool) -> Self {
         self.think_enabled = think_enabled;
+        self
+    }
+
+    /// Sets the payload-recording consent gate (§9.48.8; spec 50 §20.4.2).
+    /// `false` (the default) strips `thought_text` from every reasoning
+    /// record before it leaves the executor.
+    #[must_use]
+    pub const fn with_record_payloads(mut self, record_payloads: bool) -> Self {
+        self.record_payloads = record_payloads;
         self
     }
 

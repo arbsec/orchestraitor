@@ -277,6 +277,18 @@ async fn watch_cycle() -> Result<ExitCode> {
              stay degraded; arm external_event or disable the ingress"
         );
     }
+    if !watch_config.ingress.enabled && watch_config.kickoff.external_event {
+        // The reverse mismatch: the kick-off condition is armed but its
+        // event source (the ingress queue) is disabled — the condition can
+        // never fire. The operator must see the dead configuration instead
+        // of silently never kicking off (the same visibility rule the
+        // enabled-ingress/disarmed-consumer direction enforces above).
+        tracing::warn!(
+            "orcd watch: watch.kickoff.external_event is true but \
+             watch.ingress.enabled is false - the external-event condition \
+             can never fire; enable the ingress or disarm external_event"
+        );
+    }
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
         .ingress
         .enabled

@@ -577,6 +577,8 @@ impl<'a> ToolExecutor<'a> {
         self.thoughts
             .accept(thought_number, next_thought_needed, is_revision);
         let record = ReasoningRecord {
+            accepted: true,
+            refusal_reason: None,
             thought_number,
             total_thoughts,
             next_thought_needed,
@@ -584,7 +586,12 @@ impl<'a> ToolExecutor<'a> {
             revises_thought: if is_revision { revises_thought } else { None },
             thought_chars,
             sequence_id: self.thoughts.sequence_id(),
-            thought_text: Some(thought.to_string()),
+            // Consent gate at the SOURCE (§9.48.8; spec 50 §20.4.2): the
+            // text never enters the record — and therefore no serializer,
+            // run result, or event payload — unless payload recording is
+            // enabled. The model still holds the thought in its context;
+            // only the persisted copy is gated.
+            thought_text: self.policy.record_payloads.then(|| thought.to_string()),
         };
         self.reasoning_records.push(record);
         self.push_receipt("think", true, "completed", None, None);
@@ -620,6 +627,8 @@ impl<'a> ToolExecutor<'a> {
         revises_thought: Option<u32>,
     ) -> ToolTurn {
         self.reasoning_records.push(ReasoningRecord {
+            accepted: false,
+            refusal_reason: Some(reason),
             thought_number,
             total_thoughts,
             next_thought_needed,
@@ -970,6 +979,7 @@ mod tests {
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
             think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -998,6 +1008,7 @@ mod tests {
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
             think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -1022,6 +1033,7 @@ mod tests {
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 1,
             think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -1174,17 +1186,36 @@ mod tests {
             .dispatch(&think_action("final step", 3, 3, false))
             .await;
         assert_eq!(executor.receipts.len(), 3);
-        // One audit record per accepted step; text rides the record.
+        // Consent gate at the source (§9.48.8; spec 50 §20.4.2): the
+        // default-off executor persists structure, never text.
         assert_eq!(executor.reasoning_records().len(), 3);
-        assert_eq!(
-            executor.reasoning_records()[2].thought_text.as_deref(),
-            Some("final step")
-        );
-        assert_eq!(
-            executor.reasoning_records()[2].thought_chars,
-            "final step".len()
-        );
-        assert_eq!(executor.reasoning_records()[2].sequence_id, 1);
+        let record = &executor.reasoning_records()[2];
+        assert!(record.accepted);
+        assert_eq!(record.refusal_reason, None);
+        assert_eq!(record.thought_text, None);
+        assert_eq!(record.thought_chars, "final step".len());
+        assert_eq!(record.sequence_id, 1);
+    }
+
+    #[tokio::test]
+    async fn think_text_rides_the_record_only_under_payload_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: Vec::new(),
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 0,
+            think_enabled: true,
+            record_payloads: true,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+        executor
+            .dispatch(&think_action("consented step", 1, 3, true))
+            .await;
+        let record = executor.reasoning_records().first().unwrap();
+        assert!(record.accepted);
+        assert_eq!(record.refusal_reason, None);
+        assert_eq!(record.thought_text.as_deref(), Some("consented step"));
     }
 
     #[tokio::test]
@@ -1440,6 +1471,7 @@ mod tests {
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
             think_enabled: false,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
         let turn = executor
@@ -1470,6 +1502,7 @@ mod tests {
             ]),
             subsession_depth: 1,
             think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
         let turn = executor

@@ -311,7 +311,7 @@ fn parse_think(value: &serde_json::Value) -> Result<WorkerAction, ActionRejectio
     };
     if thought_number == 0 || total_thoughts == 0 {
         return Err(ActionRejection::Malformed {
-            reason: "missing-field",
+            reason: "invalid-field-value",
         });
     }
     Ok(WorkerAction::Think {

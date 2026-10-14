@@ -69,6 +69,7 @@ pub async fn run_worker(
         allowed_internal: config.subsession_allowed_internal.clone(),
         subsession_depth: config.subsession_depth,
         think_enabled: config.think_enabled,
+        record_payloads: config.record_payloads,
     };
     let mut executor = ToolExecutor::new(&root, bash).with_policy(policy);
     let budgets = &config.budgets;

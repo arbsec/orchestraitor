@@ -344,5 +344,13 @@ fn render_reasoning_trace(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnaps
 /// marker, which also breaks any CSI/OSC sequence it introduced.
 #[must_use]
 pub fn neutralize_control_sequences(text: &str) -> String {
-    text.replace('\x1b', "<esc>")
+    text.chars()
+        .map(|character| match character {
+            '\x1b' => "<esc>".to_string(),
+            control if control.is_control() => {
+                format!("<U+{:04X}>", u32::from(control))
+            }
+            character => character.to_string(),
+        })
+        .collect()
 }

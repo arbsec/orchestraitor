@@ -9,22 +9,39 @@ use crate::task::WorkerTask;
 /// Static system prompt for the bootstrap worker. Never asserted in tests
 /// (prompt prose is not a machine-consumed contract); the protocol it
 /// documents is exercised through the loop's behavior.
-pub(super) const SYSTEM_PROMPT: &str = "You are Orchestraitor's bootstrap worker operating on a task worktree.
-Every response MUST contain exactly one fenced ```json block selecting one of the five tools:
+/// The tool-listing header + the four mediated tools (shared by both
+/// prompt variants — the `think` line composes in only when enabled, so
+/// the prompt can never advertise a tool the executor refuses).
+const PROMPT_HEAD: &str = "You are Orchestraitor's bootstrap worker operating on a task worktree.\n\
+Every response MUST contain exactly one fenced ```json block selecting one of the ";
 
-{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}
-{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}
-{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}
-{\"tool\": \"bash\", \"script\": \"<bash script>\"}
-{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n>, \"total_thoughts\": <n>, \"next_thought_needed\": <bool>}
+/// The `think` tool line + its usage guidance (§9.48). Composed into the
+/// prompt ONLY when the kill-switch did not remove the tool.
+const PROMPT_THINK: &str = "five tools:\n\
+\n\
+{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}\n\
+{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}\n\
+{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}\n\
+{\"tool\": \"bash\", \"script\": \"<bash script>\"}\n\
+{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n>, \"total_thoughts\": <n>, \"next_thought_needed\": <bool>}\n\
+\n\
+Use `think` before complex work: estimate the step count, reason one step at\n\
+a time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),\n\
+and stop calling it when done. `think` performs no action — it only records\n\
+your deliberation.\n";
 
-Use `think` before complex work: estimate the step count, reason one step at
-a time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),
-and stop calling it when done. `think` performs no action — it only records
-your deliberation.
+/// The four-tool variant: identical surface minus the `think` line.
+const PROMPT_NO_THINK: &str = "four tools:\n\
+\n\
+{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}\n\
+{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}\n\
+{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}\n\
+{\"tool\": \"bash\", \"script\": \"<bash script>\"}\n\
+\n";
 
-Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}
-or success=false when the task cannot be completed. Any tool not listed
+/// The terminator + refusal contract (shared by both variants).
+const PROMPT_TAIL: &str = "Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}\n\
+or success=false when the task cannot be completed. Any tool not listed\n\
 above (and not listed as a declared tool) is refused and recorded.";
 
 /// Builds the system prompt: the static bootstrap prompt plus the one
@@ -69,21 +86,18 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
         }
         return prompt;
     }
-    let mut prompt = SYSTEM_PROMPT.to_string();
-    if !config.think_enabled {
-        // The §9.48.2 trusted-layer kill-switch: the prompt never advertises
-        // a tool the executor would refuse.
-        prompt = prompt
-            .lines()
-            .filter(|line| !line.contains("\"tool\": \"think\""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        prompt = prompt.replace("one of the five tools", "one of the four tools");
-        prompt = prompt.replace(
-            "\nUse `think` before complex work: estimate the step count, reason one step at\na time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),\nand stop calling it when done. `think` performs no action — it only records\nyour deliberation.\n",
-            "\n",
-        );
-    }
+    // The §9.48.2 trusted-layer kill-switch composes the prompt from
+    // constant pieces: the `think` line appears ONLY when the tool is on
+    // the surface, so the prompt can never advertise a refused tool and no
+    // exact-string surgery can silently fail.
+    let mut prompt = format!(
+        "{PROMPT_HEAD}{}{PROMPT_TAIL}",
+        if config.think_enabled {
+            PROMPT_THINK
+        } else {
+            PROMPT_NO_THINK
+        }
+    );
     if config.tools.is_empty() {
         return prompt;
     }

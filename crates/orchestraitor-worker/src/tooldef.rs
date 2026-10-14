@@ -210,6 +210,9 @@ pub(crate) struct ToolPolicy {
     /// trusted-layer kill-switch). Default-on; `false` refuses every think
     /// dispatch at every depth and removes the prompt line.
     pub(crate) think_enabled: bool,
+    /// Payload-recording consent (§9.48.8): `thought_text` stays in the
+    /// reasoning records only when enabled. Enforced at the source.
+    pub(crate) record_payloads: bool,
 }
 
 impl ToolPolicy {
@@ -222,6 +225,7 @@ impl ToolPolicy {
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
             think_enabled: true,
+            record_payloads: false,
         }
     }
 
@@ -314,6 +318,7 @@ mod tests {
             allowed_internal: BTreeSet::new(),
             subsession_depth: 0,
             think_enabled: true,
+            record_payloads: true,
         };
         assert!(policy.find("explain-clippy").is_some());
         assert!(policy.find("nope").is_none());

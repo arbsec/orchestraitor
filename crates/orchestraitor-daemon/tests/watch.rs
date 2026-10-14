@@ -779,6 +779,8 @@ fn reasoning_events_persist_hash_chained_and_consent_gated()
     let store = std::sync::Arc::new(std::sync::Mutex::new(InMemoryAuditStore::default()));
     let records = vec![
         ReasoningRecord {
+            accepted: true,
+            refusal_reason: None,
             thought_number: 1,
             total_thoughts: 3,
             next_thought_needed: true,
@@ -790,6 +792,8 @@ fn reasoning_events_persist_hash_chained_and_consent_gated()
         },
         // A refusal-shaped record: text is never written, consent or not.
         ReasoningRecord {
+            accepted: false,
+            refusal_reason: Some("secret-shaped-content"),
             thought_number: 1,
             total_thoughts: 3,
             next_thought_needed: true,
