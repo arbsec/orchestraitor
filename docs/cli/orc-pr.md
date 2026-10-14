@@ -92,3 +92,28 @@ Reads run through the same `github_app` service-identity mint path every
 never a personal token. There is no personal-account fallback: a missing or
 partial `github_app` config is a typed config error (exit 2). No secrets
 appear in the output: the token lives only in the minting client.
+
+## The `pr.status` MCP tool surface (§9.39)
+
+The §9.48 engine is SHARED ("one engine, three surfaces"): the typed verdict,
+the pure classification semantics, and the aggregation live in the
+`orchestraitor-mcp` crate (`orchestraitor_mcp::pr_status`), consumed verbatim
+by BOTH `orc pr status` (this CLI) and the daemon's `pr.status` MCP gateway
+tool (spec `10-orchestrator.md` §9.39, §9.48) — the same typed output, the
+same reason codes, never a second interpretation. The CLI keeps only its
+shell: `--repo` resolution, the service-identity mint, the blocking GitHub
+transport, and the human one-pager.
+
+The `pr.status` tool is read-only and event-recorded like `board.query`
+(§9.25.1): every invocation appends a `ToolRequest` event carrying the
+request (`number`/`owner`/`repo`, truncated) and a result summary
+(`mergeable` + reason count) to the shared audit store. Failures surface as
+typed structured payloads (never prose-only): `pr_status_unrecoverable`
+carries the degraded partial verdict on `partial_verdict` when one exists,
+`pr_status_config` covers PR-not-found/config/state, and
+`pr_status_concurrent_edit` names the moved anchor with the before/after
+OIDs. The tool is enabled only when the daemon's gateway context carries a
+GraphQL transport AND the CLEAN-record root; otherwise the route is disabled
+entirely (hidden from `tools/list`, calls rejected — the same posture as
+`board.query`). The engine is blocking, so the gateway runs it inside
+`tokio::task::spawn_blocking`.

@@ -13,6 +13,39 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **`pr.status` MCP decision tool** — the §9.48 PR-status aggregation engine
+  is now SHARED between `orc pr status` and the daemon's MCP gateway
+  ("one engine, three surfaces"; spec `10-orchestrator.md` §9.39, §9.48):
+  the same typed verdict, the same reason codes, the same fail-closed
+  unread-sub-check semantics. The tool is read-only, event-recorded into the
+  §9.25.1 audit store like `board.query` (request truncated, result summary
+  `mergeable` + reason count), and fails with typed structured payloads —
+  `pr_status_unrecoverable` (carrying the degraded `partial_verdict` when
+  one exists), `pr_status_config`, and `pr_status_concurrent_edit` naming
+  the moved anchor. The route is enabled only when the gateway context
+  carries ALL THREE values — the GraphQL transport, the CLEAN-record root,
+  and the allowed `owner/name` repository; any missing one disables it
+  entirely (hidden from `tools/list`, calls rejected), and a request naming
+  a repository outside the allowed scope is refused with the typed
+  `pr_status_out_of_scope` payload (recorded in the audit trail with the
+  `out_of_scope` outcome class). Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+- **`orc pr status <N>`** — a read-only PR-mergeability verdict in ONE
+  invocation (spec `10-orchestrator.md` §9.48). One command replaces the
+  five pr-lifecycle script reads an agent previously ran to answer "is my
+  PR mergeable?": the in-process engine consumes `pr-checks`,
+  `review-threads`, `reconcile-checklist`, `convergence-status`, and
+  `merge-gate` semantics verbatim (same check classifications, same
+  reason-code vocabulary, known-disabled-job SKIP semantics included) and
+  emits the typed §9.48 JSON (`--json`) or a human one-pager. A BLOCKED PR
+  is a successful read (exit 0 with `mergeable: false` + reasons); exit 1
+  covers unrecoverable failures (network, auth, malformed provider output),
+  config/state problems exit 2, and a moved
+  head/base anchor between the pre- and post-reads exits 4 (concurrent
+  edit) — never a verdict from a mixed snapshot. Read-only: the tool never
+  labels, comments, reviews, or merges, and reads run through the GitHub App
+  service identity. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **CI completions for the `orcd watch` event ingress**: when
   `[watch.ingress].enabled = true`, a second conditional poll lane now
   covers check-run and workflow-run completions, which the repository
