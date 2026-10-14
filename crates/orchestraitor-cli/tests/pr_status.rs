@@ -234,12 +234,34 @@ fn write_git_repo(temp: &tempfile::TempDir) -> miette::Result<String> {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
     let repo_str = repo.display().to_string();
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(["-C", &repo_str])
-            .args(args)
-            .output()
-            .into_diagnostic()
+    // Scrub the ambient GIT_* location variables (the production code does
+    // the same): a hook-exported GIT_DIR/GIT_WORK_TREE would redirect the
+    // fixture commits into the caller's real repository. Every call's exit
+    // status is asserted — a silently failed fixture step must fail the
+    // test, not poison later assertions.
+    let git = |args: &[&str]| -> miette::Result<()> {
+        let mut command = Command::new("git");
+        command.args(["-C", &repo_str]).args(args);
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command.output().into_diagnostic()?;
+        if !output.status.success() {
+            return Err(miette::miette!(
+                "fixture git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
     };
     git(&["init", "-q"])?;
     git(&[

@@ -1066,7 +1066,11 @@ fn sub_read<T: Clone>(
         Err(message) => {
             *unread_subcheck = Some(name);
             reasons.push(format!("unread({name})"));
-            *unread_detail = Some(format!("{name}: {message}"));
+            // The message may be a rendered typed error carrying its own
+            // `pr status: ` prefix — strip it so the diagnostic never
+            // repeats the prefix.
+            let detail = message.trim_start_matches("pr status: ");
+            *unread_detail = Some(format!("{name}: {detail}"));
             None
         }
     }
