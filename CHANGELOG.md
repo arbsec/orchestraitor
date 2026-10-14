@@ -672,6 +672,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orcd watch` now emits a startup warning for the reverse
+  ingress/condition mismatch (issue #603): when
+  `[watch.kickoff].external_event = true` is armed but
+  `[watch.ingress].enabled = false`, the external-event kick-off
+  condition has no ingress feeding it, so it can never fire — silently.
+  The forward-direction warning (ingress enabled, condition disarmed;
+  issue #504) was already in place; the new warning is symmetric. Both
+  warnings flow through `WatchConfig::ingress_kickoff_warnings` and the
+  operator-facing message names the exact config pair and the remedy.
+  Consistent pairs (both enabled or both disabled) stay silent. The
+  forward-mismatch warning and the poller-still-runs behavior (a
+  gen-13 review finding) are unchanged. Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-950b-opt-in).
 - Documented GitHub's `since` filter semantics for the issue-comment API
   endpoints: the filter applies to `updated_at`, not `created_at`, so
   responses include comments created before the requested window even when
