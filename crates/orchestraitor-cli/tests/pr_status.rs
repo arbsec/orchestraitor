@@ -32,6 +32,7 @@ fn pr_view_json(head: &str, base: &str, review_decision: &str, is_draft: bool) -
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
             "number": 614,
+            "state": "OPEN",
             "headRefOid": head,
             "baseRefOid": base,
             "isDraft": is_draft,
@@ -1042,6 +1043,98 @@ fn pr_status_partial_graphql_error_degrades_not_fails() -> miette::Result<()> {
     assert_eq!(checks.len(), 1, "the surviving check still classifies");
     assert_eq!(checks[0]["classification"], "pass");
     assert_eq!(verdict["checks_all_passed"], true);
+    Ok(())
+}
+
+#[test]
+fn pr_status_changes_requested_blocks_the_verdict() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // CHANGES_REQUESTED blocks even with every other gate green.
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "CHANGES_REQUESTED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_all_checked(),
+        pr_view_json(HEAD, BASE, "CHANGES_REQUESTED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["review_changes_requested"])
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_closed_pr_never_reports_mergeable() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // A closed PR with unchanged head/base/checks/record cannot merge.
+    let payloads = vec![
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "number": 614, "state": "CLOSED",
+                "headRefOid": HEAD, "baseRefOid": BASE,
+                "isDraft": false, "reviewDecision": "APPROVED",
+                "mergeStateStatus": "CLEAN",
+            }}}
+        })
+        .to_string(),
+        checks_all_pass(),
+        threads_none(),
+        body_all_checked(),
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "number": 614, "state": "CLOSED",
+                "headRefOid": HEAD, "baseRefOid": BASE,
+                "isDraft": false, "reviewDecision": "APPROVED",
+                "mergeStateStatus": "CLEAN",
+            }}}
+        })
+        .to_string(),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["pr_not_open"])
+    );
     Ok(())
 }
 

@@ -673,7 +673,7 @@ impl Engine {
     fn pr_view(&self, owner: &str, repo: &str, number: u64) -> Result<Value> {
         let query = "query($owner:String!,$name:String!,$number:Int!){\
 repository(owner:$owner,name:$name){\
-pullRequest(number:$number){number headRefOid baseRefOid isDraft reviewDecision mergeStateStatus}}}\
+pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDecision mergeStateStatus}}}\
 ";
         let data = self.graphql(
             "pr view",
@@ -698,20 +698,40 @@ pullRequest(number:$number){number headRefOid baseRefOid isDraft reviewDecision 
         repo: &str,
         head_oid: &str,
     ) -> Result<ChecksAggregate, String> {
-        let query = "query($owner:String!,$name:String!,$oid:GitObjectID!){\
+        // Two query shapes: the full one requests `WorkflowRun.event` (which
+        // gh gates behind feature detection — some GHES versions reject the
+        // field); the fallback omits it and dedupes on (name, workflow).
+        let query_with_event = "query($owner:String!,$name:String!,$oid:GitObjectID!){\
 repository(owner:$owner,name:$name){\
 object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
 __typename\
 ... on StatusContext{context state targetUrl createdAt}\
 ... on CheckRun{name checkSuite{workflowRun{event workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
 }}}}}}}";
-        let data = self
-            .graphql(
-                "checks",
-                query,
-                &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
-            )
-            .map_err(|error| format!("{error:#}"))?;
+        let query_without_event = "query($owner:String!,$name:String!,$oid:GitObjectID!){\
+repository(owner:$owner,name:$name){\
+object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
+__typename\
+... on StatusContext{context state targetUrl createdAt}\
+... on CheckRun{name checkSuite{workflowRun{workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
+}}}}}}}";
+        // Try the event-including shape first; a query-level rejection
+        // (unsupported field on older GHES) falls back to the event-less
+        // shape once — the same includeEvent detection gh applies.
+        let data = match self.graphql(
+            "checks",
+            query_with_event,
+            &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
+        ) {
+            Ok(data) => data,
+            Err(_) => self
+                .graphql(
+                    "checks",
+                    query_without_event,
+                    &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
+                )
+                .map_err(|error| format!("{error:#}"))?,
+        };
         // A head commit with NO status contexts yet (fresh push, repo without
         // CI) reports `statusCheckRollup: null` — a valid provider state, not
         // a failure: aggregate over an EMPTY checks array (all_passed is then
@@ -732,65 +752,26 @@ __typename\
                 );
             }
         };
-        let has_next = data
-            .pointer("/repository/object/statusCheckRollup/contexts/pageInfo/hasNextPage")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // A missing/malformed pageInfo (when a rollup OBJECT exists) is
+        // MALFORMED provider output (a first-page-only response could hide a
+        // failing check): fail closed. A null rollup carries no pageInfo —
+        // that is the valid "no checks yet" state.
+        let has_next = if rollup.is_some_and(Value::is_null) {
+            false
+        } else {
+            data.pointer("/repository/object/statusCheckRollup/contexts/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    "checks rollup response is missing pagination metadata".to_string()
+                })?
+        };
         if has_next {
             // >100 contexts: the first page's aggregate would silently lie.
             return Err(
                 "checks rollup exceeds one page (100 contexts); not aggregated".to_string(),
             );
         }
-        // gh's eliminateDuplicates, verbatim: when a check re-ran, keep ONLY
-        // the most recent run (sort by startedAt descending, first seen per
-        // (context) or (name, workflow, event) key wins). Without this, an
-        // old failed run next to a new passing one would fail the gate
-        // forever. startedAt is absent on some StatusContexts — absent sorts
-        // last (oldest), matching an empty instant.
-        let mut deduped: Vec<&Value> = Vec::new();
-        let mut seen_contexts: Vec<String> = Vec::new();
-        let mut seen_checks: Vec<String> = Vec::new();
-        let started_at = |node: &Value| -> String {
-            node.get("startedAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        let mut sorted: Vec<&Value> = nodes.iter().collect();
-        sorted.sort_by_key(|node| std::cmp::Reverse(started_at(node)));
-        for node in sorted {
-            let context = node
-                .get("context")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if context.is_empty() {
-                let key = format!(
-                    "{}/{}/{}",
-                    node.get("name").and_then(Value::as_str).unwrap_or_default(),
-                    node.pointer("/checkSuite/workflowRun/workflow/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    // gh keys on (name, workflow, event) — include the event
-                    // so differently-triggered runs of the same job stay
-                    // distinct, exactly as eliminateDuplicates does.
-                    node.pointer("/checkSuite/workflowRun/event")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                );
-                if seen_checks.contains(&key) {
-                    continue;
-                }
-                seen_checks.push(key);
-            } else {
-                if seen_contexts.contains(&context) {
-                    continue;
-                }
-                seen_contexts.push(context);
-            }
-            deduped.push(node);
-        }
+        let deduped = dedupe_check_nodes(&nodes);
         let mut items: Vec<CheckItem> = Vec::new();
         for node in deduped {
             items.push(classify_check(node)?);
@@ -818,10 +799,11 @@ comments(first:50){totalCount nodes{body author{login}}}\
             .pointer("/repository/pullRequest/reviewThreads/nodes")
             .and_then(Value::as_array)
             .ok_or_else(|| "review threads response is missing nodes".to_string())?;
+        // Same fail-closed rule as the checks rollup.
         let has_next = data
             .pointer("/repository/pullRequest/reviewThreads/pageInfo/hasNextPage")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .ok_or_else(|| "review threads response is missing pagination metadata".to_string())?;
         if has_next {
             return Err("review threads exceed one page (100 threads); not aggregated".to_string());
         }
@@ -973,6 +955,37 @@ fn build_verdict(
     }
 }
 
+/// Applies the review-state gates (`reviewDecision` unreadability,
+/// `is_draft`, `pr_not_open`, `CHANGES_REQUESTED`) to the reasons.
+fn apply_review_state_gates(
+    initial: &Value,
+    reasons: &mut Vec<String>,
+    unread_subcheck: &mut Option<&'static str>,
+) -> bool {
+    // An unreadable (null/absent) reviewDecision is an unread sub-field —
+    // fail closed (a partial field error must never masquerade as "no
+    // review requirement").
+    match initial.get("reviewDecision").and_then(Value::as_str) {
+        Some("REVIEW_REQUIRED") => reasons.push("review_required".to_string()),
+        Some(decision) if !decision.is_empty() => {}
+        _ => *unread_subcheck = Some("review-decision"),
+    }
+    let is_draft = initial.get("isDraft").and_then(Value::as_bool) == Some(true);
+    if is_draft {
+        reasons.push("is_draft".to_string());
+    }
+    // Lifecycle state: a PR that is not OPEN cannot merge, whatever the
+    // other gates say (a closed PR's head/base/checks can be unchanged).
+    if initial.get("state").and_then(Value::as_str) != Some("OPEN") {
+        reasons.push("pr_not_open".to_string());
+    }
+    // A blocking requested-changes review prevents merging under the branch
+    // rules even when every other gate is green.
+    if initial.get("reviewDecision").and_then(Value::as_str) == Some("CHANGES_REQUESTED") {
+        reasons.push("review_changes_requested".to_string());
+    }
+    is_draft
+}
 /// The sub-read results handed to [`assemble_verdict`]: each read is either
 /// its typed payload or a failure message. The reason carries the stable
 /// `unread(<name>)` code ONLY — the variable provider detail rides the
@@ -1062,13 +1075,7 @@ fn assemble_verdict(
     {
         reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
     }
-    if initial.get("reviewDecision").and_then(Value::as_str) == Some("REVIEW_REQUIRED") {
-        reasons.push("review_required".to_string());
-    }
-    let is_draft = initial.get("isDraft").and_then(Value::as_bool) == Some(true);
-    if is_draft {
-        reasons.push("is_draft".to_string());
-    }
+    let is_draft = apply_review_state_gates(initial, &mut reasons, &mut unread_subcheck);
 
     let verdict = build_verdict(
         initial,
@@ -1124,6 +1131,58 @@ fn sub_read<T: Clone>(
             None
         }
     }
+}
+
+/// gh's `eliminateDuplicates`, verbatim: when a check re-ran, keep ONLY the
+/// most recent run per (context) or (name, workflow, event) key (sort by
+/// startedAt descending, first seen wins). Without this, an old failed run
+/// next to a new passing one would fail the gate forever. Absent startedAt
+/// sorts last (oldest), matching an empty instant.
+fn dedupe_check_nodes(nodes: &[Value]) -> Vec<&Value> {
+    let started_at = |node: &Value| -> String {
+        node.get("startedAt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut sorted: Vec<&Value> = nodes.iter().collect();
+    sorted.sort_by_key(|node| std::cmp::Reverse(started_at(node)));
+    let mut deduped: Vec<&Value> = Vec::new();
+    let mut seen_contexts: Vec<String> = Vec::new();
+    let mut seen_checks: Vec<String> = Vec::new();
+    for node in sorted {
+        let context = node
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if context.is_empty() {
+            let key = format!(
+                "{}/{}/{}",
+                node.get("name").and_then(Value::as_str).unwrap_or_default(),
+                node.pointer("/checkSuite/workflowRun/workflow/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                // gh keys on (name, workflow, event) — include the event so
+                // differently-triggered runs of the same job stay distinct,
+                // exactly as eliminateDuplicates does.
+                node.pointer("/checkSuite/workflowRun/event")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            if seen_checks.contains(&key) {
+                continue;
+            }
+            seen_checks.push(key);
+        } else {
+            if seen_contexts.contains(&context) {
+                continue;
+            }
+            seen_contexts.push(context);
+        }
+        deduped.push(node);
+    }
+    deduped
 }
 
 /// pr-checks' aggregate flags over the classified array: `all_passed` =
