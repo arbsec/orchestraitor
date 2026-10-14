@@ -13,7 +13,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use miette::{IntoDiagnostic, Result, bail, miette};
+use miette::{IntoDiagnostic, Result, miette};
 use secrecy::ExposeSecret as _;
 use serde::Serialize;
 use serde_json::Value;
@@ -132,10 +132,14 @@ fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
         let (owner, repo) = super::github::origin_owner_repo();
         match (owner, repo) {
             (Some(owner), Some(repo)) => format!("{owner}/{repo}"),
-            _ => bail!(
-                "could not resolve the target repository — pass --repo OWNER/REPO \
-                 explicitly (no github.com `origin` remote in this checkout)"
-            ),
+            _ => {
+                return Err(PrStatusConfigError {
+                    message: "could not resolve the target repository — pass --repo OWNER/REPO \
+                              explicitly (no github.com `origin` remote in this checkout)"
+                        .to_string(),
+                }
+                .into());
+            }
         }
     };
     let Some((owner, name)) = slug.split_once('/') else {
@@ -467,12 +471,18 @@ impl Engine {
     /// Executes one GraphQL operation; transport/HTTP/shape failures are
     /// typed unrecoverable errors.
     fn graphql(&self, operation: &str, query: &str, variables: &Value) -> Result<Value> {
-        let response = self.transport.request_bearer(
-            "POST",
-            "graphql",
-            &self.bearer,
-            Some(serde_json::json!({"query": query, "variables": variables}).to_string()),
-        )?;
+        let response = self
+            .transport
+            .request_bearer(
+                "POST",
+                "graphql",
+                &self.bearer,
+                Some(serde_json::json!({"query": query, "variables": variables}).to_string()),
+            )
+            .map_err(|error| PrStatusUnrecoverable {
+                message: format!("github api transport failed ({operation}): {error}"),
+                partial_json: String::new(),
+            })?;
         let (status_code, body) = response;
         if !status_code.is_success() {
             return Err(PrStatusUnrecoverable {
@@ -485,8 +495,20 @@ impl Engine {
             message: format!("github api response is malformed ({operation})"),
             partial_json: String::new(),
         })?;
-        if let Some(messages) = envelope.get("errors").and_then(Value::as_array) {
-            let rendered: Vec<String> = messages
+        if let Some(errors) = envelope.get("errors").and_then(Value::as_array) {
+            // GitHub maps a missing PR/repository to a NOT_FOUND-typed error
+            // entry alongside `pullRequest: null` — a config/state condition
+            // (exit 2), not a transport failure.
+            if errors
+                .iter()
+                .any(|error| error.get("type").and_then(Value::as_str) == Some("NOT_FOUND"))
+            {
+                return Err(PrStatusConfigError {
+                    message: format!("github api request failed ({operation}): not found"),
+                }
+                .into());
+            }
+            let rendered: Vec<String> = errors
                 .iter()
                 .filter_map(|error| error.get("message").and_then(Value::as_str))
                 .map(str::to_string)
@@ -762,8 +784,63 @@ repository(owner:$owner,name:$name){pullRequest(number:$number){body}}}";
     }
 }
 
+/// Builds the typed §9.48 verdict object from the reduced sub-reads.
+#[allow(clippy::too_many_arguments)]
+fn build_verdict(
+    initial: &Value,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    checks: Option<&ChecksAggregate>,
+    threads: Option<&ThreadsSummary>,
+    checklist: Option<&Checklist>,
+    review_record: &ReviewRecord,
+    is_draft: bool,
+    reasons: Vec<String>,
+) -> PrStatus {
+    PrStatus {
+        number,
+        repository: format!("{owner}/{repo}"),
+        head_sha: initial
+            .get("headRefOid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        base_oid: initial
+            .get("baseRefOid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        is_draft,
+        review_decision: initial
+            .get("reviewDecision")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        merge_state: initial
+            .get("mergeStateStatus")
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN")
+            .to_string(),
+        checks: checks.map(|checks| checks.items.clone()),
+        checks_all_passed: checks.map(|checks| checks.all_passed),
+        checks_any_failing: checks.map(|checks| checks.any_failing),
+        checks_any_pending: checks.map(|checks| checks.any_pending),
+        threads: threads.cloned(),
+        checklist: checklist.cloned(),
+        review_record: review_record.clone(),
+        convergence: Convergence {
+            mergeable: reasons.is_empty(),
+            reasons,
+        },
+        fetched_at: now_rfc3339(),
+    }
+}
+
 /// The sub-read results handed to [`assemble_verdict`]: each read is either
-/// its typed payload or a failure message (rendered as `unread(<name>)`).
+/// its typed payload or a failure message. The reason carries the stable
+/// `unread(<name>)` code ONLY — the variable provider detail rides the
+/// exit-1 diagnostic, never the machine reasons.
 struct SubReads {
     /// CI checks.
     checks: Result<ChecksAggregate, String>,
@@ -797,9 +874,28 @@ fn assemble_verdict(
     let mut reasons: Vec<String> = Vec::new();
     let mut unread_subcheck: Option<&'static str> = None;
 
-    let checks = sub_read(checks, "checks", &mut reasons, &mut unread_subcheck);
-    let threads = sub_read(threads, "threads", &mut reasons, &mut unread_subcheck);
-    let checklist = sub_read(checklist, "body", &mut reasons, &mut unread_subcheck);
+    let mut unread_detail: Option<String> = None;
+    let checks = sub_read(
+        checks,
+        "checks",
+        &mut reasons,
+        &mut unread_subcheck,
+        &mut unread_detail,
+    );
+    let threads = sub_read(
+        threads,
+        "threads",
+        &mut reasons,
+        &mut unread_subcheck,
+        &mut unread_detail,
+    );
+    let checklist = sub_read(
+        checklist,
+        "body",
+        &mut reasons,
+        &mut unread_subcheck,
+        &mut unread_detail,
+    );
 
     // convergence-status' reason vocabulary, verbatim and in its order.
     let review_clean = review_record.present
@@ -838,48 +934,30 @@ fn assemble_verdict(
         reasons.push("is_draft".to_string());
     }
 
-    let verdict = PrStatus {
+    let verdict = build_verdict(
+        initial,
+        owner,
+        repo,
         number,
-        repository: format!("{owner}/{repo}"),
-        head_sha: initial
-            .get("headRefOid")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        base_oid: initial
-            .get("baseRefOid")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        checks.as_ref(),
+        threads.as_ref(),
+        checklist.as_ref(),
+        &review_record,
         is_draft,
-        review_decision: initial
-            .get("reviewDecision")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        merge_state: initial
-            .get("mergeStateStatus")
-            .and_then(Value::as_str)
-            .unwrap_or("UNKNOWN")
-            .to_string(),
-        checks: checks.as_ref().map(|checks| checks.items.clone()),
-        checks_all_passed: checks.as_ref().map(|checks| checks.all_passed),
-        checks_any_failing: checks.as_ref().map(|checks| checks.any_failing),
-        checks_any_pending: checks.as_ref().map(|checks| checks.any_pending),
-        threads: threads.clone(),
-        checklist: checklist.clone(),
-        review_record: review_record.clone(),
-        convergence: Convergence {
-            mergeable: reasons.is_empty(),
-            reasons: reasons.clone(),
-        },
-        fetched_at: now_rfc3339(),
-    };
-    if unread_subcheck.is_some() {
+        reasons,
+    );
+    if let Some(name) = unread_subcheck {
         return Err(PrStatusUnrecoverable {
-            message: "one or more sub-checks could not be read; mergeable is reported false \
-                      with unread(<sub-check>) reasons in the emitted JSON"
-                .to_string(),
+            message: match unread_detail {
+                Some(detail) => format!(
+                    "sub-check unread({name}) could not be read ({detail}); mergeable is \
+                     reported false with unread(<sub-check>) reasons in the emitted JSON"
+                ),
+                None => format!(
+                    "sub-check unread({name}) could not be read; mergeable is reported false \
+                     with unread(<sub-check>) reasons in the emitted JSON"
+                ),
+            },
             partial_json: serde_json::to_string(&verdict).unwrap_or_else(|_| String::new()),
         }
         .into());
@@ -888,18 +966,21 @@ fn assemble_verdict(
 }
 
 /// Reduces one sub-read result: `Ok` passes through; `Err(message)` records
-/// `unread(<name>): <message>` in the reasons and flags the unread marker.
+/// the stable `unread(<name>)` code in the reasons, keeps the variable detail
+/// for the diagnostic, and flags the unread marker.
 fn sub_read<T: Clone>(
     result: Result<T, String>,
     name: &'static str,
     reasons: &mut Vec<String>,
     unread_subcheck: &mut Option<&'static str>,
+    unread_detail: &mut Option<String>,
 ) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(message) => {
             *unread_subcheck = Some(name);
-            reasons.push(format!("unread({name}): {message}"));
+            reasons.push(format!("unread({name})"));
+            *unread_detail = Some(format!("{name}: {message}"));
             None
         }
     }

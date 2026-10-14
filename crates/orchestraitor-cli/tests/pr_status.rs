@@ -634,7 +634,13 @@ fn pr_status_nonexistent_pr_is_a_config_error_exit_two() -> miette::Result<()> {
     write_project_config(&temp)?;
     write_git_repo(&temp)?;
     // GraphQL resolves but the PR is null -> pullRequest missing.
-    let payloads = vec![r#"{"data":{"repository":{"pullRequest":null}}}"#.to_string()];
+    // GitHub's real shape for a missing PR: `pullRequest: null` PLUS an
+    // errors entry typed NOT_FOUND — the NOT_FOUND mapping must win (exit 2).
+    let payloads = vec![serde_json::json!({
+        "data": {"repository": {"pullRequest": null}},
+        "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a PullRequest with the number of 999999."}],
+    })
+    .to_string()];
     let endpoint = spawn_pr_status_server(payloads)?;
     let output = pr_status_cli(
         &temp.path().display().to_string(),
