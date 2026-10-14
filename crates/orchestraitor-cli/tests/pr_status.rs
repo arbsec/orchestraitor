@@ -169,7 +169,24 @@ fn spawn_pr_status_server_with_status(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         request_bytes.extend_from_slice(&chunk[..n]);
-                        if String::from_utf8_lossy(&request_bytes).contains("\r\n\r\n") {
+                        // Read the FULL request (headers + body): stopping at
+                        // the header terminator leaves the POST body unread,
+                        // and closing a socket with unread data sends RST —
+                        // racing the client's response read. Read until the
+                        // declared content-length has arrived.
+                        let text = String::from_utf8_lossy(&request_bytes).into_owned();
+                        let Some(headers_end) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let content_length = text[..headers_end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request_bytes.len() >= headers_end + 4 + content_length {
                             break;
                         }
                     }

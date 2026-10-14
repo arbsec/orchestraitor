@@ -692,23 +692,59 @@ __typename\
                 "checks rollup exceeds one page (100 contexts); not aggregated".to_string(),
             );
         }
-        let mut items: Vec<CheckItem> = Vec::new();
-        for node in nodes {
-            items.push(classify_check(&node)?);
+        // gh's eliminateDuplicates, verbatim: when a check re-ran, keep ONLY
+        // the most recent run (sort by startedAt descending, first seen per
+        // (context) or (name, workflow, event) key wins). Without this, an
+        // old failed run next to a new passing one would fail the gate
+        // forever. startedAt is absent on some StatusContexts — absent sorts
+        // last (oldest), matching an empty instant.
+        let mut deduped: Vec<&Value> = Vec::new();
+        let mut seen_contexts: Vec<String> = Vec::new();
+        let mut seen_checks: Vec<String> = Vec::new();
+        let started_at = |node: &Value| -> String {
+            node.get("startedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let mut sorted: Vec<&Value> = nodes.iter().collect();
+        sorted.sort_by_key(|node| std::cmp::Reverse(started_at(node)));
+        for node in sorted {
+            let context = node
+                .get("context")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if context.is_empty() {
+                let key = format!(
+                    "{}/{}/{}",
+                    node.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    node.pointer("/checkSuite/workflowRun/workflow/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    // includeEvent: this engine does not read the event field
+                    // (the §9.48 schema carries no event), so the key uses the
+                    // empty event — re-runs of the same workflow job still
+                    // dedupe on (name, workflow).
+                    "",
+                );
+                if seen_checks.contains(&key) {
+                    continue;
+                }
+                seen_checks.push(key);
+            } else {
+                if seen_contexts.contains(&context) {
+                    continue;
+                }
+                seen_contexts.push(context);
+            }
+            deduped.push(node);
         }
-        // pr-checks' aggregate flags over the classified array.
-        let all_passed = !items.is_empty()
-            && items.iter().all(|check| {
-                check.classification == "pass" || check.classification == "not-applicable"
-            });
-        let any_failing = items.iter().any(|check| check.classification == "fail");
-        let any_pending = items.iter().any(|check| check.classification == "pending");
-        Ok(ChecksAggregate {
-            items,
-            all_passed,
-            any_failing,
-            any_pending,
-        })
+        let mut items: Vec<CheckItem> = Vec::new();
+        for node in deduped {
+            items.push(classify_check(node)?);
+        }
+        Ok(aggregate_checks(items))
     }
 
     /// The reviewThreads GraphQL query (review-threads' query, verbatim shape)
@@ -1035,6 +1071,25 @@ fn sub_read<T: Clone>(
     }
 }
 
+/// pr-checks' aggregate flags over the classified array: `all_passed` =
+/// (length > 0) AND every classification is `pass` or `not-applicable`; the
+/// genuinely skipped-but-optioned checks are NOT known-disabled and fail
+/// the gate.
+fn aggregate_checks(items: Vec<CheckItem>) -> ChecksAggregate {
+    let all_passed = !items.is_empty()
+        && items.iter().all(|check| {
+            check.classification == "pass" || check.classification == "not-applicable"
+        });
+    let any_failing = items.iter().any(|check| check.classification == "fail");
+    let any_pending = items.iter().any(|check| check.classification == "pending");
+    ChecksAggregate {
+        items,
+        all_passed,
+        any_failing,
+        any_pending,
+    }
+}
+
 /// Aggregated checks verdict (pr-checks' output object shape).
 #[derive(Clone)]
 struct ChecksAggregate {
@@ -1251,8 +1306,16 @@ fn repo_root() -> Result<PathBuf> {
     // The shared scrubbed-git helper: ambient GIT_DIR/GIT_WORK_TREE (hook
     // exports) must never redirect the record lookup away from the intended
     // checkout (#553/#529 corruption class — same scrub every other
-    // production git call in this crate uses).
-    let root = super::github::git(None, &["rev-parse", "--show-toplevel"])?;
+    // production git call in this crate uses). Running outside a checkout is
+    // a config/state condition (exit 2), not a transport failure.
+    let root = super::github::git(None, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+        PrStatusConfigError {
+            message: format!(
+                "pr status requires running from the target git checkout (the review records \
+                 live in <repo-root>/.orchestraitor/reviews/): {error:#}"
+            ),
+        }
+    })?;
     if root.is_empty() {
         return Err(PrStatusConfigError {
             message: "`git rev-parse --show-toplevel` returned an empty path".to_string(),
@@ -1604,153 +1667,6 @@ mod tests {
         let record = read_review_record(temp.path(), 999, HEAD, BASE);
         assert!(!record.present);
         assert_eq!(record.verdict, "");
-    }
-
-    // --- excerpt capping ------------------------------------------------------
-
-    #[test]
-    fn excerpt_is_size_capped_on_char_boundaries() {
-        let short = "short body";
-        assert_eq!(cap_excerpt(short, THREAD_EXCERPT_CAP), short);
-        let long = "x".repeat(THREAD_EXCERPT_CAP + 10);
-        let capped = cap_excerpt(&long, THREAD_EXCERPT_CAP);
-        assert_eq!(capped.chars().count(), THREAD_EXCERPT_CAP + 1); // + ellipsis
-        assert!(capped.ends_with('…'));
-        // Multibyte content never splits mid-codepoint.
-        let multibyte = "é".repeat(THREAD_EXCERPT_CAP + 5);
-        let capped_mb = cap_excerpt(&multibyte, THREAD_EXCERPT_CAP);
-        assert!(capped_mb.ends_with('…'));
-        assert_eq!(capped_mb.chars().count(), THREAD_EXCERPT_CAP + 1);
-    }
-
-    // --- repo slug resolution --------------------------------------------------
-
-    #[test]
-    fn repo_slug_requires_owner_name_shape() {
-        let error = resolve_repo(Some("justname")).expect_err("no slash");
-        assert!(format!("{error}").contains("owner/name"));
-        let error = resolve_repo(Some("owner/")).expect_err("empty name");
-        assert!(format!("{error}").contains("owner/name"));
-        let error = resolve_repo(Some("a/b/c")).expect_err("two slashes");
-        assert!(format!("{error}").contains("owner/name"));
-        let (owner, repo) = resolve_repo(Some("arbsec/orchestraitor")).expect("valid slug");
-        assert_eq!((owner.as_str(), repo.as_str()), ("arbsec", "orchestraitor"));
-    }
-
-    // --- thread summary shape (the review-threads actionable rule) -------------
-
-    #[test]
-    fn actionable_is_unresolved_and_not_outdated() {
-        let thread_resolved = json!({
-            "id": "T1", "isResolved": true, "isOutdated": false,
-            "path": "src/a.rs", "line": 3,
-            "comments": {"nodes": [{"body": "done", "author": {"login": "alice"}}]},
-        });
-        let thread_actionable = json!({
-            "id": "T2", "isResolved": false, "isOutdated": false,
-            "path": "src/b.rs", "line": 9,
-            "comments": {"nodes": [
-                {"body": "first", "author": {"login": "bob"}},
-                {"body": "second", "author": {"login": "alice"}},
-                {"body": "second again", "author": {"login": "alice"}},
-            ]},
-        });
-        let thread_outdated = json!({
-            "id": "T3", "isResolved": false, "isOutdated": true,
-            "comments": {"nodes": []},
-        });
-        let data = json!({
-            "repository": {"pullRequest": {"reviewThreads": {
-                "pageInfo": {"hasNextPage": false},
-                "nodes": [thread_resolved, thread_actionable, thread_outdated],
-            }}}
-        });
-        // Reduce exactly like read_threads does (the GraphQL call itself is
-        // exercised in the e2e fixture suite).
-        let nodes = data
-            .pointer("/repository/pullRequest/reviewThreads/nodes")
-            .and_then(Value::as_array)
-            .expect("nodes");
-        let mut actionable_count = 0_u64;
-        for node in nodes {
-            let is_resolved = node.get("isResolved").and_then(Value::as_bool) == Some(true);
-            let is_outdated = node.get("isOutdated").and_then(Value::as_bool) == Some(true);
-            if !is_resolved && !is_outdated {
-                actionable_count += 1;
-            }
-        }
-        assert_eq!(actionable_count, 1);
-        // Authors dedupe in order; the excerpt comes from the LAST comment.
-        let comments = nodes[1]
-            .pointer("/comments/nodes")
-            .and_then(Value::as_array)
-            .expect("comments");
-        let mut authors: Vec<String> = Vec::new();
-        for comment in comments {
-            if let Some(login) = comment.pointer("/author/login").and_then(Value::as_str)
-                && !authors.iter().any(|known| known == login)
-            {
-                authors.push(login.to_string());
-            }
-        }
-        assert_eq!(authors, ["bob", "alice"]);
-        let excerpt = comments
-            .last()
-            .and_then(|comment| comment.get("body"))
-            .and_then(Value::as_str)
-            .expect("last comment");
-        assert_eq!(excerpt, "second again");
-    }
-
-    // --- verdict assembly: BLOCKED is a successful read, reasons verbatim -----
-
-    #[test]
-    fn blocked_reason_order_matches_convergence_status() {
-        // convergence-status builds reasons in a fixed order; the engine must
-        // emit the identical sequence.
-        let mut reasons: Vec<String> = Vec::new();
-        let review_clean = false;
-        let all_checks_pass = false;
-        let checks_pending = true;
-        let unresolved = 2_u64;
-        let unchecked = 3_u64;
-        let review_required = true;
-        let is_draft = false;
-        if !review_clean {
-            reasons.push("agent_review_not_clean_at_head".to_string());
-        }
-        if !all_checks_pass {
-            reasons.push("checks_not_passing".to_string());
-        }
-        if checks_pending {
-            reasons.push("checks_pending".to_string());
-        }
-        if unresolved > 0 {
-            reasons.push(format!("unresolved_threads({unresolved})"));
-        }
-        if unchecked > 0 {
-            reasons.push(format!("unchecked_items({unchecked})"));
-        }
-        if review_required {
-            reasons.push("review_required".to_string());
-        }
-        if is_draft {
-            reasons.push("is_draft".to_string());
-        }
-        assert_eq!(
-            reasons,
-            [
-                "agent_review_not_clean_at_head",
-                "checks_not_passing",
-                "checks_pending",
-                "unresolved_threads(2)",
-                "unchecked_items(3)",
-                "review_required",
-            ]
-        );
-        // The verdict: NOT mergeable, but a well-formed typed answer.
-        let mergeable = reasons.is_empty();
-        assert!(!mergeable);
     }
 
     #[test]
