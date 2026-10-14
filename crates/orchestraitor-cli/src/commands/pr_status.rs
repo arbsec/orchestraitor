@@ -120,7 +120,7 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
             {
                 writeln!(std::io::stderr(), "{}", unrecoverable.partial_json).into_diagnostic()?;
             }
-            writeln!(std::io::stderr(), "error: pr status: {error:#}").into_diagnostic()?;
+            writeln!(std::io::stderr(), "error: {error:#}").into_diagnostic()?;
             Err(error)
         }
     }
@@ -653,7 +653,7 @@ repository(owner:$owner,name:$name){\
 object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
 __typename\
 ... on StatusContext{context state targetUrl createdAt}\
-... on CheckRun{name checkSuite{workflowRun{workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
+... on CheckRun{name checkSuite{workflowRun{event workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
 }}}}}}}";
         let data = self
             .graphql(
@@ -722,11 +722,12 @@ __typename\
                     node.pointer("/checkSuite/workflowRun/workflow/name")
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
-                    // includeEvent: this engine does not read the event field
-                    // (the §9.48 schema carries no event), so the key uses the
-                    // empty event — re-runs of the same workflow job still
-                    // dedupe on (name, workflow).
-                    "",
+                    // gh keys on (name, workflow, event) — include the event
+                    // so differently-triggered runs of the same job stay
+                    // distinct, exactly as eliminateDuplicates does.
+                    node.pointer("/checkSuite/workflowRun/event")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
                 );
                 if seen_checks.contains(&key) {
                     continue;

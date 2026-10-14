@@ -9,10 +9,10 @@ typed verdict the `pr.status` coordinator decision tool (§9.39) serves.
 
 Answers ONE question — "is PR N mergeable right now, and if not, why not?" —
 from a single invocation. The engine reproduces, in-process, the semantics of
-the five pr-lifecycle skill scripts it replaces for agents (`.agents/skills/
-github-pr-lifecycle/scripts/`: `pr-checks`, `review-threads`,
-`reconcile-checklist`, `convergence-status`, `merge-gate`): one PR view, one
-checks rollup, one `reviewThreads` GraphQL query, one body fetch, one
+the five pr-lifecycle skill scripts it replaces for agents
+(`.agents/skills/github-pr-lifecycle/scripts/`: `pr-checks`,
+`review-threads`, `reconcile-checklist`, `convergence-status`,
+`merge-gate`): one PR view, one checks rollup, one `reviewThreads` GraphQL query, one body fetch, one
 CLEAN-record file read. The scripts stay the shell-level operators' surface
 and the normative definition of the classification rules; the engine consumes
 their semantics verbatim — one vocabulary, never a second interpretation.
