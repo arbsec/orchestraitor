@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Regression test for #607 (and the original repro behind #588): the skill
+# scripts land as mode 100644 because the App-signed `createCommitOnBranch`
+# path cannot create 100755 (issue #556). The fix lives in two places:
+#
+#   1. Sibling-script invocations inside merge-gate / convergence-status use
+#      `bash "$SCRIPT_DIR/<script>"` (the PR #600 callsite fix), so the chain
+#      does not 126 when scripts are 100644.
+#   2. SKILL.md now states the `bash <path>` invocation contract at the top
+#      of the core procedure.
+#
+# This test exercises (1) end-to-end with scripts in mode 100644 (no
+# `chmod +x`), invoking `bash <path>` exactly the way the SKILL.md core
+# procedure tells operators to. A regression to the old direct-exec form
+# shows up here as exit 126 on the sub-check.
+#
+# Deterministic: synthetic GitHub responses, no network, no provider.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/repo/scripts" "$TMP/bin"
+git -C "$TMP/repo" init -q
+
+# Copy the real scripts WITHOUT chmod +x — leave them mode 644 (the
+# production landing state). If any sibling invocation uses the direct
+# `$(...)` form here, the chain will fail with exit 126.
+for script in _lib.sh pr-checks review-threads reconcile-checklist \
+              convergence-status merge-gate; do
+  cp -L -- "$SCRIPT_DIR/$script" "$TMP/repo/scripts/"
+done
+
+# Stub only the independent checks (the leaf reads convergence-status
+# composes from). The real convergence-status + merge-gate scripts run.
+for check in pr-checks review-threads reconcile-checklist; do
+  cat > "$TMP/repo/scripts/$check" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"all_passed":true,"any_pending":false,"unresolved_actionable":0,"all_checked":true,"unchecked":[]}'
+STUB
+  # Leave the stubs 644 too — the test asserts the FULL tree stays 644.
+done
+
+# A real merge-gate / convergence-status invocation will not chmod these.
+# Assert the production shape: every script in the test tree is 644.
+for script in convergence-status merge-gate pr-checks review-threads reconcile-checklist; do
+  mode="$(stat -c '%a' "$TMP/repo/scripts/$script")"
+  if [ "$mode" != "644" ]; then
+    printf 'FAIL: scripts/%s mode is %s, expected 644 (#607 test must mirror the 100644 production landing state)\n' "$script" "$mode"
+    exit 1
+  fi
+done
+
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/view)
+    if [[ " $* " == *"--json baseRefOid,headRefOid"* ]]; then
+      jq -n --arg sha "$TEST_HEAD" --arg base "$TEST_BASE" '{headRefOid:$sha,baseRefOid:$base}'
+    else
+      jq -n --arg sha "$TEST_HEAD" --arg base "$TEST_BASE" \
+        '{state:"OPEN",headRefOid:$sha,baseRefOid:$base,mergeStateStatus:"CLEAN",reviewDecision:"APPROVED",isDraft:false}'
+    fi ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub-config ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
+TEST_BASE=1111111234567890abcdef1234567890abcdef99
+export TEST_HEAD TEST_BASE
+mkdir -p "$TMP/repo/.orchestraitor/reviews"
+# Record format the convergence-status script reads (lines 3, 5, 6):
+#   line 3 = `- verdict: CLEAN`
+#   line 5 = `- head SHA: <full sha>`
+#   line 6 = `- base OID: <full oid>`
+# (see pr-review-agent's record writer for the same shape).
+cat > "$TMP/repo/.orchestraitor/reviews/7-abcdef1.md" <<EOF
+# Agent review record: PR #7 @ abcdef1
+
+- verdict: CLEAN
+- reviewer-agent: test
+- head SHA: $TEST_HEAD
+- base OID: $TEST_BASE
+- findings: 0
+
+EOF
+
+PASS=0
+FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual:   %s\n' "$1" "$2" "$3"; fi
+}
+
+# --- The issue's exact reproduction: `bash <merge-gate> --dry-run` ---
+OUT="$(cd "$TMP/repo" && bash scripts/convergence-status 7 --repo test-org/repo --json 2>"$TMP/cstderr")"; RC=$?
+assert 'convergence-status (bash-invoked, mode 644) does not exit 126' 0 "$RC"
+assert 'convergence-status (mode 644) renders a JSON verdict' true "$([ -n "$OUT" ] && printf '%s' "$OUT" | jq -e . >/dev/null 2>&1 && echo true || echo false)"
+assert 'convergence-status verdict is mergeable at CLEAN head' true "$(jq -r .mergeable <<<"$OUT")"
+assert 'convergence-status (mode 644) never emits Permission denied' 0 "$(grep -cF 'Permission denied' "$TMP/cstderr")"
+
+OUT="$(cd "$TMP/repo" && bash scripts/merge-gate 7 --repo test-org/repo --dry-run 2>"$TMP/mstderr")"; RC=$?
+assert 'merge-gate (bash-invoked, mode 644) does not exit 126' 0 "$RC"
+assert 'merge-gate (mode 644) never emits Permission denied' 0 "$(grep -cF 'Permission denied' "$TMP/mstderr")"
+
+# --- Adversarial: direct exec on a mode-644 script MUST still 126 ---
+# This is the documented production reality (scripts cannot land as
+# 100755; issue #556). Operators must invoke via `bash <path>`; the test
+# also confirms that no caller has inadvertently landed the scripts as
+# 100755 and silently masked the failure. Bash emits the failure message
+# to stderr with exit 126 (EACCES) — the chain works through `bash <path>`
+# and ONLY through `bash <path>`; nothing else satisfies the contract.
+DIRECT_OUT="$(cd "$TMP/repo" && ./scripts/convergence-status 7 --repo test-org/repo --json 2>"$TMP/dstderr")"; DIRECT_RC=$?
+DIRECT_COMBINED="$DIRECT_OUT$(cat "$TMP/dstderr")"
+assert 'direct exec on mode-644 convergence-status returns 126 (the documented production state)' 126 "$DIRECT_RC"
+assert 'direct exec error names Permission denied' 1 "$(printf '%s' "$DIRECT_COMBINED" | grep -cF 'Permission denied')"
+
+printf '\n=== bash-invocation-survival regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

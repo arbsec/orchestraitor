@@ -672,6 +672,23 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `github-pr-lifecycle` skill scripts must be invoked as
+  `bash .agents/skills/github-pr-lifecycle/scripts/<name>`, never exec'd
+  directly: the App-signed landing path (`createCommitOnBranch`
+  `fileChanges`) cannot materialize mode `100755`, so the scripts land as
+  mode `100644` on the default branch — a direct `./scripts/...` call
+  fails with exit 126 (`Permission denied`) and the
+  `merge-gate` → `convergence-status` chain can never render a verdict.
+  The sibling-script invocations inside `merge-gate` and
+  `convergence-status` already route through `bash "$SCRIPT_DIR/<name>"`
+  (PR #600). The SKILL.md core procedure now states the `bash <path>`
+  contract at the top and bash-prefixes the `convergence-status` (step 6),
+  `merge-gate` (step 8), and `pr-labels`/`pr-labels-from-issue`
+  (step 9) invocations; a new regression test
+  (`scripts/test-bash-invocation-survival`) exercises the chain against
+  scripts in mode 644 and confirms the chain never returns exit 126.
+  The `check-bash-subinvocations` guard already prevents reintroduction
+  of direct-exec sibling invocations in any future commit.
 - `orcd watch` now emits a startup warning for the reverse
   ingress/condition mismatch (issue #603): when
   `[watch.kickoff].external_event = true` is armed but

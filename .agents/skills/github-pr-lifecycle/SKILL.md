@@ -38,6 +38,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 
 ## Core procedure
 
+> **Skill scripts are invoked as `bash <path>`, never exec'd directly.** Scripts
+> land as mode `100644` (the App-signed `createCommitOnBranch` path cannot
+> create mode `100755`; issue #556), so direct execution fails with exit 126
+> (`Permission denied`). Every `scripts/<name>` call below is bash-prefixed for
+> that reason; sibling-script invocations inside each script use the same
+> `bash "$SCRIPT_DIR/<name>"` form. Run
+> `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations`
+> to guard against regressions.
+
 ```text
 1. DRAFT          PRE-REVIEW GATE: before `pr-create` creates a PR, it
                   verifies a recorded CLEAN local review generation exists
@@ -248,8 +257,8 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   converges).
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
-                  Use `convergence-status` to compute the verdict from checks + threads
-                  + checklist.
+                  Use `bash .agents/skills/github-pr-lifecycle/scripts/convergence-status`
+                  to compute the verdict from checks + threads + checklist.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon
@@ -259,7 +268,8 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   gains an entry per public-behavior change. Reconcile the checklist
                   with `reconcile-checklist`.
 
-8. MERGE          Only when `merge-gate` exits 0:
+8. MERGE          Only when
+                  `bash .agents/skills/github-pr-lifecycle/scripts/merge-gate` exits 0:
                     - all required + non-optional checks pass (current HEAD)
                     - all actionable review threads resolved
                     - all noteworthy findings fixed or formally resolved (recorded)
@@ -272,8 +282,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   see Safety conditions).
                   Never use --admin to bypass a red gate (spec `50-contracts-data.md` §21.10, AGENTS.md).
 
-9. RECONCILE      After merge: re-run `pr-labels <pr>` and
-                  `pr-labels-from-issue <pr>` (labels can drift as the
+9. RECONCILE      After merge: re-run
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-labels <pr>`
+                  and
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-labels-from-issue <pr>`
+                  (labels can drift as the
                   diff changed during the review loop — the audit is cheap
                   and idempotent; it never removes labels). Then close the linked
                   issue (or confirm the PR's "Closes #N" did), delete the
