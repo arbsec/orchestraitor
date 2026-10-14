@@ -525,10 +525,32 @@ impl Engine {
             message: format!("github api response is malformed ({operation})"),
             partial_json: String::new(),
         })?;
-        if let Some(errors) = envelope.get("errors").and_then(Value::as_array) {
-            // GitHub maps a missing PR/repository to a NOT_FOUND-typed error
-            // entry alongside `pullRequest: null` — a config/state condition
-            // (exit 2), not a transport failure.
+        // A NOT_FOUND-typed error is ALWAYS a config/state condition (exit 2),
+        // even alongside partial data.
+        let not_found = envelope
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .any(|error| error.get("type").and_then(Value::as_str) == Some("NOT_FOUND"))
+            });
+        if not_found {
+            return Err(PrStatusConfigError {
+                message: format!("github api request failed ({operation}): not found"),
+            }
+            .into());
+        }
+        // Partial-error tolerance: GitHub can answer HTTP 200 with `data`
+        // populated AND `errors` entries (e.g. FORBIDDEN on a sub-field the
+        // installation cannot read, like workflowRun). An empty/absent `data`
+        // is a real failure; data WITH errors degrades — the caller's pointer
+        // reads produce their own typed misses on the affected sub-fields.
+        if envelope.get("data").is_none_or(Value::is_null)
+            && let Some(errors) = envelope.get("errors").and_then(Value::as_array)
+        {
+            // GitHub maps a missing PR/repository to a NOT_FOUND-typed
+            // error entry — a config/state condition (exit 2).
             if errors
                 .iter()
                 .any(|error| error.get("type").and_then(Value::as_str) == Some("NOT_FOUND"))

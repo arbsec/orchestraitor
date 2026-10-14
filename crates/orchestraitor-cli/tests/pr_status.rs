@@ -987,6 +987,65 @@ fn pr_status_null_rollup_is_blocked_not_unrecoverable() -> miette::Result<()> {
 }
 
 #[test]
+fn pr_status_partial_graphql_error_degrades_not_fails() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // GitHub answers HTTP 200 with data populated AND an errors entry
+    // (FORBIDDEN on checkSuite.workflowRun, which an installation without
+    // the Actions read permission hits). The reads must DEGRADE — the
+    // checks still classify from the surviving fields — never unread(checks)
+    // exit 1.
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        serde_json::json!({
+            "data": {"repository": {"object": {"statusCheckRollup": {"contexts": {
+                "pageInfo": {"hasNextPage": false},
+                "nodes": [
+                    {"__typename": "CheckRun", "name": "Check & Lint", "status": "COMPLETED",
+                     "conclusion": "SUCCESS", "detailsUrl": "https://ci/lint",
+                     "checkSuite": null}
+                ],
+            }}}}},
+            "errors": [{"type": "FORBIDDEN",
+                        "message": "Resource not accessible by integration",
+                        "path": ["repository", "object", "statusCheckRollup", "contexts",
+                                 "nodes", 0, "checkSuite", "workflowRun"]}]
+        })
+        .to_string(),
+        threads_none(),
+        body_all_checked(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    let checks = verdict["checks"].as_array().expect("checks");
+    assert_eq!(checks.len(), 1, "the surviving check still classifies");
+    assert_eq!(checks[0]["classification"], "pass");
+    assert_eq!(verdict["checks_all_passed"], true);
+    Ok(())
+}
+
+#[test]
 fn pr_status_no_secrets_in_output() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_project_config(&temp)?;
