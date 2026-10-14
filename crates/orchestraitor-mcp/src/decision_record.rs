@@ -551,139 +551,15 @@ fn scan_for_secrets(decision: &CampaignDecision) -> Result<(), DecisionRecordErr
     Ok(())
 }
 
-/// Conservative §9.23.4-style secret byte-shape heuristic. Mirrors the
-/// trace-redaction classes (spec `40-arbitraitor-integration.md` §9.23.4)
-/// and the payload-recording redaction classes (spec
-/// `50-contracts-data.md` §20.4.2). Deliberately over-eager: a decision
-/// record is an audit artifact, and a false refusal is recoverable (the
-/// caller rephrases) while a false pass leaks permanently.
+/// Conservative §9.23.4-style secret byte-shape heuristic. Delegates to the
+/// shared implementation in `orchestraitor-core::secret_shape` — one
+/// heuristic, so the decision-record gate and the §9.48 `think` tool can
+/// never drift. Deliberately over-eager: a decision record is an audit
+/// artifact, and a false refusal is recoverable (the caller rephrases)
+/// while a false pass leaks permanently.
 #[must_use]
 pub fn contains_secret_shaped(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    // secret:// URIs (§9.23 secret referencing).
-    if lower.contains("secret://") {
-        return true;
-    }
-    // GitHub token shapes.
-    if ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
-        .iter()
-        .any(|prefix| lower.contains(prefix))
-    {
-        return true;
-    }
-    // `sk-`-prefixed keys (§9.23.4) — a real key continues with a long run
-    // of token characters; prose containing the bare prefix stays allowed.
-    // EVERY occurrence is inspected: an early short "sk-" in prose must not
-    // mask a later real key.
-    for (index, _) in lower.match_indices("sk-") {
-        let token_chars: usize = lower[index + 3..]
-            .chars()
-            .take_while(|character| {
-                character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
-            })
-            .count();
-        if token_chars >= 16 {
-            return true;
-        }
-    }
-    // Bearer tokens and credential headers (§20.4.2, §9.23.4 field names).
-    if lower.contains("bearer ") && long_token_after(&lower, "bearer ") {
-        return true;
-    }
-    if ["authorization:", "x-api-key:", "x-goog-api-key:"]
-        .iter()
-        .any(|marker| long_token_after(&lower, marker))
-    {
-        return true;
-    }
-    // Long hex runs: a 32+ hex run in a decision record is secret-shaped
-    // (digest-length keys) until proven otherwise.
-    if hex_runs(value).iter().any(|run| *run >= 32) {
-        return true;
-    }
-    // Long base64/base64url runs (§9.23.4 "long base64"): the shape of an
-    // encoded key or JWT signature segment. Pure prose (no digits) is
-    // never flagged.
-    is_long_base64_run(value)
-}
-
-/// Whether any occurrence of `marker` is followed by a credential-shaped
-/// token run of at least 16 characters. For credential headers the token
-/// may be preceded by one authentication-scheme word (`Basic`, `Bearer`,
-/// `token`, …), so one leading whitespace-delimited word is skipped before
-/// measuring — `Authorization: Basic dXNlcjpwYXNzd29yZA==` measures the
-/// base64 credential, not the scheme.
-fn long_token_after(lower: &str, marker: &str) -> bool {
-    lower.match_indices(marker).any(|(index, matched)| {
-        let rest = &lower[index + matched.len()..];
-        let mut words = rest
-            .split(|character: char| {
-                character.is_whitespace() || character == '"' || character == '\''
-            })
-            .filter(|word| !word.is_empty());
-        // One optional leading auth-scheme word (e.g. `basic`), then the
-        // credential token itself.
-        let credential = match words.next() {
-            Some(first) if is_auth_scheme_word(first) => words.next(),
-            other => other,
-        };
-        credential.is_some_and(|word| word.chars().count() >= 16)
-    })
-}
-
-/// Whether a whitespace-delimited word is an authentication-scheme label
-/// that may precede the credential token in a header value.
-fn is_auth_scheme_word(word: &str) -> bool {
-    matches!(
-        word,
-        "basic" | "bearer" | "token" | "digest" | "negotiate" | "ntlm" | "oauth"
-    )
-}
-
-/// Returns the lengths of maximal runs of ASCII hex characters in `value`.
-fn hex_runs(value: &str) -> Vec<usize> {
-    let mut runs = Vec::new();
-    let mut current = 0usize;
-    for character in value.chars() {
-        if character.is_ascii_hexdigit() {
-            current += 1;
-        } else {
-            if current > 0 {
-                runs.push(current);
-            }
-            current = 0;
-        }
-    }
-    if current > 0 {
-        runs.push(current);
-    }
-    runs
-}
-
-/// Detects a ≥43-character run of the base64/base64url alphabet containing
-/// at least one letter and one digit (the shape of an encoded key or JWT
-/// signature segment, not of prose or a URL slug).
-fn is_long_base64_run(value: &str) -> bool {
-    let mut run_chars = 0usize;
-    let mut has_letter = false;
-    let mut has_digit = false;
-    for character in value.chars() {
-        let in_alphabet =
-            character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=' | '-' | '_');
-        if in_alphabet {
-            run_chars += 1;
-            has_letter |= character.is_ascii_alphabetic();
-            has_digit |= character.is_ascii_digit();
-        } else {
-            run_chars = 0;
-            has_letter = false;
-            has_digit = false;
-        }
-        if run_chars >= 43 && has_letter && has_digit {
-            return true;
-        }
-    }
-    false
+    orchestraitor_core::contains_secret_shaped(value)
 }
 
 /// Runs one `decision.record` (spec §9.39): validates, appends the record

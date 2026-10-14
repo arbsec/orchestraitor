@@ -41,6 +41,9 @@ pub struct AppSnapshot {
     pub policy_trace: Vec<String>,
     /// Context trace entries.
     pub context_trace: Vec<String>,
+    /// Reasoning trace entries (spec §9.2, §9.48.8): one line per
+    /// persisted `think` step. Rendered as inert text (§9.48.8).
+    pub reasoning_trace: Vec<String>,
     /// Tool call summaries.
     pub tool_calls: Vec<String>,
     /// Command plan summaries (spec §9.2).
@@ -99,6 +102,8 @@ pub struct App {
     policy_trace: Vec<String>,
     /// Context trace entries.
     context_trace: Vec<String>,
+    /// Reasoning trace entries (spec §9.2, §9.48.8).
+    reasoning_trace: Vec<String>,
     /// Tool call summaries.
     tool_calls: Vec<String>,
     /// Command plan summaries (spec §9.2).
@@ -135,6 +140,7 @@ impl Default for App {
             receipts: Vec::new(),
             policy_trace: Vec::new(),
             context_trace: Vec::new(),
+            reasoning_trace: Vec::new(),
             tool_calls: Vec::new(),
             command_plans: Vec::new(),
             test_build_results: Vec::new(),
@@ -188,6 +194,7 @@ impl App {
             receipts: self.receipts.clone(),
             policy_trace: self.policy_trace.clone(),
             context_trace: self.context_trace.clone(),
+            reasoning_trace: self.reasoning_trace.clone(),
             tool_calls: self.tool_calls.clone(),
             command_plans: self.command_plans.clone(),
             test_build_results: self.test_build_results.clone(),
@@ -283,6 +290,13 @@ impl App {
     /// Adds a context trace entry.
     pub fn add_context_trace(&mut self, entry: impl Into<String>) {
         self.context_trace.push(entry.into());
+    }
+
+    /// Adds a reasoning trace entry (spec §9.48.8). The entry MUST already
+    /// be neutralized: thought text is model-authored untrusted data and is
+    /// rendered as inert text only.
+    pub fn add_reasoning_trace(&mut self, entry: impl Into<String>) {
+        self.reasoning_trace.push(entry.into());
     }
 
     /// Adds a tool call summary.

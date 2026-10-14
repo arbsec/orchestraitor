@@ -25,13 +25,14 @@ pub fn is_valid_tool_id(tool_id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// Reserves the built-in tool names and the §9.39 coordinator tool names: a
-/// declared tool can never shadow a protocol name.
+/// Reserves the built-in tool names (including the §9.48 `think` internal
+/// tool) and the §9.39 coordinator tool names: a declared tool can never
+/// shadow a protocol name.
 #[must_use]
 pub fn is_reserved_tool_id(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "read_file" | "write_file" | "search" | "bash" | "finish"
+        "read_file" | "write_file" | "search" | "bash" | "finish" | "think"
     ) || matches!(
         tool_id,
         "board.query"
@@ -66,7 +67,14 @@ mod tests {
 
     #[test]
     fn protocol_and_coordinator_names_are_reserved() {
-        for reserved in ["bash", "finish", "read_file", "write_file", "search"] {
+        for reserved in [
+            "bash",
+            "finish",
+            "read_file",
+            "write_file",
+            "search",
+            "think",
+        ] {
             assert!(is_reserved_tool_id(reserved), "{reserved} must be reserved");
         }
         for reserved in ["board.query", "worker.delegate", "decision.record"] {

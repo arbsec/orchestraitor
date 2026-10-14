@@ -158,6 +158,13 @@ pub(crate) fn tool_call_shape(
         crate::action::WorkerAction::DeclaredTool { tool_id, .. } => {
             format!("declared:{tool_id}")
         }
+        // The think tool's churn surface: the spec (§9.48.3) notes each
+        // thought's text differs so the normalized shape may never repeat —
+        // the bucketed step counter keeps same-position churn comparable
+        // without carrying any thought content.
+        crate::action::WorkerAction::Think { thought_number, .. } => {
+            format!("think-step:{thought_number}")
+        }
         crate::action::WorkerAction::Finish { .. } => "finish".to_string(),
     };
     ToolCallShape {

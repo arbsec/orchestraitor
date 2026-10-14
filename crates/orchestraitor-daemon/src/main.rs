@@ -77,6 +77,22 @@ async fn watch_cycle() -> Result<ExitCode> {
         .resolve(WORKER_ROLE)
         .into_diagnostic()
         .wrap_err("worker role resolution failed")?;
+    // The §9.48.2 trusted-layer kill-switch for the built-in `think` tool:
+    // resolved ONCE at startup from the layered config's trusted layers,
+    // exactly like the foreground loop's declared-tool surface.
+    let catalog_roles: Vec<String> =
+        orchestraitor_agent_catalog::RoleRegistry::from_resolver(&resolver)
+            .into_diagnostic()
+            .wrap_err("role registry construction failed")?
+            .list()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+    let think_enabled =
+        orchestraitor_core::ToolRegistry::from_resolver(&resolver, &catalog_roles, true)
+            .into_diagnostic()
+            .wrap_err("tool registry construction failed")?
+            .think_enabled();
 
     // The board client: the same reconciled read `orc loop` polls through.
     let (board_config_template, _path) =
@@ -127,6 +143,12 @@ async fn watch_cycle() -> Result<ExitCode> {
     let effective = resolver
         .resolve_config()
         .map_err(|error| miette::miette!("configuration resolution failed: {error}"))?;
+    // §9.48.8 consent gate: `thought_text` persists only when the operator
+    // enabled payload recording (spec 50 §20.4.2; default `false`).
+    let record_payloads = effective
+        .observability
+        .as_ref()
+        .is_some_and(|observability| observability.record_payloads);
     let values =
         effective
             .r#loop
@@ -240,11 +262,20 @@ async fn watch_cycle() -> Result<ExitCode> {
     // poller feeds the bounded queue and the kick-off source drains it —
     // the operator arms the condition separately via
     // `[watch.kickoff].external_event`. Disabled (the default) keeps the
-    // trigger set board/reconcile-derived only. Both directions of the
-    // enabled/arm mismatch (issues #504 and #603) emit one operator-
-    // facing warning each at startup; consistent pairs stay silent.
-    for warning in watch_config.ingress_kickoff_warnings() {
-        tracing::warn!("orcd watch: {warning}");
+    // trigger set board/reconcile-derived only.
+    if watch_config.ingress.enabled && !watch_config.kickoff.external_event {
+        // Enabled ingress with a disarmed consumer: the queue fills to
+        // capacity, drops surplus, and stays `degraded` permanently (a
+        // gen-13 review finding). The poller still runs (polling is the
+        // operator's explicit opt-in and the reconcile poll remains the
+        // completeness authority), but the operator must see the
+        // mismatched configuration.
+        tracing::warn!(
+            "orcd watch: watch.ingress.enabled is true but \
+             watch.kickoff.external_event is false - the ingress queue \
+             has no kick-off consumer and will fill, drop surplus, and \
+             stay degraded; arm external_event or disable the ingress"
+        );
     }
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
         .ingress
@@ -302,13 +333,23 @@ async fn watch_cycle() -> Result<ExitCode> {
     // pinned cap the runner enforces — cloned before the starter takes
     // its owned copy, so the two layers cannot drift.
     let daily_spend_cap_usd = budgets.daily_spend_soft_cap_usd;
+    // §9.48.8: the daemon's event store persists accepted `think` steps as
+    // `agent reasoning` events; `[observability].record_payloads` (spec 50
+    // §20.4.2) gates `thought_text`. Resolved once at startup.
     let starter = DirectWatchStarter::new(
         project_dir,
         config_dir.clone(),
         None,
         budgets,
         loop_config.guardrails.worker_guardrails(),
-    );
+    )
+    .with_think_enabled(think_enabled)
+    .with_event_store(Arc::new(std::sync::Mutex::new(
+        orchestraitor_events::SqliteAuditStore::open(config_dir.join("reasoning-events.db"))
+            .into_diagnostic()
+            .wrap_err("reasoning event store open failed")?,
+    )))
+    .with_record_payloads(record_payloads);
     let mut run_ordinal = 0_u64;
     // The §9.19.6 budget window carried across invocations: the previous
     // invocation's last-pass UTC day (`None` before the first). See the

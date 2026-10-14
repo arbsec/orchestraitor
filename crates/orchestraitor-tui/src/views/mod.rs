@@ -57,6 +57,8 @@ pub enum ViewId {
     PolicyTrace,
     /// Context compiler trace (spec §9.2).
     ContextTrace,
+    /// Externalized-deliberation trace (spec §9.2, §9.48.8).
+    ReasoningTrace,
 }
 
 impl ViewId {
@@ -80,6 +82,7 @@ impl ViewId {
         ViewId::SessionLogs,
         ViewId::PolicyTrace,
         ViewId::ContextTrace,
+        ViewId::ReasoningTrace,
     ];
 
     /// Returns the human-readable title for this view.
@@ -104,6 +107,7 @@ impl ViewId {
             Self::SessionLogs => "Session Logs",
             Self::PolicyTrace => "Policy Trace",
             Self::ContextTrace => "Context Trace",
+            Self::ReasoningTrace => "Reasoning Trace",
         }
     }
 
@@ -156,6 +160,7 @@ pub fn render_view(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
         ViewId::SessionLogs => render_session_logs(frame, area, snapshot),
         ViewId::PolicyTrace => render_policy_trace(frame, area, snapshot),
         ViewId::ContextTrace => render_context_trace(frame, area, snapshot),
+        ViewId::ReasoningTrace => render_reasoning_trace(frame, area, snapshot),
     }
 }
 
@@ -318,4 +323,26 @@ fn render_context_trace(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapsho
         &snapshot.context_trace,
         "context trace entries",
     );
+}
+
+/// Renders the reasoning trace view (spec §9.48.8): the persisted `think`
+/// chain, including revisions. Entries arrive pre-neutralized — the
+/// renderer treats `thought_text` as inert text; the neutralizer strips
+/// terminal control sequences (ESC, CSI, OSC) so model-authored text never
+/// gains terminal-control effect.
+fn render_reasoning_trace(frame: &mut Frame<'_>, area: Rect, snapshot: &AppSnapshot) {
+    render_text_list(
+        frame,
+        area,
+        &snapshot.reasoning_trace,
+        "reasoning trace entries",
+    );
+}
+
+/// Neutralizes terminal control sequences (ESC, CSI, OSC) in
+/// model-authored text (§9.48.8): ESC is replaced with the visible `<esc>`
+/// marker, which also breaks any CSI/OSC sequence it introduced.
+#[must_use]
+pub fn neutralize_control_sequences(text: &str) -> String {
+    text.replace('\x1b', "<esc>")
 }

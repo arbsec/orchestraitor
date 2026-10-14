@@ -80,6 +80,11 @@ pub struct WorkerConfig {
     /// Structured-only finish (issue #535 §9.45): the system prompt demands
     /// a compact fielded summary payload instead of prose narrative.
     pub structured_summary: bool,
+    /// Whether the built-in `think` tool is on this run's surface (§9.48.2):
+    /// default-on; a trusted-layer `[tools.think] enabled = false` removes
+    /// it. Sub-sessions inherit the parent's gate and are additionally
+    /// bound by the spawning definition's `internal_tools` allowlist.
+    pub think_enabled: bool,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -119,6 +124,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("effort", &self.effort)
             .field("profile", &self.profile)
             .field("structured_summary", &self.structured_summary)
+            .field("think_enabled", &self.think_enabled)
             .finish()
     }
 }
@@ -144,6 +150,7 @@ impl WorkerConfig {
             effort: None,
             profile: None,
             structured_summary: false,
+            think_enabled: true,
         }
     }
 
@@ -184,6 +191,16 @@ impl WorkerConfig {
     #[must_use]
     pub const fn with_structured_summary(mut self, structured_summary: bool) -> Self {
         self.structured_summary = structured_summary;
+        self
+    }
+
+    /// Sets the built-in `think` tool's kill-switch state (§9.48.2).
+    /// `false` removes the tool from the run's surface: the prompt never
+    /// advertises it and every dispatch is refused with the typed
+    /// `tool-not-allowed` reason.
+    #[must_use]
+    pub const fn with_think_enabled(mut self, think_enabled: bool) -> Self {
+        self.think_enabled = think_enabled;
         self
     }
 
@@ -340,6 +357,12 @@ pub struct WorkerRun {
     /// invocation (outcome or pre-run refusal), carrying the routing and
     /// effort evidence the §9.35 decision records consume.
     pub subsession_events: Vec<crate::model::SubsessionEvent>,
+    /// The `think` tool's receipted reasoning steps (§9.48.8): audit
+    /// metadata for every accepted call and every refusal. `thought_text`
+    /// rides only on accepted steps AND only when payload recording was
+    /// enabled for the run (§20.4.2 consent control); refused steps carry
+    /// metadata and the validation-time char count, never the text.
+    pub reasoning_events: Vec<crate::think::ReasoningRecord>,
     /// Effective budgets (evidence echo).
     pub budgets: crate::budget::BudgetEcho,
 }

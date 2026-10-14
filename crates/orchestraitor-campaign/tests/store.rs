@@ -40,6 +40,7 @@ impl WorkerSpawner for NoopSpawner {
             untrusted_writes: Vec::new(),
             receipts: Vec::new(),
             subsession_events: Vec::new(),
+            reasoning_events: Vec::new(),
             budgets: WorkerBudgets::bootstrap_defaults().echo(),
         })
     }

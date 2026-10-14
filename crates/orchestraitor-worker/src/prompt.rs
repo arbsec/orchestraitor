@@ -10,12 +10,18 @@ use crate::task::WorkerTask;
 /// (prompt prose is not a machine-consumed contract); the protocol it
 /// documents is exercised through the loop's behavior.
 pub(super) const SYSTEM_PROMPT: &str = "You are Orchestraitor's bootstrap worker operating on a task worktree.
-Every response MUST contain exactly one fenced ```json block selecting one of the four tools:
+Every response MUST contain exactly one fenced ```json block selecting one of the five tools:
 
 {\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}
 {\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}
 {\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}
 {\"tool\": \"bash\", \"script\": \"<bash script>\"}
+{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n>, \"total_thoughts\": <n>, \"next_thought_needed\": <bool>}
+
+Use `think` before complex work: estimate the step count, reason one step at
+a time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),
+and stop calling it when done. `think` performs no action — it only records
+your deliberation.
 
 Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}
 or success=false when the task cannot be completed. Any tool not listed
@@ -41,8 +47,11 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
             crate::tooldef::InternalTool::ReadFile,
             crate::tooldef::InternalTool::Search,
             crate::tooldef::InternalTool::Bash,
+            crate::tooldef::InternalTool::Think,
         ] {
-            if allowlist.contains(&tool) {
+            if allowlist.contains(&tool)
+                && (config.think_enabled || !matches!(tool, crate::tooldef::InternalTool::Think))
+            {
                 prompt.push_str(subsession_tool_line(tool));
                 prompt.push('\n');
             }
@@ -61,6 +70,20 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
         return prompt;
     }
     let mut prompt = SYSTEM_PROMPT.to_string();
+    if !config.think_enabled {
+        // The §9.48.2 trusted-layer kill-switch: the prompt never advertises
+        // a tool the executor would refuse.
+        prompt = prompt
+            .lines()
+            .filter(|line| !line.contains("\"tool\": \"think\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        prompt = prompt.replace("one of the five tools", "one of the four tools");
+        prompt = prompt.replace(
+            "\nUse `think` before complex work: estimate the step count, reason one step at\na time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),\nand stop calling it when done. `think` performs no action — it only records\nyour deliberation.\n",
+            "\n",
+        );
+    }
     if config.tools.is_empty() {
         return prompt;
     }
@@ -83,6 +106,9 @@ fn subsession_tool_line(tool: crate::tooldef::InternalTool) -> &'static str {
             "{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}"
         }
         crate::tooldef::InternalTool::Bash => "{\"tool\": \"bash\", \"script\": \"<bash script>\"}",
+        crate::tooldef::InternalTool::Think => {
+            "{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n ≥ 1>, \"total_thoughts\": <n ≥ 1>, \"next_thought_needed\": <bool>, \"is_revision\": <bool>, \"revises_thought\": <optional n>}"
+        }
     }
 }
 

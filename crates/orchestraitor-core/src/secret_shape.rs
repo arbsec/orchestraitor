@@ -41,7 +41,10 @@ pub fn contains_secret_shaped(value: &str) -> bool {
         }
     }
     // Bearer tokens and credential headers (§20.4.2, §9.23.4 field names).
-    if lower.contains("bearer ") && long_token_after(&lower, "bearer ") {
+    // The Bearer marker matches ANY following whitespace: `Bearer\t<token>`
+    // and quoted `"bearer": "<token>"` forms carry the same secret shape as
+    // the space-separated header.
+    if lower.contains("bearer") && long_token_after(&lower, "bearer") {
         return true;
     }
     if ["authorization:", "x-api-key:", "x-goog-api-key:"]
@@ -69,7 +72,12 @@ pub fn contains_secret_shaped(value: &str) -> bool {
 /// base64 credential, not the scheme.
 fn long_token_after(lower: &str, marker: &str) -> bool {
     lower.match_indices(marker).any(|(index, matched)| {
-        let rest = &lower[index + matched.len()..];
+        // A quoted/colon-delimited form (`"bearer": "<token>"`) leaves
+        // structural `"` and `:` characters before the credential — skip
+        // them the way a scheme word is skipped.
+        let rest = &lower[index + matched.len()..].trim_start_matches(|character: char| {
+            character.is_whitespace() || character == '"' || character == ':'
+        });
         let mut words = rest
             .split(|character: char| {
                 character.is_whitespace() || character == '"' || character == '\''
@@ -183,6 +191,20 @@ mod tests {
         assert!(contains_secret_shaped(
             "signature dGhpc2lzYWJhc2U2NHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA=="
         ));
+    }
+
+    #[test]
+    fn bearer_after_tab_or_quote_is_refused() {
+        assert!(
+            contains_secret_shaped("Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz123456"),
+            "tab-separated Bearer must be refused"
+        );
+        assert!(
+            contains_secret_shaped(
+                "config carries \"bearer\": \"abcdefghijklmnopqrstuvwxyz123456\" for the relay"
+            ),
+            "quoted bearer JSON form must be refused"
+        );
     }
 
     #[test]

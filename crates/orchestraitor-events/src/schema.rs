@@ -62,6 +62,9 @@ pub enum EventCategory {
     Error,
     /// Security finding event.
     SecurityFinding,
+    /// Externalized deliberation from the built-in `think` tool (spec
+    /// `20-harness-worker.md` §9.48): one event per accepted reasoning step.
+    AgentReasoning,
 }
 
 /// Normalized append-only event envelope.

@@ -120,6 +120,12 @@ impl ThoughtChain {
             }
             return Ok(());
         }
+        // A fresh sequence (`thought_number = 1` after a closed one) still
+        // validates the estimate shape: `total_thoughts` is part of the
+        // tool's contract on every non-revision call (§9.48.3).
+        if total_thoughts == 0 {
+            return Err(REASON_THOUGHT_NUMBER_REGRESSED);
+        }
         // Sequence transitions: `thought_number = 1` after a closed sequence
         // starts a fresh sequence (§9.48.3 run-total semantics).
         if thought_number == 1 && self.sequence_closed {
@@ -134,16 +140,16 @@ impl ThoughtChain {
         if thought_number <= self.highest_number {
             return Err(REASON_THOUGHT_NUMBER_REGRESSED);
         }
-        if total_thoughts == 0 {
-            return Err(REASON_THOUGHT_NUMBER_REGRESSED);
-        }
         Ok(())
     }
 
     /// Records one accepted thought, advancing the counters. `thought_number
-    /// = 1` on a closed sequence starts a fresh sequence (§9.48.3).
-    pub fn accept(&mut self, thought_number: u32, next_thought_needed: bool) {
-        if thought_number == 1 && self.sequence_closed {
+    /// = 1` on a closed sequence starts a fresh sequence (§9.48.3) — but a
+    /// REVISION is a revisit of the existing chain, never a fork: it
+    /// re-opens the closed sequence in place and does not advance the
+    /// sequence id.
+    pub fn accept(&mut self, thought_number: u32, next_thought_needed: bool, is_revision: bool) {
+        if !is_revision && thought_number == 1 && self.sequence_closed {
             self.sequence_id = self.sequence_id.saturating_add(1);
             self.highest_number = 0;
             self.sequence_count = 0;
@@ -171,7 +177,7 @@ mod tests {
     fn linear_chain_must_advance() {
         let mut chain = ThoughtChain::new();
         assert!(chain.validate(1, 5, false, None).is_ok());
-        chain.accept(1, true);
+        chain.accept(1, true, false);
         // Regression without is_revision is refused.
         assert_eq!(
             chain.validate(1, 5, false, None),
@@ -192,7 +198,7 @@ mod tests {
             chain.validate(1, 5, true, None),
             Err(REASON_REVISION_TARGET_UNKNOWN)
         );
-        chain.accept(3, true);
+        chain.accept(3, true, false);
         assert!(chain.validate(3, 5, true, Some(2)).is_ok());
         assert_eq!(
             chain.validate(3, 5, true, Some(4)),
@@ -203,7 +209,7 @@ mod tests {
     #[test]
     fn sequence_ceiling_refuses_above_256() {
         let mut chain = ThoughtChain::new();
-        chain.accept(256, true);
+        chain.accept(256, true, false);
         // Above the ceiling: receipted refusal.
         assert_eq!(
             chain.validate(257, 300, false, None),
@@ -211,16 +217,16 @@ mod tests {
         );
         // The ceiling boundary itself is admissible.
         let mut boundary = ThoughtChain::new();
-        boundary.accept(255, true);
+        boundary.accept(255, true, false);
         assert!(boundary.validate(256, 300, false, None).is_ok());
     }
 
     #[test]
     fn closed_sequence_then_one_starts_fresh() {
         let mut chain = ThoughtChain::new();
-        chain.accept(4, false);
+        chain.accept(4, false, false);
         assert!(chain.validate(1, 7, false, None).is_ok());
-        chain.accept(1, true);
+        chain.accept(1, true, false);
         assert_eq!(chain.validate(2, 7, false, None), Ok::<(), &str>(()));
         assert_eq!(chain.sequence_id(), 2);
     }

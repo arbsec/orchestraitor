@@ -102,7 +102,7 @@ pub enum ToolRegistryError {
     /// `internal_tools` carries a name outside the typed enum.
     #[error(
         "tool `{tool_id}` has unknown internal tool `{name}`; allowed values are: read_file, \
-         search, bash"
+         search, bash, think"
     )]
     UnknownInternalTool {
         /// Offending tool id.
@@ -234,6 +234,13 @@ pub enum ResolvedToolMechanism {
         /// Operator-authored instructions.
         instructions: Option<String>,
     },
+    /// The built-in `think` tool's trusted-layer kill-switch entry (spec
+    /// `20-harness-worker.md` §9.48.2): not a dispatchable mechanism — a
+    /// marker recording whether a trusted layer disabled the built-in tool.
+    ThinkSwitch {
+        /// `false` removes the tool from the surface.
+        enabled: bool,
+    },
 }
 
 /// The typed internal-tool allowlist (mirrors the worker enum).
@@ -245,6 +252,9 @@ pub enum ResolvedInternalTool {
     Search,
     /// Mediated bash execution.
     Bash,
+    /// Externalized deliberation (spec `20-harness-worker.md` §9.48): a
+    /// zero-I/O receipted scratchpad step.
+    Think,
 }
 
 impl ResolvedInternalTool {
@@ -258,6 +268,7 @@ impl ResolvedInternalTool {
             "read_file" => Ok(Self::ReadFile),
             "search" => Ok(Self::Search),
             "bash" => Ok(Self::Bash),
+            "think" => Ok(Self::Think),
             other => Err(ToolRegistryError::UnknownInternalTool {
                 tool_id: tool_id.to_string(),
                 name: other.to_string(),
@@ -272,6 +283,7 @@ impl ResolvedInternalTool {
             Self::ReadFile => "read_file",
             Self::Search => "search",
             Self::Bash => "bash",
+            Self::Think => "think",
         }
     }
 }
@@ -447,6 +459,66 @@ impl ToolRegistry {
     pub fn len(&self) -> usize {
         self.tools.len()
     }
+
+    /// Whether the built-in `think` tool is on the surface (§9.48.2).
+    /// Default-on; a trusted-layer `[tools.think] enabled = false` entry
+    /// removes it. Any other `[tools.think]` shape is a resolution error,
+    /// so this reads the kill-switch marker the resolver produced.
+    #[must_use]
+    pub fn think_enabled(&self) -> bool {
+        self.tools
+            .get("think")
+            .is_none_or(|tool| match &tool.mechanism {
+                ResolvedToolMechanism::ThinkSwitch { enabled } => *enabled,
+                _ => true,
+            })
+    }
+}
+
+/// Validates a trusted-layer `[tools.think]` kill-switch entry (§9.48.2).
+/// The ONLY recognized field is `enabled`; anything else on the entry is a
+/// typed error (the built-in tool has no other configuration surface —
+/// "there is nothing to configure").
+fn resolve_think_kill_switch(
+    tool: &ToolConfig,
+    layer: ConfigLayer,
+) -> Result<ResolvedTool, ToolRegistryError> {
+    let configured = [
+        tool.kind.is_some(),
+        tool.command.is_some(),
+        tool.subagent_role.is_some(),
+        tool.internal_tools.is_some(),
+        tool.instructions.is_some(),
+        tool.visible_to.is_some(),
+        tool.budget.is_some(),
+        tool.effort.is_some(),
+        tool.max_summary_bytes.is_some(),
+        tool.structured_summary.is_some(),
+    ]
+    .iter()
+    .any(|present| *present);
+    if configured {
+        return Err(ToolRegistryError::MalformedMechanism {
+            tool_id: "think".to_string(),
+            reason: "the built-in `think` tool carries no configuration beyond \
+                     `enabled = false`"
+                .to_string(),
+        });
+    }
+    Ok(ResolvedTool {
+        id: "think".to_string(),
+        mechanism: ResolvedToolMechanism::ThinkSwitch {
+            enabled: tool.enabled.unwrap_or(true),
+        },
+        max_turns: None,
+        wall_clock_secs: None,
+        max_result_bytes: None,
+        visible_to: BTreeSet::new(),
+        effort: None,
+        max_summary_bytes: None,
+        structured_summary: None,
+        layer,
+    })
 }
 
 /// Resolves one raw `ToolConfig` into a validated `ResolvedTool`.
@@ -457,9 +529,18 @@ fn resolve_tool(
     subagent_wired: bool,
     layer: ConfigLayer,
 ) -> Result<ResolvedTool, ToolRegistryError> {
-    if !is_valid_tool_id(tool_id) || is_reserved_tool_id(tool_id) {
+    if !is_valid_tool_id(tool_id) || (is_reserved_tool_id(tool_id) && tool_id != "think") {
         return Err(ToolRegistryError::InvalidToolId {
             tool_id: tool_id.to_string(),
+        });
+    }
+    if tool_id == "think" {
+        return resolve_think_kill_switch(tool, layer);
+    }
+    if tool.enabled.is_some() {
+        return Err(ToolRegistryError::MalformedMechanism {
+            tool_id: tool_id.to_string(),
+            reason: "only the built-in `think` tool carries `enabled`".to_string(),
         });
     }
     let kind = tool

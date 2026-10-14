@@ -148,6 +148,8 @@ struct DirectLoopStarter {
     /// accepts work): a broken tool definition is a typed startup error,
     /// never a per-spawn failure after worktrees are created.
     declared_tools: Vec<orchestraitor_worker::ToolDefinition>,
+    /// The built-in `think` tool's kill-switch state (§9.48.2).
+    think_enabled: bool,
     /// The sub-session routing resolved with that tool surface (the §9.35
     /// decision-record evidence).
     subsession_routing:
@@ -422,6 +424,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
             &super::DeclaredToolSurface {
                 tools: self.declared_tools.clone(),
                 subsession_routing: self.subsession_routing.clone(),
+                think_enabled: self.think_enabled,
             },
         );
         let config = self.with_cost_tracking(config, selected, routing);
@@ -746,6 +749,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             profile: routing_profile.clone(),
             // Gated once, above: never re-validated per spawn.
             declared_tools: surface.tools,
+            think_enabled: surface.think_enabled,
             subsession_routing: surface.subsession_routing,
         };
         let runner = LoopRunner::new(

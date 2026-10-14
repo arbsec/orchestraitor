@@ -4881,6 +4881,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "orchestraitor-arbitraitor-client",
+ "orchestraitor-core",
  "orchestraitor-cost-ledger",
  "orchestraitor-model",
  "orchestraitor-provider-api",

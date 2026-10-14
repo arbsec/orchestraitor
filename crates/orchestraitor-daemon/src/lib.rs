@@ -58,5 +58,5 @@ pub use watch::{
     BoardSnapshotPoller, DEFAULT_POLL_INTERVAL_SECS, DirectWatchStarter, IngressSettings,
     InstanceLock, JournallessSink, KICKOFF_CONFIG_KEY_PREFIX, POLL_INTERVAL_CONFIG_KEY,
     ReconcilePoller, ReconcileSink, SetWatchInvocation, WATCH_BUILT_IN_DEFAULTS_TOML, WatchConfig,
-    acquire_instance_lock, run_watch,
+    acquire_instance_lock, append_reasoning_events, run_watch,
 };

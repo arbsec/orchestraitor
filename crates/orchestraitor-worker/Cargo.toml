@@ -19,6 +19,10 @@ async-trait = "0.1"
 orchestraitor-arbitraitor-client = { path = "../orchestraitor-arb-client" }
 chrono = { version = "0.4", features = ["serde"] }
 orchestraitor-cost-ledger = { path = "../orchestraitor-cost-ledger" }
+# orchestraitor-core (MIT OR Apache-2.0): the shared §9.23.4 secret-shape
+# heuristic the `think` tool's fail-closed refusal scans with — one
+# implementation, shared with `decision.record` validation (§9.48.4).
+orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 orchestraitor-provider-api = { path = "../orchestraitor-provider-api" }
 orchestraitor-provider-neuralwatt = { path = "../orchestraitor-provider-neuralwatt" }
