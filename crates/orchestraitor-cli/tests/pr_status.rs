@@ -895,6 +895,59 @@ fn pr_status_known_disabled_failing_check_is_a_failure_never_a_pass() -> miette:
 }
 
 #[test]
+fn pr_status_null_rollup_is_blocked_not_unrecoverable() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    write_git_repo(&temp)?;
+    write_clean_record(&temp.path().join("repo").display().to_string())?;
+    // A head commit with no status contexts yet (fresh push): rollup null.
+    // Valid provider state -> BLOCKED with checks_not_passing, exit 0.
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        serde_json::json!({"data": {"repository": {"object": {"statusCheckRollup": null}}}})
+            .to_string(),
+        threads_none(),
+        body_all_checked(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["checks"].as_array().expect("checks").len(), 0);
+    assert_eq!(verdict["checks_all_passed"], false);
+    assert_eq!(
+        verdict["convergence"]["mergeable"], false,
+        "no checks = not all passed (pr-checks length > 0 rule)"
+    );
+    assert!(
+        verdict["convergence"]["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .any(|reason| reason.as_str() == Some("checks_not_passing")),
+        "{verdict}"
+    );
+    Ok(())
+}
+
+#[test]
 fn pr_status_no_secrets_in_output() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_project_config(&temp)?;

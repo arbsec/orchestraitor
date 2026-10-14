@@ -91,9 +91,13 @@ pub fn run<W: Write>(paths: &ConfigPaths, command: PrCommand, writer: &mut W) ->
 
 /// Runs `orc pr status <N>`.
 fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) -> Result<()> {
-    let (owner, repo) = resolve_repo(args.repo.as_deref())?;
-    let outcome =
-        Engine::new(paths).and_then(|engine| engine.aggregate(&owner, &repo, args.number));
+    // All typed failures — slug validation, engine construction, the
+    // aggregation — funnel through ONE outcome so the diagnostic-printing
+    // branch below covers every error (a typed error that bypasses it would
+    // exit mapped-but-silent).
+    let outcome = resolve_repo(args.repo.as_deref()).and_then(|(owner, repo)| {
+        Engine::new(paths).and_then(|engine| engine.aggregate(&owner, &repo, args.number))
+    });
     match outcome {
         Ok(verdict) => {
             if args.json {
@@ -101,7 +105,7 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
                     .map_err(|error| miette!("verdict is not serializable: {error}"))?;
                 writeln!(writer, "{json}").into_diagnostic()?;
             } else {
-                write_one_pager(writer, &owner, &repo, &verdict)?;
+                write_one_pager(writer, &verdict.repository, &verdict)?;
             }
             Ok(())
         }
@@ -160,12 +164,7 @@ fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
 /// Renders the human one-pager: verdict first, reason codes, one line per
 /// failing/pending check, one line per unresolved actionable thread, the
 /// checklist delta — a screen, not a transcript.
-fn write_one_pager<W: Write>(
-    writer: &mut W,
-    owner: &str,
-    repo: &str,
-    verdict: &PrStatus,
-) -> Result<()> {
+fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatus) -> Result<()> {
     let convergence = &verdict.convergence;
     let headline = if convergence.mergeable {
         "MERGEABLE"
@@ -174,10 +173,9 @@ fn write_one_pager<W: Write>(
     };
     writeln!(
         writer,
-        "{headline}: PR #{} ({}/{}) is {}right now.",
+        "{headline}: PR #{} ({}) is {}right now.",
         verdict.number,
-        owner,
-        repo,
+        repository,
         if convergence.mergeable {
             "mergeable "
         } else {
@@ -418,12 +416,12 @@ impl Engine {
     /// failure with a complete config (unresolvable key, HTTP error) is
     /// unrecoverable (exit 1).
     fn new(paths: &ConfigPaths) -> Result<Self> {
-        let Ok(config) = super::github::resolved_config(paths) else {
-            return Err(PrStatusConfigError {
-                message: "layered configuration could not be resolved".to_string(),
-            }
-            .into());
-        };
+        let config =
+            super::github::resolved_config(paths).map_err(|error| PrStatusConfigError {
+                // `resolved_config`'s diagnostic names the failing key/layer and
+                // carries no secrets — keep it so an operator can fix the file.
+                message: format!("layered configuration could not be resolved: {error:#}"),
+            })?;
         let Some(github_app) = config.github_app.as_ref() else {
             return Err(PrStatusConfigError {
                 message: "github_app configuration is not set (the §9.48 read route is the \
@@ -462,8 +460,19 @@ impl Engine {
                 .into());
             }
         };
+        let graphql_base: Option<String> = match paths.github_graphql_endpoint.as_deref() {
+            // Endpoint already names `/graphql`: use its API-root prefix so
+            // ApiTransport (which appends "graphql") lands on the same URL.
+            Some(endpoint) if endpoint.ends_with("/graphql") => {
+                let base = endpoint.trim_end_matches("/graphql").trim_end_matches('/');
+                Some(base.to_string())
+            }
+            // API root: ApiTransport appends "graphql" itself.
+            other => other.map(str::to_string),
+        };
+        let transport = super::github::ApiTransport::new(graphql_base)?;
         Ok(Self {
-            transport: super::github::ApiTransport::new(paths.github_graphql_endpoint.clone())?,
+            transport,
             bearer: token.token().expose_secret().to_string(),
         })
     }
@@ -644,10 +653,26 @@ __typename\
                 &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
             )
             .map_err(|error| format!("{error:#}"))?;
-        let nodes = data
-            .pointer("/repository/object/statusCheckRollup/contexts/nodes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "checks rollup response is missing contexts nodes".to_string())?;
+        // A head commit with NO status contexts yet (fresh push, repo without
+        // CI) reports `statusCheckRollup: null` — a valid provider state, not
+        // a failure: aggregate over an EMPTY checks array (all_passed is then
+        // false per pr-checks' `length > 0` rule → `checks_not_passing`,
+        // exit 0 BLOCKED), never `unread(checks)`. A missing `object` (no
+        // such commit) or a wrong shape stays unread.
+        let rollup = data.pointer("/repository/object/statusCheckRollup");
+        let nodes: Vec<Value> = match rollup {
+            Some(rollup) if rollup.is_null() => Vec::new(),
+            Some(rollup) => rollup
+                .pointer("/contexts/nodes")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| "checks rollup response is missing contexts nodes".to_string())?,
+            None => {
+                return Err(
+                    "checks rollup response is missing (no object for the head commit)".to_string(),
+                );
+            }
+        };
         let has_next = data
             .pointer("/repository/object/statusCheckRollup/contexts/pageInfo/hasNextPage")
             .and_then(Value::as_bool)
@@ -660,7 +685,7 @@ __typename\
         }
         let mut items: Vec<CheckItem> = Vec::new();
         for node in nodes {
-            items.push(classify_check(node)?);
+            items.push(classify_check(&node)?);
         }
         // pr-checks' aggregate flags over the classified array.
         let all_passed = !items.is_empty()
