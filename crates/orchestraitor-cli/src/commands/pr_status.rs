@@ -96,7 +96,14 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
     // branch below covers every error (a typed error that bypasses it would
     // exit mapped-but-silent).
     let outcome = resolve_repo(args.repo.as_deref()).and_then(|(owner, repo)| {
-        Engine::new(paths).and_then(|engine| engine.aggregate(&owner, &repo, args.number))
+        // The review-record root resolves BEFORE the token mint: a caller
+        // outside a git checkout gets the typed config error (exit 2)
+        // immediately, never after a wasted mint and network call.
+        repo_root().and_then(|repo_root| {
+            Engine::new(paths).and_then(|engine| {
+                engine.aggregate_with_root(&owner, &repo, args.number, &repo_root)
+            })
+        })
     });
     match outcome {
         Ok(verdict) => {
@@ -590,11 +597,13 @@ impl Engine {
     /// Snapshot discipline (spec §9.48): capture head SHA and base OID BEFORE
     /// the sub-reads, re-read BOTH after them, and refuse (exit 4) on any
     /// anchor movement — never a verdict from a mixed snapshot.
-    fn aggregate(&self, owner: &str, repo: &str, number: u64) -> Result<PrStatus> {
-        // 0. The review-record root resolves FIRST: a caller outside a git
-        //    checkout gets the typed config error (exit 2) before any token
-        //    is minted or network call is made.
-        let repo_root = repo_root()?;
+    fn aggregate_with_root(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        repo_root: &std::path::Path,
+    ) -> Result<PrStatus> {
         // 1. The pre-read PR view: identity fields + the two anchors.
         let initial = self.pr_view(owner, repo, number)?;
         let head_sha = oid_field(&initial, "headRefOid", "head")?;
@@ -604,7 +613,7 @@ impl Engine {
         let checks = self.read_checks(owner, repo, &head_sha);
         let threads = self.read_threads(owner, repo, number);
         let checklist = self.read_body(owner, repo, number);
-        let review_record = read_review_record(&repo_root, number, &head_sha, &base_oid);
+        let review_record = read_review_record(repo_root, number, &head_sha, &base_oid);
 
         // 3. The post-read anchor check BEFORE any verdict is emitted.
         self.check_anchors_stable(owner, repo, number, &head_sha, &base_oid)?;
