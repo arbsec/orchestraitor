@@ -21,8 +21,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `merge-gate` semantics verbatim (same check classifications, same
   reason-code vocabulary, known-disabled-job SKIP semantics included) and
   emits the typed §9.48 JSON (`--json`) or a human one-pager. A BLOCKED PR
-  is a successful read (exit 0 with `mergeable: false` + reasons); only
-  transport failures exit 1, config/state problems exit 2, and a moved
+  is a successful read (exit 0 with `mergeable: false` + reasons); exit 1
+  covers unrecoverable failures (network, auth, malformed provider output),
+  config/state problems exit 2, and a moved
   head/base anchor between the pre- and post-reads exits 4 (concurrent
   edit) — never a verdict from a mixed snapshot. Read-only: the tool never
   labels, comments, reviews, or merges, and reads run through the GitHub App

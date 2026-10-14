@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use miette::{IntoDiagnostic, Result, miette};
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -109,12 +109,11 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
             }
             Ok(())
         }
-        Err(error) => {
-            // The mapped exit codes (1/2/4) are typed by main WITHOUT its
-            // generic miette rendering, so the diagnostic prints HERE — the
-            // same shape simplify's PedanticCheckFailed path uses. The
-            // partial typed JSON (an unread aggregate) rides stderr first
-            // so a caller needing the degraded state can read it.
+        Err(error) if error.is::<PrStatusUnrecoverable>() => {
+            // main maps the typed errors WITHOUT its generic miette render,
+            // so the diagnostic prints HERE exactly once. The partial typed
+            // JSON (an unread aggregate) rides stderr first so a caller
+            // needing the degraded state can read it.
             if let Some(unrecoverable) = error.downcast_ref::<PrStatusUnrecoverable>()
                 && !unrecoverable.partial_json.is_empty()
             {
@@ -123,6 +122,17 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
             writeln!(std::io::stderr(), "error: {error:#}").into_diagnostic()?;
             Err(error)
         }
+        Err(error) if error.is::<PrStatusConfigError>() => {
+            writeln!(std::io::stderr(), "error: {error:#}").into_diagnostic()?;
+            Err(error)
+        }
+        Err(error) if error.is::<PrStatusConcurrentEdit>() => {
+            writeln!(std::io::stderr(), "error: {error:#}").into_diagnostic()?;
+            Err(error)
+        }
+        // Untyped errors (transport construction, writer failures): main
+        // renders them via miette — print nothing here (no double output).
+        Err(error) => Err(error),
     }
 }
 
@@ -403,8 +413,9 @@ pub struct Convergence {
 struct Engine {
     /// Shared REST/GraphQL transport (endpoint override honored for tests).
     transport: super::github::ApiTransport,
-    /// Installation-token bearer for every request of this invocation.
-    bearer: String,
+    /// Installation-token bearer for every request of this invocation, held
+    /// as a secret (zeroized on drop; never printed or logged).
+    bearer: SecretString,
 }
 
 impl Engine {
@@ -483,7 +494,7 @@ impl Engine {
         let transport = super::github::ApiTransport::new(graphql_base)?;
         Ok(Self {
             transport,
-            bearer: token.token().expose_secret().to_string(),
+            bearer: SecretString::from(token.token().expose_secret().to_string()),
         })
     }
 
@@ -495,7 +506,7 @@ impl Engine {
             .request_bearer(
                 "POST",
                 "graphql",
-                &self.bearer,
+                self.bearer.expose_secret(),
                 Some(serde_json::json!({"query": query, "variables": variables}).to_string()),
             )
             .map_err(|error| PrStatusUnrecoverable {
@@ -1512,18 +1523,7 @@ mod tests {
 
     #[test]
     fn all_passed_excludes_not_applicable_and_requires_at_least_one_check() {
-        // pr-checks: all_passed = (length > 0) AND every classification is
-        // pass or not-applicable.
-        let aggregate = |items: Vec<CheckItem>| {
-            let all_passed = !items.is_empty()
-                && items.iter().all(|check| {
-                    check.classification == "pass" || check.classification == "not-applicable"
-                });
-            (
-                all_passed,
-                items.iter().any(|check| check.classification == "fail"),
-            )
-        };
+        // Calls the PRODUCTION reducer (pr-checks' aggregate flags).
         let passing = |name: &str, classification: &str| CheckItem {
             name: name.to_string(),
             state: "SUCCESS".to_string(),
@@ -1533,17 +1533,18 @@ mod tests {
             link: String::new(),
         };
         // Empty checks array: all_passed is FALSE (the script's length > 0).
-        let (empty_all, _) = aggregate(Vec::new());
-        assert!(!empty_all);
-        let (with_na, _) = aggregate(vec![
+        assert!(!aggregate_checks(Vec::new()).all_passed);
+        let with_na = aggregate_checks(vec![
             passing("cool tests", "pass"),
             passing("Docs Consistency", "not-applicable"),
         ]);
-        assert!(with_na);
-        let (_, skipped_fails_gate) = aggregate(vec![passing("rad tests", "skip")]);
+        assert!(with_na.all_passed);
+        assert!(!with_na.any_failing);
         // A genuinely skipped-but-optioned check is NOT known-disabled and
-        // still fails the gate.
-        assert!(!skipped_fails_gate);
+        // still fails the gate (all_passed == false).
+        let skipped = aggregate_checks(vec![passing("rad tests", "skip")]);
+        assert!(!skipped.all_passed);
+        assert!(!skipped.any_failing, "a skip is not a failure");
     }
 
     // --- checklist parsing (reconcile-checklist semantics) -------------------
