@@ -64,6 +64,9 @@ toml_edit = { workspace = true }
 # url (MIT OR Apache-2.0): form-encoded query building for `orc github api`
 # GET/DELETE `--field` pairs (the `gh api` query-parameter shape).
 url = { workspace = true }
+# time (MIT OR Apache-2.0): RFC 3339 provider-clock stamps for the §9.48
+# PR-status snapshot (`fetched_at`).
+time = { workspace = true }
 
 [dev-dependencies]
 # chrono (MIT OR Apache-2.0): CostEntry timestamps in stats fixtures.
@@ -72,5 +75,4 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { workspace = true }
 orchestraitor-testkit = { path = "../orchestraitor-testkit" }
 tempfile = { workspace = true }
-time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

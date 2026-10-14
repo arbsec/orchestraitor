@@ -13,6 +13,21 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **`orc pr status <N>`** — a read-only PR-mergeability verdict in ONE
+  invocation (spec `10-orchestrator.md` §9.48). One command replaces the
+  five pr-lifecycle script reads an agent previously ran to answer "is my
+  PR mergeable?": the in-process engine consumes `pr-checks`,
+  `review-threads`, `reconcile-checklist`, `convergence-status`, and
+  `merge-gate` semantics verbatim (same check classifications, same
+  reason-code vocabulary, known-disabled-job SKIP semantics included) and
+  emits the typed §9.48 JSON (`--json`) or a human one-pager. A BLOCKED PR
+  is a successful read (exit 0 with `mergeable: false` + reasons); only
+  transport failures exit 1, config/state problems exit 2, and a moved
+  head/base anchor between the pre- and post-reads exits 4 (concurrent
+  edit) — never a verdict from a mixed snapshot. Read-only: the tool never
+  labels, comments, reviews, or merges, and reads run through the GitHub App
+  service identity. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **CI completions for the `orcd watch` event ingress**: when
   `[watch.ingress].enabled = true`, a second conditional poll lane now
   covers check-run and workflow-run completions, which the repository
@@ -689,19 +704,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   scripts in mode 644 and confirms the chain never returns exit 126.
   The `check-bash-subinvocations` guard already prevents reintroduction
   of direct-exec sibling invocations in any future commit.
-- `orcd watch` now emits a startup warning for the reverse
-  ingress/condition mismatch (issue #603): when
-  `[watch.kickoff].external_event = true` is armed but
-  `[watch.ingress].enabled = false`, the external-event kick-off
-  condition has no ingress feeding it, so it can never fire — silently.
-  The forward-direction warning (ingress enabled, condition disarmed;
-  issue #504) was already in place; the new warning is symmetric. Both
-  warnings flow through `WatchConfig::ingress_kickoff_warnings` and the
-  operator-facing message names the exact config pair and the remedy.
-  Consistent pairs (both enabled or both disabled) stay silent. The
-  forward-mismatch warning and the poller-still-runs behavior (a
-  gen-13 review finding) are unchanged. Documented in
-  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-950b-opt-in).
 - Documented GitHub's `since` filter semantics for the issue-comment API
   endpoints: the filter applies to `updated_at`, not `created_at`, so
   responses include comments created before the requested window even when

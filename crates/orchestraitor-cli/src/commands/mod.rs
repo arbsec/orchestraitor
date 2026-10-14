@@ -6,6 +6,7 @@ pub mod config;
 pub mod github;
 pub mod loop_runner;
 pub mod models;
+pub mod pr_status;
 pub mod routing;
 pub mod simplify;
 pub mod stats;

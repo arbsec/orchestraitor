@@ -113,6 +113,10 @@ pub enum Commands {
     /// compiler-candidate counterfactual baseline.
     #[command(subcommand)]
     Stats(StatsCommand),
+    /// Read-only pull-request status surfaces (spec `10-orchestrator.md`
+    /// §9.48): the in-process aggregation engine behind `pr.status`.
+    #[command(subcommand)]
+    Pr(PrCommand),
     /// Run the rule-driven pre-landing simplify pass (fail-open quality
     /// tooling; spec §9.5 normalization classes).
     #[command(subcommand)]
@@ -355,6 +359,31 @@ pub struct VerifyIdentityArgs {
     /// Worktree or repository whose ambient git commit identity is checked
     /// (default: the current directory).
     pub path: Option<String>,
+}
+
+/// `orc pr` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum PrCommand {
+    /// Aggregate one PR's mergeability verdict in ONE read-only pass (spec
+    /// `10-orchestrator.md` §9.48): checks, review threads, checklist,
+    /// review record, convergence. A BLOCKED PR is a successful read
+    /// (exit 0); exit codes per the spec: 0 mergeable, 1 unrecoverable,
+    /// 2 config/state, 3 reserved, 4 concurrent edit.
+    Status(PrStatusArgs),
+}
+
+/// Arguments for `orc pr status`.
+#[derive(Debug, Clone, Args)]
+pub struct PrStatusArgs {
+    /// Pull-request number.
+    pub number: u64,
+    /// Emit the typed §9.48 JSON verdict instead of the human one-pager.
+    #[arg(long)]
+    pub json: bool,
+    /// Target repository as `owner/name`. Defaults to the `origin` remote of
+    /// the current checkout (never guessed beyond that).
+    #[arg(long)]
+    pub repo: Option<String>,
 }
 
 /// Arguments for `orc init`.

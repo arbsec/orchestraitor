@@ -162,27 +162,6 @@ kick off a campaign session. Events carry identifiers only (delivery
 key, repository, event type, number, head SHA), never board or PR
 content.
 
-**Configuration mismatch warnings (issues #504, #603).** `orcd watch`
-emits a `tracing::warn!` at startup for each direction of the
-ingress/arm mismatch so operators can grep the daemon log and see
-which side of the pair is wrong:
-
-- **Forward mismatch** (ingress enabled, condition disarmed):
-  `watch.ingress.enabled is true but watch.kickoff.external_event is
-  false - the ingress queue has no kick-off consumer and will fill,
-  drop surplus, and stay degraded; arm external_event or disable the
-  ingress`. The poller still runs — polling is the operator's explicit
-  opt-in and the reconcile poll remains the completeness authority
-  (gen-13 review finding); the warning is purely informational.
-- **Reverse mismatch** (condition armed, ingress disabled):
-  `watch.kickoff.external_event is true but watch.ingress.enabled is
-  false - the external-event kick-off condition is armed but the
-  ingress that feeds it is disabled, so it can never fire; enable the
-  ingress or disarm external_event`. Without this warning the operator
-  was armed against a trigger source that does not exist (#603).
-
-Consistent pairs (both enabled or both disabled) are silent.
-
 The pinned guard set (concurrency 2, stall 10m, worker timeout 45m,
 backoff 10s·2^n capped 5m, $10/day spend soft cap, 4h run budget) is
 unchanged from [`orc loop`](orc-loop.md#guard-set) — the daemon hands the
