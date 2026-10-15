@@ -30,6 +30,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `pr_status_out_of_scope` payload (recorded in the audit trail with the
   `out_of_scope` outcome class). Documented in
   [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+- **Reference expansion at the delegation boundary** (§9.49): `pr://<N>`
+  and `issue://<N>` references in worker-bound task payloads are expanded
+  PRE-SEND into bounded fenced blocks (2 KiB per reference, 8 KiB per
+  pass; titles/labels size-capped; full bodies never inlined) so the
+  worker performs ZERO fetches of its own. Expanded content is fenced
+  untrusted data (§6.1); secret-shaped strings are REDACTED with an
+  announced count; typed failure notices (`not-found`, `forbidden`,
+  `rate-limited`, `provider-error`, `budget-exceeded`) leave the
+  reference as literal text and still deliver the payload — never
+  blocking, never retried synchronously. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`orc chat pr-status <N>`** — the §9.44 operator-chat read-only view of
   the same shared-engine verdict: verdict-first prose (the reason codes,
   failing/pending checks, actionable threads, checklist delta) stamped with
