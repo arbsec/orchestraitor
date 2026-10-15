@@ -476,26 +476,31 @@ fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
         }
         ExpandedFields::Issue(issue) => {
             let single_line = sanitize_line;
+            let mut field_redactions = 0usize;
+            let mut redacted_line = |text: &str| -> String {
+                let (redacted, count) = redact_secrets(&single_line(text));
+                field_redactions += count;
+                redacted
+            };
             let _ = writeln!(block, "number: {}", issue.number);
             let _ = writeln!(
                 block,
                 "title: {}",
-                cap_value(
-                    &redact_secrets(&single_line(&issue.title)).0,
-                    MAX_TITLE_CHARS
-                )
+                cap_value(&redacted_line(&issue.title), MAX_TITLE_CHARS)
             );
             let _ = writeln!(block, "state: {}", single_line(&issue.state));
             let _ = writeln!(block, "author: {}", single_line(&issue.author));
             let _ = writeln!(
                 block,
                 "labels: {}",
-                cap_value(
-                    &redact_secrets(&single_line(&issue.labels)).0,
-                    MAX_TITLE_CHARS
-                )
+                cap_value(&redacted_line(&issue.labels), MAX_TITLE_CHARS)
             );
             let _ = writeln!(block, "url: {}", single_line(&issue.url));
+            if field_redactions > 0 {
+                // §9.23: the per-field redaction is ANNOUNCED — never a
+                // silent pass.
+                writeln!(block, "redacted ({field_redactions} instance(s))").ok();
+            }
         }
     }
     let (mut redacted, redaction_count) = redact_secrets(&block);
