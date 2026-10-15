@@ -1063,7 +1063,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
                      remote branch exists — pass --base <ref> explicitly"
                 )
             }
-            // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
             //     whose NEW commits carry two or more CONSECUTIVE identical
             //     subjects is refused — review-fix rounds must land as distinct
             //     Conventional Commits subjects (or be squashed through this
@@ -1073,7 +1072,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
             //     never compares against the wrong history.
             Err(error) => return Err(error),
         };
-        // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
         //     whose NEW commits carry two or more CONSECUTIVE identical
         //     subjects is refused — review-fix rounds must land as distinct
         //     Conventional Commits subjects (or be squashed through this
@@ -1106,7 +1104,16 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     let guard_base_head = base_commit.clone().ok_or_else(|| {
         miette!("cannot resolve the comparison base head for the duplicate-subject guard")
     })?;
-    reject_duplicate_subjects(&local_branch, &guard_base_head, &owner, &repo)?;
+    if !git_fetch_authenticated(
+        token.token().expose_secret(),
+        &owner,
+        &repo,
+        &guard_base_head,
+    ) {
+        // Fall through: the rev-parse in the guard produces the typed error
+        // when the object is truly unavailable.
+    }
+    reject_duplicate_subjects(&local_branch, &guard_base_head)?;
     let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
@@ -1269,14 +1276,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-/// Fetches `remote_branch` from the SELECTED repository (`owner`/`repo`)
-/// so the duplicate-subject guard compares against the right history. A
-/// fetch failure is non-fatal: the guard then compares against origin/main
-/// or nothing — fail-open on connectivity, fail-closed on content.
-fn fetch_remote_branch(owner: &str, repo: &str, remote_branch: &str) {
-    let _ = git(None, &["fetch", &format!("{owner}/{repo}"), remote_branch]);
-}
-
 /// Refuses a push whose NEW commits (commits on `local_branch` not
 /// reachable from the remote branch, or from `origin/<remote_branch>`
 /// default) carry two or more CONSECUTIVE identical subject lines
@@ -1291,20 +1290,10 @@ fn fetch_remote_branch(owner: &str, repo: &str, remote_branch: &str) {
 ///
 /// Typed diagnostic naming the duplicated subject when two consecutive
 /// new commits share a subject line.
-fn reject_duplicate_subjects(
-    local_branch: &str,
-    base_head: &str,
-    owner: &str,
-    repo: &str,
-) -> Result<()> {
-    // Fetch the resolved base head from the SELECTED repository so the
-    // new-commit range is accurate (a fetch failure is non-fatal: the
-    // guard then compares against the full local branch — fail-open on
-    // connectivity, fail-closed on content).
-    fetch_remote_branch(owner, repo, base_head);
+fn reject_duplicate_subjects(local_branch: &str, base_head: &str) -> Result<()> {
     // New commits: everything on local_branch not reachable from the base
-    // head (git log lists them newest-first; adjacent-equality is
-    // order-insensitive).
+    // head (git log lists newest-first; adjacent-equality is
+    // order-insensitive, so the direction doesn't affect the check).
     let range = format!("{base_head}..{local_branch}");
     let subjects_raw = git(None, &["log", "--format=%s", &range])?;
     let subjects: Vec<String> = subjects_raw.lines().map(str::to_string).collect();
