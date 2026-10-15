@@ -700,7 +700,7 @@ fn build_verdict(
 fn apply_review_state_gates(
     initial: &Value,
     reasons: &mut Vec<String>,
-    unread_subcheck: &mut Option<&'static str>,
+    unread_subchecks: &mut Vec<&'static str>,
     view_had_errors: bool,
 ) -> bool {
     // An unreadable (null/absent) reviewDecision is an unread sub-field —
@@ -715,7 +715,7 @@ fn apply_review_state_gates(
         // exit-1 path.
         None | Some("") if view_had_errors => {
             reasons.push("unread(review-decision)".to_string());
-            *unread_subcheck = Some("review-decision");
+            unread_subchecks.push("review-decision");
         }
         // A null/empty decision WITHOUT errors is the legitimate "no review
         // required" provider state — no reason, never unread.
@@ -774,29 +774,28 @@ fn assemble_verdict(
         review_record,
     } = reads;
     let mut reasons: Vec<String> = Vec::new();
-    let mut unread_subcheck: Option<&'static str> = None;
-
-    let mut unread_detail: Option<String> = None;
+    let mut unread_subchecks: Vec<&'static str> = Vec::new();
+    let mut unread_details: Vec<String> = Vec::new();
     let checks = sub_read(
         checks,
         "checks",
         &mut reasons,
-        &mut unread_subcheck,
-        &mut unread_detail,
+        &mut unread_subchecks,
+        &mut unread_details,
     );
     let threads = sub_read(
         threads,
         "threads",
         &mut reasons,
-        &mut unread_subcheck,
-        &mut unread_detail,
+        &mut unread_subchecks,
+        &mut unread_details,
     );
     let checklist = sub_read(
         checklist,
         "body",
         &mut reasons,
-        &mut unread_subcheck,
-        &mut unread_detail,
+        &mut unread_subchecks,
+        &mut unread_details,
     );
 
     // convergence-status' reason vocabulary, verbatim and in its order.
@@ -828,8 +827,12 @@ fn assemble_verdict(
     {
         reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
     }
-    let is_draft =
-        apply_review_state_gates(initial, &mut reasons, &mut unread_subcheck, view_had_errors);
+    let is_draft = apply_review_state_gates(
+        initial,
+        &mut reasons,
+        &mut unread_subchecks,
+        view_had_errors,
+    );
 
     let verdict = build_verdict(
         initial,
@@ -843,18 +846,22 @@ fn assemble_verdict(
         is_draft,
         reasons,
     );
-    if let Some(name) = unread_subcheck {
+    if !unread_subchecks.is_empty() {
+        // EVERY unread sub-check and its detail stays in the diagnostic —
+        // the caller sees the full degraded surface, never just the first
+        // failure.
+        let details = if unread_details.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", unread_details.join("; "))
+        };
         return Err(PrStatusError::Unrecoverable {
-            message: match unread_detail {
-                Some(detail) => format!(
-                    "sub-check unread({name}) could not be read ({detail}); mergeable is \
-                     reported false with unread(<sub-check>) reasons in the emitted JSON"
-                ),
-                None => format!(
-                    "sub-check unread({name}) could not be read; mergeable is reported false \
-                     with unread(<sub-check>) reasons in the emitted JSON"
-                ),
-            },
+            message: format!(
+                "sub-checks [{}] could not be read{}; mergeable is reported false with \
+                 unread(<sub-check>) reasons in the emitted JSON",
+                unread_subchecks.join(", "),
+                details
+            ),
             partial_json: serde_json::to_string(&verdict).unwrap_or_else(|_| String::new()),
         });
     }
@@ -868,19 +875,19 @@ fn sub_read<T: Clone>(
     result: Result<T, String>,
     name: &'static str,
     reasons: &mut Vec<String>,
-    unread_subcheck: &mut Option<&'static str>,
-    unread_detail: &mut Option<String>,
+    unread_subchecks: &mut Vec<&'static str>,
+    unread_details: &mut Vec<String>,
 ) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(message) => {
-            *unread_subcheck = Some(name);
+            unread_subchecks.push(name);
             reasons.push(format!("unread({name})"));
             // The message may be a rendered typed error carrying its own
             // `pr status: ` prefix — strip it so the diagnostic never
             // repeats the prefix.
             let detail = message.trim_start_matches("pr status: ");
-            *unread_detail = Some(format!("{name}: {detail}"));
+            unread_details.push(format!("{name}: {detail}"));
             None
         }
     }
