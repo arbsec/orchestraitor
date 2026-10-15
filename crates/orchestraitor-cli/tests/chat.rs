@@ -307,7 +307,7 @@ fn chat_pr_status_mergeable_view_stamps_last_synced_caveat() -> miette::Result<(
     // §9.44: verdict-first, then the last-synced caveat naming the snapshot
     // instant.
     assert!(stdout.starts_with("MERGEABLE:"), "{stdout}");
-    assert!(stdout.contains("last synced "), "{stdout}");
+    assert!(stdout.contains("as of the read at "), "{stdout}");
     assert!(
         stdout.contains("last-synced caveat:"),
         "the §9.44 caveat must be stamped: {stdout}"

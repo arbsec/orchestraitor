@@ -13,7 +13,8 @@ use std::io::Write;
 use miette::{IntoDiagnostic, Result};
 
 use crate::cli::{ChatCommand, ConfigPaths};
-use crate::commands::pr_status::{build_engine, repo_root, typed_report};
+use crate::commands::pr_status::{PrStatusDiagnostic, build_engine, repo_root, typed_report};
+use orchestraitor_mcp::pr_status::PrStatusError;
 
 /// Runs an `orc chat` subcommand.
 ///
@@ -61,71 +62,14 @@ fn pr_status_view<W: Write>(
             // last-synced caveat — the snapshot instant, never a live feed.
             writeln!(
                 writer,
-                "{headline}: PR #{} ({}) is {}right now (last synced {}).",
+                "{headline}: PR #{} ({}) as of the read at {} is {}mergeable.",
                 verdict.number,
                 verdict.repository,
-                if convergence.mergeable {
-                    "mergeable "
-                } else {
-                    "NOT mergeable "
-                },
-                verdict.fetched_at
+                verdict.fetched_at,
+                if convergence.mergeable { "" } else { "NOT " },
             )
             .into_diagnostic()?;
-            if convergence.reasons.is_empty() {
-                writeln!(writer, "reasons: (none — all gates pass)").into_diagnostic()?;
-            } else {
-                writeln!(writer, "reasons: {}", convergence.reasons.join(", "))
-                    .into_diagnostic()?;
-            }
-            if let Some(checks) = &verdict.checks {
-                for check in checks {
-                    if matches!(check.classification.as_str(), "fail" | "pending") {
-                        writeln!(
-                            writer,
-                            "check [{}] {}: {}",
-                            check.classification, check.name, check.state
-                        )
-                        .into_diagnostic()?;
-                    }
-                }
-            }
-            if let Some(threads) = &verdict.threads {
-                for thread in &threads.items {
-                    if thread.actionable {
-                        writeln!(
-                            writer,
-                            "thread {}: {}:{} — {}",
-                            thread.id,
-                            thread.path.as_deref().unwrap_or("(no path)"),
-                            thread
-                                .line
-                                .map_or_else(|| "-".to_string(), |line| line.to_string()),
-                            thread
-                                .last_comment_excerpt
-                                .as_deref()
-                                .unwrap_or("(no comments)")
-                        )
-                        .into_diagnostic()?;
-                    }
-                }
-            }
-            if let Some(checklist) = &verdict.checklist
-                && !checklist.all_checked
-            {
-                writeln!(
-                    writer,
-                    "checklist: {} unchecked item(s)",
-                    checklist.unchecked_count
-                )
-                .into_diagnostic()?;
-                for item in &checklist.items {
-                    if !item.checked {
-                        writeln!(writer, "  [ ] {}: {}", item.marker, item.description)
-                            .into_diagnostic()?;
-                    }
-                }
-            }
+            super::pr_status::write_verdict_details(writer, &verdict)?;
             // The §9.44 caveat, verbatim: this read describes the snapshot
             // instant above. Chat answers are summaries of durable state at
             // their sync time, never a live feed; re-read for the current
@@ -140,7 +84,22 @@ fn pr_status_view<W: Write>(
             Ok(())
         }
         // The typed diagnostic surfaces exactly like `orc pr status`: the
-        // exit-code mapping in main.rs matches the same wrapper.
+        // exit-code mapping in main.rs matches the same wrapper WITHOUT
+        // rendering, so the diagnostic prints HERE exactly once (the
+        // partial typed JSON of an unread aggregate rides stderr first).
+        Err(report) if report.is::<PrStatusDiagnostic>() => {
+            if let Some(PrStatusError::Unrecoverable { partial_json, .. }) = report
+                .downcast_ref::<PrStatusDiagnostic>()
+                .map(PrStatusDiagnostic::error)
+                && !partial_json.is_empty()
+            {
+                writeln!(std::io::stderr(), "{partial_json}").into_diagnostic()?;
+            }
+            writeln!(std::io::stderr(), "error: {report:#}").into_diagnostic()?;
+            Err(report)
+        }
+        // Untyped errors (writer failures etc.): main renders them via
+        // miette exactly once — print nothing here.
         Err(report) => Err(report),
     }
 }

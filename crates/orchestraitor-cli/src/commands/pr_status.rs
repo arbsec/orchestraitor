@@ -390,14 +390,11 @@ pub(crate) fn write_one_pager<W: Write>(
     };
     writeln!(
         writer,
-        "{headline}: PR #{} ({}) is {}right now.",
+        "{headline}: PR #{} ({}) as of the read at {} is {}mergeable.",
         verdict.number,
         repository,
-        if convergence.mergeable {
-            "mergeable "
-        } else {
-            "NOT mergeable "
-        }
+        verdict.fetched_at,
+        if convergence.mergeable { "" } else { "NOT " },
     )
     .into_diagnostic()?;
     writeln!(
@@ -406,10 +403,42 @@ pub(crate) fn write_one_pager<W: Write>(
         verdict.head_sha, verdict.base_oid
     )
     .into_diagnostic()?;
-    if convergence.reasons.is_empty() {
+    write_verdict_details(writer, verdict)?;
+    writeln!(writer, "fetched_at: {}", verdict.fetched_at).into_diagnostic()?;
+    Ok(())
+}
+
+/// The verdict-DETAIL lines shared by the `orc pr status` one-pager and the
+/// `orc chat pr-status` view (reasons, failing/pending checks, actionable
+/// threads, checklist delta) — one renderer so the two operator views
+/// cannot drift. Headline and snapshot footer stay per-command.
+/// Neutralizes terminal-control characters and newlines in
+/// provider-supplied text before it reaches the operator's terminal (§9.44:
+/// a PR commenter must not be able to alter a verdict view's output).
+pub(crate) fn sanitize_provider_text(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c if c.is_control() => '\u{FFFD}',
+            c => c,
+        })
+        .collect()
+}
+
+/// The verdict-DETAIL lines shared by the `orc pr status` one-pager and the
+/// `orc chat pr-status` view (reasons, failing/pending checks, actionable
+/// threads, checklist delta) — one renderer so the two operator views
+/// cannot drift. Provider-supplied text is sanitized before writing.
+pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus) -> Result<()> {
+    if verdict.convergence.reasons.is_empty() {
         writeln!(writer, "reasons: (none — all gates pass)").into_diagnostic()?;
     } else {
-        writeln!(writer, "reasons: {}", convergence.reasons.join(", ")).into_diagnostic()?;
+        writeln!(
+            writer,
+            "reasons: {}",
+            verdict.convergence.reasons.join(", ")
+        )
+        .into_diagnostic()?;
     }
     if let Some(checks) = &verdict.checks {
         for check in checks {
@@ -417,7 +446,9 @@ pub(crate) fn write_one_pager<W: Write>(
                 writeln!(
                     writer,
                     "check [{}] {}: {}",
-                    check.classification, check.name, check.state
+                    check.classification,
+                    sanitize_provider_text(&check.name),
+                    sanitize_provider_text(&check.state)
                 )
                 .into_diagnostic()?;
             }
@@ -430,14 +461,17 @@ pub(crate) fn write_one_pager<W: Write>(
                     writer,
                     "thread {}: {}:{} — {}",
                     thread.id,
-                    thread.path.as_deref().unwrap_or("(no path)"),
+                    thread
+                        .path
+                        .as_deref()
+                        .map_or_else(|| String::from("(no path)"), sanitize_provider_text),
                     thread
                         .line
                         .map_or_else(|| "-".to_string(), |line| line.to_string()),
                     thread
                         .last_comment_excerpt
                         .as_deref()
-                        .unwrap_or("(no comments)")
+                        .map_or_else(|| String::from("(no comments)"), sanitize_provider_text),
                 )
                 .into_diagnostic()?;
             }
@@ -454,11 +488,15 @@ pub(crate) fn write_one_pager<W: Write>(
         .into_diagnostic()?;
         for item in &checklist.items {
             if !item.checked {
-                writeln!(writer, "  [ ] {}: {}", item.marker, item.description)
-                    .into_diagnostic()?;
+                writeln!(
+                    writer,
+                    "  [ ] {}: {}",
+                    sanitize_provider_text(&item.marker),
+                    sanitize_provider_text(&item.description)
+                )
+                .into_diagnostic()?;
             }
         }
     }
-    writeln!(writer, "fetched_at: {}", verdict.fetched_at).into_diagnostic()?;
     Ok(())
 }
