@@ -89,6 +89,21 @@ Config keys (layered, spec §9.22): `loop.no_progress_turns`,
   the next pass is paced out — the loop stays alive and keeps supervising in-flight
   workers. The run budget still bounds the poll while it waits.
 
+## Task fixture content
+
+The loop materializes each selected task's fixture
+(`<config-dir>/worker-tasks/<task-id>.json`) from the board selection WITH the
+issue body fetched through the board client at fixture-creation time (issue
+495): the worker sees the acceptance criteria, not just the title. The body is
+carried VERBATIM inside a fenced, labelled block as UNTRUSTED DATA (spec
+`40-arbitraitor-integration.md` §6.1 — quoted as content, never executed; the
+fence is widened over any backtick run in the body so the text can never close
+its own fence). At most 8192 characters of body are inlined; a longer body is
+truncated with an explicit NOTICE naming the issue URL for the full text. A
+body-fetch failure degrades to the title+URL description with a visible NOTICE
+(the spawn is not blocked by a content-read outage) — the worker is told the
+body is absent instead of inferring criteria from the title alone.
+
 ## Retry and reselection
 
 One worker run per task per loop invocation. A task that failed, stalled, or was

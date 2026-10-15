@@ -84,7 +84,7 @@ fn config_values(
 /// Production poll side: the same reconciled read `orc campaign run` does
 /// (open items + ready queue + blocked candidates + warnings).
 struct BoardSnapshotPoller {
-    client: BoardClient,
+    client: Arc<BoardClient>,
     config: BoardProjectConfig,
 }
 
@@ -126,6 +126,10 @@ struct DirectLoopStarter {
     config_dir: PathBuf,
     tasks_dir: Option<PathBuf>,
     provider_endpoint: Option<String>,
+    /// The board client the #495 issue-body fetch routes through (the same
+    /// App-identity route the poller reads): the starter materializes the
+    /// task fixture WITH the issue content.
+    board_client: Arc<BoardClient>,
     budgets: WorkerBudgets,
     /// The worker-side anti-stuck guardrail thresholds resolved from
     /// `[loop]` — the same settings the runner validates and enforces.
@@ -301,19 +305,37 @@ impl DirectLoopStarter {
     /// Materializes the task fixture from the board selection (write +
     /// rename so a crashed write can never leave a half-file that the
     /// id-mismatch check would silently (mis)load).
-    fn materialize_task_fixture(
+    ///
+    /// The description carries the issue body verbatim in a fenced
+    /// untrusted-content block (issue #495): the fixture is built through
+    /// the shared bounded posture (`task_description`), so both starters
+    /// cannot drift. A body-fetch failure degrades to the title+URL
+    /// description with a typed notice — never a spawn failure, never a
+    /// silent omission.
+    async fn materialize_task_fixture(
+        &self,
         tasks_dir: &Path,
         selected: &SelectedTask,
     ) -> Result<orchestraitor_worker::WorkerTask, CampaignError> {
+        let fetched = match self
+            .board_client
+            .issue_body(&selected.repo, selected.number)
+            .await
+        {
+            Ok(content) => Some(content.body),
+            Err(error) => {
+                report_loop_warning(&format!(
+                    "issue #{} body fetch failed for task {}; the fixture carries the \
+                     typed notice: {error}",
+                    selected.number, selected.task_id
+                ));
+                None
+            }
+        };
         let task = orchestraitor_worker::WorkerTask {
             id: selected.task_id.clone(),
             slug: selected.task_id.clone(),
-            description: format!(
-                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
-                 the issue and its referenced spec sections. Work in the checked-out task \
-                 worktree; deliver per the worker contract.",
-                selected.number, selected.repo, selected.title, selected.url,
-            ),
+            description: orchestraitor_campaign::task_description(selected, fetched.as_deref()),
         };
         let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
         let task_bytes =
@@ -381,9 +403,11 @@ impl LoopWorkerStarter for DirectLoopStarter {
     /// fixture is (re)written on every spawn from the `SelectedTask` the
     /// board produced — the board is the description's source of truth, and
     /// a stale file from an earlier selection can never shadow it. The
-    /// description carries the issue title and URL only: the issue body is
-    /// fetched by the worker itself if the model needs it (URLs are data,
-    /// not pre-fetched content).
+    /// description carries the issue body VERBATIM (issue #495), fetched at
+    /// fixture-creation time through the board client and bounded by the
+    /// shared `task_description` posture (URLs are data, not pre-fetched
+    /// content; the body is the one exception the loop fetches for the
+    /// worker).
     async fn start(
         &self,
         selected: &SelectedTask,
@@ -406,7 +430,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 message: format!("worker-tasks dir creation failed: {error}"),
             });
         }
-        let task = Self::materialize_task_fixture(&tasks_dir, selected)?;
+        let task = self.materialize_task_fixture(&tasks_dir, selected).await?;
         let transport = Arc::new(
             build_bootstrap_transport(self.provider_endpoint.clone()).map_err(|error| {
                 CampaignError::Spawn {
@@ -783,7 +807,11 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or_default();
-        let poller = BoardSnapshotPoller { client, config };
+        let board_client = Arc::new(client);
+        let poller = BoardSnapshotPoller {
+            client: Arc::clone(&board_client),
+            config,
+        };
         // Gated ONCE at startup, before the loop accepts work: a broken
         // tool definition is a typed startup error, never a per-spawn
         // failure after worktrees are created.
@@ -802,6 +830,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             config_dir: paths.config_dir.clone(),
             tasks_dir: args.worker_tasks_dir.clone(),
             provider_endpoint: args.worker_provider_endpoint.clone(),
+            board_client,
             // The same guard instance the runner validates and enforces:
             // the worker layer reads these pinned values, so the two
             // enforcement layers cannot drift.
@@ -951,16 +980,194 @@ fn render_text(
 mod tests {
     use super::DirectLoopStarter;
     use miette::IntoDiagnostic;
+    use orchestraitor_board::BoardClient;
     use orchestraitor_campaign::SelectedTask;
     use std::io::Read;
+    use std::sync::Arc;
+
+    /// A minimal GraphQL stub serving one canned `data` payload per request
+    /// (the same needle-match shape the board crate's `ScriptServer` uses,
+    /// reduced to what the fixture tests need).
+    struct OneShotServer {
+        endpoint: String,
+        shutdown: Arc<std::sync::Mutex<bool>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl OneShotServer {
+        fn start(payload: &'static str) -> std::io::Result<Self> {
+            use std::net::TcpListener;
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            listener.set_nonblocking(true)?;
+            let endpoint = format!("http://{}/graphql", listener.local_addr()?);
+            let shutdown = Arc::new(std::sync::Mutex::new(false));
+            let thread_shutdown = Arc::clone(&shutdown);
+            let join = std::thread::spawn(move || {
+                loop {
+                    if let Ok(guard) = thread_shutdown.lock()
+                        && *guard
+                    {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            let connection_payload = payload;
+                            let _ignore = std::thread::spawn(move || {
+                                serve_one(stream, connection_payload);
+                            });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+            Ok(Self {
+                endpoint,
+                shutdown,
+                join: Some(join),
+            })
+        }
+    }
+
+    impl OneShotServer {
+        /// The endpoint; an accessor so `Drop` never blocks a move-out.
+        fn endpoint(&self) -> &str {
+            &self.endpoint
+        }
+    }
+
+    /// Serves ONE connection: reads the request, answers with `payload`,
+    /// and drains to peer-EOF before dropping (the same shape the board
+    /// crate's `ScriptServer` harness uses — avoids TCP RST on drop).
+    fn serve_one(mut stream: std::net::TcpStream, payload: &str) {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        let _ignore = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let mut reader = BufReader::new(match stream.try_clone() {
+            Ok(clone) => clone,
+            Err(_) => return,
+        });
+        let mut content_length = 0_usize;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if let Some(value) = line
+                .trim_end()
+                .to_ascii_lowercase()
+                .strip_prefix("content-length:")
+            {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+            if line.trim_end().is_empty() {
+                break;
+            }
+        }
+        let mut body = vec![0_u8; content_length];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        let _ignore = stream.write_all(response.as_bytes());
+        let _ignore = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+        let _ignore = stream.shutdown(std::net::Shutdown::Write);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut tail = [0_u8; 1024];
+        while std::time::Instant::now() < deadline {
+            match stream.read(&mut tail) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    impl Drop for OneShotServer {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = self.shutdown.lock() {
+                *guard = true;
+            }
+            if let Some(join) = self.join.take() {
+                let _ignore = join.join();
+            }
+        }
+    }
+
+    /// A starter whose board client answers the `issueBody` query with
+    /// `payload` (every request; the fixture path needs one query).
+    fn starter_with_body(
+        payload: &'static str,
+    ) -> std::io::Result<(DirectLoopStarter, OneShotServer, Arc<tempfile::TempDir>)> {
+        let server = OneShotServer::start(payload)?;
+        let auth: Arc<dyn orchestraitor_board::BoardAuth> = Arc::new(FixtureAuth);
+        let client = BoardClient::with_endpoint(server.endpoint().to_string(), auth)
+            .map_err(|error| std::io::Error::other(format!("client construction failed: {error}")))?
+            .with_cache_path(None);
+        let (reasoning_store, event_dir) = test_reasoning_store()?;
+        let starter = DirectLoopStarter {
+            project_dir: std::env::temp_dir(),
+            config_dir: std::env::temp_dir(),
+            tasks_dir: None,
+            provider_endpoint: None,
+            board_client: Arc::new(client),
+            budgets: orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
+            guardrails: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults(),
+            cost_ledger: None,
+            invocation_id: "test-invocation".to_string(),
+            profile: None,
+            declared_tools: Vec::new(),
+            think_enabled: true,
+            record_payloads: false,
+            reasoning_events: reasoning_store,
+            subsession_routing: std::collections::BTreeMap::new(),
+        };
+        Ok((starter, server, Arc::new(event_dir)))
+    }
+
+    /// Static bearer auth: the stub server never validates the value.
+    struct FixtureAuth;
+
+    #[async_trait::async_trait]
+    impl orchestraitor_board::BoardAuth for FixtureAuth {
+        async fn bearer_token(
+            &self,
+        ) -> Result<secrecy::SecretString, orchestraitor_board::BoardError> {
+            Ok(secrecy::SecretString::from("fixture-token-value"))
+        }
+    }
+
+    /// Opens a throwaway reasoning-event store in a temp dir (the starter
+    /// field's type; the fixture tests never write reasoning events).
+    fn test_reasoning_store() -> std::io::Result<(
+        std::sync::Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
+        tempfile::TempDir,
+    )> {
+        let dir = tempfile::tempdir().map_err(|error| {
+            std::io::Error::other(format!("temp dir for the event store: {error}"))
+        })?;
+        let path = dir.path().join("events.db");
+        // The store opens the file under the TempDir; the CALLER keeps the
+        // TempDir alive for the test's scope, so the OS cleanup can never
+        // race the open store — no leak, no forget.
+        let store = orchestraitor_events::SqliteAuditStore::open(&path)
+            .map_err(|error| std::io::Error::other(format!("event store open failed: {error}")))?;
+        Ok((std::sync::Arc::new(std::sync::Mutex::new(store)), dir))
+    }
 
     /// The campaign tests drive `orc loop` with fake starters, so the
     /// production fixture (`materialize_task_fixture`) is only covered here:
     /// assert the written task JSON carries the selected board identity
-    /// (id, repo, issue number, title, URL) and that re-materializing the
-    /// same task with a CHANGED title atomically replaces the fixture.
-    #[test]
-    fn materialize_task_fixture_writes_and_replaces_selected_task() -> miette::Result<()> {
+    /// (id, repo, issue number, title, URL) AND the issue body (issue
+    /// #495), and that re-materializing the same task with a CHANGED title
+    /// atomically replaces the fixture.
+    #[tokio::test]
+    async fn materialize_task_fixture_writes_and_replaces_selected_task() -> miette::Result<()> {
         let tasks_dir = tempfile::tempdir().into_diagnostic()?;
         let dir = tasks_dir.path();
 
@@ -972,7 +1179,22 @@ mod tests {
             item_node_id: "PRR_519".to_string(),
             task_id: "pr519-agent-ops".to_string(),
         };
-        DirectLoopStarter::materialize_task_fixture(dir, &selected)
+        let body_payload = serde_json::json!({
+            "data": {
+                "repository": {
+                    "issue": {
+                        "title": "t",
+                        "body": "## Acceptance\n- the guard fires\n"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let leaked_payload: &'static str = Box::leak(body_payload.into_boxed_str());
+        let (starter, _server, _event_dir) = starter_with_body(leaked_payload).into_diagnostic()?;
+        let task = starter
+            .materialize_task_fixture(dir, &selected)
+            .await
             .map_err(|error| miette::miette!("fixture materialization failed: {error}"))?;
 
         let path = dir.join(format!("{}.json", selected.task_id));
@@ -993,6 +1215,19 @@ mod tests {
             description.contains("https://github.com/arbsec/orchestraitor/pull/519"),
             "url in description"
         );
+        // Issue #495: the body rides the fixture verbatim, fenced.
+        assert!(
+            description.contains("## Acceptance\n- the guard fires\n"),
+            "issue body verbatim in the fixture description: {description}"
+        );
+        assert!(
+            description.contains("UNTRUSTED DATA"),
+            "the 6.1 untrusted-content label is present: {description}"
+        );
+        assert_eq!(
+            task.description, description,
+            "the returned task matches the written fixture"
+        );
 
         // Re-materialize with a changed title: the write+rename contract
         // must REPLACE the fixture, not fail on the existing file.
@@ -1000,7 +1235,9 @@ mod tests {
             title: "renamed: ops discipline".to_string(),
             ..selected
         };
-        DirectLoopStarter::materialize_task_fixture(dir, &renamed)
+        starter
+            .materialize_task_fixture(dir, &renamed)
+            .await
             .map_err(|error| miette::miette!("replacement materialization failed: {error}"))?;
         let second = read_fixture(&path)?;
         assert!(
@@ -1020,6 +1257,121 @@ mod tests {
         assert!(
             leftover.is_empty(),
             "no temp files may survive: {leftover:?}"
+        );
+        Ok(())
+    }
+
+    /// A board client that CANNOT serve the body (connection refused: the
+    /// endpoint points at a closed port) must NOT fail the spawn — the
+    /// fixture carries the pre-#495 framing plus the typed fetch-failure
+    /// notice, so the worker is told the body is absent instead of
+    /// inferring criteria from the title alone (issue #495, degrade path).
+    #[tokio::test]
+    async fn materialize_task_fixture_degrades_when_body_fetch_fails() -> miette::Result<()> {
+        let tasks_dir = tempfile::tempdir().into_diagnostic()?;
+        let dir = tasks_dir.path();
+        let auth: Arc<dyn orchestraitor_board::BoardAuth> = Arc::new(FixtureAuth);
+        // Port 1: closed; the fetch fails at the transport layer.
+        let client = BoardClient::with_endpoint("http://127.0.0.1:1/graphql".to_string(), auth)
+            .into_diagnostic()?
+            .with_cache_path(None);
+        // The TempDir binding outlives the Arc'd store in THIS test's scope:
+        // the store's file lives under it, so no forget and no leak.
+        let (event_store, _event_dir) = test_reasoning_store()
+            .map_err(|error| miette::miette!("event store open failed: {error}"))?;
+        let starter = DirectLoopStarter {
+            project_dir: std::env::temp_dir(),
+            config_dir: std::env::temp_dir(),
+            tasks_dir: None,
+            provider_endpoint: None,
+            board_client: Arc::new(client),
+            budgets: orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
+            guardrails: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults(),
+            cost_ledger: None,
+            invocation_id: "test-invocation".to_string(),
+            profile: None,
+            declared_tools: Vec::new(),
+            think_enabled: true,
+            record_payloads: false,
+            reasoning_events: Arc::clone(&event_store),
+            subsession_routing: std::collections::BTreeMap::new(),
+        };
+        let selected = SelectedTask {
+            repo: "arbsec/orchestraitor".to_string(),
+            number: 495,
+            title: "task descriptions lose the issue body".to_string(),
+            url: "https://github.com/arbsec/orchestraitor/issues/495".to_string(),
+            item_node_id: "PVTI_495".to_string(),
+            task_id: "issue-495-body".to_string(),
+        };
+        starter
+            .materialize_task_fixture(dir, &selected)
+            .await
+            .map_err(|error| miette::miette!("degrade path must not fail the spawn: {error}"))?;
+        let description =
+            read_fixture(&dir.join(format!("{}.json", selected.task_id)))?["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+        assert!(
+            description
+                .contains("NOTICE: the issue body could not be fetched at fixture-creation time"),
+            "typed fetch-failure notice present: {description}"
+        );
+        assert!(
+            description.contains("#495 (arbsec/orchestraitor)"),
+            "pre-#495 framing survives: {description}"
+        );
+        Ok(())
+    }
+
+    /// An oversized issue body is capped in the fixture with the explicit
+    /// truncation notice; the inline cap keeps the worker prompt bounded
+    /// (issue #495, bounded-payload posture).
+    #[tokio::test]
+    async fn materialize_task_fixture_caps_oversized_body() -> miette::Result<()> {
+        let tasks_dir = tempfile::tempdir().into_diagnostic()?;
+        let dir = tasks_dir.path();
+        let long_body = "y".repeat(orchestraitor_campaign::MAX_INLINE_BODY_CHARS + 500);
+        let payload = format!(
+            r#"{{"data":{{"repository":{{"issue":{{"title":"t","body":"{long_body}"}}}}}}}}"#
+        );
+        let leaked: &'static str = Box::leak(payload.into_boxed_str());
+        let (starter, _server, _event_dir) = starter_with_body(leaked).into_diagnostic()?;
+        let selected = SelectedTask {
+            repo: "arbsec/orchestraitor".to_string(),
+            number: 496,
+            title: "turn-budget".to_string(),
+            url: "https://github.com/arbsec/orchestraitor/issues/496".to_string(),
+            item_node_id: "PVTI_496".to_string(),
+            task_id: "issue-496-budget".to_string(),
+        };
+        starter
+            .materialize_task_fixture(dir, &selected)
+            .await
+            .map_err(|error| miette::miette!("capped materialization failed: {error}"))?;
+        let description =
+            read_fixture(&dir.join(format!("{}.json", selected.task_id)))?["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+        assert!(
+            description.contains("exceeded the 8192-character inline cap and was truncated"),
+            "truncation notice present"
+        );
+        // The description must NOT contain the body's tail (the 500 y's
+        // beyond the cap) — the cap, not the full body, is inlined.
+        assert!(
+            !description.contains(&long_body[..]),
+            "the full oversized body must not be inlined"
+        );
+        assert!(
+            !description.contains(&"y".repeat(orchestraitor_campaign::MAX_INLINE_BODY_CHARS + 1)),
+            "no run beyond the cap is inlined"
+        );
+        assert!(
+            description.contains(&"y".repeat(orchestraitor_campaign::MAX_INLINE_BODY_CHARS)),
+            "the cap-sized prefix IS inlined"
         );
         Ok(())
     }

@@ -28,6 +28,7 @@ pub use arbitraitor_mcp::{ApprovalTokenIssuer, PlanContext};
 /// lock; the gate-refusal test holds it across its snapshot window.
 #[doc(hidden)]
 pub static EXEC_TEMP_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use arbitraitor_model::finding::Finding;
 pub use arbitraitor_model::verdict::Verdict;
 pub use arbitraitor_policy::{EvalContext, PolicyEngine, PolicyError};

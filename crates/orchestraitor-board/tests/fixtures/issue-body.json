@@ -1,0 +1,10 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "bug(worker): descriptions lose the body",
+        "body": "## Acceptance\n- the fixture includes the body\n- untrusted content, carried as data"
+      }
+    }
+  }
+}

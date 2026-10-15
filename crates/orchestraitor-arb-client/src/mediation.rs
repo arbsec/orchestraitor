@@ -770,22 +770,17 @@ mod tests {
 
         // Snapshot this process's Arbitraitor execution temp directories:
         // ScriptExecution materializes them at construction, so any
-        // construction while we hold the lock would be observable here.
+        // construction would be observable here.
         let before = count_exec_temp_dirs();
 
         // When: the spawn gate refuses.
         assert!(gate_preflight(preflight).is_err());
 
-        // Then: no execution context was materialized. The gate is
-        // synchronous and refuses before touching the exec crate; with the
-        // window serialized against sibling constructions, the unchanged
-        // count proves no mediated context build (and therefore no spawn)
-        // occurred.
-        assert_eq!(
-            count_exec_temp_dirs(),
-            before,
-            "the gate refusal must not materialize an execution temp directory"
-        );
+        // Then: no execution context was materialized. Because the gate is
+        // synchronous, refuses before touching the exec crate, and these
+        // directory names are namespaced to this process, the unchanged count
+        // proves no mediated context build (and therefore no spawn) occurred.
+        assert_eq!(count_exec_temp_dirs(), before);
     }
 
     #[test]

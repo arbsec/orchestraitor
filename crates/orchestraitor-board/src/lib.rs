@@ -24,7 +24,7 @@ pub mod queue;
 
 pub use auth::{BoardAuth, SecretUriAuth};
 pub use cache::{NodeIdCacheFile, ProjectNodeIds, default_cache_path};
-pub use client::{BoardClient, MoveOutcome};
+pub use client::{BoardClient, IssueContent, MoveOutcome};
 pub use config::BoardProjectConfig;
 pub use error::BoardError;
 pub use item::{ItemFacts, ItemSkip};
