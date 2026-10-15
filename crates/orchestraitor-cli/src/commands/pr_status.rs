@@ -62,7 +62,7 @@ impl miette::Diagnostic for PrStatusDiagnostic {
 }
 
 /// Wraps a typed [`PrStatusError`] into a downcastable miette report.
-fn typed_report(error: PrStatusError) -> miette::Report {
+pub(crate) fn typed_report(error: PrStatusError) -> miette::Report {
     miette::Report::new(PrStatusDiagnostic(error))
 }
 
@@ -138,7 +138,7 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
 /// Resolves the target repository slug: an explicit `--repo owner/name` wins;
 /// otherwise the `origin` remote of the current checkout (the scripts'
 /// `orc_lib_resolve_repo` default). Never guesses beyond that.
-fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
+pub(crate) fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
     let slug = if let Some(slug) = explicit {
         slug.to_string()
     } else {
@@ -169,7 +169,7 @@ fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
 
 /// Resolves the enclosing git repository's working-tree root (the scripts'
 /// `git rev-parse --show-toplevel`).
-fn repo_root() -> Result<PathBuf> {
+pub(crate) fn repo_root() -> Result<PathBuf> {
     // The shared scrubbed-git helper: ambient GIT_DIR/GIT_WORK_TREE (hook
     // exports) must never redirect the record lookup away from the intended
     // checkout (#553/#529 corruption class — same scrub every other
@@ -199,7 +199,7 @@ fn repo_root() -> Result<PathBuf> {
 /// names the unresolved service identity a config/state error); only a mint
 /// failure with a complete config (unresolvable key, HTTP error) is
 /// unrecoverable (exit 1).
-fn build_engine(paths: &ConfigPaths, repo_root: PathBuf) -> Result<Engine> {
+pub(crate) fn build_engine(paths: &ConfigPaths, repo_root: PathBuf) -> Result<Engine> {
     let config = super::github::resolved_config(paths).map_err(|error| {
         typed_report(PrStatusError::Config {
             // `resolved_config`'s diagnostic names the failing key/layer and
@@ -377,7 +377,11 @@ impl PrStatusTransport for CliTransport {
 /// Renders the human one-pager: verdict first, reason codes, one line per
 /// failing/pending check, one line per unresolved actionable thread, the
 /// checklist delta — a screen, not a transcript.
-fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatus) -> Result<()> {
+pub(crate) fn write_one_pager<W: Write>(
+    writer: &mut W,
+    repository: &str,
+    verdict: &PrStatus,
+) -> Result<()> {
     let convergence = &verdict.convergence;
     let headline = if convergence.mergeable {
         "MERGEABLE"

@@ -117,6 +117,11 @@ pub enum Commands {
     /// §9.48): the in-process aggregation engine behind `pr.status`.
     #[command(subcommand)]
     Pr(PrCommand),
+    /// The operator's conversational surface (spec `10-orchestrator.md`
+    /// §9.44): read-only progress views over durable state, stamped with
+    /// the last-synced caveat.
+    #[command(subcommand)]
+    Chat(ChatCommand),
     /// Run the rule-driven pre-landing simplify pass (fail-open quality
     /// tooling; spec §9.5 normalization classes).
     #[command(subcommand)]
@@ -370,6 +375,29 @@ pub enum PrCommand {
     /// (exit 0); exit codes per the spec: 0 mergeable, 1 unrecoverable,
     /// 2 config/state, 3 reserved, 4 concurrent edit.
     Status(PrStatusArgs),
+}
+
+/// `orc chat` subcommands: the operator's conversational surface (spec
+/// `10-orchestrator.md` §9.44). Progress reads are read-only views over
+/// durable state, stamped with the §9.44 last-synced caveat.
+#[derive(Debug, Clone, Subcommand)]
+pub enum ChatCommand {
+    /// The read-only `pr.status` verdict view for one PR (§9.44, §9.48):
+    /// the same shared-engine aggregation as `orc pr status`, rendered as
+    /// a progress read stamped with the last-synced caveat — the snapshot
+    /// instant, never a live feed. A BLOCKED PR is a successful read.
+    PrStatus(ChatPrStatusArgs),
+}
+
+/// Arguments for `orc chat pr-status`.
+#[derive(Debug, Clone, Args)]
+pub struct ChatPrStatusArgs {
+    /// Pull-request number.
+    pub number: u64,
+    /// Target repository as `owner/name`. Defaults to the `origin` remote of
+    /// the current checkout (never guessed beyond that).
+    #[arg(long)]
+    pub repo: Option<String>,
 }
 
 /// Arguments for `orc pr status`.

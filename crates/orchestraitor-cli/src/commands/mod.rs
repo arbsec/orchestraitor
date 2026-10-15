@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod campaign;
+pub mod chat;
 pub mod config;
 pub mod github;
 pub mod loop_runner;

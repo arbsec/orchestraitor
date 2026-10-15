@@ -126,3 +126,20 @@ delegation chain (client-asserted labels, `claimed:`-prefixed and
 truncated) and an outcome class (`verdict` / `unrecoverable` / `config` /
 `concurrent_edit` / `out_of_scope`). An unread sub-check returns the
 typed error with the degraded `partial_verdict` field (§9.48 invariant).
+
+## The `orc chat pr-status` view (§9.44)
+
+`orc chat pr-status <N> [--repo <slug>]` renders the SAME shared-engine
+verdict as the §9.44 operator-chat progress read: verdict-first prose
+(`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending
+check, one line per unresolved actionable thread, the checklist delta, and
+the **§9.44 last-synced caveat** — the view names its snapshot instant
+(`fetched_at`) and states that it describes durable state AT that instant,
+never a live feed; re-run to sync.
+
+- Read-only, no `--json` machine surface: chat views are prose for the
+  operator; machines consume `orc pr status --json`.
+- A BLOCKED view is a successful read (exit 0); the exit-code contract is
+  identical to `orc pr status`.
+- The view NEVER caches: every invocation is a fresh aggregation, so the
+  caveat names the instant the answer was actually built.
