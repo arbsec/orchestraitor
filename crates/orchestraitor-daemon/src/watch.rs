@@ -724,6 +724,11 @@ pub struct DirectWatchStarter {
     project_dir: PathBuf,
     config_dir: PathBuf,
     provider_endpoint: Option<String>,
+    /// The board client the #495 issue-body fetch routes through (the same
+    /// App-identity route the poller reads): the starter materializes the
+    /// task fixture WITH the issue content. `None` keeps the pre-#495
+    /// description (title + URL only) with the typed notice.
+    board_client: Option<Arc<BoardClient>>,
     budgets: WorkerBudgets,
     /// The worker-side anti-stuck guardrail thresholds resolved from
     /// `[loop]` — the SAME settings the runner validates, so the daemon
@@ -759,12 +764,22 @@ impl DirectWatchStarter {
             project_dir,
             config_dir,
             provider_endpoint,
+            board_client: None,
             budgets,
             guardrails,
             think_enabled: true,
             events: None,
             record_payloads: false,
         }
+    }
+
+    /// Attaches the board client the #495 issue-body fetch routes through.
+    /// The daemon main wires the same `Arc<BoardClient>` the reconcile
+    /// poller holds, so both read paths share one client.
+    #[must_use]
+    pub fn with_board_client(mut self, client: Arc<BoardClient>) -> Self {
+        self.board_client = Some(client);
+        self
     }
 
     /// Attaches the daemon's §9.17 event store: accepted `think` steps
@@ -924,6 +939,27 @@ impl DirectWatchStarter {
     }
 }
 
+impl DirectWatchStarter {
+    /// Fetches the issue body for one selected task (issue #495): `None`
+    /// when no board client is attached or the fetch failed (the fixture
+    /// then carries the typed notice; the spawn is never blocked by a
+    /// content-read outage — degrade with notice, never silent).
+    async fn fetch_issue_body(&self, selected: &SelectedTask) -> Option<String> {
+        let client = self.board_client.as_ref()?;
+        match client.issue_body(&selected.repo, selected.number).await {
+            Ok(content) => Some(content.body),
+            Err(error) => {
+                tracing::warn!(
+                    task = %selected.task_id,
+                    issue = selected.number,
+                    "issue body fetch failed; the fixture carries the typed notice: {error}"
+                );
+                None
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl LoopWorkerStarter for DirectWatchStarter {
     async fn start(
@@ -954,15 +990,11 @@ impl LoopWorkerStarter for DirectWatchStarter {
             task_id: selected.task_id.clone(),
             message: format!("worker-tasks dir creation failed: {error}"),
         })?;
+        let fetched = self.fetch_issue_body(selected).await;
         let task = orchestraitor_worker::WorkerTask {
             id: selected.task_id.clone(),
             slug: selected.task_id.clone(),
-            description: format!(
-                "Issue #{} ({}): {}\n\nTrack: {}\n\nImplement the leaf task as specified by \
-                 the issue and its referenced spec sections. Work in the checked-out task \
-                 worktree; deliver per the worker contract.",
-                selected.number, selected.repo, selected.title, selected.url,
-            ),
+            description: orchestraitor_campaign::task_description(selected, fetched.as_deref()),
         };
         let task_path = tasks_dir.join(format!("{}.json", selected.task_id));
         let task_bytes =

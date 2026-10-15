@@ -249,11 +249,14 @@ async fn watch_cycle() -> Result<ExitCode> {
     )
     .into_diagnostic()
     .wrap_err("board client construction failed")?;
+    // Shared behind an Arc: the reconcile poller AND the #495 issue-body
+    // fetch in the worker starter route through the same client.
+    let client = Arc::new(client);
     let events = orchestraitor_events::SqliteAuditStore::open(config_dir.join("watch-events.db"))
         .into_diagnostic()
         .wrap_err("watch event store open failed")?;
     let poller = ReconcilePoller::new(
-        orchestraitor_daemon::BoardSnapshotPoller::new(Arc::new(client), board_config_template),
+        orchestraitor_daemon::BoardSnapshotPoller::new(Arc::clone(&client), board_config_template),
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
@@ -339,6 +342,7 @@ async fn watch_cycle() -> Result<ExitCode> {
         budgets,
         loop_config.guardrails.worker_guardrails(),
     )
+    .with_board_client(Arc::clone(&client))
     .with_think_enabled(think_enabled)
     .with_event_store(Arc::new(std::sync::Mutex::new(
         orchestraitor_events::SqliteAuditStore::open(config_dir.join("reasoning-events.db"))
