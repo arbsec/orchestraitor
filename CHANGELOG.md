@@ -30,6 +30,16 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `pr_status_out_of_scope` payload (recorded in the audit trail with the
   `out_of_scope` outcome class). Documented in
   [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+- **`orc chat pr-status <N>`** — the §9.44 operator-chat read-only view of
+  the same shared-engine verdict: verdict-first prose (the reason codes,
+  failing/pending checks, actionable threads, checklist delta) stamped with
+  the **last-synced caveat** — the view names its snapshot instant and
+  states that it describes durable state at that instant, never a live
+  feed. The view never caches (a fresh aggregation per invocation); a
+  BLOCKED view is a successful read (exit 0) and the exit-code contract
+  matches `orc pr status`. No `--json` machine surface — machines consume
+  `orc pr status --json`. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`orc pr status <N>`** — a read-only PR-mergeability verdict in ONE
   invocation (spec `10-orchestrator.md` §9.48). One command replaces the
   five pr-lifecycle script reads an agent previously ran to answer "is my

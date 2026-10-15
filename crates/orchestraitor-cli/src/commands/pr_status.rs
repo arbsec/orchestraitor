@@ -62,7 +62,7 @@ impl miette::Diagnostic for PrStatusDiagnostic {
 }
 
 /// Wraps a typed [`PrStatusError`] into a downcastable miette report.
-fn typed_report(error: PrStatusError) -> miette::Report {
+pub(crate) fn typed_report(error: PrStatusError) -> miette::Report {
     miette::Report::new(PrStatusDiagnostic(error))
 }
 
@@ -138,7 +138,7 @@ fn status<W: Write>(paths: &ConfigPaths, args: &PrStatusArgs, writer: &mut W) ->
 /// Resolves the target repository slug: an explicit `--repo owner/name` wins;
 /// otherwise the `origin` remote of the current checkout (the scripts'
 /// `orc_lib_resolve_repo` default). Never guesses beyond that.
-fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
+pub(crate) fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
     let slug = if let Some(slug) = explicit {
         slug.to_string()
     } else {
@@ -169,7 +169,7 @@ fn resolve_repo(explicit: Option<&str>) -> Result<(String, String)> {
 
 /// Resolves the enclosing git repository's working-tree root (the scripts'
 /// `git rev-parse --show-toplevel`).
-fn repo_root() -> Result<PathBuf> {
+pub(crate) fn repo_root() -> Result<PathBuf> {
     // The shared scrubbed-git helper: ambient GIT_DIR/GIT_WORK_TREE (hook
     // exports) must never redirect the record lookup away from the intended
     // checkout (#553/#529 corruption class — same scrub every other
@@ -199,7 +199,7 @@ fn repo_root() -> Result<PathBuf> {
 /// names the unresolved service identity a config/state error); only a mint
 /// failure with a complete config (unresolvable key, HTTP error) is
 /// unrecoverable (exit 1).
-fn build_engine(paths: &ConfigPaths, repo_root: PathBuf) -> Result<Engine> {
+pub(crate) fn build_engine(paths: &ConfigPaths, repo_root: PathBuf) -> Result<Engine> {
     let config = super::github::resolved_config(paths).map_err(|error| {
         typed_report(PrStatusError::Config {
             // `resolved_config`'s diagnostic names the failing key/layer and
@@ -377,7 +377,11 @@ impl PrStatusTransport for CliTransport {
 /// Renders the human one-pager: verdict first, reason codes, one line per
 /// failing/pending check, one line per unresolved actionable thread, the
 /// checklist delta — a screen, not a transcript.
-fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatus) -> Result<()> {
+pub(crate) fn write_one_pager<W: Write>(
+    writer: &mut W,
+    repository: &str,
+    verdict: &PrStatus,
+) -> Result<()> {
     let convergence = &verdict.convergence;
     let headline = if convergence.mergeable {
         "MERGEABLE"
@@ -386,14 +390,11 @@ fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatu
     };
     writeln!(
         writer,
-        "{headline}: PR #{} ({}) is {}right now.",
+        "{headline}: PR #{} ({}) as of the read at {} is {}mergeable.",
         verdict.number,
         repository,
-        if convergence.mergeable {
-            "mergeable "
-        } else {
-            "NOT mergeable "
-        }
+        verdict.fetched_at,
+        if convergence.mergeable { "" } else { "NOT " },
     )
     .into_diagnostic()?;
     writeln!(
@@ -402,10 +403,49 @@ fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatu
         verdict.head_sha, verdict.base_oid
     )
     .into_diagnostic()?;
-    if convergence.reasons.is_empty() {
+    write_verdict_details(writer, verdict)?;
+    writeln!(writer, "fetched_at: {}", verdict.fetched_at).into_diagnostic()?;
+    Ok(())
+}
+
+/// The verdict-DETAIL lines shared by the `orc pr status` one-pager and the
+/// `orc chat pr-status` view (reasons, failing/pending checks, actionable
+/// threads, checklist delta) — one renderer so the two operator views
+/// cannot drift. Headline and snapshot footer stay per-command.
+/// Neutralizes terminal-control characters, newlines, AND bidirectional
+/// controls in provider-supplied text before it reaches the operator's
+/// terminal (§9.44: a PR commenter must not be able to alter a verdict
+/// view's output — bidi controls can reorder displayed text to disguise
+/// the verdict).
+pub(crate) fn sanitize_provider_text(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            // Bidirectional controls (LRE/RLE/LRO/RLO/PDF/LRI/RLI/FSI/PDI,
+            // plus the deprecated LRM/RLM) can reorder displayed text.
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' => {
+                '\u{FFFD}'
+            }
+            c if c.is_control() => '\u{FFFD}',
+            c => c,
+        })
+        .collect()
+}
+
+/// The verdict-DETAIL lines shared by the `orc pr status` one-pager and the
+/// `orc chat pr-status` view (reasons, failing/pending checks, actionable
+/// threads, checklist delta) — one renderer so the two operator views
+/// cannot drift. Provider-supplied text is sanitized before writing.
+pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus) -> Result<()> {
+    if verdict.convergence.reasons.is_empty() {
         writeln!(writer, "reasons: (none — all gates pass)").into_diagnostic()?;
     } else {
-        writeln!(writer, "reasons: {}", convergence.reasons.join(", ")).into_diagnostic()?;
+        writeln!(
+            writer,
+            "reasons: {}",
+            verdict.convergence.reasons.join(", ")
+        )
+        .into_diagnostic()?;
     }
     if let Some(checks) = &verdict.checks {
         for check in checks {
@@ -413,7 +453,9 @@ fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatu
                 writeln!(
                     writer,
                     "check [{}] {}: {}",
-                    check.classification, check.name, check.state
+                    check.classification,
+                    sanitize_provider_text(&check.name),
+                    sanitize_provider_text(&check.state)
                 )
                 .into_diagnostic()?;
             }
@@ -426,14 +468,17 @@ fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatu
                     writer,
                     "thread {}: {}:{} — {}",
                     thread.id,
-                    thread.path.as_deref().unwrap_or("(no path)"),
+                    thread
+                        .path
+                        .as_deref()
+                        .map_or_else(|| String::from("(no path)"), sanitize_provider_text),
                     thread
                         .line
                         .map_or_else(|| "-".to_string(), |line| line.to_string()),
                     thread
                         .last_comment_excerpt
                         .as_deref()
-                        .unwrap_or("(no comments)")
+                        .map_or_else(|| String::from("(no comments)"), sanitize_provider_text),
                 )
                 .into_diagnostic()?;
             }
@@ -450,11 +495,65 @@ fn write_one_pager<W: Write>(writer: &mut W, repository: &str, verdict: &PrStatu
         .into_diagnostic()?;
         for item in &checklist.items {
             if !item.checked {
-                writeln!(writer, "  [ ] {}: {}", item.marker, item.description)
-                    .into_diagnostic()?;
+                writeln!(
+                    writer,
+                    "  [ ] {}: {}",
+                    sanitize_provider_text(&item.marker),
+                    sanitize_provider_text(&item.description)
+                )
+                .into_diagnostic()?;
             }
         }
     }
-    writeln!(writer, "fetched_at: {}", verdict.fetched_at).into_diagnostic()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn sanitize_provider_text_neutralizes_newlines_and_controls() {
+        let sanitized = sanitize_provider_text("line1\nline2\r\ttab\u{7}");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\r'));
+        assert!(!sanitized.contains('\t'));
+        assert!(!sanitized.contains('\u{7}'));
+    }
+
+    #[test]
+    fn sanitize_provider_text_neutralizes_bidirectional_controls() {
+        // LRE/RLE/LRO/RLO/PDF/LRI/RLI/FSI/PDI + LRM/RLM: bidi controls can
+        // reorder displayed text to disguise the verdict.
+        for (label, ch) in [
+            ("LRE", '\u{202A}'),
+            ("RLE", '\u{202B}'),
+            ("LRO", '\u{202C}'),
+            ("RLO", '\u{202D}'),
+            ("PDF", '\u{202E}'),
+            ("LRI", '\u{2066}'),
+            ("RLI", '\u{2067}'),
+            ("FSI", '\u{2068}'),
+            ("PDI", '\u{2069}'),
+            ("LRM", '\u{200E}'),
+            ("RLM", '\u{200F}'),
+        ] {
+            let sanitized = sanitize_provider_text(&format!("a{ch}b"));
+            assert!(
+                !sanitized.contains(ch),
+                "{label} must be neutralized: {sanitized:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_provider_text_preserves_plain_text() {
+        assert_eq!(
+            sanitize_provider_text("plain text with spaces"),
+            "plain text with spaces"
+        );
+        assert_eq!(sanitize_provider_text("café ✓"), "café ✓");
+    }
 }
