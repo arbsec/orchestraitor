@@ -481,14 +481,6 @@ mod linux_exec {
     use crate::exec::{ExecError, ExecutionPolicy, NetworkPolicy, ScriptExecution};
 
     pub(super) fn run_bash(script: &[u8]) -> Result<MediatedRun, MediationError> {
-        // Every directory-materializing construction funnels through here:
-        // hold the snapshot lock across the whole construction + execution
-        // so the gate-refusal test's snapshot window is serialized (issue
-        // #645). The gate test itself never calls run_bash, so no
-        // re-entrancy.
-        let _guard = crate::EXEC_TEMP_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Explicit mediated policy (issue #311): network is denied even
         // though `NetworkPolicy::Denied` is also the crate default — the
         // bootstrap path names its enforcement posture instead of inheriting
@@ -585,6 +577,15 @@ mod linux_exec {
 
 #[cfg(test)]
 mod tests {
+    /// Serializes every test that materializes or drops
+    /// `arbitraitor-exec-<pid>-*` temp directories (issue #645): under the
+    /// parallel test runner, sibling constructions AND sibling drops
+    /// legitimately move the directory count, which made the gate-refusal
+    /// test's snapshot-assert-diff flake. Each such test holds this lock
+    /// across its whole body (construction, execution, and the final
+    /// drop), so inside the gate test's window the count can only move if
+    /// the GATE moved it. Test-only: production paths never take this
+    /// lock.
     use super::*;
     use crate::sandbox::LandlockAbiVersion;
     use std::path::Path;
@@ -757,12 +758,13 @@ mod tests {
         let controls = EffectiveControls::all_unavailable();
         let preflight = build_preflight("linux", controls);
 
-        // The snapshot window is serialized against every OTHER test in this
-        // module that materializes `arbitraitor-exec-<pid>-*` directories
-        // (they hold the same lock across their constructions — issue #645:
-        // under the parallel runner, sibling constructions legitimately move
-        // the count, which made an unsynchronized count-diff flake).
-        let _guard = crate::EXEC_TEMP_DIR_LOCK
+        // The snapshot window is serialized against every OTHER test that
+        // materializes or drops `arbitraitor-exec-<pid>-*` directories
+        // (they hold `crate::EXEC_TEMP_DIR_TEST_LOCK` across their whole bodies —
+        // issue #645: under the parallel runner, sibling constructions and
+        // sibling drops legitimately move the count, which made an
+        // unsynchronized count-diff flake).
+        let _guard = crate::EXEC_TEMP_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -917,17 +919,20 @@ mod tests {
     /// enforcement tests rather than fabricate a weaker claim; the refusal and
     /// preflight tests above never skip.
     #[cfg(target_os = "linux")]
-    fn mediated_stack_or_skip() -> Option<MediatedWorker> {
-        // The probe's `run_bash` call takes EXEC_TEMP_DIR_LOCK itself (the
-        // whole construction + execution window is serialized there), so
-        // the gate-refusal test's snapshot window never overlaps a live
-        // construction (issue #645).
+    fn mediated_stack_or_skip() -> Option<(MediatedWorker, std::sync::MutexGuard<'static, ()>)> {
+        // The construction, the probe run, and every subsequent run_bash on
+        // this worker materialize or own `arbitraitor-exec-<pid>-*` dirs;
+        // hold the test lock for the WHOLE test body by returning the guard
+        // alongside the worker (the caller binds and keeps it — issue #645).
+        let guard = crate::EXEC_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
             return None;
         }
         let worker = MediatedWorker::spawn(&linux_client(), "linux").ok()?;
         match worker.run_bash(b"true\n") {
-            Ok(run) if run.exit_code == Some(0) => Some(worker),
+            Ok(run) if run.exit_code == Some(0) => Some((worker, guard)),
             _ => None,
         }
     }
@@ -937,7 +942,7 @@ mod tests {
     fn mediated_bash_runs_benign_command_and_captures_output() -> TestResult {
         // Given: a gated worker on supported Linux, or skip when the host
         // cannot create the network namespace (CI variance).
-        let Some(worker) = mediated_stack_or_skip() else {
+        let Some((worker, _exec_dir_lock)) = mediated_stack_or_skip() else {
             return Ok(());
         };
 
@@ -969,7 +974,7 @@ mod tests {
     #[test]
     fn mediated_bash_env_is_allowlisted_and_path_is_controlled() -> TestResult {
         // Given: a gated worker.
-        let Some(worker) = mediated_stack_or_skip() else {
+        let Some((worker, _exec_dir_lock)) = mediated_stack_or_skip() else {
             return Ok(());
         };
 
@@ -1026,7 +1031,7 @@ mod tests {
         // mediated exec runs in an isolated network namespace.
         use std::net::TcpListener;
 
-        let Some(worker) = mediated_stack_or_skip() else {
+        let Some((worker, _exec_dir_lock)) = mediated_stack_or_skip() else {
             return Ok(());
         };
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -1071,7 +1076,7 @@ mod tests {
         // first, so the assertion below observes only this run's effect.
         const CANARY: &str = "/tmp/orc-311-canary-write";
         let canary = Path::new(CANARY);
-        let Some(worker) = mediated_stack_or_skip() else {
+        let Some((worker, _exec_dir_lock)) = mediated_stack_or_skip() else {
             return Ok(());
         };
         if canary.exists() {
@@ -1099,7 +1104,7 @@ mod tests {
     #[test]
     fn mediated_bash_nonzero_exit_is_a_script_result_not_a_refusal() -> TestResult {
         // Given: a gated worker.
-        let Some(worker) = mediated_stack_or_skip() else {
+        let Some((worker, _exec_dir_lock)) = mediated_stack_or_skip() else {
             return Ok(());
         };
 
