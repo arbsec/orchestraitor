@@ -878,9 +878,6 @@ struct PrStatusInvocationSummary {
 // truth for the bound + marker): reused directly, not copied.
 use crate::board_query::truncate_payload_value as truncate_pr_status_value;
 
-/// Builds the `ToolRequest` envelope for one `pr.status` invocation,
-/// continuing the chain at `(seq_base, prev_base)` (mirrors
-/// `board_query::build_invocation_event`; issues #458-gen2 N1/N2).
 /// Builds the `ToolRequest` event for one OUT-OF-SCOPE refusal: the
 /// refused request values ride as truncated data, the outcome class is
 /// `out_of_scope`, and the configured scope is recorded — the audit trail
@@ -2204,6 +2201,69 @@ mod tests {
         assert_eq!(records[0].envelope.payload["request"]["owner"], "evil");
         orchestraitor_events::validate_hash_chain(&records)
             .expect("the refusal event continues the shared chain");
+    }
+
+    /// (f) An unreadable \`isDraft\` (partial field error nulling it) is an
+    /// unread sub-field — fail closed with \`unread(is-draft)\`, never a
+    /// silent draft downgrade.
+    #[tokio::test]
+    async fn pr_status_unreadable_is_draft_fails_closed() {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(
+            orchestraitor_events::InMemoryAuditStore::default(),
+        ));
+        let (_gateway, root, _temp) = pr_status_gateway(
+            Some(std::sync::Arc::new(StubTransport::new(Vec::new()))),
+            Some(shared.clone()),
+        );
+        let records_dir = root.join(".orchestraitor").join("reviews");
+        std::fs::create_dir_all(&records_dir).unwrap();
+        std::fs::write(
+            records_dir.join("614-cb7cf77.md"),
+            "# Agent review record: PR #614 @ cb7cf77\n\n\
+             - verdict: CLEAN\n\
+             - reviewer-agent: test\n\
+             - head SHA: cb7cf776939f65981f9fb7c9e5263ba0b20b7c7c\n\
+             - base OID: 9cc67bf0db85a7248a9b9718974f4460d5fb3759\n\
+             - findings: 0\n\nNo findings.\n",
+        )
+        .unwrap();
+
+        let err_view = serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "number": 614, "state": "OPEN",
+                "headRefOid": "cb7cf776939f65981f9fb7c9e5263ba0b20b7c7c",
+                "baseRefOid": "9cc67bf0db85a7248a9b9718974f4460d5fb3759",
+                "isDraft": null, "reviewDecision": null,
+                "mergeStateStatus": "CLEAN",
+            }}},
+            "errors": [{"message": "field unavailable",
+                        "path": ["repository", "pullRequest", "isDraft"]}]
+        })
+        .to_string();
+        let result = run_pr_status_shared(
+            std::sync::Arc::new(StubTransport::new(vec![
+                err_view.clone(),
+                err_view.clone(),
+                err_view.clone(),
+                err_view.clone(),
+                err_view,
+            ])),
+            root,
+            PrStatusRequest {
+                number: 614,
+                owner: String::from("arbsec"),
+                repo: String::from("orchestraitor"),
+                delegation_chain: vec![String::from("user:test")],
+            },
+            Some(shared.clone()),
+        )
+        .await;
+
+        let Err(tool_error) = result else {
+            panic!("an unread isDraft must fail closed");
+        };
+        let text = tool_error.payload.to_string();
+        assert!(text.contains("unread(is-draft)"), "{text}");
     }
 
     /// (b) Configured happy path: a stub transport serving a mergeable

@@ -702,7 +702,7 @@ fn apply_review_state_gates(
     reasons: &mut Vec<String>,
     unread_subchecks: &mut Vec<&'static str>,
     view_had_errors: bool,
-) -> bool {
+) {
     // An unreadable (null/absent) reviewDecision is an unread sub-field —
     // fail closed (a partial field error must never masquerade as "no
     // review requirement").
@@ -721,9 +721,21 @@ fn apply_review_state_gates(
         // required" provider state — no reason, never unread.
         _ => {}
     }
-    let is_draft = initial.get("isDraft").and_then(Value::as_bool) == Some(true);
-    if is_draft {
-        reasons.push("is_draft".to_string());
+    // An unreadable (null/absent) isDraft WITH partial errors is an unread
+    // sub-field — fail closed (a partial field error must never silently
+    // downgrade a draft to non-draft). Without errors, absent/null is the
+    // provider's false shape.
+    match initial.get("isDraft").and_then(Value::as_bool) {
+        Some(is_draft) => {
+            if is_draft {
+                reasons.push("is_draft".to_string());
+            }
+        }
+        None if view_had_errors => {
+            reasons.push("unread(is-draft)".to_string());
+            unread_subchecks.push("is-draft");
+        }
+        None => {}
     }
     // Lifecycle state: a PR that is not OPEN cannot merge, whatever the
     // other gates say (a closed PR's head/base/checks can be unchanged).
@@ -735,7 +747,6 @@ fn apply_review_state_gates(
     if initial.get("reviewDecision").and_then(Value::as_str) == Some("CHANGES_REQUESTED") {
         reasons.push("review_changes_requested".to_string());
     }
-    is_draft
 }
 
 /// The sub-read results handed to [`assemble_verdict`]: each read is either
@@ -827,12 +838,16 @@ fn assemble_verdict(
     {
         reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
     }
-    let is_draft = apply_review_state_gates(
+    apply_review_state_gates(
         initial,
         &mut reasons,
         &mut unread_subchecks,
         view_had_errors,
     );
+    // is_draft for the verdict struct: true only when explicitly reported
+    // true (an unread isDraft rides the exit-1 path above, so the struct
+    // value is never load-bearing for a mergeable verdict).
+    let is_draft = initial.get("isDraft").and_then(Value::as_bool) == Some(true);
 
     let verdict = build_verdict(
         initial,
