@@ -691,7 +691,7 @@ async fn walk_blocked(
 /// Truncates an untrusted value for the event payload: at most
 /// [`MAX_PAYLOAD_VALUE_CHARS`] characters plus the static truncation marker.
 /// The full hostile payload never enters the audit record.
-fn truncate_payload_value(value: &str) -> String {
+pub(crate) fn truncate_payload_value(value: &str) -> String {
     if value.chars().count() <= MAX_PAYLOAD_VALUE_CHARS {
         return value.to_string();
     }

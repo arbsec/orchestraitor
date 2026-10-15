@@ -431,7 +431,7 @@ __typename\
         // Try the event-including shape first; a query-level rejection
         // (unsupported field on older GHES) falls back to the event-less
         // shape once — the same includeEvent detection gh applies.
-        let (data, _had_errors) = match self.graphql(
+        let (data, had_errors) = match self.graphql(
             "checks",
             query_with_event,
             &serde_json::json!({"owner": owner, "name": repo, "oid": head_oid}),
@@ -453,6 +453,14 @@ __typename\
         // such commit) or a wrong shape stays unread.
         let rollup = data.pointer("/repository/object/statusCheckRollup");
         let nodes: Vec<Value> = match rollup {
+            // A null rollup WITH partial errors is an UNREAD checks read
+            // (the error may have suppressed the rollup) — fail closed;
+            // WITHOUT errors it is the valid "no checks yet" state.
+            Some(rollup) if rollup.is_null() && had_errors => {
+                return Err(
+                    "checks rollup is unreadable (partial errors on the response)".to_string(),
+                );
+            }
             Some(rollup) if rollup.is_null() => Vec::new(),
             Some(rollup) => rollup
                 .pointer("/contexts/nodes")

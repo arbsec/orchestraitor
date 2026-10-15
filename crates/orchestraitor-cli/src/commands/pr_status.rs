@@ -337,19 +337,10 @@ impl PrStatusTransport for CliTransport {
         // installation cannot read, like workflowRun). An empty/absent `data`
         // is a real failure; data WITH errors degrades — the caller's pointer
         // reads produce their own typed misses on the affected sub-fields.
+        // (A NOT_FOUND-typed error was already handled above.)
         if envelope.get("data").is_none_or(Value::is_null)
             && let Some(errors) = envelope.get("errors").and_then(Value::as_array)
         {
-            // GitHub maps a missing PR/repository to a NOT_FOUND-typed
-            // error entry — a config/state condition (exit 2).
-            if errors
-                .iter()
-                .any(|error| error.get("type").and_then(Value::as_str) == Some("NOT_FOUND"))
-            {
-                return Err(PrStatusError::Config {
-                    message: format!("github api request failed ({operation}): not found"),
-                });
-            }
             let rendered: Vec<String> = errors
                 .iter()
                 .filter_map(|error| error.get("message").and_then(Value::as_str))

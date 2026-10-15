@@ -71,20 +71,24 @@ pub struct GatewayContext {
         Option<std::sync::Arc<std::sync::Mutex<crate::board_move::InMemoryLeaseRegistry>>>,
     /// The §9.48 GraphQL transport the `pr.status` decision tool reads
     /// through (spec `10-orchestrator.md` §9.39, §9.48; issue #614 slice 2).
-    /// `None` disables the tool (the same `disable_route` posture as
-    /// `board.query`: hidden from `tools/list`, calls rejected).
+    /// REQUIRED together with `pr_status_repo_root` AND
+    /// `pr_status_allowed_repo`: any of the three missing disables the tool
+    /// (the same `disable_route` posture as `board.query`: hidden from
+    /// `tools/list`, calls rejected).
     pub pr_status: Option<std::sync::Arc<dyn crate::pr_status::PrStatusTransport>>,
     /// The CLEAN-record root the `pr.status` engine reads
     /// `.orchestraitor/reviews/` under — the caller's workspace config
     /// records it (the CLI passes its checkout toplevel). REQUIRED together
-    /// with `pr_status` for the tool to be usable.
+    /// with `pr_status` AND `pr_status_allowed_repo` for the tool to be
+    /// usable.
     pub pr_status_repo_root: Option<std::path::PathBuf>,
     /// The `owner/name` repository the `pr.status` tool may read (the
     /// workspace config's project scope). REQUIRED together with
-    /// `pr_status`: tool arguments are untrusted input (§6.1), so a request
-    /// naming any OTHER repository is refused with a typed payload before
-    /// the engine runs — the tool's read authority is bounded to the
-    /// configured project scope, never the request's claim.
+    /// `pr_status` AND `pr_status_repo_root`: tool arguments are untrusted
+    /// input (§6.1), so a request naming any OTHER repository is refused
+    /// with the typed `pr_status_out_of_scope` payload before the engine
+    /// runs — the tool's read authority is bounded to the configured
+    /// project scope, never the request's claim.
     pub pr_status_allowed_repo: Option<String>,
 }
 
@@ -490,29 +494,33 @@ impl McpGateway {
                 parent_op_id: None,
                 principals: input.delegation_chain.clone(),
             };
+            // Fail closed: an audit failure must be VISIBLE — the refusal
+            // payload carries an `audit_recorded: false` marker instead of
+            // silently dropping the trail. The shared store is locked
+            // synchronously (no guard crosses an await).
+            let mut audit_recorded = false;
             if let Some(shared) = shared.as_ref()
                 && let Ok(mut store) = shared.lock()
-            {
-                let seq_base = store.records().len();
-                let prev_base = store.records().last().map(|record| record.hash.clone());
-                if let Ok(event) = build_pr_status_refusal_event(
+                && let Ok(event) = build_pr_status_refusal_event(
                     &input,
                     &chain,
                     &allowed_repo,
-                    seq_base,
-                    prev_base,
-                ) {
-                    let _ = store.append(event);
-                }
+                    store.records().len(),
+                    store.records().last().map(|record| record.hash.clone()),
+                )
+            {
+                audit_recorded = store.append(event).is_ok();
             }
-            return Ok(CallToolResult::structured_error(serde_json::json!({
+            let mut refusal = serde_json::json!({
                 "error": format!(
                     "pr.status is bound to {allowed_repo}; the requested repository is \
                      outside this project scope"
                 ),
                 "code": "pr_status_out_of_scope",
                 "allowed": allowed_repo,
-            })));
+            });
+            refusal["audit_recorded"] = serde_json::Value::Bool(audit_recorded);
+            return Ok(CallToolResult::structured_error(refusal));
         }
         let shared = self.context.board_audit_store.clone();
         match run_pr_status_shared(transport, repo_root, input, shared).await {
@@ -865,22 +873,9 @@ struct PrStatusInvocationSummary {
     outcome: String,
 }
 
-/// Truncates an untrusted value for the event payload (mirrors
-/// `board_query`'s bound): at most
-/// [`crate::board_query::MAX_PAYLOAD_VALUE_CHARS`] characters plus the
-/// static truncation marker — the full hostile payload never enters the
-/// audit record.
-fn truncate_pr_status_value(value: &str) -> String {
-    if value.chars().count() <= crate::board_query::MAX_PAYLOAD_VALUE_CHARS {
-        return value.to_string();
-    }
-    let mut truncated: String = value
-        .chars()
-        .take(crate::board_query::MAX_PAYLOAD_VALUE_CHARS)
-        .collect();
-    truncated.push_str(crate::board_query::TRUNCATION_SUFFIX);
-    truncated
-}
+// The event-payload truncation helper is `board_query`'s (single source of
+// truth for the bound + marker): reused directly, not copied.
+use crate::board_query::truncate_payload_value as truncate_pr_status_value;
 
 /// Builds the `ToolRequest` envelope for one `pr.status` invocation,
 /// continuing the chain at `(seq_base, prev_base)` (mirrors
@@ -896,59 +891,33 @@ fn build_pr_status_refusal_event(
     seq_base: usize,
     prev_base: Option<orchestraitor_events::HashDigest>,
 ) -> Result<orchestraitor_events::EventEnvelope, McpGatewayError> {
-    let mut payload = serde_json::Map::new();
-    payload.insert("tool".to_string(), Value::String(String::from("pr.status")));
-    payload.insert(
-        "request".to_string(),
-        serde_json::json!({
-            "number": request.number,
-            "owner": truncate_pr_status_value(&request.owner),
-            "repo": truncate_pr_status_value(&request.repo),
-        }),
-    );
-    payload.insert(
-        "result_summary".to_string(),
-        serde_json::json!({
-            "outcome": "out_of_scope",
-            "allowed": allowed_repo,
-        }),
-    );
-    payload.insert(
-        "chain_source".to_string(),
-        Value::String(String::from("client-asserted")),
-    );
-    let mut principals: Vec<Value> = chain
-        .principals
-        .iter()
-        .take(crate::board_query::MAX_CHAIN_PRINCIPALS)
-        .map(|principal| truncate_pr_status_value(principal))
-        .map(|truncated| Value::String(format!("claimed:{truncated}")))
-        .collect();
-    if chain.principals.len() > crate::board_query::MAX_CHAIN_PRINCIPALS {
-        principals.push(Value::String(String::from(
-            crate::board_query::CHAIN_TRUNCATION_MARKER,
-        )));
-    }
-    payload.insert("delegation_chain".to_string(), Value::Array(principals));
-
-    let monotonic_seq = u64::try_from(seq_base).map_or(u64::MAX, |base| base.saturating_add(1));
-    orchestraitor_events::EventEnvelope::try_new(orchestraitor_events::EventEnvelopeInput {
-        schema_version: orchestraitor_events::CURRENT_SCHEMA_VERSION,
-        monotonic_seq,
-        wall_clock_ts: rfc3339_now(),
-        correlation_id: chain.correlation_id.clone(),
-        parent_op_id: chain.parent_op_id.clone(),
-        category: orchestraitor_events::EventCategory::ToolRequest,
-        payload: Value::Object(payload),
-        prev_hash: prev_base,
-    })
-    .map_err(|_| McpGatewayError::PrStatus(String::from("refusal event construction failed")))
+    let result_summary = serde_json::json!({
+        "outcome": "out_of_scope",
+        "allowed": allowed_repo,
+    });
+    build_pr_status_event(request, chain, result_summary, seq_base, prev_base)
 }
 
 fn build_pr_status_invocation_event(
     request: &PrStatusRequest,
     chain: &DelegationChain,
     summary: &PrStatusInvocationSummary,
+    seq_base: usize,
+    prev_base: Option<orchestraitor_events::HashDigest>,
+) -> Result<orchestraitor_events::EventEnvelope, McpGatewayError> {
+    let result_summary = serde_json::to_value(summary)
+        .map_err(|_| McpGatewayError::PrStatus(String::from("summary serialization failed")))?;
+    build_pr_status_event(request, chain, result_summary, seq_base, prev_base)
+}
+
+/// Builds the SHARED payload prefix and envelope tail for the two
+/// `pr.status` event builders: tool name, truncated request values,
+/// chain-source labelling, principal truncation/cap, and the envelope
+/// construction — one source of truth for the truncation and chain bounds.
+fn build_pr_status_event(
+    request: &PrStatusRequest,
+    chain: &DelegationChain,
+    result_summary: serde_json::Value,
     seq_base: usize,
     prev_base: Option<orchestraitor_events::HashDigest>,
 ) -> Result<orchestraitor_events::EventEnvelope, McpGatewayError> {
@@ -962,18 +931,11 @@ fn build_pr_status_invocation_event(
             "repo": truncate_pr_status_value(&request.repo),
         }),
     );
-    payload.insert(
-        "result_summary".to_string(),
-        serde_json::to_value(summary)
-            .map_err(|_| McpGatewayError::PrStatus(String::from("summary serialization failed")))?,
-    );
+    payload.insert("result_summary".to_string(), result_summary);
     payload.insert(
         "chain_source".to_string(),
         Value::String(String::from("client-asserted")),
     );
-    // Client-supplied principal labels are data, not authority (N4): each
-    // label is truncated like any request value, and the chain is bounded —
-    // overflow is marked, never silently dropped.
     let mut principals: Vec<Value> = chain
         .principals
         .iter()
@@ -999,7 +961,7 @@ fn build_pr_status_invocation_event(
         payload: Value::Object(payload),
         prev_hash: prev_base,
     })
-    .map_err(|_| McpGatewayError::PrStatus(String::from("envelope rejected")))
+    .map_err(|_| McpGatewayError::PrStatus(String::from("event construction failed")))
 }
 
 /// Current wall-clock time as an RFC 3339 string (mirrors
