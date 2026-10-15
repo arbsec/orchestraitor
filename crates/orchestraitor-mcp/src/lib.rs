@@ -19,6 +19,7 @@ pub mod board_move;
 pub mod board_query;
 pub mod decision_record;
 pub mod pr_status;
+pub mod ref_expansion;
 
 pub use board_move::{
     BoardMoveApplied, BoardMoveDelegationChain, BoardMoveError, BoardMoveOutcome, BoardMoveRefusal,

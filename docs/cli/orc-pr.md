@@ -143,3 +143,31 @@ never a live feed; re-run to sync.
   identical to `orc pr status`.
 - The view NEVER caches: every invocation is a fresh aggregation, so the
   caveat names the instant the answer was actually built.
+
+## Reference expansion at the delegation boundary (§9.49)
+
+The orchestration layer expands `pr://<N>` and `issue://<N>` references in
+worker-bound task payloads PRE-SEND (spec §9.49): the worker receives the
+bounded expanded block and performs ZERO fetches of its own. The expansion
+engine lives in the shared mcp crate (`orchestraitor_mcp::ref_expansion`) —
+the PR flavor consumes the §9.48 engine's typed output (state, head/base
+OIDs, CI booleans, thread counts), never a second vocabulary.
+
+- **Grammar (fail-closed):** only the exact shapes `pr://<digits>` and
+  `issue://<digits>` are references. Unrecognized schemes (`issue:/`,
+  `pr:/x`, `fixes://`, `cr://…`) pass through as literal text, never
+  best-effort expanded.
+- **Bounded payload:** 2 KiB per expanded reference, 8 KiB per pass;
+  titles/labels size-capped; full bodies, comments, and review text are
+  NEVER inlined. The pass budget stops inlining deterministically (later
+  references stay literal with a `budget-exceeded` notice).
+- **Data, never instructions (§6.1):** expanded content is fenced
+  (```` ```expanded pr://N (untrusted content below) ````) with no
+  instruction-bearing framing; the fence boundary IS the containment.
+- **Secret redaction (§9.23):** token shapes (`ghp_…`, `gho_…`, `github_pat_…`,
+  `sk-…`), `secret://` URIs, and Bearer/credential values are REDACTED with
+  an announced `redacted (N instance(s))` — never a silent pass.
+- **Typed failures, never blocking:** `not-found`, `forbidden`,
+  `rate-limited`, `provider-error`, and `budget-exceeded` leave the
+  reference as literal text with a typed notice; the payload is still
+  delivered. No synchronous retry (§9.26.1).
