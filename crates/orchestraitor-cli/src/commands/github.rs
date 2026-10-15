@@ -992,21 +992,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     //     intends to land, refuse on ANY divergence before mutating.
     verify_expect_tree(&local_tree, args.expect_tree.as_deref(), &local_branch)?;
 
-    // Fetch the remote branch first so the new-commit range is accurate
-    // (a fetch failure is non-fatal: the guard then compares against
-    // origin/main or nothing — fail-open on connectivity, fail-closed on
-    // content).
-    let _ = git(None, &["fetch", "origin", &remote_branch]);
-
-    // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
-    //     whose NEW commits carry two or more CONSECUTIVE identical
-    //     subjects is refused — review-fix rounds must land as distinct
-    //     Conventional Commits subjects (or be squashed through this
-    //     command's single-commit landing). A single new commit is always
-    //     allowed. Only commits NOT already on the remote branch are
-    //     examined, so a re-land of an unchanged chain is unaffected.
-    reject_duplicate_subjects(&local_branch, &remote_branch)?;
-
     // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
     //    Authorization header and never enters a diagnostic.
@@ -1078,8 +1063,26 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
                      remote branch exists — pass --base <ref> explicitly"
                 )
             }
+            // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
+            //     whose NEW commits carry two or more CONSECUTIVE identical
+            //     subjects is refused — review-fix rounds must land as distinct
+            //     Conventional Commits subjects (or be squashed through this
+            //     command's single-commit landing). The comparison head is the
+            //     RESOLVED landing base (args.base or the default branch), and the
+            //     fetch targets the SELECTED repository (--repo), so the guard
+            //     never compares against the wrong history.
             Err(error) => return Err(error),
         };
+        // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
+        //     whose NEW commits carry two or more CONSECUTIVE identical
+        //     subjects is refused — review-fix rounds must land as distinct
+        //     Conventional Commits subjects (or be squashed through this
+        //     command's single-commit landing). The comparison head is the
+        //     RESOLVED landing base (--base or the default branch), and the
+        //     fetch targets the SELECTED repository (--repo), so the guard
+        //     never compares against the wrong history.
+        fetch_remote_branch(&owner, &repo, &remote_branch);
+        reject_duplicate_subjects(&local_branch, &remote_branch)?;
         let repo_url = format!("https://github.com/{owner}/{repo}.git");
         if !git_fetch_authenticated(token.token().expose_secret(), &owner, &repo, &base_head) {
             // Fall through: the rev-parse below produces the typed error
@@ -1255,6 +1258,14 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Fetches `remote_branch` from the SELECTED repository (`owner`/`repo`)
+/// so the duplicate-subject guard compares against the right history. A
+/// fetch failure is non-fatal: the guard then compares against origin/main
+/// or nothing — fail-open on connectivity, fail-closed on content.
+fn fetch_remote_branch(owner: &str, repo: &str, remote_branch: &str) {
+    let _ = git(None, &["fetch", &format!("{owner}/{repo}"), remote_branch]);
+}
+
 /// Refuses a push whose NEW commits (commits on `local_branch` not
 /// reachable from the remote branch, or from `origin/<remote_branch>`
 /// default) carry two or more CONSECUTIVE identical subject lines
