@@ -197,7 +197,10 @@ orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
   environment variable or flag. In
   `recommended` enforcement mode the guard does not fire (the labelled
   personal fallback is a documented, warned path there).
-- The child's stdout/stderr pass through unchanged and the child's exit code
+- The child's stdout/stderr pass through unchanged, stdin passes through to
+  the child (so `gh` flags like `--body-file -` and `-F -` read the caller's
+  piped input — including on the `gh-env-pr-create-chain` capture route,
+  which re-emits only the created PR's URL), and the child's exit code
   propagates (a missing exit code maps to 1).
 - In `required` enforcement mode the child's git identity is PINNED via
   `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/

@@ -726,6 +726,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `orc github gh-env` and `orc github gh-env-pr-create-chain` now pass the
+  caller's stdin through to the delegated child on ALL routes. The capture
+  route (used by `gh-env-pr-create-chain`) previously handed the child a
+  closed stdin, so a `gh pr create --body-file -` or `-F -` call read an
+  empty body and silently created a body-less PR; piped bodies now behave
+  identically on both routes. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
 - `github-pr-lifecycle` skill scripts must be invoked as
   `bash .agents/skills/github-pr-lifecycle/scripts/<name>`, never exec'd
   directly: the App-signed landing path (`createCommitOnBranch`

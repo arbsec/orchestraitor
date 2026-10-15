@@ -626,11 +626,14 @@ fn gh_env_spawn_child(
             .env("GIT_COMMITTER_EMAIL", email);
     }
     if capture_stdout {
-        // Pipe ONLY stdout (the PR URL); stderr inherits so child
-        // diagnostics stay visible (matching the pass-through contract),
-        // and the exit status still propagates before the URL is used.
+        // Pipe ONLY stdout (the PR URL); stderr and stdin inherit so child
+        // diagnostics stay visible and `gh` flags like `--body-file -` read
+        // the caller's piped input exactly as on the pass-through route
+        // (matching the pass-through contract), and the exit status still
+        // propagates before the URL is used.
         let output = child
             .stderr(std::process::Stdio::inherit())
+            .stdin(std::process::Stdio::inherit())
             .output()
             .map_err(|error| miette!("failed to spawn child command `{program}`: {error}"))?;
         if !output.status.success() {
