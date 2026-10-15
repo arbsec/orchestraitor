@@ -881,6 +881,10 @@ fn github_cli(
         ])
         .args(args)
         .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        // The test runner's ambient environment MUST NOT leak into the child:
+        // `ORC_GITHUB_APP_ENFORCEMENT` overrides the layered config and would
+        // make these tests environment-dependent (issue #602, aspect 2).
+        .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -1600,6 +1604,10 @@ fn github_cli_with_gh_stub_out_in(
         ])
         .args(args)
         .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        // The test runner's ambient environment MUST NOT leak into the child:
+        // `ORC_GITHUB_APP_ENFORCEMENT` overrides the layered config and would
+        // make the guard tests environment-dependent.
+        .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
         .env("PATH", std::env::join_paths(&split).into_diagnostic()?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1773,6 +1781,113 @@ fn github_gh_env_pr_create_guard_does_not_fire_outside_required_enforcement() ->
     Ok(())
 }
 
+// Regression test for #602 (1): the CAPTURE branch of `gh_env_spawn_child`
+// (used by `gh-env-pr-create-chain`) must pass the parent's stdin through,
+// so a `gh pr create --body-file -` child reads the caller's piped body
+// exactly as on the pass-through route. Before the fix, `Command::output()`
+// handed the child a closed stdin: `gh` read an empty body and created the
+// PR silently without a description.
+#[test]
+#[cfg(unix)]
+fn github_gh_env_pr_create_chain_child_reads_piped_stdin() -> miette::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+    let server = spawn_mint_then_two_api_server(
+        r#"{"id":5082653,"slug":"arbsec-agent"}"#,
+        r#"{"id":334074867,"login":"arbsec-agent[bot]","type":"Bot"}"#,
+    )?;
+    let repo = gh_env_guard_bot_identity_repo(&temp)?;
+    // Skill-script stand-ins: the chain runs them after creation; this test
+    // asserts only the stdin contract, so they just record their argv.
+    let scripts = repo.join(".agents/skills/github-pr-lifecycle/scripts");
+    fs::create_dir_all(&scripts).into_diagnostic()?;
+    let labels_log = temp.path().join("labels.log");
+    for script in ["pr-labels", "pr-labels-from-issue"] {
+        fs::write(
+            scripts.join(script),
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"{script}:$*\" >> \"{}\"\n",
+                labels_log.display()
+            ),
+        )
+        .into_diagnostic()?;
+        fs::set_permissions(scripts.join(script), fs::Permissions::from_mode(0o755))
+            .into_diagnostic()?;
+    }
+    // The stub `gh` drains its stdin into a file (what `--body-file -` does
+    // with the caller's pipe), records its argv, and "creates" PR #999.
+    let out_path = temp.path().join("child-body.out");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut split = std::env::split_paths(&path).collect::<Vec<_>>();
+    split.insert(0, std::path::PathBuf::from(&stub_dir));
+    fs::write(
+        temp.path().join("gh"),
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > \"{}\"\ncat > \"{}\"\necho https://github.com/arbsec/orchestraitor/pull/999\n",
+            temp.path().join("child.out").display(),
+            out_path.display()
+        ),
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(temp.path().join("gh"), fs::Permissions::from_mode(0o755))
+        .into_diagnostic()?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orc"))
+        .args([
+            "--project-dir",
+            &temp.path().display().to_string(),
+            "--config-dir",
+            &temp.path().display().to_string(),
+            "--github-api-endpoint",
+            &server.endpoint,
+            "github",
+            "gh-env-pr-create-chain",
+            "arbsec/orchestraitor",
+            "--",
+            "gh",
+            "pr",
+            "create",
+            "--body-file",
+            "-",
+        ])
+        .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
+        .env("PATH", std::env::join_paths(&split).into_diagnostic()?)
+        .env("GUARD_OUT", temp.path().join("child.out"))
+        .current_dir(&repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .into_diagnostic()?;
+    // Feed the "body" the way the `pr-create` script's `@<path>` callers
+    // would, then close the pipe so `cat` in the stub sees EOF.
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| miette::miette!("orc child stdin must be piped"))?
+        .write_all(b"## Summary\n\npiped body for #602\n")
+        .into_diagnostic()?;
+    let output = child.wait_with_output().into_diagnostic()?;
+
+    assert!(
+        output.status.success(),
+        "the chain child must read the piped body and create the PR: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = fs::read(&out_path).into_diagnostic()?;
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "## Summary\n\npiped body for #602\n",
+        "the capture-route child must receive the parent's piped stdin verbatim"
+    );
+    Ok(())
+}
+
 #[test]
 #[cfg(unix)]
 fn github_gh_env_pr_create_chain_runs_labeling_scripts() -> miette::Result<()> {
@@ -1843,6 +1958,10 @@ fn github_gh_env_pr_create_chain_runs_labeling_scripts() -> miette::Result<()> {
             "--draft",
         ])
         .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+        // The test runner's ambient environment MUST NOT leak into the child:
+        // `ORC_GITHUB_APP_ENFORCEMENT` overrides the layered config and would
+        // make the guard tests environment-dependent.
+        .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
         .env("PATH", std::env::join_paths(&split).into_diagnostic()?)
         .env("GUARD_OUT", &out_path)
         .current_dir(&repo)
