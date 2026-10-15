@@ -77,7 +77,6 @@ impl ExpansionFailure {
 }
 
 /// A failure carrying its typed reason for one reference lookup.
-/// A failure carrying its typed reason for one reference lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferenceError {
     /// Typed lookup failure; the reference stays literal text.
@@ -254,8 +253,7 @@ fn is_secret_uri(candidate: &str) -> bool {
 /// `key=value` credential assignment (case-insensitive key, long value).
 fn is_credential_assignment(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
-    (lower.starts_with("bearer ")
-        || lower.starts_with("api_key=")
+    (lower.starts_with("api_key=")
         || lower.starts_with("apikey=")
         || lower.starts_with("api-key=")
         || lower.starts_with("token=")
@@ -283,11 +281,28 @@ pub fn redact_secrets(text: &str) -> (String, usize) {
     let mut count = 0usize;
     let mut rest = text;
     while !rest.is_empty() {
-        if is_secret_shaped(rest, 0) {
-            let word: String = rest
+        let word: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '`')
+            .collect();
+        // `Bearer <value>`: the scheme word AND the following value word
+        // are both consumed — a bare scheme word alone carries no secret.
+        if word.eq_ignore_ascii_case("bearer") {
+            let after = &rest[word.len()..];
+            let value: String = after
                 .chars()
+                .skip_while(|c| c.is_whitespace())
                 .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '`')
                 .collect();
+            if !value.is_empty() {
+                redacted.push_str("[REDACTED]");
+                count += 1;
+                let skipped = word.len() + (after.len() - value.len()) + value.len();
+                rest = &rest[skipped..];
+                continue;
+            }
+        }
+        if is_secret_shaped(rest, 0) {
             redacted.push_str("[REDACTED]");
             count += 1;
             rest = &rest[word.len()..];
@@ -311,17 +326,32 @@ pub fn cap_value(text: &str, cap: usize) -> String {
 }
 
 /// Builds the fenced expanded block for one reference (§6.1: untrusted
-/// provider content, quoted as data in a labelled fence; secrets
-/// redacted with the announcement).
+/// provider content, quoted as data in a labelled fence; secrets redacted
+/// with the announcement). The fence is longer than ANY backtick run in
+/// the content, so provider text can never close it early (§6.1
+/// containment).
 #[must_use]
 fn build_block(reference: &Reference, fields: &ExpandedFields) -> String {
-    let mut block = String::new();
-    let _ = writeln!(
-        block,
-        "{FENCE}expanded {}://{} (untrusted content below)",
+    let raw = build_block_unfenced(fields);
+    let longest_run = raw
+        .split("```")
+        .map(|segment| segment.chars().take_while(|c| *c == '`').count())
+        .chain(std::iter::once(0))
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let fence = "`".repeat(longest_run);
+    format!(
+        "{fence}expanded {}://{} (untrusted content below)\n{raw}\n{fence}",
         reference.kind.scheme(),
         reference.number
-    );
+    )
+}
+
+/// The unfenced block content (typed fields + redaction).
+#[must_use]
+fn build_block_unfenced(fields: &ExpandedFields) -> String {
+    let mut block = String::new();
     match fields {
         ExpandedFields::Pr(pr) => {
             let _ = writeln!(block, "number: {}", pr.number);
@@ -372,7 +402,6 @@ fn build_block(reference: &Reference, fields: &ExpandedFields) -> String {
     if count > 0 {
         let _ = writeln!(result, "redacted ({count} instance(s))");
     }
-    result.push_str(FENCE);
     result
 }
 
@@ -425,6 +454,30 @@ pub struct ExpansionReport {
 /// Never returns an error for a lookup failure (those are typed notices in
 /// the report); returns [`ReferenceError`] only if the payload itself
 /// cannot be processed, which cannot occur for text input.
+/// The typed budget-exceeded notice for one literal (§9.49: the payload
+/// is still delivered; the reference stays literal with the notice).
+/// The typed budget-exceeded notice for one literal (§9.49: the payload
+/// is still delivered; the reference stays literal with the notice).
+fn budget_exceeded_notice(literal: &str) -> String {
+    format!(
+        "{literal} [budget-exceeded; the payload is still delivered — the pass budget \
+         was reached before this reference could be expanded]"
+    )
+}
+
+/// Expands every reference in `payload` at the delegation boundary (§9.49).
+///
+/// The expansion is ONE pass over the payload; expanded block content is
+/// never re-scanned. References are processed in first-appearance order;
+/// the pass stops inlining at the 8 KiB budget (later references stay
+/// literal with a typed budget notice). Failures leave the reference as
+/// literal text with a typed notice and the payload is still delivered —
+/// the layer never retries synchronously (§9.26.1).
+///
+/// # Errors
+///
+/// Only propagated transport-level construction failures; lookup failures
+/// are typed notices inside the returned report, never an error return.
 pub fn expand_payload(
     payload: &str,
     owner: &str,
@@ -450,6 +503,8 @@ pub fn expand_payload(
     let mut budget_exceeded = false;
     for reference in &unique {
         if budget_exceeded {
+            let notice = budget_exceeded_notice(&reference.literal);
+            blocks.push((reference.literal.clone(), notice));
             outcomes.push(ExpansionOutcome {
                 reference: reference.literal.clone(),
                 expanded: false,
@@ -467,9 +522,20 @@ pub fn expand_payload(
         };
         match fields {
             Ok(resolved) => {
-                let block = build_block(reference, &resolved);
+                let mut block = build_block(reference, &resolved);
+                // §9.49: 2 KiB per expanded reference — a block larger than
+                // the cap is truncated before the closing fence.
+                if block.len() > MAX_REFERENCE_CHARS {
+                    let truncated = block
+                        .chars()
+                        .take(MAX_REFERENCE_CHARS.saturating_sub(4))
+                        .collect::<String>();
+                    block = format!("{truncated}…[truncated]\n```");
+                }
                 if pass_chars + block.len() > MAX_PASS_CHARS {
                     budget_exceeded = true;
+                    let notice = budget_exceeded_notice(&reference.literal);
+                    blocks.push((reference.literal.clone(), notice));
                     outcomes.push(ExpansionOutcome {
                         reference: reference.literal.clone(),
                         expanded: false,
@@ -478,20 +544,22 @@ pub fn expand_payload(
                     continue;
                 }
                 pass_chars += block.len();
-                let notice = String::new();
                 blocks.push((reference.literal.clone(), block));
                 outcomes.push(ExpansionOutcome {
                     reference: reference.literal.clone(),
                     expanded: true,
                     failure: None,
                 });
-                let _ = notice;
             }
             Err(ReferenceError::Failure(failure)) => {
                 let label = failure.label();
+                // The reference STAYS literal text with the typed notice
+                // attached after it (§9.49: "the reference is left as
+                // literal text and an expansion notice is attached").
                 let notice = format!(
-                    "{label}; the payload is still delivered — the reference could not \
-                     be expanded"
+                    "{literal} [{label}; the payload is still delivered — the reference \
+                     could not be expanded]",
+                    literal = reference.literal
                 );
                 blocks.push((reference.literal.clone(), notice));
                 outcomes.push(ExpansionOutcome {
