@@ -507,3 +507,53 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn sanitize_provider_text_neutralizes_newlines_and_controls() {
+        let sanitized = sanitize_provider_text("line1\nline2\r\ttab\u{7}");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\r'));
+        assert!(!sanitized.contains('\t'));
+        assert!(!sanitized.contains('\u{7}'));
+    }
+
+    #[test]
+    fn sanitize_provider_text_neutralizes_bidirectional_controls() {
+        // LRE/RLE/LRO/RLO/PDF/LRI/RLI/FSI/PDI + LRM/RLM: bidi controls can
+        // reorder displayed text to disguise the verdict.
+        for (label, ch) in [
+            ("LRE", '\u{202A}'),
+            ("RLE", '\u{202B}'),
+            ("LRO", '\u{202C}'),
+            ("RLO", '\u{202D}'),
+            ("PDF", '\u{202E}'),
+            ("LRI", '\u{2066}'),
+            ("RLI", '\u{2067}'),
+            ("FSI", '\u{2068}'),
+            ("PDI", '\u{2069}'),
+            ("LRM", '\u{200E}'),
+            ("RLM", '\u{200F}'),
+        ] {
+            let sanitized = sanitize_provider_text(&format!("a{ch}b"));
+            assert!(
+                !sanitized.contains(ch),
+                "{label} must be neutralized: {sanitized:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_provider_text_preserves_plain_text() {
+        assert_eq!(
+            sanitize_provider_text("plain text with spaces"),
+            "plain text with spaces"
+        );
+        assert_eq!(sanitize_provider_text("café ✓"), "café ✓");
+    }
+}
