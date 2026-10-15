@@ -369,6 +369,17 @@ pub fn redact_secrets(text: &str) -> (String, usize) {
     (redacted, count)
 }
 
+/// Flattens provider-supplied text to a single line (newlines in
+/// state/author/url/labels would break the block's line-based layout).
+fn sanitize_line(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' => ' ',
+            c => c,
+        })
+        .collect()
+}
+
 /// Cap a value with the static truncation marker.
 #[must_use]
 pub fn cap_value(text: &str, cap: usize) -> String {
@@ -408,12 +419,21 @@ fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
     let mut block = String::new();
     match fields {
         ExpandedFields::Pr(pr) => {
+            let single_line = |text: &str| -> String { sanitize_line(text) };
             let _ = writeln!(block, "number: {}", pr.number);
-            let _ = writeln!(block, "title: {}", cap_value(&pr.title, MAX_TITLE_CHARS));
-            let _ = writeln!(block, "state: {}", pr.state);
-            let _ = writeln!(block, "author: {}", pr.author);
-            let _ = writeln!(block, "labels: {}", cap_value(&pr.labels, MAX_TITLE_CHARS));
-            let _ = writeln!(block, "url: {}", pr.url);
+            let _ = writeln!(
+                block,
+                "title: {}",
+                cap_value(&single_line(&pr.title), MAX_TITLE_CHARS)
+            );
+            let _ = writeln!(block, "state: {}", single_line(&pr.state));
+            let _ = writeln!(block, "author: {}", single_line(&pr.author));
+            let _ = writeln!(
+                block,
+                "labels: {}",
+                cap_value(&single_line(&pr.labels), MAX_TITLE_CHARS)
+            );
+            let _ = writeln!(block, "url: {}", single_line(&pr.url));
             let _ = writeln!(block, "head_sha: {}", pr.head_sha);
             let _ = writeln!(block, "base_oid: {}", pr.base_oid);
             let _ = writeln!(
@@ -425,7 +445,7 @@ fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
                 let names: Vec<String> = pr
                     .failing_checks
                     .iter()
-                    .map(|name| cap_value(name, MAX_TITLE_CHARS))
+                    .map(|name| cap_value(&sanitize_line(name), MAX_TITLE_CHARS))
                     .collect();
                 let _ = writeln!(block, "failing_checks: {}", names.join(", "));
             }
@@ -537,6 +557,11 @@ fn enforce_reference_cap(mut raw: String, header_len: usize, fence_len: usize) -
         }
         raw = format!("{}…[truncated]", &raw[..cut]);
         if !announcement.is_empty() {
+            // Newline before the announcement: it must read as its own
+            // line after the truncated content.
+            if !raw.ends_with('\n') {
+                raw.push('\n');
+            }
             writeln!(raw, "{announcement}").ok();
         }
     }
@@ -649,7 +674,9 @@ fn resolve_references(
         outcomes.push(ExpansionOutcome {
             reference: reference.literal.clone(),
             expanded: !is_failure && !budget_hit,
-            failure: failure_label.filter(|_| is_failure),
+            failure: failure_label
+                .filter(|_| is_failure)
+                .or_else(|| budget_hit.then(|| String::from("budget-exceeded"))),
         });
     }
     (outcomes, substitutions, budget_exceeded)
