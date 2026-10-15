@@ -992,6 +992,21 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     //     intends to land, refuse on ANY divergence before mutating.
     verify_expect_tree(&local_tree, args.expect_tree.as_deref(), &local_branch)?;
 
+    // Fetch the remote branch first so the new-commit range is accurate
+    // (a fetch failure is non-fatal: the guard then compares against
+    // origin/main or nothing — fail-open on connectivity, fail-closed on
+    // content).
+    let _ = git(None, &["fetch", "origin", &remote_branch]);
+
+    // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
+    //     whose NEW commits carry two or more CONSECUTIVE identical
+    //     subjects is refused — review-fix rounds must land as distinct
+    //     Conventional Commits subjects (or be squashed through this
+    //     command's single-commit landing). A single new commit is always
+    //     allowed. Only commits NOT already on the remote branch are
+    //     examined, so a re-land of an unchanged chain is unaffected.
+    reject_duplicate_subjects(&local_branch, &remote_branch)?;
+
     // 2. Mint and drive the remote: one GraphQL endpoint, installation-token
     //    bearer, every mutation's result validated. The token rides only the
     //    Authorization header and never enters a diagnostic.
@@ -1239,6 +1254,66 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+/// Refuses a push whose NEW commits (commits on `local_branch` not
+/// reachable from the remote branch, or from `origin/<remote_branch>`
+/// default) carry two or more CONSECUTIVE identical subject lines
+/// (owner directive 2026-10-15: review-fix rounds landed with only the
+/// body differing defeated PR review convergence — each round must be a
+/// distinct Conventional Commits subject or squashed into one commit).
+///
+/// The single-new-commit case is always allowed. Commits already on the
+/// remote are ignored, so re-landing an unchanged chain is unaffected.
+///
+/// # Errors
+///
+/// Typed diagnostic naming the duplicated subject when two consecutive
+/// new commits share a subject line.
+fn reject_duplicate_subjects(local_branch: &str, remote_branch: &str) -> Result<()> {
+    // The remote head: the branch on the origin remote if it exists, else
+    // the default branch's head (a new remote branch starts from the base).
+    let remote_head = git(
+        None,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("origin/{remote_branch}"),
+        ],
+    )
+    .or_else(|_| git(None, &["rev-parse", "--verify", "--quiet", "origin/main"]))
+    .unwrap_or_default();
+
+    // List the new commits oldest-first: subjects only.
+    let range = if remote_head.is_empty() {
+        local_branch.to_string()
+    } else {
+        format!("{remote_head}..{local_branch}")
+    };
+    let subjects_raw = git(None, &["log", "--format=%s", &range])?;
+    let subjects: Vec<String> = subjects_raw.lines().map(str::to_string).collect();
+    reject_consecutive_duplicate_subjects(&subjects, local_branch)
+}
+
+/// The pure duplicate-subject check over an oldest-first subject list.
+///
+/// # Errors
+///
+/// Typed diagnostic naming the duplicated subject when two consecutive
+/// entries share a subject line.
+fn reject_consecutive_duplicate_subjects(subjects: &[String], local_branch: &str) -> Result<()> {
+    for pair in subjects.windows(2) {
+        if pair[0] == pair[1] {
+            bail!(
+                "refusing to push: commits on `{local_branch}` carry the identical subject \
+                 `{pair0}` — review-fix rounds must land as distinct Conventional Commits \
+                 subjects, or squash the chain into one commit and land it via this command",
+                pair0 = pair[0]
+            );
+        }
+    }
+    Ok(())
+}
 /// Resolves the target `(owner, repo)` slug. `--repo owner/name` is used
 /// as-is; a bare `--repo name` combines with the owner (explicit `--owner`
 /// or the origin-derived one). With no flags both come from origin.
@@ -2782,6 +2857,51 @@ mod tests {
     fn empty_path_is_a_typed_error() {
         let error = format!("{}", validate_api_path("").unwrap_err());
         assert!(error.contains("must not be empty"), "{error}");
+    }
+
+    // --- reject_duplicate_subjects (owner directive 2026-10-15) --------------
+
+    #[test]
+    fn duplicate_consecutive_subjects_are_refused() {
+        // Two consecutive new commits sharing a subject: refused.
+        let subjects = vec![
+            String::from("feat: same subject"),
+            String::from("feat: same subject"),
+        ];
+        let error = reject_consecutive_duplicate_subjects(&subjects, "feature")
+            .expect_err("duplicates are refused");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("identical subject"),
+            "typed diagnostic must name the duplicated subject: {rendered}"
+        );
+    }
+
+    #[test]
+    fn distinct_subjects_pass() {
+        let subjects = vec![String::from("fix: first"), String::from("fix: second")];
+        reject_consecutive_duplicate_subjects(&subjects, "feature")
+            .expect("distinct subjects pass");
+    }
+
+    #[test]
+    fn single_new_commit_is_always_allowed() {
+        let subjects = vec![String::from("feat: only one")];
+        reject_consecutive_duplicate_subjects(&subjects, "feature")
+            .expect("a single new commit is allowed");
+    }
+
+    #[test]
+    fn non_consecutive_duplicates_are_allowed() {
+        // The guard targets CONSECUTIVE duplicates only: distinct subjects
+        // between them are fine.
+        let subjects = vec![
+            String::from("feat: same subject"),
+            String::from("fix: other"),
+            String::from("feat: same subject"),
+        ];
+        reject_consecutive_duplicate_subjects(&subjects, "feature")
+            .expect("non-consecutive duplicates pass");
     }
 
     // --- error paths never carry token material ------------------------------
