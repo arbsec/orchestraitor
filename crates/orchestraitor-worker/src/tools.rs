@@ -90,9 +90,10 @@ pub(crate) struct ToolExecutor<'a> {
     /// The session's `think`-tool state (§9.48.3 budgets, §9.48.8 sequence
     /// ids). Per-executor, i.e. per-run at depth 0.
     thoughts: crate::think::ThoughtChain,
-    /// Audit metadata of every accepted reasoning step (§9.48.8): the run
-    /// result carries them so the caller can persist `agent reasoning`
-    /// events; text rides only when payload recording is enabled.
+    /// Audit metadata of every receipted reasoning step, accepted or
+    /// refused (spec 9.48.8): the run result carries them so the caller can
+    /// persist `agent reasoning` events; text rides only on accepted steps
+    /// AND only when payload recording is enabled.
     reasoning_records: Vec<ReasoningRecord>,
 }
 
@@ -110,8 +111,8 @@ impl<'a> ToolExecutor<'a> {
         }
     }
 
-    /// The audit metadata of every accepted reasoning step, in acceptance
-    /// order (§9.48.8 persistence source).
+    /// The audit metadata of every receipted reasoning step - accepted AND
+    /// refused - in call order (spec 9.48.8 persistence source).
     pub(crate) fn reasoning_records(&self) -> &[ReasoningRecord] {
         &self.reasoning_records
     }

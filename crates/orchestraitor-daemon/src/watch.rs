@@ -1066,8 +1066,16 @@ impl LoopWorkerStarter for DirectWatchStarter {
                     append_reasoning_events(&events, &run_task_id, &records, record_payloads)
                 })
                 .await;
-                if let Ok(Err(error)) = persistence {
-                    tracing::warn!("reasoning event persistence failed: {error}");
+                match persistence {
+                    Ok(Err(error)) => {
+                        tracing::warn!("reasoning event persistence failed: {error}");
+                    }
+                    // A panicking append must never vanish silently: the
+                    // comment above promises the failure is observable.
+                    Err(join_error) => {
+                        tracing::warn!("reasoning event persistence task failed: {join_error}");
+                    }
+                    Ok(Ok(())) => {}
                 }
             }
             result

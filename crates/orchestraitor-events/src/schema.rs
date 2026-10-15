@@ -63,7 +63,8 @@ pub enum EventCategory {
     /// Security finding event.
     SecurityFinding,
     /// Externalized deliberation from the built-in `think` tool (spec
-    /// `20-harness-worker.md` §9.48): one event per accepted reasoning step.
+    /// `20-harness-worker.md` §9.48): one event per receipted reasoning
+    /// step - accepted step or typed refusal (§9.48.1).
     AgentReasoning,
 }
 

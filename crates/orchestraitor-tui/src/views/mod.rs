@@ -356,6 +356,9 @@ pub fn neutralize_control_sequences(text: &str) -> String {
             bidi @ ('\u{202A}'..='\u{202E}'
             | '\u{2066}'..='\u{2069}'
             | '\u{200B}'..='\u{200F}'
+            | '\u{061C}'
+            | '\u{2028}'
+            | '\u{2029}'
             | '\u{FEFF}') => {
                 format!("<U+{:04X}>", u32::from(bidi))
             }
