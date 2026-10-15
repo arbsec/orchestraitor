@@ -481,6 +481,14 @@ mod linux_exec {
     use crate::exec::{ExecError, ExecutionPolicy, NetworkPolicy, ScriptExecution};
 
     pub(super) fn run_bash(script: &[u8]) -> Result<MediatedRun, MediationError> {
+        // Every directory-materializing construction funnels through here:
+        // hold the snapshot lock across the whole construction + execution
+        // so the gate-refusal test's snapshot window is serialized (issue
+        // #645). The gate test itself never calls run_bash, so no
+        // re-entrancy.
+        let _guard = crate::EXEC_TEMP_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Explicit mediated policy (issue #311): network is denied even
         // though `NetworkPolicy::Denied` is also the crate default — the
         // bootstrap path names its enforcement posture instead of inheriting
@@ -749,19 +757,33 @@ mod tests {
         let controls = EffectiveControls::all_unavailable();
         let preflight = build_preflight("linux", controls);
 
+        // The snapshot window is serialized against every OTHER test in this
+        // module that materializes `arbitraitor-exec-<pid>-*` directories
+        // (they hold the same lock across their constructions — issue #645:
+        // under the parallel runner, sibling constructions legitimately move
+        // the count, which made an unsynchronized count-diff flake).
+        let _guard = crate::EXEC_TEMP_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         // Snapshot this process's Arbitraitor execution temp directories:
         // ScriptExecution materializes them at construction, so any
-        // construction would be observable here.
+        // construction while we hold the lock would be observable here.
         let before = count_exec_temp_dirs();
 
         // When: the spawn gate refuses.
         assert!(gate_preflight(preflight).is_err());
 
-        // Then: no execution context was materialized. Because the gate is
-        // synchronous, refuses before touching the exec crate, and these
-        // directory names are namespaced to this process, the unchanged count
-        // proves no mediated context build (and therefore no spawn) occurred.
-        assert_eq!(count_exec_temp_dirs(), before);
+        // Then: no execution context was materialized. The gate is
+        // synchronous and refuses before touching the exec crate; with the
+        // window serialized against sibling constructions, the unchanged
+        // count proves no mediated context build (and therefore no spawn)
+        // occurred.
+        assert_eq!(
+            count_exec_temp_dirs(),
+            before,
+            "the gate refusal must not materialize an execution temp directory"
+        );
     }
 
     #[test]
@@ -896,6 +918,10 @@ mod tests {
     /// preflight tests above never skip.
     #[cfg(target_os = "linux")]
     fn mediated_stack_or_skip() -> Option<MediatedWorker> {
+        // The probe's `run_bash` call takes EXEC_TEMP_DIR_LOCK itself (the
+        // whole construction + execution window is serialized there), so
+        // the gate-refusal test's snapshot window never overlaps a live
+        // construction (issue #645).
         if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
             return None;
         }

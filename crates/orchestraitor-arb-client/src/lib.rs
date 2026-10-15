@@ -18,6 +18,15 @@ pub use arbitraitor_receipt as receipt;
 pub use arbitraitor_sandbox as sandbox;
 
 pub use arbitraitor_mcp::{ApprovalTokenIssuer, PlanContext};
+
+/// Serializes every path that materializes `arbitraitor-exec-<pid>-*` temp
+/// directories (issue #645): under the parallel test runner, sibling
+/// constructions legitimately move the directory count, which made the
+/// gate-refusal test's snapshot-assert-diff flake. The production paths
+/// (`mediation::linux_exec::run_bash`, `bash_child::BashChild::spawn`/`wait`)
+/// and the gate-refusal test's snapshot window all hold this lock.
+#[doc(hidden)]
+pub static EXEC_TEMP_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub use arbitraitor_model::finding::Finding;
 pub use arbitraitor_model::verdict::Verdict;
 pub use arbitraitor_policy::{EvalContext, PolicyEngine, PolicyError};

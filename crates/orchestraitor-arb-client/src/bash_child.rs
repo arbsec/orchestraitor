@@ -182,6 +182,12 @@ impl BashChild {
     ///   mediated context.
     /// - [`MediationError::Bash`] when the spawn fails.
     pub fn spawn() -> Result<Self, MediationError> {
+        // Materializes `arbitraitor-exec-<pid>-*` directories: hold the
+        // crate-wide snapshot lock so the gate-refusal test's window is
+        // serialized against this construction (issue #645).
+        let _guard = crate::EXEC_TEMP_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(target_os = "linux")]
         {
             let interpreter = std::path::PathBuf::from("/bin/bash");
