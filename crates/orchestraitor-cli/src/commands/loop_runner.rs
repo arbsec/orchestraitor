@@ -150,6 +150,8 @@ struct DirectLoopStarter {
     declared_tools: Vec<orchestraitor_worker::ToolDefinition>,
     /// The built-in `think` tool's kill-switch state (§9.48.2).
     think_enabled: bool,
+    /// The §9.48.8 payload-recording consent gate, resolved once at startup.
+    record_payloads: bool,
     /// The sub-session routing resolved with that tool surface (the §9.35
     /// decision-record evidence).
     subsession_routing:
@@ -428,7 +430,9 @@ impl LoopWorkerStarter for DirectLoopStarter {
             },
         );
         let config = self.with_cost_tracking(config, selected, routing);
-        let config = config.with_profile(self.profile.clone());
+        let config = config
+            .with_profile(self.profile.clone())
+            .with_record_payloads(self.record_payloads);
         let config = config.with_progress(beats_tx);
         let run = tokio::spawn(async move {
             run_worker(
@@ -656,17 +660,26 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     // "bookkeeping must never block delivery" (a PR #565 gen-3 review
     // finding — the `?` here made the same error fatal that
     // `resolve_guardrails` treats as a warning).
-    let routing_profile = match layers.resolver.resolve_config() {
-        Ok(effective) => effective
-            .roles
-            .and_then(|roles| roles.get(WORKER_ROLE).cloned())
-            .and_then(|role| role.routing)
-            .and_then(|routing| routing.profile),
+    let (routing_profile, record_payloads) = match layers.resolver.resolve_config() {
+        Ok(effective) => {
+            let routing_profile = effective
+                .roles
+                .and_then(|roles| roles.get(WORKER_ROLE).cloned())
+                .and_then(|role| role.routing)
+                .and_then(|routing| routing.profile);
+            // The 9.48.8 consent gate, read once at startup like the daemon
+            // path: `thought_text` persists only when the operator enabled
+            // payload recording (spec 50 20.4.2; default false).
+            let record_payloads = effective
+                .observability
+                .is_some_and(|observability| observability.record_payloads);
+            (routing_profile, record_payloads)
+        }
         Err(error) => {
             report_loop_warning(&format!(
                 "profile label unresolved ({error}); runs record no profile"
             ));
-            None
+            (None, false)
         }
     };
 
@@ -750,6 +763,7 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             // Gated once, above: never re-validated per spawn.
             declared_tools: surface.tools,
             think_enabled: surface.think_enabled,
+            record_payloads,
             subsession_routing: surface.subsession_routing,
         };
         let runner = LoopRunner::new(
