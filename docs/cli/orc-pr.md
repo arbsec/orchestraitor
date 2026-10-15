@@ -92,3 +92,37 @@ Reads run through the same `github_app` service-identity mint path every
 never a personal token. There is no personal-account fallback: a missing or
 partial `github_app` config is a typed config error (exit 2). No secrets
 appear in the output: the token lives only in the minting client.
+
+## The `pr.status` coordinator decision tool (daemon/MCP surface)
+
+The §9.48 engine is SHARED ("one engine, three surfaces"): the typed verdict,
+the pure classification semantics, and the aggregation live in the
+`orchestraitor-mcp` crate (`orchestraitor_mcp::pr_status`), consumed verbatim
+by BOTH `orc pr status` (this CLI) and the daemon's `pr.status` MCP gateway
+tool (spec `10-orchestrator.md` §9.39, §9.48) — the same typed output, the
+same reason codes, never a second interpretation. The CLI keeps only its
+shell: `--repo` resolution, the service-identity mint, the blocking GitHub
+transport, and the human one-pager. The tool is READ-ONLY: it never labels,
+comments, reviews, or merges.
+
+**Enabling the tool requires ALL THREE gateway context values** — an
+operator who sets only a subset gets a hidden, uncallsable tool (the same
+`disable_route` posture as `board.query`), never a partially scoped one:
+
+1. `pr_status` — the GraphQL transport reading through the configured
+   `github_app` service identity (the same mint path the CLI uses).
+2. `pr_status_repo_root` — the workspace root the tool reads
+   `.orchestraitor/reviews/` under (the CLEAN-review-record store).
+3. `pr_status_allowed_repo` — the single `owner/name` repository the tool
+   may read. Tool arguments are untrusted input (§6.1): a request naming
+   any OTHER repository is refused BEFORE the engine runs with the typed
+   `pr_status_out_of_scope` payload (naming the configured scope), and the
+   refusal is recorded in the audit store with the `out_of_scope` outcome
+   class — scope-boundary probes leave an audit trail.
+
+Every invocation — verdict, typed error, or scope refusal — records a
+`ToolRequest` event in the shared audit store with the §9.25.1
+delegation chain (client-asserted labels, `claimed:`-prefixed and
+truncated) and an outcome class (`verdict` / `unrecoverable` / `config` /
+`concurrent_edit` / `out_of_scope`). An unread sub-check returns the
+typed error with the degraded `partial_verdict` field (§9.48 invariant).

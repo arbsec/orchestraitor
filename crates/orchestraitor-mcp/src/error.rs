@@ -90,6 +90,12 @@ pub enum McpGatewayError {
     /// REFUSALS are not errors: they are structured outcomes.
     #[error("board.move failed: {0}")]
     BoardMove(String),
+    /// The `pr.status` decision tool failed (transport, malformed provider
+    /// output, event store, or worker failure). Message text is a static,
+    /// log-safe label — never PR content. The typed §9.48 payload rides the
+    /// structured tool content, not this message (§9.48).
+    #[error("pr.status failed: {0}")]
+    PrStatus(String),
 }
 
 impl From<std::io::Error> for McpGatewayError {

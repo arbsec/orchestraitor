@@ -48,9 +48,9 @@ const MAX_BLOCKED_DEPTH: usize = 64;
 /// Filter values are untrusted input (§6.1); the audit record shows the
 /// value for correlation, truncated with a static marker — never the full
 /// hostile payload, never executed.
-const MAX_PAYLOAD_VALUE_CHARS: usize = 200;
+pub(crate) const MAX_PAYLOAD_VALUE_CHARS: usize = 200;
 /// Static suffix appended to truncated event-payload values.
-const TRUNCATION_SUFFIX: &str = "…[truncated]";
+pub(crate) const TRUNCATION_SUFFIX: &str = "…[truncated]";
 /// Maximum filter-field entries carried into the event payload (mirrors
 /// [`MAX_CHAIN_PRINCIPALS`]): the MCP caller controls `filter.fields`, so an
 /// unbounded array would let one request bloat the audit record. Overflow is
@@ -691,7 +691,7 @@ async fn walk_blocked(
 /// Truncates an untrusted value for the event payload: at most
 /// [`MAX_PAYLOAD_VALUE_CHARS`] characters plus the static truncation marker.
 /// The full hostile payload never enters the audit record.
-fn truncate_payload_value(value: &str) -> String {
+pub(crate) fn truncate_payload_value(value: &str) -> String {
     if value.chars().count() <= MAX_PAYLOAD_VALUE_CHARS {
         return value.to_string();
     }
@@ -750,9 +750,9 @@ fn cap_filter_fields(value: &Value) -> Value {
 /// will assert it itself once it records events). Principal labels are
 /// client input, so each is truncated like any filter value and the chain
 /// length is bounded ([`MAX_CHAIN_PRINCIPALS`]).
-const MAX_CHAIN_PRINCIPALS: usize = 32;
+pub(crate) const MAX_CHAIN_PRINCIPALS: usize = 32;
 /// Static marker appended when the principal list exceeds the cap.
-const CHAIN_TRUNCATION_MARKER: &str = "…[chain truncated]";
+pub(crate) const CHAIN_TRUNCATION_MARKER: &str = "…[chain truncated]";
 
 /// Records one completed invocation into the caller-owned store (the
 /// empty-store path; the gateway's shared-store path appends via
