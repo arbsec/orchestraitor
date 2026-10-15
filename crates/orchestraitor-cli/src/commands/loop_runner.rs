@@ -462,7 +462,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
                     let run_task_id = run_task_id.clone();
                     let records = worker_run.reasoning_events.clone();
                     move || {
-                        append_reasoning_events(
+                        orchestraitor_events::append_reasoning_events(
                             &reasoning_events,
                             &run_task_id,
                             &records,
@@ -944,67 +944,6 @@ fn render_text(
     )
     .into_diagnostic()?;
     writeln!(writer, "elapsed = {}s", summary.elapsed_secs).into_diagnostic()?;
-    Ok(())
-}
-
-/// The foreground loop's §9.48.8 append: the same hash-chained
-/// `agent reasoning` event the daemon path writes — audit metadata always,
-/// `thought_text` only under payload-recording consent (spec 50 §20.4.2),
-/// refused steps never carrying text under any consent setting.
-///
-/// # Errors
-///
-/// Returns the store error when the head read or any append fails.
-fn append_reasoning_events(
-    events: &std::sync::Mutex<orchestraitor_events::SqliteAuditStore>,
-    task_id: &str,
-    records: &[orchestraitor_worker::ReasoningRecord],
-    record_payloads: bool,
-) -> Result<(), String> {
-    use orchestraitor_events::{
-        AuditStore, CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
-    };
-    let mut store = events
-        .lock()
-        .map_err(|_| "reasoning event store lock poisoned".to_string())?;
-    for record in records {
-        let thought_text = if record_payloads {
-            record.thought_text.clone()
-        } else {
-            None
-        };
-        let payload = serde_json::json!({
-            "event": "agent-reasoning",
-            "task_id": task_id,
-            "accepted": record.accepted,
-            "refusal_reason": record.refusal_reason,
-            "thought_number": record.thought_number,
-            "total_thoughts": record.total_thoughts,
-            "next_thought_needed": record.next_thought_needed,
-            "is_revision": record.is_revision,
-            "revises_thought": record.revises_thought,
-            "thought_chars": record.thought_chars,
-            "sequence_id": record.sequence_id,
-            "thought_text": thought_text,
-        });
-        let head = store.head().map_err(|error| error.to_string())?;
-        let envelope = EventEnvelope::try_new(EventEnvelopeInput {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            monotonic_seq: u64::try_from(head.seq_base)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-            wall_clock_ts: time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z")),
-            correlation_id: orchestraitor_model::OperationId::new(),
-            parent_op_id: None,
-            category: EventCategory::AgentReasoning,
-            payload,
-            prev_hash: head.prev_hash,
-        })
-        .map_err(|error| error.to_string())?;
-        store.append(envelope).map_err(|error| error.to_string())?;
-    }
     Ok(())
 }
 

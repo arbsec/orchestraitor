@@ -63,6 +63,39 @@ pub struct ReasoningRecord {
     pub thought_text: Option<String>,
 }
 
+impl orchestraitor_events::ReasoningEvent for ReasoningRecord {
+    fn accepted(&self) -> bool {
+        self.accepted
+    }
+    fn refusal_reason(&self) -> Option<&'static str> {
+        self.refusal_reason
+    }
+    fn thought_number(&self) -> u32 {
+        self.thought_number
+    }
+    fn total_thoughts(&self) -> u32 {
+        self.total_thoughts
+    }
+    fn next_thought_needed(&self) -> bool {
+        self.next_thought_needed
+    }
+    fn is_revision(&self) -> bool {
+        self.is_revision
+    }
+    fn revises_thought(&self) -> Option<u32> {
+        self.revises_thought
+    }
+    fn thought_chars(&self) -> usize {
+        self.thought_chars
+    }
+    fn sequence_id(&self) -> u32 {
+        self.sequence_id
+    }
+    fn thought_text(&self) -> Option<&str> {
+        self.thought_text.as_deref()
+    }
+}
+
 /// Per-run thought-chain state backing the §9.48.3 budgets.
 #[derive(Default)]
 pub struct ThoughtChain {

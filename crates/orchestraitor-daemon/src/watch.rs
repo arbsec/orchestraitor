@@ -670,75 +670,46 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
-/// Appends one hash-chained `agent reasoning` event per reasoning step,
-/// accepted or refused (§9.48.8), to the daemon's §9.17 event store. The
-/// payload always
-/// carries the audit metadata (`thought_number`, `total_thoughts`,
-/// `next_thought_needed`, `is_revision`, `revises_thought`, `thought_chars`,
-/// `sequence_id`, `task_id`); `thought_text` rides ONLY under
-/// payload-recording consent (spec 50 §20.4.2) — the second defense layer
-/// after the §9.48.4 source refusal, with export redaction (the
-/// `PrivacyExportMode::Redacted` class the category is wired into) as the
-/// third. Refused steps carry no text under any consent setting.
+/// The ingress/kickoff mismatch warnings (§9.50): pure so the two
+/// directions are testable. `main.rs` logs what this returns.
+#[must_use]
+pub fn ingress_kickoff_warnings(
+    ingress_enabled: bool,
+    external_event_armed: bool,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if ingress_enabled && !external_event_armed {
+        warnings.push(
+            "orcd watch: watch.ingress.enabled is true but \
+             watch.kickoff.external_event is false - the ingress queue \
+             has no kick-off consumer and will fill, drop surplus, and \
+             stay degraded; arm external_event or disable the ingress",
+        );
+    }
+    if !ingress_enabled && external_event_armed {
+        warnings.push(
+            "orcd watch: watch.kickoff.external_event is true but \
+             watch.ingress.enabled is false - the external-event condition \
+             can never fire; enable the ingress or disarm external_event",
+        );
+    }
+    warnings
+}
+
+/// The §9.48.8 appender. DELEGATES to the shared implementation in
+/// `orchestraitor-events` — one payload/consent implementation, so the
+/// daemon and foreground `orc loop` paths can never drift.
 ///
 /// # Errors
 ///
-/// Returns the store error when the head read or any append fails. A
-/// mid-batch failure leaves the store consistent with the recorded prefix
-/// (per-event atomicity, the same convention as the reconcile recorder).
+/// Returns the store error when the head read or any append fails.
 pub fn append_reasoning_events<S: orchestraitor_events::AuditStore>(
     events: &std::sync::Mutex<S>,
     task_id: &str,
     records: &[orchestraitor_worker::ReasoningRecord],
     record_payloads: bool,
 ) -> Result<(), orchestraitor_events::EventError> {
-    use orchestraitor_events::{
-        CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput,
-    };
-    // Trait methods (`head`/`append`) come from the generic bound; the
-    // named import keeps the envelope constructors in scope.
-    let mut store = events.lock().map_err(|_| {
-        orchestraitor_events::EventError::Sqlite(rusqlite::Error::ToSqlConversionFailure(
-            "reasoning event store lock poisoned".into(),
-        ))
-    })?;
-    for record in records {
-        // Accepted steps carry text only under consent; refusals never do.
-        let thought_text = if record_payloads {
-            record.thought_text.clone()
-        } else {
-            None
-        };
-        let payload = serde_json::json!({
-            "event": "agent-reasoning",
-            "task_id": task_id,
-            "thought_number": record.thought_number,
-            "total_thoughts": record.total_thoughts,
-            "next_thought_needed": record.next_thought_needed,
-            "is_revision": record.is_revision,
-            "revises_thought": record.revises_thought,
-            "thought_chars": record.thought_chars,
-            "sequence_id": record.sequence_id,
-            "thought_text": thought_text,
-            "accepted": record.accepted,
-            "refusal_reason": record.refusal_reason,
-        });
-        let head = store.head()?;
-        let envelope = EventEnvelope::try_new(EventEnvelopeInput {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            monotonic_seq: u64::try_from(head.seq_base)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-            wall_clock_ts: rfc3339_now(),
-            correlation_id: orchestraitor_model::OperationId::new(),
-            parent_op_id: None,
-            category: EventCategory::AgentReasoning,
-            payload,
-            prev_hash: head.prev_hash,
-        })?;
-        store.append(envelope)?;
-    }
-    Ok(())
+    orchestraitor_events::append_reasoning_events(events, task_id, records, record_payloads)
 }
 
 /// Production worker side for the daemon: the direct-path starter `orc

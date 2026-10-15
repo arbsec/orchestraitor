@@ -845,3 +845,19 @@ fn reasoning_events_persist_hash_chained_and_consent_gated()
     );
     Ok(())
 }
+
+#[test]
+fn ingress_kickoff_warnings_cover_both_mismatch_directions() {
+    use orchestraitor_daemon::ingress_kickoff_warnings;
+    // Both aligned: no warnings in either direction.
+    assert!(ingress_kickoff_warnings(true, true).is_empty());
+    assert!(ingress_kickoff_warnings(false, false).is_empty());
+    // Enabled ingress with a disarmed consumer: fill/drop/degrade warning.
+    let forward = ingress_kickoff_warnings(true, false);
+    assert_eq!(forward.len(), 1);
+    assert!(forward[0].contains("no kick-off consumer"));
+    // Armed external_event without the ingress: can-never-fire warning.
+    let reverse = ingress_kickoff_warnings(false, true);
+    assert_eq!(reverse.len(), 1);
+    assert!(reverse[0].contains("can never fire"));
+}

@@ -292,11 +292,13 @@ impl App {
         self.context_trace.push(entry.into());
     }
 
-    /// Adds a reasoning trace entry (spec §9.48.8). The entry MUST already
-    /// be neutralized: thought text is model-authored untrusted data and is
-    /// rendered as inert text only.
+    /// Adds a reasoning trace entry (spec §9.48.8). Neutralization happens
+    /// HERE — not at the call site — so no caller can forget it: thought
+    /// text is model-authored untrusted data and is rendered as inert text
+    /// only (§9.48.8).
     pub fn add_reasoning_trace(&mut self, entry: impl Into<String>) {
-        self.reasoning_trace.push(entry.into());
+        let entry = crate::views::neutralize_control_sequences(&entry.into());
+        self.reasoning_trace.push(entry);
     }
 
     /// Adds a tool call summary.

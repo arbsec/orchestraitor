@@ -4689,6 +4689,7 @@ dependencies = [
 name = "orchestraitor-events"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "hex",
  "orchestraitor-core",
  "orchestraitor-model",
@@ -4883,6 +4884,7 @@ dependencies = [
  "orchestraitor-arbitraitor-client",
  "orchestraitor-core",
  "orchestraitor-cost-ledger",
+ "orchestraitor-events",
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-provider-neuralwatt",

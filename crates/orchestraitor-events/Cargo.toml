@@ -13,6 +13,9 @@ workspace = true
 
 [dependencies]
 hex = { workspace = true }
+# chrono (MIT OR Apache-2.0): RFC 3339 wall-clock stamps on agent-reasoning
+# events (the same idiom the daemon reconcile recorder uses with `time`).
+chrono = { version = "0.4", features = ["serde"] }
 orchestraitor-core = { path = "../orchestraitor-core" }
 orchestraitor-model = { path = "../orchestraitor-model" }
 serde = { workspace = true, features = ["derive"] }

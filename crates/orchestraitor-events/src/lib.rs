@@ -7,6 +7,7 @@
 
 mod error;
 mod hash;
+mod reasoning;
 mod redaction;
 mod schema;
 mod sqlite;
@@ -17,6 +18,7 @@ mod tracing_layer;
 
 pub use error::EventError;
 pub use hash::{HashDigest, hash_envelope, validate_hash_chain};
+pub use reasoning::{ReasoningEvent, append_reasoning_events};
 pub use redaction::{PrivacyExportMode, redact_event};
 pub use schema::{
     CURRENT_SCHEMA_VERSION, EventCategory, EventEnvelope, EventEnvelopeInput, SchemaInterpretation,

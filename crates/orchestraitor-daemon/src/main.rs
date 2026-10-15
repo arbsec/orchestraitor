@@ -263,31 +263,15 @@ async fn watch_cycle() -> Result<ExitCode> {
     // the operator arms the condition separately via
     // `[watch.kickoff].external_event`. Disabled (the default) keeps the
     // trigger set board/reconcile-derived only.
-    if watch_config.ingress.enabled && !watch_config.kickoff.external_event {
-        // Enabled ingress with a disarmed consumer: the queue fills to
-        // capacity, drops surplus, and stays `degraded` permanently (a
-        // gen-13 review finding). The poller still runs (polling is the
-        // operator's explicit opt-in and the reconcile poll remains the
-        // completeness authority), but the operator must see the
-        // mismatched configuration.
-        tracing::warn!(
-            "orcd watch: watch.ingress.enabled is true but \
-             watch.kickoff.external_event is false - the ingress queue \
-             has no kick-off consumer and will fill, drop surplus, and \
-             stay degraded; arm external_event or disable the ingress"
-        );
-    }
-    if !watch_config.ingress.enabled && watch_config.kickoff.external_event {
-        // The reverse mismatch: the kick-off condition is armed but its
-        // event source (the ingress queue) is disabled — the condition can
-        // never fire. The operator must see the dead configuration instead
-        // of silently never kicking off (the same visibility rule the
-        // enabled-ingress/disarmed-consumer direction enforces above).
-        tracing::warn!(
-            "orcd watch: watch.kickoff.external_event is true but \
-             watch.ingress.enabled is false - the external-event condition \
-             can never fire; enable the ingress or disarm external_event"
-        );
+    // Both mismatch directions are warned via the testable helper
+    // (spec 9.50): an enabled ingress with a disarmed consumer fills,
+    // drops, and degrades; an armed external_event without the ingress
+    // can never fire. The operator must see either dead configuration.
+    for warning in orchestraitor_daemon::ingress_kickoff_warnings(
+        watch_config.ingress.enabled,
+        watch_config.kickoff.external_event,
+    ) {
+        tracing::warn!("{warning}");
     }
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
         .ingress
