@@ -296,6 +296,15 @@ impl Engine {
         number: u64,
         repo_root: &std::path::Path,
     ) -> Result<PrStatus, PrStatusError> {
+        // 0b. The PR number rides a GraphQL Int — reject anything beyond
+        // i32::MAX as a typed config error BEFORE any network call (a
+        // number the query cannot carry would fail mid-read, not at the
+        // boundary).
+        if number > i32::MAX as u64 {
+            return Err(PrStatusError::Config {
+                message: format!("PR #{number} is outside the GraphQL Int range the query carries"),
+            });
+        }
         // 1. The pre-read PR view: identity fields + the two anchors.
         let (initial, view_had_errors) = self.pr_view(owner, repo, number)?;
         let head_sha = oid_field(&initial, "headRefOid", "head")?;

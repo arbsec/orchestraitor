@@ -1012,10 +1012,16 @@ pub(crate) async fn run_pr_status_shared(
             engine.aggregate(&owner, &repo, number)
         })
         .await
-        .map_err(|error| McpGatewayError::PrStatus(format!("pr.status worker failed: {error}")))
-        .map_err(|error| PrStatusToolError {
-            payload: error_payload(&error),
-        })?
+        .unwrap_or_else(|join_error| {
+            // A worker failure (panic inside spawn_blocking, join error) is
+            // an unrecoverable read. It becomes a TYPED Err VALUE (not `?`)
+            // so the shared summary/record path below runs — every terminal
+            // outcome records its event first, never a silent audit gap.
+            Err(crate::pr_status::PrStatusError::Unrecoverable {
+                message: format!("pr.status worker failed: {join_error}"),
+                partial_json: String::new(),
+            })
+        })
     };
 
     let summary = match &aggregate_result {
