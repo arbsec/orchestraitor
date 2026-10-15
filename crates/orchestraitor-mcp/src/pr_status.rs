@@ -892,8 +892,12 @@ fn sub_read<T: Clone>(
 /// next to a new passing one would fail the gate forever. Absent startedAt
 /// sorts last (oldest), matching an empty instant.
 fn dedupe_check_nodes(nodes: &[Value]) -> Vec<&Value> {
+    // gh sorts by the run's start instant: CheckRun `startedAt` for check
+    // runs, StatusContext `createdAt` for status contexts (an absent value
+    // sorts last, matching an empty instant).
     let started_at = |node: &Value| -> String {
         node.get("startedAt")
+            .or_else(|| node.get("createdAt"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string()

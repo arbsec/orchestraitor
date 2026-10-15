@@ -138,9 +138,10 @@ impl McpGateway {
             || context.pr_status_repo_root.is_none()
             || context.pr_status_allowed_repo.is_none()
         {
-            // `pr.status` needs BOTH the transport and the CLEAN-record
-            // root: either missing disables the route — the tool never runs
-            // against a partial configuration (fail closed).
+            // `pr.status` needs the transport, the CLEAN-record root, AND
+            // the allowed repository: any missing one disables the route —
+            // the tool never runs against a partial configuration (fail
+            // closed).
             tool_router.disable_route(Self::PR_STATUS_NAME);
         }
         Self {
