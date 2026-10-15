@@ -403,9 +403,11 @@ impl LoopWorkerStarter for DirectLoopStarter {
     /// fixture is (re)written on every spawn from the `SelectedTask` the
     /// board produced — the board is the description's source of truth, and
     /// a stale file from an earlier selection can never shadow it. The
-    /// description carries the issue title and URL only: the issue body is
-    /// fetched by the worker itself if the model needs it (URLs are data,
-    /// not pre-fetched content).
+    /// description carries the issue body VERBATIM (issue #495), fetched at
+    /// fixture-creation time through the board client and bounded by the
+    /// shared `task_description` posture (URLs are data, not pre-fetched
+    /// content; the body is the one exception the loop fetches for the
+    /// worker).
     async fn start(
         &self,
         selected: &SelectedTask,
@@ -1101,12 +1103,13 @@ mod tests {
     /// `payload` (every request; the fixture path needs one query).
     fn starter_with_body(
         payload: &'static str,
-    ) -> std::io::Result<(DirectLoopStarter, OneShotServer)> {
+    ) -> std::io::Result<(DirectLoopStarter, OneShotServer, Arc<tempfile::TempDir>)> {
         let server = OneShotServer::start(payload)?;
         let auth: Arc<dyn orchestraitor_board::BoardAuth> = Arc::new(FixtureAuth);
         let client = BoardClient::with_endpoint(server.endpoint().to_string(), auth)
             .map_err(|error| std::io::Error::other(format!("client construction failed: {error}")))?
             .with_cache_path(None);
+        let (reasoning_store, event_dir) = test_reasoning_store()?;
         let starter = DirectLoopStarter {
             project_dir: std::env::temp_dir(),
             config_dir: std::env::temp_dir(),
@@ -1121,10 +1124,10 @@ mod tests {
             declared_tools: Vec::new(),
             think_enabled: true,
             record_payloads: false,
-            reasoning_events: test_reasoning_store()?,
+            reasoning_events: reasoning_store,
             subsession_routing: std::collections::BTreeMap::new(),
         };
-        Ok((starter, server))
+        Ok((starter, server, Arc::new(event_dir)))
     }
 
     /// Static bearer auth: the stub server never validates the value.
@@ -1141,19 +1144,20 @@ mod tests {
 
     /// Opens a throwaway reasoning-event store in a temp dir (the starter
     /// field's type; the fixture tests never write reasoning events).
-    fn test_reasoning_store()
-    -> std::io::Result<std::sync::Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>>
-    {
+    fn test_reasoning_store() -> std::io::Result<(
+        std::sync::Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
+        tempfile::TempDir,
+    )> {
         let dir = tempfile::tempdir().map_err(|error| {
             std::io::Error::other(format!("temp dir for the event store: {error}"))
         })?;
         let path = dir.path().join("events.db");
-        // Leak the tempdir so the store's file outlives the test scope the
-        // same way the production store does (the file is tiny).
+        // The store opens the file under the TempDir; the CALLER keeps the
+        // TempDir alive for the test's scope, so the OS cleanup can never
+        // race the open store — no leak, no forget.
         let store = orchestraitor_events::SqliteAuditStore::open(&path)
             .map_err(|error| std::io::Error::other(format!("event store open failed: {error}")))?;
-        std::mem::forget(dir);
-        Ok(std::sync::Arc::new(std::sync::Mutex::new(store)))
+        Ok((std::sync::Arc::new(std::sync::Mutex::new(store)), dir))
     }
 
     /// The campaign tests drive `orc loop` with fake starters, so the
@@ -1175,8 +1179,19 @@ mod tests {
             item_node_id: "PRR_519".to_string(),
             task_id: "pr519-agent-ops".to_string(),
         };
-        let body_payload = r###"{"data":{"repository":{"issue":{"title":"t","body":"## Acceptance\n- the guard fires\n"}}}}"###;
-        let (starter, _server) = starter_with_body(body_payload).into_diagnostic()?;
+        let body_payload = serde_json::json!({
+            "data": {
+                "repository": {
+                    "issue": {
+                        "title": "t",
+                        "body": "## Acceptance\n- the guard fires\n"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let leaked_payload: &'static str = Box::leak(body_payload.into_boxed_str());
+        let (starter, _server, _event_dir) = starter_with_body(leaked_payload).into_diagnostic()?;
         let task = starter
             .materialize_task_fixture(dir, &selected)
             .await
@@ -1260,6 +1275,10 @@ mod tests {
         let client = BoardClient::with_endpoint("http://127.0.0.1:1/graphql".to_string(), auth)
             .into_diagnostic()?
             .with_cache_path(None);
+        // The TempDir binding outlives the Arc'd store in THIS test's scope:
+        // the store's file lives under it, so no forget and no leak.
+        let (event_store, _event_dir) = test_reasoning_store()
+            .map_err(|error| miette::miette!("event store open failed: {error}"))?;
         let starter = DirectLoopStarter {
             project_dir: std::env::temp_dir(),
             config_dir: std::env::temp_dir(),
@@ -1274,8 +1293,7 @@ mod tests {
             declared_tools: Vec::new(),
             think_enabled: true,
             record_payloads: false,
-            reasoning_events: test_reasoning_store()
-                .map_err(|error| miette::miette!("event store open failed: {error}"))?,
+            reasoning_events: Arc::clone(&event_store),
             subsession_routing: std::collections::BTreeMap::new(),
         };
         let selected = SelectedTask {
@@ -1319,7 +1337,7 @@ mod tests {
             r#"{{"data":{{"repository":{{"issue":{{"title":"t","body":"{long_body}"}}}}}}}}"#
         );
         let leaked: &'static str = Box::leak(payload.into_boxed_str());
-        let (starter, _server) = starter_with_body(leaked).into_diagnostic()?;
+        let (starter, _server, _event_dir) = starter_with_body(leaked).into_diagnostic()?;
         let selected = SelectedTask {
             repo: "arbsec/orchestraitor".to_string(),
             number: 496,

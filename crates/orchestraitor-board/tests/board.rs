@@ -788,9 +788,16 @@ async fn issue_body_fetches_verbatim_content() -> Result<(), BoardError> {
     let recorded = server.recorded();
     assert_eq!(recorded.len(), 1, "exactly one query");
     let Some((_auth, body)) = recorded.into_iter().next() else {
-        return Ok(());
+        return Err(BoardError::GraphQl {
+            messages: vec!["no request was recorded".to_string()],
+        });
     };
-    assert!(body.contains("issueBodyQuery") || body.contains("issue(number: $number)"));
+    // Only the new query fetches `body` on the issue; the find-item query
+    // does not. Prove the RIGHT query was sent (the JSON-escaped request
+    // carries the field block with \n between title and body).
+    assert!(body.contains("issue(number: $number)"));
+    assert!(body.contains("      body"));
+    assert!(!body.contains("projectItems"));
     assert!(body.contains(r#""number":495"#));
     assert!(body.contains(r#""name":"orchestraitor""#));
     Ok(())

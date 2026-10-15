@@ -325,6 +325,13 @@ impl BoardClient {
     /// worker task fixture WITH the issue content so the worker never has to
     /// infer acceptance criteria from the title alone.
     ///
+    /// Unlike [`Self::find_item`], this fetches from the EXACT `repo` given
+    /// (no configured-repository walk, no ambiguity resolution): callers
+    /// pass the `repo` from the board selection, which the poller derived
+    /// from the configured repositories. A malformed `repo` (empty side,
+    /// extra separator) is answered with [`BoardError::IssueNotFound`] —
+    /// the query never leaves with a guessed owner or name.
+    ///
     /// The body is UNTRUSTED PROVIDER CONTENT (spec `40-arbitraitor-integration.md`
     /// §6.1): the caller carries it as data — fenced and labelled — and never
     /// executes any command it contains. No size cap is applied here: the
@@ -334,8 +341,7 @@ impl BoardClient {
     /// # Errors
     ///
     /// Returns a typed [`BoardError`] for auth, transport, GraphQL, shape,
-    /// not-found, or ambiguity failures — mirroring [`Self::find_item`]'s
-    /// not-found and multi-repo semantics.
+    /// or not-found failures.
     pub async fn issue_body(
         &self,
         repo: &str,
@@ -346,6 +352,11 @@ impl BoardClient {
                 number: issue_number,
             });
         };
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            return Err(BoardError::IssueNotFound {
+                number: issue_number,
+            });
+        }
         let data = self
             .execute(
                 ISSUE_BODY_QUERY,
@@ -365,7 +376,7 @@ impl BoardClient {
             })?;
         Ok(IssueContent {
             title: issue.title.unwrap_or_default(),
-            body: issue.body.unwrap_or_default(),
+            body: issue.body,
         })
     }
 
@@ -711,5 +722,8 @@ struct IssueBodyRepo {
 #[derive(Debug, Deserialize)]
 struct IssueBody {
     title: Option<String>,
-    body: Option<String>,
+    // REQUIRED: an omitted or null `body` is a shape failure (the typed
+    // error path), never a silently-empty body — an issue with a genuinely
+    // empty body still serializes `""` from GitHub.
+    body: String,
 }
