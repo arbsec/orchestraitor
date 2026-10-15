@@ -21,6 +21,7 @@ const RESOLVE_FIELDS: &str = include_str!("fixtures/resolve-fields.json");
 const ITEMS: &str = include_str!("fixtures/items.json");
 const ITEMS_CLOSED: &str = include_str!("fixtures/items-closed.json");
 const ITEMS_STUCK_CURSOR: &str = include_str!("fixtures/items-stuck-cursor.json");
+const ISSUE_BODY: &str = include_str!("fixtures/issue-body.json");
 const FIND_ITEM: &str = include_str!("fixtures/find-item.json");
 
 const TOKEN: &str = "fixture-token-value";
@@ -762,5 +763,58 @@ async fn move_item_falls_through_to_second_repo() -> Result<(), BoardError> {
         return Ok(());
     };
     assert!(body.contains("PVTI_ARB_42"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn issue_body_fetches_verbatim_content() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![Rule {
+        needle: "issue(number",
+        response: RuleResponse::Json(ISSUE_BODY),
+    }])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let content = client.issue_body("arbsec/orchestraitor", 495).await?;
+
+    assert_eq!(content.title, "bug(worker): descriptions lose the body");
+    assert!(
+        content.body.contains("## Acceptance"),
+        "body verbatim: {}",
+        content.body
+    );
+    // The query carries the exact repo + number (no project resolution needed).
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 1, "exactly one query");
+    let Some((_auth, body)) = recorded.into_iter().next() else {
+        return Ok(());
+    };
+    assert!(body.contains("issueBodyQuery") || body.contains("issue(number: $number)"));
+    assert!(body.contains(r#""number":495"#));
+    assert!(body.contains(r#""name":"orchestraitor""#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn issue_body_missing_issue_is_typed() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![Rule {
+        needle: "issue(number",
+        response: RuleResponse::Json(r#"{"data":{"repository":null}}"#),
+    }])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let result = client.issue_body("arbsec/orchestraitor", 999_999).await;
+    let Err(error) = result else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["a missing issue must be a typed failure".to_string()],
+        });
+    };
+    assert!(
+        matches!(error, BoardError::IssueNotFound { number: 999_999 }),
+        "typed not-found: {error:?}"
+    );
     Ok(())
 }

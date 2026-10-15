@@ -28,6 +28,7 @@ mod kickoff;
 mod loop_run;
 mod run_state;
 mod session;
+mod task_description;
 mod watch;
 
 pub use decision::{
@@ -54,4 +55,5 @@ pub use session::{
     plan_pass_with_selector, plan_pass_with_selector_async, run_once, run_once_with_selector,
     task_id_for,
 };
+pub use task_description::{MAX_INLINE_BODY_CHARS, task_description};
 pub use watch::{ReconcileEvent, ReconcileOutcome, reconcile};

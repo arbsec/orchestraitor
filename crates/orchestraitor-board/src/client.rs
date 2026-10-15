@@ -91,6 +91,15 @@ const FIND_ITEM_QUERY: &str = r"query($owner: String!, $name: String!, $number: 
   }
 }";
 
+const ISSUE_BODY_QUERY: &str = r"query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      title
+      body
+    }
+  }
+}";
+
 const UPDATE_STATUS_MUTATION: &str = r"mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) {
   updateProjectV2ItemFieldValue(input: {
     projectId: $projectId
@@ -121,6 +130,18 @@ pub struct MoveOutcome {
     pub item_id: String,
     /// Status name confirmed by the read-back.
     pub status: String,
+}
+
+/// The verbatim content of one board issue (issue #495). Both fields are
+/// UNTRUSTED PROVIDER CONTENT (spec `40-arbitraitor-integration.md` §6.1):
+/// carried as data, never executed, and bounded by the caller before
+/// inlining into a worker-bound payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueContent {
+    /// Verbatim issue title.
+    pub title: String,
+    /// Verbatim issue body (empty when the issue carries none).
+    pub body: String,
 }
 
 /// GitHub Projects v2 board client.
@@ -296,6 +317,55 @@ impl BoardClient {
             number: issue_number,
             item_id,
             status: status.to_string(),
+        })
+    }
+
+    /// Fetches the verbatim title and body of one board issue through the
+    /// service-identity auth route (issue #495): the loop materializes the
+    /// worker task fixture WITH the issue content so the worker never has to
+    /// infer acceptance criteria from the title alone.
+    ///
+    /// The body is UNTRUSTED PROVIDER CONTENT (spec `40-arbitraitor-integration.md`
+    /// §6.1): the caller carries it as data — fenced and labelled — and never
+    /// executes any command it contains. No size cap is applied here: the
+    /// body is fetched verbatim and the CALLER owns the bounded-inline-payload
+    /// posture (cap + truncation notice) for what it embeds downstream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`BoardError`] for auth, transport, GraphQL, shape,
+    /// not-found, or ambiguity failures — mirroring [`Self::find_item`]'s
+    /// not-found and multi-repo semantics.
+    pub async fn issue_body(
+        &self,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<IssueContent, BoardError> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(BoardError::IssueNotFound {
+                number: issue_number,
+            });
+        };
+        let data = self
+            .execute(
+                ISSUE_BODY_QUERY,
+                serde_json::json!({
+                    "owner": owner,
+                    "name": name,
+                    "number": issue_number,
+                }),
+            )
+            .await?;
+        let response: IssueBodyResponse = decode(data, "issue body fetch")?;
+        let issue = response
+            .repository
+            .and_then(|repository| repository.issue)
+            .ok_or(BoardError::IssueNotFound {
+                number: issue_number,
+            })?;
+        Ok(IssueContent {
+            title: issue.title.unwrap_or_default(),
+            body: issue.body.unwrap_or_default(),
         })
     }
 
@@ -626,4 +696,20 @@ struct ReadBackNode {
 #[derive(Debug, Deserialize)]
 struct ReadBackValue {
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueBodyResponse {
+    repository: Option<IssueBodyRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueBodyRepo {
+    issue: Option<IssueBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueBody {
+    title: Option<String>,
+    body: Option<String>,
 }

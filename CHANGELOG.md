@@ -726,6 +726,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **Loop task fixtures carry the issue body** (fixes the "completion theater"
+  failure mode where a loop worker inferred acceptance criteria from the
+  issue TITLE alone): the task fixture materialized for a board-selected
+  item now includes the issue body, fetched at fixture-creation time
+  through the board client's App-identity route. The body is carried
+  verbatim in a fenced, labelled UNTRUSTED-DATA block (spec
+  `40-arbitraitor-integration.md` §6.1), capped at 8192 characters with an
+  explicit truncation notice naming the issue URL; a fetch failure degrades
+  to the title+URL description with a visible NOTICE instead of blocking
+  the spawn. Documented in [docs/cli/orc-loop.md](docs/cli/orc-loop.md)
+  ("Task fixture content").
 - `orc github gh-env` and `orc github gh-env-pr-create-chain` now pass the
   caller's stdin through to the delegated child on ALL routes. The capture
   route (used by `gh-env-pr-create-chain`) previously handed the child a
