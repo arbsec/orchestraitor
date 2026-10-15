@@ -296,6 +296,7 @@ mod tests {
             declared_surface: crate::commands::DeclaredToolSurface {
                 tools: Vec::new(),
                 subsession_routing: std::collections::BTreeMap::new(),
+                think_enabled: true,
             },
         };
         let routing = RoleRoutingDecision {

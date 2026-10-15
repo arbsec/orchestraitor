@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use miette::{Diagnostic, IntoDiagnostic, Result, miette};
+use miette::{Diagnostic, IntoDiagnostic, Result, WrapErr, miette};
 use orchestraitor_agent_catalog::{
     RoleRouter, RoleRoutingDecision, resolve_decision_provider_with,
 };
@@ -148,6 +148,14 @@ struct DirectLoopStarter {
     /// accepts work): a broken tool definition is a typed startup error,
     /// never a per-spawn failure after worktrees are created.
     declared_tools: Vec<orchestraitor_worker::ToolDefinition>,
+    /// The built-in `think` tool's kill-switch state (§9.48.2).
+    think_enabled: bool,
+    /// The §9.48.8 payload-recording consent gate, resolved once at startup.
+    record_payloads: bool,
+    /// The §9.17 event store: every receipted `think` call (accepted step or
+    /// typed refusal) persists as an `agent reasoning` event when the run
+    /// completes — the SAME behavior the daemon path provides (§9.48.8).
+    reasoning_events: std::sync::Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
     /// The sub-session routing resolved with that tool surface (the §9.35
     /// decision-record evidence).
     subsession_routing:
@@ -422,13 +430,19 @@ impl LoopWorkerStarter for DirectLoopStarter {
             &super::DeclaredToolSurface {
                 tools: self.declared_tools.clone(),
                 subsession_routing: self.subsession_routing.clone(),
+                think_enabled: self.think_enabled,
             },
         );
         let config = self.with_cost_tracking(config, selected, routing);
-        let config = config.with_profile(self.profile.clone());
+        let config = config
+            .with_profile(self.profile.clone())
+            .with_record_payloads(self.record_payloads);
         let config = config.with_progress(beats_tx);
+        let reasoning_events = std::sync::Arc::clone(&self.reasoning_events);
+        let record_payloads_spawn = self.record_payloads;
+        let run_task_id = selected.task_id.clone();
         let run = tokio::spawn(async move {
-            run_worker(
+            let result = run_worker(
                 &task,
                 &project_dir,
                 &*transport,
@@ -436,7 +450,42 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 &PendingDeliverySink,
                 &config,
             )
-            .await
+            .await;
+            // §9.48.8 persistence (the daemon path's behavior, mirrored):
+            // every receipted `think` call appends one hash-chained
+            // `agent reasoning` event. Synchronous SQLite I/O moves off
+            // the async runtime; a failure degrades to a warning — the run
+            // result still carries the records (never silently dropped).
+            if let Ok(worker_run) = &result {
+                let persistence = tokio::task::spawn_blocking({
+                    let reasoning_events = std::sync::Arc::clone(&reasoning_events);
+                    let run_task_id = run_task_id.clone();
+                    let records = worker_run.reasoning_events.clone();
+                    move || {
+                        orchestraitor_events::append_reasoning_events(
+                            &reasoning_events,
+                            &run_task_id,
+                            &records,
+                            record_payloads_spawn,
+                        )
+                    }
+                })
+                .await;
+                match persistence {
+                    Ok(Err(error)) => {
+                        report_loop_warning(&format!(
+                            "reasoning event persistence failed: {error}"
+                        ));
+                    }
+                    Err(join_error) => {
+                        report_loop_warning(&format!(
+                            "reasoning event persistence task failed: {join_error}"
+                        ));
+                    }
+                    Ok(Ok(())) => {}
+                }
+            }
+            result
         });
         Ok(WorkerProcess {
             beats: beats_rx,
@@ -653,17 +702,26 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     // "bookkeeping must never block delivery" (a PR #565 gen-3 review
     // finding — the `?` here made the same error fatal that
     // `resolve_guardrails` treats as a warning).
-    let routing_profile = match layers.resolver.resolve_config() {
-        Ok(effective) => effective
-            .roles
-            .and_then(|roles| roles.get(WORKER_ROLE).cloned())
-            .and_then(|role| role.routing)
-            .and_then(|routing| routing.profile),
+    let (routing_profile, record_payloads) = match layers.resolver.resolve_config() {
+        Ok(effective) => {
+            let routing_profile = effective
+                .roles
+                .and_then(|roles| roles.get(WORKER_ROLE).cloned())
+                .and_then(|role| role.routing)
+                .and_then(|routing| routing.profile);
+            // The 9.48.8 consent gate, read once at startup like the daemon
+            // path: `thought_text` persists only when the operator enabled
+            // payload recording (spec 50 20.4.2; default false).
+            let record_payloads = effective
+                .observability
+                .is_some_and(|observability| observability.record_payloads);
+            (routing_profile, record_payloads)
+        }
         Err(error) => {
             report_loop_warning(&format!(
                 "profile label unresolved ({error}); runs record no profile"
             ));
-            None
+            (None, false)
         }
     };
 
@@ -731,6 +789,14 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
         // failure after worktrees are created.
         let surface = super::build_declared_tools(&layers.resolver, &routing.role)
             .map_err(|error| miette!("{error}"))?;
+        // The §9.48.8 reasoning-event store: the foreground loop persists
+        // the same `agent reasoning` events the daemon path persists — one
+        // store, the same category and consent semantics (§9.48.8).
+        let reasoning_events = orchestraitor_events::SqliteAuditStore::open(
+            paths.config_dir.join("loop-events.db").as_path(),
+        )
+        .into_diagnostic()
+        .wrap_err("loop reasoning event store open failed")?;
         let starter = DirectLoopStarter {
             project_dir: paths.project_dir.clone(),
             config_dir: paths.config_dir.clone(),
@@ -746,6 +812,9 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             profile: routing_profile.clone(),
             // Gated once, above: never re-validated per spawn.
             declared_tools: surface.tools,
+            think_enabled: surface.think_enabled,
+            record_payloads,
+            reasoning_events: std::sync::Arc::new(std::sync::Mutex::new(reasoning_events)),
             subsession_routing: surface.subsession_routing,
         };
         let runner = LoopRunner::new(

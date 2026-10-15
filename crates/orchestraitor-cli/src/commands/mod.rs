@@ -80,8 +80,15 @@ pub(crate) struct DeclaredToolSurface {
     /// (the §9.35 decision-record evidence).
     pub(crate) subsession_routing:
         std::collections::BTreeMap<String, orchestraitor_worker::RoleRoutingEvidence>,
+    /// Whether the built-in `think` tool is on the surface (§9.48.2): a
+    /// trusted-layer `[tools.think] enabled = false` entry removes it.
+    pub(crate) think_enabled: bool,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the per-mechanism mapping (command argv, subagent role/routing/effort/budget) is the audited startup gate; splitting it would scatter the fail-fast checks the reviewer must see together"
+)]
 /// Builds the declared tools visible to the worker role (issue #535,
 /// T2/T4). Call ONCE at startup: the layer-trust gate, mechanism
 /// validation, role routing, and the sub-role provider gate all run here,
@@ -150,6 +157,15 @@ pub(crate) fn build_declared_tools(
                 },
             );
         }
+        // The `think` kill-switch marker (§9.48.2) is not a dispatchable
+        // tool: it never enters the declared surface (the built-in tool's
+        // default-on behavior is handled by the worker itself).
+        if matches!(
+            &tool.mechanism,
+            orchestraitor_core::ResolvedToolMechanism::ThinkSwitch { .. }
+        ) {
+            continue;
+        }
         tools.push(orchestraitor_worker::ToolDefinition {
             id: tool.id.clone(),
             mechanism: match &tool.mechanism {
@@ -174,10 +190,17 @@ pub(crate) fn build_declared_tools(
                             orchestraitor_core::ResolvedInternalTool::Bash => {
                                 orchestraitor_worker::InternalTool::Bash
                             }
+                            orchestraitor_core::ResolvedInternalTool::Think => {
+                                orchestraitor_worker::InternalTool::Think
+                            }
                         })
                         .collect(),
                     instructions: instructions.clone(),
                 },
+                // Unreachable: ThinkSwitch markers skip the push above.
+                orchestraitor_core::ResolvedToolMechanism::ThinkSwitch { .. } => {
+                    continue;
+                }
             },
             budget: orchestraitor_worker::ToolBudget {
                 max_turns: tool.max_turns.unwrap_or(12),
@@ -208,6 +231,7 @@ pub(crate) fn build_declared_tools(
     Ok(DeclaredToolSurface {
         tools,
         subsession_routing: routing_map,
+        think_enabled: registry.think_enabled(),
     })
 }
 
@@ -219,6 +243,7 @@ pub(crate) fn attach_declared_surface(
     surface: &DeclaredToolSurface,
 ) -> orchestraitor_worker::WorkerConfig {
     config.subsession_routing = surface.subsession_routing.clone();
+    config.think_enabled = surface.think_enabled;
     config.with_tools(surface.tools.clone())
 }
 

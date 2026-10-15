@@ -129,6 +129,10 @@ fn is_known_key(key: &str) -> bool {
         || key == "service_identities"
         || matches!(
             key,
+            "observability.record_payloads"
+        )
+        || matches!(
+            key,
             "loop.no_progress_turns"
                 | "loop.tool_repeat_count"
                 | "loop.tool_repeat_window"
@@ -188,7 +192,8 @@ fn matches_tool_key(key: &str) -> bool {
         [_tool] => true,
         [_tool, field] => matches!(
             *field,
-            "kind"
+            "enabled"
+                | "kind"
                 | "command"
                 | "subagent_role"
                 | "internal_tools"

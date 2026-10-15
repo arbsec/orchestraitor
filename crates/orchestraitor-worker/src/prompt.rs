@@ -9,16 +9,39 @@ use crate::task::WorkerTask;
 /// Static system prompt for the bootstrap worker. Never asserted in tests
 /// (prompt prose is not a machine-consumed contract); the protocol it
 /// documents is exercised through the loop's behavior.
-pub(super) const SYSTEM_PROMPT: &str = "You are Orchestraitor's bootstrap worker operating on a task worktree.
-Every response MUST contain exactly one fenced ```json block selecting one of the four tools:
+/// The tool-listing header + the four mediated tools (shared by both
+/// prompt variants — the `think` line composes in only when enabled, so
+/// the prompt can never advertise a tool the executor refuses).
+const PROMPT_HEAD: &str = "You are Orchestraitor's bootstrap worker operating on a task worktree.\n\
+Every response MUST contain exactly one fenced ```json block selecting one of the ";
 
-{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}
-{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}
-{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}
-{\"tool\": \"bash\", \"script\": \"<bash script>\"}
+/// The `think` tool line + its usage guidance (§9.48). Composed into the
+/// prompt ONLY when the kill-switch did not remove the tool.
+const PROMPT_THINK: &str = "five tools:\n\
+\n\
+{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}\n\
+{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}\n\
+{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}\n\
+{\"tool\": \"bash\", \"script\": \"<bash script>\"}\n\
+{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n>, \"total_thoughts\": <n>, \"next_thought_needed\": <bool>}\n\
+\n\
+Use `think` before complex work: estimate the step count, reason one step at\n\
+a time, revise explicitly (set \"is_revision\": true with \"revises_thought\": <n>),\n\
+and stop calling it when done. `think` performs no action — it only records\n\
+your deliberation.\n";
 
-Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}
-or success=false when the task cannot be completed. Any tool not listed
+/// The four-tool variant: identical surface minus the `think` line.
+const PROMPT_NO_THINK: &str = "four tools:\n\
+\n\
+{\"tool\": \"read_file\", \"path\": \"<worktree-relative path>\"}\n\
+{\"tool\": \"write_file\", \"path\": \"<worktree-relative path>\", \"content\": \"<full file content>\"}\n\
+{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}\n\
+{\"tool\": \"bash\", \"script\": \"<bash script>\"}\n\
+\n";
+
+/// The terminator + refusal contract (shared by both variants).
+const PROMPT_TAIL: &str = "Terminate with {\"tool\": \"finish\", \"summary\": \"<what was done>\", \"success\": true}\n\
+or success=false when the task cannot be completed. Any tool not listed\n\
 above (and not listed as a declared tool) is refused and recorded.";
 
 /// Builds the system prompt: the static bootstrap prompt plus the one
@@ -41,8 +64,11 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
             crate::tooldef::InternalTool::ReadFile,
             crate::tooldef::InternalTool::Search,
             crate::tooldef::InternalTool::Bash,
+            crate::tooldef::InternalTool::Think,
         ] {
-            if allowlist.contains(&tool) {
+            if allowlist.contains(&tool)
+                && (config.think_enabled || !matches!(tool, crate::tooldef::InternalTool::Think))
+            {
                 prompt.push_str(subsession_tool_line(tool));
                 prompt.push('\n');
             }
@@ -60,7 +86,18 @@ pub(super) fn system_prompt(config: &crate::result::WorkerConfig) -> String {
         }
         return prompt;
     }
-    let mut prompt = SYSTEM_PROMPT.to_string();
+    // The §9.48.2 trusted-layer kill-switch composes the prompt from
+    // constant pieces: the `think` line appears ONLY when the tool is on
+    // the surface, so the prompt can never advertise a refused tool and no
+    // exact-string surgery can silently fail.
+    let mut prompt = format!(
+        "{PROMPT_HEAD}{}{PROMPT_TAIL}",
+        if config.think_enabled {
+            PROMPT_THINK
+        } else {
+            PROMPT_NO_THINK
+        }
+    );
     if config.tools.is_empty() {
         return prompt;
     }
@@ -83,6 +120,9 @@ fn subsession_tool_line(tool: crate::tooldef::InternalTool) -> &'static str {
             "{\"tool\": \"search\", \"pattern\": \"<plain text>\", \"path\": \"<optional worktree-relative dir>\"}"
         }
         crate::tooldef::InternalTool::Bash => "{\"tool\": \"bash\", \"script\": \"<bash script>\"}",
+        crate::tooldef::InternalTool::Think => {
+            "{\"tool\": \"think\", \"thought\": \"<this step's deliberation>\", \"thought_number\": <n ≥ 1>, \"total_thoughts\": <n ≥ 1>, \"next_thought_needed\": <bool>, \"is_revision\": <bool>, \"revises_thought\": <optional n>}"
+        }
     }
 }
 

@@ -39,7 +39,8 @@ fn redacts_entire_payload(mode: PrivacyExportMode, category: EventCategory) -> b
             | EventCategory::ContextSelection
             | EventCategory::ToolRequest
             | EventCategory::ActionPlan
-            | EventCategory::FileObservation,
+            | EventCategory::FileObservation
+            | EventCategory::AgentReasoning,
         ) => true,
         (
             PrivacyExportMode::Full,
@@ -60,7 +61,8 @@ fn redacts_entire_payload(mode: PrivacyExportMode, category: EventCategory) -> b
             | EventCategory::SandboxCapability
             | EventCategory::ResourceUsage
             | EventCategory::Error
-            | EventCategory::SecurityFinding,
+            | EventCategory::SecurityFinding
+            | EventCategory::AgentReasoning,
         )
         | (
             PrivacyExportMode::Redacted,

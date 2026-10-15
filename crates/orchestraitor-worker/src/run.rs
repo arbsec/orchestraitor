@@ -68,6 +68,8 @@ pub async fn run_worker(
         declared: config.tools.clone(),
         allowed_internal: config.subsession_allowed_internal.clone(),
         subsession_depth: config.subsession_depth,
+        think_enabled: config.think_enabled,
+        record_payloads: config.record_payloads,
     };
     let mut executor = ToolExecutor::new(&root, bash).with_policy(policy);
     let budgets = &config.budgets;
@@ -152,6 +154,7 @@ pub async fn run_worker(
         }
     };
 
+    let reasoning_events = executor.reasoning_records().to_vec();
     let (receipts, untrusted_writes) = executor.into_records();
     let subsession_events = std::mem::take(&mut state.subsession_events);
     let run = match outcome {
@@ -171,6 +174,7 @@ pub async fn run_worker(
             untrusted_writes,
             receipts,
             subsession_events,
+            reasoning_events,
             budgets: budgets.echo(),
         },
         AttemptOutcome::Failed(failure) => {
@@ -191,6 +195,7 @@ pub async fn run_worker(
                 untrusted_writes,
                 receipts,
                 subsession_events,
+                reasoning_events,
                 budgets: budgets.echo(),
             }
         }

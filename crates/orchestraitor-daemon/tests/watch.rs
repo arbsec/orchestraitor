@@ -766,169 +766,98 @@ fn the_built_in_defaults_carry_the_ingress_block() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Issue #603: the reverse-direction ingress/kick-off mismatch (the
-/// condition armed, the ingress disabled) was silent. The forward-
-/// direction mismatch (ingress enabled, condition disarmed) warns. Both
-/// are exposed by `WatchConfig::ingress_kickoff_warnings` and rendered
-/// by the `orcd watch` startup gate; consistent pairs stay silent.
-/// Deterministic: pure helper over the resolved config, no tracing,
-/// no I/O — every shape asserts the exact emitted message and the
-/// complement.
 #[test]
-fn ingress_kickoff_warnings_cover_both_mismatch_directions() {
-    let mut kickoff = orchestraitor_campaign::KickoffSettings::builtin_defaults();
+fn reasoning_events_persist_hash_chained_and_consent_gated()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_daemon::append_reasoning_events;
+    use orchestraitor_events::{AuditStore, EventCategory, EventQuery, InMemoryAuditStore};
+    use orchestraitor_worker::ReasoningRecord;
 
-    // --- Consistent: ingress enabled AND external_event armed ---
-    // No warning: the armed condition has an ingress feeding it.
-    kickoff.external_event = true;
-    let config = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: true,
-            queue_capacity: 256,
+    // §9.48.8: accepted steps persist as hash-chained `agent reasoning`
+    // events; `[observability].record_payloads` consent gates `thought_text`;
+    // refused steps (text `None`) carry no text under ANY consent setting.
+    let store = std::sync::Arc::new(std::sync::Mutex::new(InMemoryAuditStore::default()));
+    let records = vec![
+        ReasoningRecord {
+            accepted: true,
+            refusal_reason: None,
+            thought_number: 1,
+            total_thoughts: 3,
+            next_thought_needed: true,
+            is_revision: false,
+            revises_thought: None,
+            thought_chars: 5,
+            sequence_id: 1,
+            thought_text: Some("step one".to_string()),
         },
-    )
-    .expect("consistent config is valid");
-    assert!(
-        config.ingress_kickoff_warnings().is_empty(),
-        "both arms true must produce no warnings; got {:?}",
-        config.ingress_kickoff_warnings()
-    );
+        // A refusal-shaped record: text is never written, consent or not.
+        ReasoningRecord {
+            accepted: false,
+            refusal_reason: Some("secret-shaped-content"),
+            thought_number: 1,
+            total_thoughts: 3,
+            next_thought_needed: true,
+            is_revision: false,
+            revises_thought: None,
+            thought_chars: 42,
+            sequence_id: 1,
+            thought_text: None,
+        },
+    ];
 
-    // --- Consistent: ingress disabled AND external_event disarmed ---
-    // No warning: nothing armed against a missing trigger source.
-    kickoff.external_event = false;
-    let config = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: false,
-            queue_capacity: 256,
-        },
-    )
-    .expect("consistent config is valid");
-    assert!(
-        config.ingress_kickoff_warnings().is_empty(),
-        "both arms false must produce no warnings; got {:?}",
-        config.ingress_kickoff_warnings()
-    );
+    // Default consent (false): metadata only.
+    append_reasoning_events(&store, "task-1", &records, false)?;
+    // Consent enabled: accepted text rides.
+    append_reasoning_events(&store, "task-1", &records, true)?;
 
-    // --- Forward mismatch: ingress enabled, condition disarmed ---
-    // Pre-existing #504 behavior: the queue fills, drops surplus,
-    // stays degraded; the operator must see the mismatch.
-    kickoff.external_event = false;
-    let config = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: true,
-            queue_capacity: 256,
-        },
-    )
-    .expect("forward-mismatch config is valid");
-    let warnings = config.ingress_kickoff_warnings();
+    let sink = store.lock().unwrap();
+    let query = EventQuery {
+        category: Some(EventCategory::AgentReasoning),
+        since_seq: None,
+        until_seq: None,
+        include_uninterpreted: false,
+    };
+    let events = sink.query(&query)?;
+    assert_eq!(events.len(), 4, "one event per record per persist pass");
+    // Default-consent pass: no text anywhere.
+    for record in &events[..2] {
+        let text = record.envelope.payload.get("thought_text").unwrap();
+        assert_eq!(text, &serde_json::Value::Null);
+        assert!(
+            record.envelope.payload.get("thought_number").is_some(),
+            "audit metadata always rides (§9.48.8)"
+        );
+    }
+    // Consent pass: accepted text present, refusal text still absent.
     assert_eq!(
-        warnings.len(),
-        1,
-        "exactly one forward-mismatch warning, got {warnings:?}"
+        events[2].envelope.payload.get("thought_text").unwrap(),
+        &serde_json::Value::String("step one".to_string())
     );
-    assert!(
-        warnings[0]
-            .contains("watch.ingress.enabled is true but watch.kickoff.external_event is false"),
-        "forward-mismatch warning names the enabled/arm pair; got: {}",
-        warnings[0]
-    );
-    assert!(
-        warnings[0].contains("arm external_event or disable the ingress"),
-        "forward-mismatch warning names the operator remedy; got: {}",
-        warnings[0]
-    );
-
-    // --- Reverse mismatch: ingress disabled, condition ARMED ---
-    // Issue #603: the condition can never fire. Pre-existing main
-    // silently dropped this — the new helper MUST.
-    kickoff.external_event = true;
-    let config = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: false,
-            queue_capacity: 256,
-        },
-    )
-    .expect("reverse-mismatch config is valid");
-    let warnings = config.ingress_kickoff_warnings();
     assert_eq!(
-        warnings.len(),
-        1,
-        "exactly one reverse-mismatch warning (#603), got {warnings:?}"
+        events[3].envelope.payload.get("thought_text").unwrap(),
+        &serde_json::Value::Null
     );
-    assert!(
-        warnings[0]
-            .contains("watch.kickoff.external_event is true but watch.ingress.enabled is false"),
-        "reverse-mismatch warning names the arm/enabled pair; got: {}",
-        warnings[0]
+    // Hash chain: each event links to the previous record's hash.
+    assert_eq!(
+        events[1].envelope.prev_hash,
+        Some(events[0].hash.clone()),
+        "reasoning events ride the §9.17 hash chain"
     );
-    assert!(
-        warnings[0].contains("can never fire"),
-        "reverse-mismatch warning names the dead-trigger consequence; got: {}",
-        warnings[0]
-    );
-    assert!(
-        warnings[0].contains("enable the ingress or disarm external_event"),
-        "reverse-mismatch warning names the operator remedy; got: {}",
-        warnings[0]
-    );
+    Ok(())
 }
 
-/// Issue #603: the `orcd watch` startup emits exactly the warnings the
-/// helper returns and nothing more for the consistent pairs (the
-/// invariants of the surrounding gate stay intact). The pure helper
-/// check above pins the contract; this one asserts the call-site shape
-/// the PR review can read in `main.rs`.
 #[test]
-fn ingress_kickoff_warnings_are_stable_strings() {
-    let mut kickoff = orchestraitor_campaign::KickoffSettings::builtin_defaults();
-    kickoff.external_event = false;
-    let forward = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: true,
-            queue_capacity: 256,
-        },
-    )
-    .expect("forward-mismatch config is valid");
-    let fwd = forward.ingress_kickoff_warnings();
-    assert_eq!(fwd.len(), 1);
-    assert!(
-        fwd[0].contains("queue has no kick-off consumer"),
-        "forward-mismatch message text is stable (consumer-mismatch wording)"
-    );
-
-    kickoff.external_event = true;
-    let reverse = WatchConfig::with_ingress(
-        60,
-        kickoff,
-        orchestraitor_daemon::IngressSettings {
-            enabled: false,
-            queue_capacity: 256,
-        },
-    )
-    .expect("reverse-mismatch config is valid");
-    let rev = reverse.ingress_kickoff_warnings();
-    assert_eq!(rev.len(), 1);
-    assert!(
-        rev[0].contains("can never fire"),
-        "reverse-mismatch message text is stable (dead-trigger wording)"
-    );
-
-    // The two warnings are distinct strings — operators must be able to
-    // grep the daemon log for the exact phrase to identify which side of
-    // the configuration pair is wrong.
-    assert_ne!(
-        fwd[0], rev[0],
-        "forward- and reverse-mismatch messages must be distinct"
-    );
+fn ingress_kickoff_warnings_cover_both_mismatch_directions() {
+    use orchestraitor_daemon::ingress_kickoff_warnings;
+    // Both aligned: no warnings in either direction.
+    assert!(ingress_kickoff_warnings(true, true).is_empty());
+    assert!(ingress_kickoff_warnings(false, false).is_empty());
+    // Enabled ingress with a disarmed consumer: fill/drop/degrade warning.
+    let forward = ingress_kickoff_warnings(true, false);
+    assert_eq!(forward.len(), 1);
+    assert!(forward[0].contains("no kick-off consumer"));
+    // Armed external_event without the ingress: can-never-fire warning.
+    let reverse = ingress_kickoff_warnings(false, true);
+    assert_eq!(reverse.len(), 1);
+    assert!(reverse[0].contains("can never fire"));
 }

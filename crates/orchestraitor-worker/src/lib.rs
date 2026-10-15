@@ -9,8 +9,9 @@
 //! `orchestraitor-testkit` (spec `50-contracts-data.md` §21.3 — no live
 //! provider in CI).
 //!
-//! Exactly four tools exist: `read_file`, `search`, `bash`, `write_file`.
-//! Every call is receipted; any capability request outside the four is a
+//! The built-in internal tools are `read_file`, `search`, `bash`,
+//! `write_file`, and `think` (spec `20-harness-worker.md` §9.48). Every
+//! call is receipted; any capability request outside the surface is a
 //! typed refusal, recorded and fed back to the model. `bash` crosses the
 //! Arbitraitor boundary through the #311 mediation module
 //! (`MediatedWorker::spawn` preflight + `run_bash`); file tools are confined
@@ -41,6 +42,7 @@ mod run;
 mod search;
 mod subsession;
 mod task;
+mod think;
 mod tooldef;
 mod tools;
 
@@ -70,6 +72,7 @@ pub use subsession::{
     default_internal_tools, parent_failure_class, run_subsession,
 };
 pub use task::{FixtureTaskSource, TaskLoadError, TaskSource, WorkerTask};
+pub use think::ReasoningRecord;
 pub use tooldef::{
     InternalTool, MAX_QUESTION_CHARS, MAX_TOOL_ID_CHARS, ReasoningEffort, ToolBudget,
     ToolDefinition, ToolMechanism, is_reserved_tool_id, is_valid_tool_id,

@@ -131,6 +131,58 @@ fn export_redacts_prompt_like_payloads_and_secret_events() -> Result<(), EventEr
 }
 
 #[test]
+fn export_redacts_agent_reasoning_payloads_like_prompt_class() -> Result<(), EventError> {
+    // §9.48.8 redaction parity: `agent reasoning` rides the same
+    // prompt/completion-class `PrivacyExportMode::Redacted` redaction (the
+    // whole payload drops, the hash chain relinks on export).
+    let mut store = InMemoryAuditStore::default();
+    let reasoning = event(
+        1,
+        EventCategory::AgentReasoning,
+        json!({
+            "event": "agent-reasoning",
+            "thought_number": 1,
+            "total_thoughts": 3,
+            "next_thought_needed": true,
+            "is_revision": false,
+            "revises_thought": serde_json::Value::Null,
+            "thought_chars": 9,
+            "sequence_id": 1,
+            "thought_text": "secret deliberation",
+        }),
+        None,
+    )?;
+    store.append(reasoning)?;
+
+    let exported = store.export(PrivacyExportMode::Redacted)?;
+    let rendered = String::from_utf8(exported).map_err(|error| {
+        EventError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error,
+        )))
+    })?;
+    assert!(
+        !rendered.contains("secret deliberation"),
+        "thought text must not survive a redacted export"
+    );
+    assert!(rendered.contains("redacted"));
+    // Full mode preserves the payload (consent already gated what was
+    // written — export redaction is the third layer, not a general ban).
+    let full_export = store.export(PrivacyExportMode::Full)?;
+    let full_rendered = String::from_utf8(full_export.clone()).map_err(|error| {
+        EventError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error,
+        )))
+    })?;
+    assert!(full_rendered.contains("agent-reasoning"));
+    let mut imported = InMemoryAuditStore::default();
+    imported.r#import(rendered.as_bytes())?;
+    imported.r#import(&full_export)?;
+    Ok(())
+}
+
+#[test]
 fn future_schema_is_preserved_as_uninterpreted() -> Result<(), EventError> {
     let mut store = InMemoryAuditStore::default();
     let future = EventEnvelope::try_new(EventEnvelopeInput {

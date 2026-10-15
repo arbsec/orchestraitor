@@ -227,46 +227,6 @@ impl WatchConfig {
         }
     }
 
-    /// Returns the operator-facing startup warnings for the §9.50 event
-    /// ingress / §9.36 kick-off configuration pair (issues #504, #505,
-    /// #603). Symmetric: both directions of the enabled/arm mismatch are
-    /// checked. Each entry is emitted once at startup via
-    /// `tracing::warn!("orcd watch: {warning}")`.
-    ///
-    /// - **Forward mismatch** (ingress enabled, condition disarmed):
-    ///   the queue fills to capacity, drops surplus, and stays `degraded`
-    ///   permanently (a gen-13 review finding). The poller still runs
-    ///   (polling is the operator's explicit opt-in and the reconcile
-    ///   poll remains the completeness authority), but the operator must
-    ///   see the mismatched configuration.
-    /// - **Reverse mismatch** (condition armed, ingress disabled): the
-    ///   external-event kick-off condition has no ingress feeding it, so
-    ///   the armed condition can never fire. This direction was silent
-    ///   before issue #603; the operator was armed against a trigger
-    ///   source that does not exist. Symmetric with the forward warning.
-    ///
-    /// Returns an empty `Vec` for the consistent pair (both enabled or
-    /// both disabled) — no warning is appropriate there.
-    #[must_use]
-    pub fn ingress_kickoff_warnings(&self) -> Vec<&'static str> {
-        let mut warnings = Vec::new();
-        if self.ingress.enabled && !self.kickoff.external_event {
-            warnings.push(
-                "watch.ingress.enabled is true but watch.kickoff.external_event is false - \
-                 the ingress queue has no kick-off consumer and will fill, drop surplus, and \
-                 stay degraded; arm external_event or disable the ingress",
-            );
-        }
-        if !self.ingress.enabled && self.kickoff.external_event {
-            warnings.push(
-                "watch.kickoff.external_event is true but watch.ingress.enabled is false - \
-                 the external-event kick-off condition is armed but the ingress that feeds it \
-                 is disabled, so it can never fire; enable the ingress or disarm external_event",
-            );
-        }
-        warnings
-    }
-
     /// Resolves the §9.36 kick-off condition enables (issue #505) from
     /// the layered `[watch.kickoff]` block. Every absent key inherits the
     /// built-in default; the resolved enables are the effective AND of
@@ -710,6 +670,48 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
+/// The ingress/kickoff mismatch warnings (§9.50): pure so the two
+/// directions are testable. `main.rs` logs what this returns.
+#[must_use]
+pub fn ingress_kickoff_warnings(
+    ingress_enabled: bool,
+    external_event_armed: bool,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if ingress_enabled && !external_event_armed {
+        warnings.push(
+            "orcd watch: watch.ingress.enabled is true but \
+             watch.kickoff.external_event is false - the ingress queue \
+             has no kick-off consumer and will fill, drop surplus, and \
+             stay degraded; arm external_event or disable the ingress",
+        );
+    }
+    if !ingress_enabled && external_event_armed {
+        warnings.push(
+            "orcd watch: watch.kickoff.external_event is true but \
+             watch.ingress.enabled is false - the external-event condition \
+             can never fire; enable the ingress or disarm external_event",
+        );
+    }
+    warnings
+}
+
+/// The §9.48.8 appender. DELEGATES to the shared implementation in
+/// `orchestraitor-events` — one payload/consent implementation, so the
+/// daemon and foreground `orc loop` paths can never drift.
+///
+/// # Errors
+///
+/// Returns the store error when the head read or any append fails.
+pub fn append_reasoning_events<S: orchestraitor_events::AuditStore>(
+    events: &std::sync::Mutex<S>,
+    task_id: &str,
+    records: &[orchestraitor_worker::ReasoningRecord],
+    record_payloads: bool,
+) -> Result<(), orchestraitor_events::EventError> {
+    orchestraitor_events::append_reasoning_events(events, task_id, records, record_payloads)
+}
+
 /// Production worker side for the daemon: the direct-path starter `orc
 /// loop` uses, rebuilt over the daemon's config-dir layout (task fixtures
 /// under `<config-dir>/worker-tasks/`, per-task git worktrees under
@@ -728,6 +730,19 @@ pub struct DirectWatchStarter {
     /// cannot drift from the foreground loop's enforcement (a PR #564
     /// review finding: the worker config never received them).
     guardrails: orchestraitor_worker::GuardrailsConfig,
+    /// The built-in `think` tool's kill-switch state (§9.48.2), resolved
+    /// once at startup from the layered config's trusted layers.
+    think_enabled: bool,
+    /// The daemon's §9.17 event store, when one is attached: accepted
+    /// `think` steps persist as `agent reasoning` events (§9.48.8) as part
+    /// of the run's receipted completion. `None` keeps the reasoning chain
+    /// in the run result only.
+    events: Option<Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>>,
+    /// Consent gate for `thought_text` persistence (spec 50 §20.4.2):
+    /// `[observability].record_payloads` resolved once at startup. Default
+    /// `false` — thought text stays out of the event store unless the
+    /// operator opted in.
+    record_payloads: bool,
 }
 
 impl DirectWatchStarter {
@@ -746,7 +761,39 @@ impl DirectWatchStarter {
             provider_endpoint,
             budgets,
             guardrails,
+            think_enabled: true,
+            events: None,
+            record_payloads: false,
         }
+    }
+
+    /// Attaches the daemon's §9.17 event store: accepted `think` steps
+    /// persist as `agent reasoning` events when the run completes (§9.48.8).
+    #[must_use]
+    pub fn with_event_store(
+        mut self,
+        events: Arc<std::sync::Mutex<orchestraitor_events::SqliteAuditStore>>,
+    ) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Sets the `[observability].record_payloads` consent gate (spec 50
+    /// §20.4.2): thought text rides the persisted events only when enabled.
+    #[must_use]
+    pub const fn with_record_payloads(mut self, record_payloads: bool) -> Self {
+        self.record_payloads = record_payloads;
+        self
+    }
+
+    /// Sets the built-in `think` tool's kill-switch state (§9.48.2). The
+    /// daemon resolves the trusted-layer gate ONCE at startup, exactly like
+    /// `orc loop`'s declared-tool surface, so the two enforcement layers
+    /// cannot drift.
+    #[must_use]
+    pub const fn with_think_enabled(mut self, think_enabled: bool) -> Self {
+        self.think_enabled = think_enabled;
+        self
     }
 
     /// Prepares (or reuses) the task's git worktree under
@@ -952,9 +999,14 @@ impl LoopWorkerStarter for DirectWatchStarter {
         );
         config.guardrails = self.guardrails.clone();
         config.prior_daily_spend_usd = prior_daily_spend_usd;
+        config.think_enabled = self.think_enabled;
+        config.record_payloads = self.record_payloads;
         let config = config.with_progress(beats_tx);
+        let reasoning_sink = self.events.clone();
+        let record_payloads = self.record_payloads;
+        let run_task_id = selected.task_id.clone();
         let run = tokio::spawn(async move {
-            run_worker(
+            let result = run_worker(
                 &task,
                 &worktree,
                 &*transport,
@@ -962,7 +1014,42 @@ impl LoopWorkerStarter for DirectWatchStarter {
                 &PendingDeliverySink,
                 &config,
             )
-            .await
+            .await;
+            // §9.48.8 persistence: every receipted `think` call (accepted
+            // step or typed refusal) appends one hash-chained
+            // `agent reasoning` event, as part of the
+            // run's receipted completion (crash semantics are §9.17's — a
+            // crash loses at most the last step's record, the same gap
+            // class as any un-persisted receipt). Payload-recording
+            // consent (spec 50 §20.4.2) gates `thought_text`; the audit
+            // metadata rides every accepted step. A persistence failure
+            // degrades to a warning: the run result still carries the
+            // records, and the reasoning chain is reconstructable from the
+            // receipts (the same best-effort class the daemon's other
+            // event appends use — never silently dropped).
+            if let (Some(events), Ok(worker_run)) = (&reasoning_sink, &result) {
+                // Synchronous SQLite I/O: move it off the async runtime
+                // (the same off-runtime convention the blocking wait uses).
+                let events = std::sync::Arc::clone(events);
+                let run_task_id = run_task_id.clone();
+                let records = worker_run.reasoning_events.clone();
+                let persistence = tokio::task::spawn_blocking(move || {
+                    append_reasoning_events(&events, &run_task_id, &records, record_payloads)
+                })
+                .await;
+                match persistence {
+                    Ok(Err(error)) => {
+                        tracing::warn!("reasoning event persistence failed: {error}");
+                    }
+                    // A panicking append must never vanish silently: the
+                    // comment above promises the failure is observable.
+                    Err(join_error) => {
+                        tracing::warn!("reasoning event persistence task failed: {join_error}");
+                    }
+                    Ok(Ok(())) => {}
+                }
+            }
+            result
         });
         Ok(WorkerProcess {
             beats: beats_rx,

@@ -463,3 +463,80 @@ fn registry_errors_carry_stable_orc_config_codes() {
     // Codes are distinct across variants.
     assert_ne!(structured.code, invalid.structured().code);
 }
+
+// --- §9.48.2 think kill-switch ------------------------------------------------
+
+#[test]
+fn think_is_reserved_against_declared_shadowing() {
+    assert!(is_reserved_tool_id("think"));
+    // A full declared `think` definition (mechanism fields) is a typed
+    // error: the built-in tool "carries no configuration beyond `enabled`"
+    // (§9.48.2), so a `kind`/`command` entry can never smuggle a shadow.
+    let toml = "[tools.think]\nkind = \"command\"\ncommand = [\"evil\"]\n";
+    let resolver = resolver_with(ConfigLayer::GlobalUser, toml);
+    let error = ToolRegistry::from_resolver(&resolver, &roles(), true)
+        .expect_err("a configured `think` mechanism is a typed error");
+    assert!(matches!(
+        error,
+        ToolRegistryError::MalformedMechanism { .. }
+    ));
+}
+
+#[test]
+fn think_kill_switch_default_is_enabled() {
+    let registry = ToolRegistry::from_resolver(&ConfigResolver::new(), &roles(), true).unwrap();
+    assert!(registry.think_enabled());
+}
+
+#[test]
+fn think_kill_switch_in_trusted_layer_disables_the_tool() {
+    let toml = "[tools.think]\nenabled = false\n";
+    for layer in [
+        ConfigLayer::BuiltInDefaults,
+        ConfigLayer::PluginDefaults,
+        ConfigLayer::GlobalUser,
+        ConfigLayer::OrganizationTeam,
+    ] {
+        let resolver = resolver_with(layer, toml);
+        let registry = ToolRegistry::from_resolver(&resolver, &roles(), true).unwrap();
+        assert!(
+            !registry.think_enabled(),
+            "trusted layer {layer:?} must be able to kill the tool"
+        );
+    }
+}
+
+#[test]
+fn think_kill_switch_in_untrusted_layer_is_a_typed_error() {
+    let toml = "[tools.think]\nenabled = false\n";
+    let resolver = resolver_with(ConfigLayer::Project, toml);
+    let error = ToolRegistry::from_resolver(&resolver, &roles(), true)
+        .expect_err("an untrusted-layer kill-switch is a typed error");
+    assert!(matches!(error, ToolRegistryError::UntrustedLayer { .. }));
+}
+
+#[test]
+fn think_entry_carrying_other_fields_is_a_typed_error() {
+    // "There is nothing to configure" (§9.48.2): the kill-switch entry
+    // accepts `enabled` and nothing else.
+    let toml = "[tools.think]\nenabled = true\nkind = \"command\"\ncommand = [\"x\"]\n";
+    let resolver = resolver_with(ConfigLayer::GlobalUser, toml);
+    let error = ToolRegistry::from_resolver(&resolver, &roles(), true)
+        .expect_err("a configured think entry is a typed error");
+    assert!(matches!(
+        error,
+        ToolRegistryError::MalformedMechanism { .. }
+    ));
+}
+
+#[test]
+fn declared_tool_with_enabled_field_is_a_typed_error() {
+    let toml = "[tools.fmt]\nkind = \"command\"\ncommand = [\"cargo\", \"fmt\"]\nenabled = true\n";
+    let resolver = resolver_with(ConfigLayer::GlobalUser, toml);
+    let error = ToolRegistry::from_resolver(&resolver, &roles(), true)
+        .expect_err("`enabled` is think-only");
+    assert!(matches!(
+        error,
+        ToolRegistryError::MalformedMechanism { .. }
+    ));
+}

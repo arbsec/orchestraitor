@@ -1,14 +1,18 @@
-//! The four-tool executor and its receipts.
+//! The internal-tool executor and its receipts.
 //!
-//! Exactly four tools exist: `read_file`, `search`, `bash`, `write_file`.
-//! Anything else is refused before reaching this executor (see
-//! `action.rs`). Every dispatch produces a [`ToolReceipt`] — the per-call
-//! record required by the issue acceptance criteria — carrying static reason
-//! codes only: no tool arguments, command lines, or captured output (spec
+//! The built-in internal tools are `read_file`, `search`, `bash`,
+//! `write_file`, and `think` (spec `20-harness-worker.md` §9.48). Anything
+//! else is refused before reaching this executor (see `action.rs`). Every
+//! dispatch produces a [`ToolReceipt`] — the per-call record required by
+//! the issue acceptance criteria — carrying static reason codes only: no
+//! tool arguments, command lines, or captured output (spec
 //! `40-arbitraitor-integration.md` §9.23.4).
 //!
 //! `bash` crosses the Arbitraitor boundary through the
 //! [`crate::mediator::BashMediator`] seam (issue #311); see `mediator.rs`.
+//! `think` performs no mediated operation at all: zero I/O, nothing for
+//! Arbitraitor to mediate (§9.48.7) — it appends to the session's own
+//! thought state only.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +23,11 @@ use crate::action::WorkerAction;
 use crate::mediator::{BashMediator, MediationError};
 use crate::paths::resolve_confined;
 use crate::search::{search_files, truncate_chars};
+use crate::think::{
+    MAX_THOUGHTS_PER_SEQUENCE, REASON_BRANCHING_NOT_SUPPORTED, REASON_SECRET_SHAPED_CONTENT,
+    REASON_THOUGHT_BUDGET_EXHAUSTED, REASON_THOUGHT_EMPTY, REASON_THOUGHT_TOO_LARGE,
+    ReasoningRecord,
+};
 use crate::tooldef::InternalTool;
 
 /// Read size cap for `read_file` (bytes).
@@ -27,6 +36,9 @@ const MAX_READ_BYTES: u64 = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 /// Observation cap per captured stream / file body fed back to the model.
 const MAX_OBSERVATION_CHARS: usize = 8 * 1024;
+/// Per-thought size cap (chars, §9.48.3): the 8 KiB observation idiom.
+pub(crate) const MAX_THOUGHT_CHARS: usize = 8 * 1024;
+
 /// Appended when an observation is cut to a byte cap.
 const TRUNCATION_MARKER: &str = "\n[truncated]";
 
@@ -75,6 +87,14 @@ pub(crate) struct ToolExecutor<'a> {
     /// when `[tools]` configuration resolves.
     #[allow(dead_code, reason = "carried for the T2 command/T3 subagent dispatch")]
     policy: crate::tooldef::ToolPolicy,
+    /// The session's `think`-tool state (§9.48.3 budgets, §9.48.8 sequence
+    /// ids). Per-executor, i.e. per-run at depth 0.
+    thoughts: crate::think::ThoughtChain,
+    /// Audit metadata of every receipted reasoning step, accepted or
+    /// refused (spec 9.48.8): the run result carries them so the caller can
+    /// persist `agent reasoning` events; text rides only on accepted steps
+    /// AND only when payload recording is enabled.
+    reasoning_records: Vec<ReasoningRecord>,
 }
 
 impl<'a> ToolExecutor<'a> {
@@ -86,7 +106,15 @@ impl<'a> ToolExecutor<'a> {
             receipts: Vec::new(),
             untrusted_writes: Vec::new(),
             policy: crate::tooldef::ToolPolicy::built_ins_only(),
+            thoughts: crate::think::ThoughtChain::new(),
+            reasoning_records: Vec::new(),
         }
+    }
+
+    /// The audit metadata of every receipted reasoning step - accepted AND
+    /// refused - in call order (spec 9.48.8 persistence source).
+    pub(crate) fn reasoning_records(&self) -> &[ReasoningRecord] {
+        &self.reasoning_records
     }
 
     /// Attaches the run's declared-tool policy (config-resolved tools and
@@ -150,6 +178,24 @@ impl<'a> ToolExecutor<'a> {
             WorkerAction::Search { pattern, path } => self.search(pattern, path.as_deref()),
             WorkerAction::WriteFile { path, content } => self.write_file(path, content),
             WorkerAction::Bash { script } => self.bash(script).await,
+            WorkerAction::Think {
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+                branch_from_thought,
+                branch_id,
+            } => self.think(
+                thought,
+                *thought_number,
+                *total_thoughts,
+                *next_thought_needed,
+                *is_revision,
+                *revises_thought,
+                branch_from_thought.is_some() || branch_id.is_some(),
+            ),
             WorkerAction::DeclaredTool { tool_id, .. } => self.dispatch_declared(tool_id).await,
             WorkerAction::Finish { .. } => self.record_refusal("finish", "misrouted-finish"),
         }
@@ -167,6 +213,13 @@ impl<'a> ToolExecutor<'a> {
     /// rejects it), so a sub-session can never mutate the (shared parent)
     /// worktree through the executor.
     fn admit_internal(&mut self, action: &WorkerAction) -> Option<ToolTurn> {
+        // The §9.48.2 trusted-layer kill-switch applies at EVERY depth:
+        // `enabled = false` removes the tool from the run's surface. Depth 0
+        // otherwise bypasses the internal admission gate (the bootstrap
+        // surface is unconditional).
+        if !self.policy.think_enabled && matches!(action, WorkerAction::Think { .. }) {
+            return Some(self.push_refusal("think", true, "tool-not-allowed"));
+        }
         if self.policy.subsession_depth == 0 {
             return None;
         }
@@ -412,6 +465,183 @@ impl<'a> ToolExecutor<'a> {
         }
     }
 
+    /// The built-in `think` tool (spec `20-harness-worker.md` §9.48): one
+    /// receipted deliberation step. Zero I/O — nothing for Arbitraitor to
+    /// mediate (§9.48.7); the only effects are the executor's thought state,
+    /// the receipt, and the audit record surfaced via
+    /// [`Self::reasoning_records`] for the caller to persist as
+    /// `agent reasoning` events (§9.48.8).
+    ///
+    /// Refusal order is the audited surface (§9.48.4 before persistence of
+    /// any text; budgets before ordering so an exhausted run cannot be
+    /// probed for ordering state):
+    /// branching-reserved → size → budget/ordering → secret-shape.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the §9.48.1 parameter surface is one audited contract; grouping it into a struct would hide which fields the refusal order consumes"
+    )]
+    fn think(
+        &mut self,
+        thought: &str,
+        thought_number: u32,
+        total_thoughts: u32,
+        next_thought_needed: bool,
+        is_revision: bool,
+        revises_thought: Option<u32>,
+        branching_supplied: bool,
+    ) -> ToolTurn {
+        // Reserved v2 branching fields (§9.48.5): parsing never fails on
+        // their presence; the SUPPLY of either is a typed refusal.
+        if branching_supplied {
+            return self.think_refusal(
+                REASON_BRANCHING_NOT_SUPPORTED,
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+            );
+        }
+        // Per-thought size cap (§9.48.3). The scan measures the full input
+        // regardless of size, so the refusal carries `thought_chars`.
+        let thought_chars = thought.chars().count();
+        if thought.is_empty() {
+            return self.think_refusal(
+                REASON_THOUGHT_EMPTY,
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+            );
+        }
+        if thought_chars > MAX_THOUGHT_CHARS {
+            return self.think_refusal(
+                REASON_THOUGHT_TOO_LARGE,
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+            );
+        }
+        // Budget + ordering rules (§9.48.1, §9.48.3). The sequence-ceiling
+        // observation guides the agent to conclude now and finish.
+        if let Err(reason) =
+            self.thoughts
+                .validate(thought_number, total_thoughts, is_revision, revises_thought)
+        {
+            let mut turn = self.think_refusal(
+                reason,
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+            );
+            if reason == REASON_THOUGHT_BUDGET_EXHAUSTED
+                && thought_number > MAX_THOUGHTS_PER_SEQUENCE
+            {
+                turn.observation = format!(
+                    "[think refused: {reason}] the sequence ceiling of {MAX_THOUGHTS_PER_SEQUENCE} thoughts is reached: conclude now, then finish the task"
+                );
+            }
+            return turn;
+        }
+        // Secret-shaped thought text is REFUSED, not redacted (§9.48.4):
+        // this check runs before any event carrying `thought_text` could be
+        // produced — a secret-shaped thought's text is never written, and
+        // the refusal record below carries only the validation-time char
+        // count.
+        if orchestraitor_core::contains_secret_shaped(thought) {
+            return self.think_refusal(
+                REASON_SECRET_SHAPED_CONTENT,
+                thought,
+                thought_number,
+                total_thoughts,
+                next_thought_needed,
+                is_revision,
+                revises_thought,
+            );
+        }
+        // Accepted: append to the chain and record the audit metadata.
+        self.thoughts
+            .accept(thought_number, next_thought_needed, is_revision);
+        let record = ReasoningRecord {
+            accepted: true,
+            refusal_reason: None,
+            thought_number,
+            total_thoughts,
+            next_thought_needed,
+            is_revision,
+            revises_thought: if is_revision { revises_thought } else { None },
+            thought_chars,
+            sequence_id: self.thoughts.sequence_id(),
+            // Consent gate at the SOURCE (§9.48.8; spec 50 §20.4.2): the
+            // text never enters the record — and therefore no serializer,
+            // run result, or event payload — unless payload recording is
+            // enabled. The model still holds the thought in its context;
+            // only the persisted copy is gated.
+            thought_text: self.policy.record_payloads.then(|| thought.to_string()),
+        };
+        self.reasoning_records.push(record);
+        self.push_receipt("think", true, "completed", None, None);
+        // Output is a compact state echo — an audit line, NEVER the thought
+        // text (§9.48.1; the model already holds its own thought in context).
+        let sequence = self.thoughts.sequence_id();
+        ToolTurn {
+            observation: format!(
+                "[think {thought_number}/{total_thoughts} next={next_thought_needed}] sequence={sequence} thoughts={} budget={MAX_THOUGHTS_PER_SEQUENCE}",
+                self.thoughts.run_count()
+            ),
+            mediation_failure: None,
+        }
+    }
+
+    /// Records one receipted `think` refusal: the receipt plus an
+    /// observation carrying the typed reason code. The thought's TEXT never
+    /// enters the record or the observation — only the validation-time
+    /// `thought_chars` count (§9.48.4). A refusal never ends the run and
+    /// never raises an exception into the loop (§9.48.1).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the §9.48.1 parameter surface so the refusal record is complete"
+    )]
+    fn think_refusal(
+        &mut self,
+        reason: &'static str,
+        thought: &str,
+        thought_number: u32,
+        total_thoughts: u32,
+        next_thought_needed: bool,
+        is_revision: bool,
+        revises_thought: Option<u32>,
+    ) -> ToolTurn {
+        self.reasoning_records.push(ReasoningRecord {
+            accepted: false,
+            refusal_reason: Some(reason),
+            thought_number,
+            total_thoughts,
+            next_thought_needed,
+            is_revision,
+            revises_thought: if is_revision { revises_thought } else { None },
+            thought_chars: thought.chars().count(),
+            sequence_id: self.thoughts.sequence_id(),
+            // The refusal event never contains the rejected thought
+            // (§9.48.4): text stays `None` for every refusal code.
+            thought_text: None,
+        });
+        self.push_receipt("think", true, "refused", Some(reason), None);
+        ToolTurn {
+            observation: format!("[think refused: {reason}]"),
+            mediation_failure: None,
+        }
+    }
+
     async fn bash(&mut self, script: &str) -> ToolTurn {
         match self.bash.run_bash(script).await {
             Ok(run) => {
@@ -465,6 +695,7 @@ fn internal_action_of(action: &WorkerAction) -> InternalAction {
         WorkerAction::ReadFile { .. } => InternalAction::Allowed(InternalTool::ReadFile),
         WorkerAction::Search { .. } => InternalAction::Allowed(InternalTool::Search),
         WorkerAction::Bash { .. } => InternalAction::Allowed(InternalTool::Bash),
+        WorkerAction::Think { .. } => InternalAction::Allowed(InternalTool::Think),
         WorkerAction::WriteFile { .. } => InternalAction::NeverAdmissible("write_file"),
         WorkerAction::DeclaredTool { .. } | WorkerAction::Finish { .. } => {
             InternalAction::NotInternal
@@ -742,6 +973,8 @@ mod tests {
             declared: vec![command_tool("explain-clippy")],
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
+            think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -769,6 +1002,8 @@ mod tests {
             declared: vec![command_tool("explain-clippy")],
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 0,
+            think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -792,6 +1027,8 @@ mod tests {
             declared: vec![command_tool("explain-clippy")],
             allowed_internal: std::collections::BTreeSet::new(),
             subsession_depth: 1,
+            think_enabled: true,
+            record_payloads: true,
         };
         let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
 
@@ -897,5 +1134,379 @@ mod tests {
         let executor = ToolExecutor::new(temp.path(), &bash);
         assert!(executor.policy().declared.is_empty());
         assert_eq!(executor.policy().subsession_depth, 0);
+    }
+
+    // §9.48 think-tool tests: contract, budgets, secret-shape refusal
+    // (negative + adversarial per spec 50 §21.4), branching reservation.
+
+    fn think_action(
+        thought: &str,
+        thought_number: u32,
+        total_thoughts: u32,
+        next: bool,
+    ) -> WorkerAction {
+        WorkerAction::Think {
+            thought: thought.to_string(),
+            thought_number,
+            total_thoughts,
+            next_thought_needed: next,
+            is_revision: false,
+            revises_thought: None,
+            branch_from_thought: None,
+            branch_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn think_accepts_a_linear_chain_and_returns_compact_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+
+        let turn = executor
+            .dispatch(&think_action("first step: read the spec", 1, 3, true))
+            .await;
+        assert_eq!(executor.receipts.last().unwrap().outcome, "completed");
+        assert_eq!(executor.receipts.last().unwrap().tool, "think");
+        // Compact state echo — never the thought text (§9.48.1).
+        assert_eq!(
+            turn.observation,
+            "[think 1/3 next=true] sequence=1 thoughts=1 budget=256"
+        );
+
+        executor
+            .dispatch(&think_action("second step", 2, 3, true))
+            .await;
+        executor
+            .dispatch(&think_action("final step", 3, 3, false))
+            .await;
+        assert_eq!(executor.receipts.len(), 3);
+        // Consent gate at the source (§9.48.8; spec 50 §20.4.2): the
+        // default-off executor persists structure, never text.
+        assert_eq!(executor.reasoning_records().len(), 3);
+        let record = &executor.reasoning_records()[2];
+        assert!(record.accepted);
+        assert_eq!(record.refusal_reason, None);
+        assert_eq!(record.thought_text, None);
+        assert_eq!(record.thought_chars, "final step".len());
+        assert_eq!(record.sequence_id, 1);
+    }
+
+    #[tokio::test]
+    async fn think_text_rides_the_record_only_under_payload_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: Vec::new(),
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 0,
+            think_enabled: true,
+            record_payloads: true,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+        executor
+            .dispatch(&think_action("consented step", 1, 3, true))
+            .await;
+        let record = executor.reasoning_records().first().unwrap();
+        assert!(record.accepted);
+        assert_eq!(record.refusal_reason, None);
+        assert_eq!(record.thought_text.as_deref(), Some("consented step"));
+    }
+
+    #[tokio::test]
+    async fn think_refuses_regression_and_receipts_typed_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        executor
+            .dispatch(&think_action("step one", 1, 3, true))
+            .await;
+
+        let turn = executor
+            .dispatch(&think_action("regressed", 1, 3, true))
+            .await;
+        let receipt = executor.receipts.last().unwrap();
+        assert_eq!(receipt.outcome, "refused");
+        assert_eq!(
+            receipt.reason,
+            Some(crate::think::REASON_THOUGHT_NUMBER_REGRESSED)
+        );
+        assert_eq!(
+            turn.observation,
+            "[think refused: thought-number-regressed]"
+        );
+        // The refusal record carries metadata, never the rejected text.
+        let record = executor.reasoning_records().last().unwrap();
+        assert_eq!(record.thought_text, None);
+        assert_eq!(record.thought_chars, "regressed".len());
+    }
+
+    #[tokio::test]
+    async fn think_refuses_empty_thought() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        let turn = executor.dispatch(&think_action("", 1, 3, true)).await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some(crate::think::REASON_THOUGHT_EMPTY)
+        );
+        assert_eq!(turn.observation, "[think refused: thought-empty]");
+    }
+
+    #[tokio::test]
+    async fn think_refuses_oversized_thought_with_char_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        let oversized = "x".repeat(MAX_THOUGHT_CHARS + 1);
+        let turn = executor
+            .dispatch(&think_action(&oversized, 1, 3, true))
+            .await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some(crate::think::REASON_THOUGHT_TOO_LARGE)
+        );
+        // The observation is the refusal line only — never the oversized text.
+        assert_eq!(turn.observation, "[think refused: thought-too-large]");
+        let record = executor.reasoning_records().last().unwrap();
+        assert_eq!(record.thought_chars, MAX_THOUGHT_CHARS + 1);
+        assert_eq!(record.thought_text, None);
+    }
+
+    #[tokio::test]
+    async fn think_refuses_above_sequence_ceiling_with_concluding_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        let turn = executor
+            .dispatch(&think_action("way past the ceiling", 257, 300, true))
+            .await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some(crate::think::REASON_THOUGHT_BUDGET_EXHAUSTED)
+        );
+        // The refusal observation guides the agent to conclude (§9.48.3).
+        assert!(turn.observation.contains("conclude now"));
+        assert!(turn.observation.contains("256"));
+    }
+
+    #[tokio::test]
+    async fn think_revision_requires_known_target_and_reopens_closed_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        // Revision of an unknown target is refused.
+        let turn = executor
+            .dispatch(&WorkerAction::Think {
+                thought: "revising nothing".to_string(),
+                thought_number: 1,
+                total_thoughts: 3,
+                next_thought_needed: true,
+                is_revision: true,
+                revises_thought: Some(2),
+                branch_from_thought: None,
+                branch_id: None,
+            })
+            .await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some(crate::think::REASON_REVISION_TARGET_UNKNOWN)
+        );
+        assert_eq!(turn.observation, "[think refused: revision-target-unknown]");
+
+        executor
+            .dispatch(&think_action("step one", 1, 3, true))
+            .await;
+        executor
+            .dispatch(&think_action("step two", 2, 3, false))
+            .await;
+        // A revision re-opens the closed sequence.
+        let turn = executor
+            .dispatch(&WorkerAction::Think {
+                thought: "step two reconsidered".to_string(),
+                thought_number: 2,
+                total_thoughts: 3,
+                next_thought_needed: true,
+                is_revision: true,
+                revises_thought: Some(2),
+                branch_from_thought: None,
+                branch_id: None,
+            })
+            .await;
+        assert_eq!(executor.receipts.last().unwrap().outcome, "completed");
+        let record = executor.reasoning_records().last().unwrap();
+        assert!(record.is_revision);
+        assert_eq!(record.revises_thought, Some(2));
+        assert!(turn.observation.contains("next=true"));
+        // A non-revision call with a `revises_thought` value persists null.
+        executor
+            .dispatch(&think_action("step three", 3, 3, false))
+            .await;
+        assert_eq!(
+            executor.reasoning_records().last().unwrap().revises_thought,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn think_closed_sequence_then_new_one_starts_fresh_and_budget_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        executor
+            .dispatch(&think_action("seq 1 step 1", 1, 2, false))
+            .await;
+        executor
+            .dispatch(&think_action("seq 2 step 1", 1, 2, true))
+            .await;
+        let record = executor.reasoning_records().last().unwrap();
+        assert_eq!(record.sequence_id, 2);
+        assert_eq!(
+            executor.receipts.last().unwrap().outcome,
+            "completed",
+            "a fresh sequence after a closed one is accepted (§9.48.3)"
+        );
+    }
+
+    #[tokio::test]
+    async fn think_secret_shaped_thoughts_are_refused_not_redacted() {
+        // Adversarial §9.23.4 shapes (spec 50 §21.4: assert the forbidden
+        // effect — persistence of the secret — did NOT happen).
+        let secret_thoughts = [
+            ("sk", "the key is sk-proj-abcdefghijklmnop for the api"),
+            (
+                "secret-uri",
+                "resolve secret://env/NEURALWATT_API_KEY before calling",
+            ),
+            (
+                "bearer",
+                "send Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            ),
+            ("github", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop"),
+            ("header", "x-api-key: abcdefghijklmnopqrstuvwxyz123456"),
+            ("hex", "digest a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6 matches"),
+            (
+                "base64",
+                "signature dGhpc2lzYWJhc2U2NHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA== here",
+            ),
+        ];
+        for (label, secret) in secret_thoughts {
+            let temp = tempfile::tempdir().unwrap();
+            let bash = fixture_bash_ok();
+            let mut executor = ToolExecutor::new(temp.path(), &bash);
+            let turn = executor.dispatch(&think_action(secret, 1, 3, true)).await;
+            let receipt = executor.receipts.last().unwrap();
+            assert_eq!(
+                receipt.reason,
+                Some(crate::think::REASON_SECRET_SHAPED_CONTENT),
+                "shape `{label}` must be refused"
+            );
+            assert_eq!(turn.observation, "[think refused: secret-shaped-content]");
+            // The forbidden effect: the secret text persisted NOWHERE —
+            // not in the record, not in the observation.
+            let record = executor.reasoning_records().last().unwrap();
+            assert_eq!(record.thought_text, None, "shape `{label}`");
+            assert!(!turn.observation.contains(&secret[..8.min(secret.len())]));
+        }
+    }
+
+    #[tokio::test]
+    async fn think_prose_with_secret_prefixes_is_not_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        let turn = executor
+            .dispatch(&think_action(
+                "the parser handles the sk- prefix; issue #597 covers the spec home",
+                1,
+                3,
+                true,
+            ))
+            .await;
+        assert_eq!(executor.receipts.last().unwrap().outcome, "completed");
+        assert!(turn.observation.starts_with("[think 1/3"));
+    }
+
+    #[tokio::test]
+    async fn think_branching_fields_are_refused_but_parse_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let mut executor = ToolExecutor::new(temp.path(), &bash);
+        // Parsing must NOT fail on the reserved fields' presence (§9.48.5).
+        let action = WorkerAction::Think {
+            thought: "branching".to_string(),
+            thought_number: 1,
+            total_thoughts: 3,
+            next_thought_needed: true,
+            is_revision: false,
+            revises_thought: None,
+            branch_from_thought: Some(1),
+            branch_id: Some("b1".to_string()),
+        };
+        let turn = executor.dispatch(&action).await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some(crate::think::REASON_BRANCHING_NOT_SUPPORTED)
+        );
+        assert_eq!(
+            turn.observation,
+            "[think refused: branching-not-supported-in-v1]"
+        );
+        let record = executor.reasoning_records().last().unwrap();
+        assert_eq!(record.thought_text, None);
+    }
+
+    #[tokio::test]
+    async fn think_kill_switch_refuses_every_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: Vec::new(),
+            allowed_internal: std::collections::BTreeSet::new(),
+            subsession_depth: 0,
+            think_enabled: false,
+            record_payloads: true,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+        let turn = executor
+            .dispatch(&think_action("any thought", 1, 3, true))
+            .await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some("tool-not-allowed")
+        );
+        assert_eq!(turn.observation, "tool call refused: tool-not-allowed");
+        assert!(
+            executor.reasoning_records().is_empty(),
+            "a killed switch refuses before any record is produced"
+        );
+    }
+
+    #[tokio::test]
+    async fn think_inside_subsession_requires_allowlist() {
+        let temp = tempfile::tempdir().unwrap();
+        let bash = fixture_bash_ok();
+        let policy = crate::tooldef::ToolPolicy {
+            declared: Vec::new(),
+            // A sub-session allowlist carved WITHOUT think: the depth rule
+            // (§9.48.2 ring 3) keeps the tool refused.
+            allowed_internal: std::collections::BTreeSet::from([
+                InternalTool::ReadFile,
+                InternalTool::Search,
+            ]),
+            subsession_depth: 1,
+            think_enabled: true,
+            record_payloads: true,
+        };
+        let mut executor = ToolExecutor::new(temp.path(), &bash).with_policy(policy);
+        let turn = executor
+            .dispatch(&think_action("sub-session thought", 1, 3, true))
+            .await;
+        assert_eq!(
+            executor.receipts.last().unwrap().reason,
+            Some("tool-not-allowed")
+        );
+        assert_eq!(turn.observation, "tool call refused: tool-not-allowed");
     }
 }

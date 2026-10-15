@@ -55,6 +55,21 @@ pub struct OrchestraitorConfig {
     /// Watch-daemon settings (spec `10-orchestrator.md` §9.36). Absent
     /// block keeps every documented default.
     pub watch: Option<WatchConfigBlock>,
+    /// Observability settings (spec `50-contracts-data.md` §20.4.2).
+    /// Absent block keeps every documented default.
+    pub observability: Option<ObservabilityConfig>,
+}
+
+/// Observability configuration block (spec `50-contracts-data.md`
+/// §20.4.2): payload-recording consent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ObservabilityConfig {
+    /// Explicit opt-in to payload-class content in the event store
+    /// (prompts, completions, tool arguments/results, and the §9.48.8
+    /// `thought_text`). Default `false`: the audit metadata persists, the
+    /// text does not.
+    #[serde(default)]
+    pub record_payloads: bool,
 }
 
 /// Watch-daemon configuration block (spec `10-orchestrator.md` §9.36):
@@ -308,6 +323,13 @@ pub struct ToolBudgetConfig {
 /// cheap-model sub-session with a scoped internal-tool allowlist.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolConfig {
+    /// Trusted-layer kill-switch (spec `20-harness-worker.md` §9.48.2):
+    /// `enabled = false` on the built-in `think` tool in any trusted config
+    /// layer (built-in defaults, plugin defaults, global user,
+    /// organization/team) removes the tool from the surface. Declared
+    /// tools (`command`/`subagent`) do not carry this key; a non-`think`
+    /// entry with `enabled` set is rejected at resolve time.
+    pub enabled: Option<bool>,
     /// Tool mechanism: `command` (fixed argv, mediated dispatch) or
     /// `subagent` (cheap-model sub-session). `hybrid` is schema-reserved
     /// and rejected at resolve time in v1.

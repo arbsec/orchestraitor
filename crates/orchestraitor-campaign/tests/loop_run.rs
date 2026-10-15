@@ -85,6 +85,7 @@ fn fixture_run(task_id: &str, turns: u32, tokens: u64) -> WorkerRun {
         untrusted_writes: Vec::new(),
         receipts: Vec::new(),
         subsession_events: Vec::new(),
+        reasoning_events: Vec::new(),
         budgets: BudgetEcho {
             max_attempts: 3,
             max_replans: 2,

@@ -86,5 +86,6 @@ pub(crate) const fn category_text(category: EventCategory) -> &'static str {
         EventCategory::ResourceUsage => "resource_usage",
         EventCategory::Error => "error",
         EventCategory::SecurityFinding => "security_finding",
+        EventCategory::AgentReasoning => "agent_reasoning",
     }
 }

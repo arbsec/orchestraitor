@@ -45,6 +45,28 @@ pub(crate) enum WorkerAction {
         /// Bash script bytes (streamed to the interpreter over stdin).
         script: String,
     },
+    /// Externalized deliberation (spec `20-harness-worker.md` §9.48): one
+    /// step of step-by-step reasoning appended to the session's thought
+    /// chain. Zero I/O; the thought text is validated (budgets, secret
+    /// shapes) at dispatch and persisted as an `agent reasoning` event.
+    Think {
+        /// This step's deliberation text.
+        thought: String,
+        /// Position in the sequence (1-based).
+        thought_number: u32,
+        /// Current step-count estimate.
+        total_thoughts: u32,
+        /// Whether more steps are coming.
+        next_thought_needed: bool,
+        /// Whether this call revises earlier thinking.
+        is_revision: bool,
+        /// Which thought is reconsidered (required when `is_revision`).
+        revises_thought: Option<u32>,
+        /// Reserved for v2 branching (§9.48.5); refused when supplied.
+        branch_from_thought: Option<u32>,
+        /// Reserved for v2 branching (§9.48.5); refused when supplied.
+        branch_id: Option<String>,
+    },
     /// A config-declared tool (issue #535, T1). The id is untrusted model
     /// output routed through the tool registry; admission (existence,
     /// visibility, depth) happens at dispatch. v1 carries no per-call
@@ -168,6 +190,7 @@ pub(crate) fn parse_action(text: &str) -> Result<WorkerAction, ActionRejection> 
             }
             Ok(WorkerAction::Bash { script })
         }
+        "think" => parse_think(&value),
         "finish" => {
             let summary = required_string(&value, "summary")?;
             let success = value
@@ -246,6 +269,110 @@ fn required_string(
         Some(_) => Err(ActionRejection::Malformed {
             reason: "wrong-field-type",
         }),
+    }
+}
+
+/// Parses the `think` action fields (§9.48.1). Parsing is total and never
+/// fails on the reserved branching fields — their PRESENCE is a typed,
+/// receipted refusal at dispatch (`branching-not-supported-in-v1`), not a
+/// parse error. Only the hard shape violations (missing/wrong-typed
+/// required fields, non-positive counters, an over-bound thought) are
+/// protocol errors here; everything the tool itself refuses travels with
+/// the action so the executor can receipt it.
+fn parse_think(value: &serde_json::Value) -> Result<WorkerAction, ActionRejection> {
+    let thought = required_string(value, "thought")?;
+    let thought_number = required_u32(value, "thought_number")?;
+    let total_thoughts = required_u32(value, "total_thoughts")?;
+    let next_thought_needed = value
+        .get("next_thought_needed")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(ActionRejection::Malformed {
+            reason: "missing-field",
+        })?;
+    let is_revision = match value.get("is_revision") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(_) => {
+            return Err(ActionRejection::Malformed {
+                reason: "wrong-field-type",
+            });
+        }
+    };
+    let revises_thought = optional_u32(value, "revises_thought")?;
+    let branch_from_thought = optional_u32(value, "branch_from_thought")?;
+    // Cap the thought BEFORE it is cloned into the action: the receipted
+    // `thought-too-large` refusal still covers the near-miss range at the
+    // executor, but an unbounded model string must never be materialized
+    // here (the same cap shape every other string field applies).
+    if thought.chars().count() > 4 * crate::tools::MAX_THOUGHT_CHARS {
+        return Err(ActionRejection::Malformed {
+            reason: "field-too-large",
+        });
+    }
+    let branch_id = match value.get("branch_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => {
+            // Reserved-and-refused, but still a model-supplied string: cap
+            // it like every other string field before it is stored.
+            if id.chars().count() > MAX_TOOL_NAME_CHARS {
+                return Err(ActionRejection::Malformed {
+                    reason: "field-too-large",
+                });
+            }
+            Some(id.clone())
+        }
+        Some(_) => {
+            return Err(ActionRejection::Malformed {
+                reason: "wrong-field-type",
+            });
+        }
+    };
+    if thought_number == 0 || total_thoughts == 0 {
+        return Err(ActionRejection::Malformed {
+            reason: "invalid-field-value",
+        });
+    }
+    Ok(WorkerAction::Think {
+        thought,
+        thought_number,
+        total_thoughts,
+        next_thought_needed,
+        is_revision,
+        revises_thought,
+        branch_from_thought,
+        branch_id,
+    })
+}
+
+/// Reads a required `u32` field.
+fn required_u32(value: &serde_json::Value, field: &'static str) -> Result<u32, ActionRejection> {
+    match value.get(field) {
+        None => Err(ActionRejection::Malformed {
+            reason: "missing-field",
+        }),
+        Some(number @ serde_json::Value::Number(_)) => {
+            if let Some(number) = number.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                Ok(number)
+            } else {
+                Err(ActionRejection::Malformed {
+                    reason: "wrong-field-type",
+                })
+            }
+        }
+        Some(_) => Err(ActionRejection::Malformed {
+            reason: "wrong-field-type",
+        }),
+    }
+}
+
+/// Reads an optional `u32` field (absent or `null` = `None`).
+fn optional_u32(
+    value: &serde_json::Value,
+    field: &'static str,
+) -> Result<Option<u32>, ActionRejection> {
+    match value.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(_) => required_u32(value, field).map(Some),
     }
 }
 
@@ -356,6 +483,73 @@ mod tests {
                 question: None,
             })
         );
+    }
+
+    #[test]
+    fn think_action_parses_with_optional_fields_and_reserved_branching() {
+        // Minimal shape: only the required fields.
+        let minimal = "```json\n{\"tool\": \"think\", \"thought\": \"step one\", \"thought_number\": 1, \
+             \"total_thoughts\": 3, \"next_thought_needed\": true}\n```";
+        assert_eq!(
+            parse_action(minimal),
+            Ok(WorkerAction::Think {
+                thought: "step one".to_string(),
+                thought_number: 1,
+                total_thoughts: 3,
+                next_thought_needed: true,
+                is_revision: false,
+                revises_thought: None,
+                branch_from_thought: None,
+                branch_id: None,
+            })
+        );
+        // Full shape with revision + reserved branching fields: parsing
+        // NEVER fails on their presence (§9.48.5) — the executor refuses.
+        let full = "```json\n{\"tool\": \"think\", \"thought\": \"revising\", \"thought_number\": 2, \
+             \"total_thoughts\": 3, \"next_thought_needed\": false, \"is_revision\": true, \
+             \"revises_thought\": 1, \"branch_from_thought\": 1, \"branch_id\": \"b1\"}\n```";
+        assert_eq!(
+            parse_action(full),
+            Ok(WorkerAction::Think {
+                thought: "revising".to_string(),
+                thought_number: 2,
+                total_thoughts: 3,
+                next_thought_needed: false,
+                is_revision: true,
+                revises_thought: Some(1),
+                branch_from_thought: Some(1),
+                branch_id: Some("b1".to_string()),
+            })
+        );
+        // Shape violations stay parse-level rejections.
+        let empty_thought = "```json\n{\"tool\": \"think\", \"thought\": \"\", \"thought_number\": 1, \
+             \"total_thoughts\": 3, \"next_thought_needed\": true}\n```";
+        assert!(matches!(
+            parse_action(empty_thought),
+            Ok(WorkerAction::Think { thought, .. }) if thought.is_empty()
+        ));
+        let zero_number = "```json\n{\"tool\": \"think\", \"thought\": \"x\", \"thought_number\": 0, \
+             \"total_thoughts\": 3, \"next_thought_needed\": true}\n```";
+        assert!(matches!(
+            parse_action(zero_number),
+            Err(ActionRejection::Malformed { .. })
+        ));
+        let missing_field =
+            "```json\n{\"tool\": \"think\", \"thought\": \"x\", \"thought_number\": 1}\n```";
+        assert_eq!(
+            parse_action(missing_field),
+            Err(ActionRejection::Malformed {
+                reason: "missing-field"
+            })
+        );
+        let wrong_type = "```json\n{\"tool\": \"think\", \"thought\": \"x\", \"thought_number\": \"1\", \
+             \"total_thoughts\": 3, \"next_thought_needed\": true}\n```";
+        assert!(matches!(
+            parse_action(wrong_type),
+            Err(ActionRejection::Malformed {
+                reason: "wrong-field-type"
+            })
+        ));
     }
 
     #[test]
