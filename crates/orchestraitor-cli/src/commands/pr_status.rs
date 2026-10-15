@@ -412,13 +412,20 @@ pub(crate) fn write_one_pager<W: Write>(
 /// `orc chat pr-status` view (reasons, failing/pending checks, actionable
 /// threads, checklist delta) — one renderer so the two operator views
 /// cannot drift. Headline and snapshot footer stay per-command.
-/// Neutralizes terminal-control characters and newlines in
-/// provider-supplied text before it reaches the operator's terminal (§9.44:
-/// a PR commenter must not be able to alter a verdict view's output).
+/// Neutralizes terminal-control characters, newlines, AND bidirectional
+/// controls in provider-supplied text before it reaches the operator's
+/// terminal (§9.44: a PR commenter must not be able to alter a verdict
+/// view's output — bidi controls can reorder displayed text to disguise
+/// the verdict).
 pub(crate) fn sanitize_provider_text(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',
+            // Bidirectional controls (LRE/RLE/LRO/RLO/PDF/LRI/RLI/FSI/PDI,
+            // plus the deprecated LRM/RLM) can reorder displayed text.
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' => {
+                '\u{FFFD}'
+            }
             c if c.is_control() => '\u{FFFD}',
             c => c,
         })
