@@ -1081,8 +1081,6 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         //     RESOLVED landing base (--base or the default branch), and the
         //     fetch targets the SELECTED repository (--repo), so the guard
         //     never compares against the wrong history.
-        fetch_remote_branch(&owner, &repo, &remote_branch);
-        reject_duplicate_subjects(&local_branch, &remote_branch)?;
         let repo_url = format!("https://github.com/{owner}/{repo}.git");
         if !git_fetch_authenticated(token.token().expose_secret(), &owner, &repo, &base_head) {
             // Fall through: the rev-parse below produces the typed error
@@ -1096,6 +1094,19 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         })?;
         (tree, Some(base_head))
     };
+    // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
+    //     whose NEW commits carry two or more CONSECUTIVE identical
+    //     subjects is refused — review-fix rounds must land as distinct
+    //     Conventional Commits subjects (or be squashed through this
+    //     command's single-commit landing). The comparison head is the
+    //     RESOLVED base head (the remote head for an existing branch, the
+    //     --base/default head for a new branch) from the SELECTED
+    //     repository, so the guard never compares against the wrong
+    //     history. Runs for new AND existing remote branches.
+    let guard_base_head = base_commit.clone().ok_or_else(|| {
+        miette!("cannot resolve the comparison base head for the duplicate-subject guard")
+    })?;
+    reject_duplicate_subjects(&local_branch, &guard_base_head, &owner, &repo)?;
     let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
@@ -1280,27 +1291,21 @@ fn fetch_remote_branch(owner: &str, repo: &str, remote_branch: &str) {
 ///
 /// Typed diagnostic naming the duplicated subject when two consecutive
 /// new commits share a subject line.
-fn reject_duplicate_subjects(local_branch: &str, remote_branch: &str) -> Result<()> {
-    // The remote head: the branch on the origin remote if it exists, else
-    // the default branch's head (a new remote branch starts from the base).
-    let remote_head = git(
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("origin/{remote_branch}"),
-        ],
-    )
-    .or_else(|_| git(None, &["rev-parse", "--verify", "--quiet", "origin/main"]))
-    .unwrap_or_default();
-
-    // List the new commits oldest-first: subjects only.
-    let range = if remote_head.is_empty() {
-        local_branch.to_string()
-    } else {
-        format!("{remote_head}..{local_branch}")
-    };
+fn reject_duplicate_subjects(
+    local_branch: &str,
+    base_head: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<()> {
+    // Fetch the resolved base head from the SELECTED repository so the
+    // new-commit range is accurate (a fetch failure is non-fatal: the
+    // guard then compares against the full local branch — fail-open on
+    // connectivity, fail-closed on content).
+    fetch_remote_branch(owner, repo, base_head);
+    // New commits: everything on local_branch not reachable from the base
+    // head (git log lists them newest-first; adjacent-equality is
+    // order-insensitive).
+    let range = format!("{base_head}..{local_branch}");
     let subjects_raw = git(None, &["log", "--format=%s", &range])?;
     let subjects: Vec<String> = subjects_raw.lines().map(str::to_string).collect();
     reject_consecutive_duplicate_subjects(&subjects, local_branch)
