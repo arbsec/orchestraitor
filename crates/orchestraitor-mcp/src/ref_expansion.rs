@@ -579,11 +579,16 @@ fn enforce_reference_cap(mut raw: String, header_len: usize, fence_len: usize) -
 /// literal), enforcing the 8 KiB pass budget and the 2 KiB per-reference
 /// cap. Returns (substitution, failure, `budget_hit`) — a budget hit leaves
 /// the literal with the typed notice (§9.49) and flips the pass budget.
+/// The byte length of a substitution (block or notice) for budget
+/// accounting.
+fn block_len_of(substitution: &str) -> usize {
+    substitution.len()
+}
+
 fn build_site_substitution(
     reference: &Reference,
     fields: &Result<ExpandedFields, ReferenceError>,
-    pass_chars: &mut usize,
-) -> (String, Option<String>, bool) {
+) -> (String, Option<String>) {
     let fields = match fields {
         Ok(resolved) => resolved,
         Err(ReferenceError::Failure(failure)) => {
@@ -597,7 +602,6 @@ fn build_site_substitution(
                     literal = reference.literal
                 ),
                 Some(String::from(label)),
-                false,
             );
         }
     };
@@ -615,14 +619,7 @@ fn build_site_substitution(
         reference.kind.scheme(),
         reference.number
     );
-    // §9.49: the 8 KiB bound applies to the WHOLE pass — count the block at
-    // EVERY substitution site (a repeated literal with N sites costs
-    // N × block.len()).
-    if *pass_chars + block.len() > MAX_PASS_CHARS {
-        return (budget_exceeded_notice(&reference.literal), None, true);
-    }
-    *pass_chars += block.len();
-    (block, None, false)
+    (block, None)
 }
 
 fn resolve_references(
@@ -660,21 +657,30 @@ fn resolve_references(
                 .fetch_issue(owner, repo, reference.number)
                 .map(ExpandedFields::Issue),
         };
-        let (substitution, failure_label, budget_hit) =
-            build_site_substitution(reference, &fields, &mut pass_chars);
-        if budget_hit {
-            budget_exceeded = true;
-        }
+        let (substitution, failure_label) = build_site_substitution(reference, &fields);
+        let is_failure = failure_label.is_some();
+        let mut budget_hit = false;
         for (_, start, end) in spans
             .iter()
             .filter(|(candidate, _, _)| candidate.literal == reference.literal)
         {
+            // §9.49: the 8 KiB bound applies to the WHOLE pass — EVERY site
+            // costs its block size (a repeated literal with N sites costs
+            // N × block.len()).
+            if pass_chars + block_len_of(&substitution) > MAX_PASS_CHARS {
+                budget_hit = true;
+                budget_exceeded = true;
+                let notice = budget_exceeded_notice(&reference.literal);
+                substitutions.push((*start, *end, notice));
+                continue;
+            }
+            pass_chars += block_len_of(&substitution);
             substitutions.push((*start, *end, substitution.clone()));
         }
         outcomes.push(ExpansionOutcome {
             reference: reference.literal.clone(),
-            expanded: !budget_hit && failure_label.is_none(),
-            failure: failure_label,
+            expanded: !is_failure && !budget_hit,
+            failure: failure_label.filter(|_| is_failure),
         });
     }
     (outcomes, substitutions, budget_exceeded)
