@@ -18,6 +18,7 @@ mod workflow;
 pub mod board_move;
 pub mod board_query;
 pub mod decision_record;
+pub mod pr_status;
 
 pub use board_move::{
     BoardMoveApplied, BoardMoveDelegationChain, BoardMoveError, BoardMoveOutcome, BoardMoveRefusal,
@@ -47,5 +48,9 @@ pub use error::{McpGatewayError, McpGatewayResult};
 pub use fs::FileSystemTools;
 pub use fs_types::{ApplyPatchRequest, DigestMismatch, FileDigest, ProjectPath};
 pub use gateway::{GatewayContext, McpGateway};
+pub use pr_status::{
+    CheckItem, Checklist, ChecklistItem, Convergence, Engine, PrStatus, PrStatusError,
+    PrStatusTransport, ReviewRecord, ThreadItem, ThreadsSummary,
+};
 pub use project::{ProjectId, ProjectScope};
 pub use workflow::{WorkflowKind, WorkflowRequest, WorkflowTools};

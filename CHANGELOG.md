@@ -13,6 +13,39 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **`pr.status` MCP decision tool** — the §9.48 PR-status aggregation engine
+  is now SHARED between `orc pr status` and the daemon's MCP gateway
+  ("one engine, three surfaces"; spec `10-orchestrator.md` §9.39, §9.48):
+  the same typed verdict, the same reason codes, the same fail-closed
+  unread-sub-check semantics. The tool is read-only, event-recorded into the
+  §9.25.1 audit store like `board.query` (request truncated, result summary
+  `mergeable` + reason count), and fails with typed structured payloads —
+  `pr_status_unrecoverable` (carrying the degraded `partial_verdict` when
+  one exists), `pr_status_config`, and `pr_status_concurrent_edit` naming
+  the moved anchor. The route is enabled only when the gateway context
+  carries ALL THREE values — the GraphQL transport, the CLEAN-record root,
+  and the allowed `owner/name` repository; any missing one disables it
+  entirely (hidden from `tools/list`, calls rejected), and a request
+  naming a repository outside the allowed scope is refused with the typed
+  `pr_status_out_of_scope` payload (recorded in the audit trail with the
+  `out_of_scope` outcome class). Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+- **`orc pr status <N>`** — a read-only PR-mergeability verdict in ONE
+  invocation (spec `10-orchestrator.md` §9.48). One command replaces the
+  five pr-lifecycle script reads an agent previously ran to answer "is my
+  PR mergeable?": the in-process engine consumes `pr-checks`,
+  `review-threads`, `reconcile-checklist`, `convergence-status`, and
+  `merge-gate` semantics verbatim (same check classifications, same
+  reason-code vocabulary, known-disabled-job SKIP semantics included) and
+  emits the typed §9.48 JSON (`--json`) or a human one-pager. A BLOCKED PR
+  is a successful read (exit 0 with `mergeable: false` + reasons); exit 1
+  covers unrecoverable failures (network, auth, malformed provider output),
+  config/state problems exit 2, and a moved
+  head/base anchor between the pre- and post-reads exits 4 (concurrent
+  edit) — never a verdict from a mixed snapshot. Read-only: the tool never
+  labels, comments, reviews, or merges, and reads run through the GitHub App
+  service identity. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **CI completions for the `orcd watch` event ingress**: when
   `[watch.ingress].enabled = true`, a second conditional poll lane now
   covers check-run and workflow-run completions, which the repository
@@ -672,6 +705,36 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- `github-pr-lifecycle` skill scripts must be invoked as
+  `bash .agents/skills/github-pr-lifecycle/scripts/<name>`, never exec'd
+  directly: the App-signed landing path (`createCommitOnBranch`
+  `fileChanges`) cannot materialize mode `100755`, so the scripts land as
+  mode `100644` on the default branch — a direct `./scripts/...` call
+  fails with exit 126 (`Permission denied`) and the
+  `merge-gate` → `convergence-status` chain can never render a verdict.
+  The sibling-script invocations inside `merge-gate` and
+  `convergence-status` already route through `bash "$SCRIPT_DIR/<name>"`
+  (PR #600). The SKILL.md core procedure now states the `bash <path>`
+  contract at the top and bash-prefixes the `convergence-status` (step 6),
+  `merge-gate` (step 8), and `pr-labels`/`pr-labels-from-issue`
+  (step 9) invocations; a new regression test
+  (`scripts/test-bash-invocation-survival`) exercises the chain against
+  scripts in mode 644 and confirms the chain never returns exit 126.
+  The `check-bash-subinvocations` guard already prevents reintroduction
+  of direct-exec sibling invocations in any future commit.
+- `orcd watch` now emits a startup warning for the reverse
+  ingress/condition mismatch (issue #603): when
+  `[watch.kickoff].external_event = true` is armed but
+  `[watch.ingress].enabled = false`, the external-event kick-off
+  condition has no ingress feeding it, so it can never fire — silently.
+  The forward-direction warning (ingress enabled, condition disarmed;
+  issue #504) was already in place; the new warning is symmetric. Both
+  warnings flow through `WatchConfig::ingress_kickoff_warnings` and the
+  operator-facing message names the exact config pair and the remedy.
+  Consistent pairs (both enabled or both disabled) stay silent. The
+  forward-mismatch warning and the poller-still-runs behavior (a
+  gen-13 review finding) are unchanged. Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md#event-ingress-950b-opt-in).
 - Documented GitHub's `since` filter semantics for the issue-comment API
   endpoints: the filter applies to `updated_at`, not `created_at`, so
   responses include comments created before the requested window even when
