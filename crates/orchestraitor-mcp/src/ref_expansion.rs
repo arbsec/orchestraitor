@@ -419,19 +419,29 @@ fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
     let mut block = String::new();
     match fields {
         ExpandedFields::Pr(pr) => {
-            let single_line = |text: &str| -> String { sanitize_line(text) };
+            let single_line = sanitize_line;
+            // Redact BEFORE capping: a truncated token body can slip past
+            // the length minimum (part of a secret must never reach the
+            // worker). The per-field count is accumulated and announced at
+            // the end of the block (§9.23: announced, never silent).
+            let mut field_redactions = 0usize;
+            let mut redacted_line = |text: &str| -> String {
+                let (redacted, count) = redact_secrets(&single_line(text));
+                field_redactions += count;
+                redacted
+            };
             let _ = writeln!(block, "number: {}", pr.number);
             let _ = writeln!(
                 block,
                 "title: {}",
-                cap_value(&single_line(&pr.title), MAX_TITLE_CHARS)
+                cap_value(&redacted_line(&pr.title), MAX_TITLE_CHARS)
             );
             let _ = writeln!(block, "state: {}", single_line(&pr.state));
             let _ = writeln!(block, "author: {}", single_line(&pr.author));
             let _ = writeln!(
                 block,
                 "labels: {}",
-                cap_value(&single_line(&pr.labels), MAX_TITLE_CHARS)
+                cap_value(&redacted_line(&pr.labels), MAX_TITLE_CHARS)
             );
             let _ = writeln!(block, "url: {}", single_line(&pr.url));
             let _ = writeln!(block, "head_sha: {}", pr.head_sha);
@@ -445,11 +455,17 @@ fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
                 let names: Vec<String> = pr
                     .failing_checks
                     .iter()
-                    .map(|name| cap_value(&sanitize_line(name), MAX_TITLE_CHARS))
+                    .map(|name| cap_value(&redacted_line(name), MAX_TITLE_CHARS))
                     .collect();
                 let _ = writeln!(block, "failing_checks: {}", names.join(", "));
             }
             let _ = writeln!(block, "unresolved_threads: {}", pr.unresolved_threads);
+            if field_redactions > 0 {
+                // §9.23: the per-field redaction is ANNOUNCED — never a
+                // silent pass. (build_block's whole-block redaction then
+                // re-checks the composed block.)
+                writeln!(block, "redacted ({field_redactions} instance(s))").ok();
+            }
             if !pr.convergence_reasons.is_empty() {
                 let _ = writeln!(
                     block,
@@ -968,7 +984,11 @@ mod tests {
             report.payload
         );
         assert!(report.payload.contains("[REDACTED]"));
-        assert!(report.payload.contains("redacted (1 instance(s))"));
+        assert!(
+            report.payload.contains("redacted ("),
+            "the redaction must be announced: {:?}",
+            report.payload
+        );
     }
 
     #[test]
