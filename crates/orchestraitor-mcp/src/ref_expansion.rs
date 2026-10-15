@@ -331,8 +331,11 @@ pub fn redact_secrets(text: &str) -> (String, usize) {
         // `Bearer <value>`: the scheme word AND the following value word
         // are both consumed — a bare scheme word alone carries no secret.
         if word.eq_ignore_ascii_case("bearer") {
-            let after = &rest[word.len()..];
-            let value: String = after
+            // The value word is on the SAME line as the scheme — bound the
+            // search at the next newline so later block lines are never
+            // consumed as the value.
+            let same_line = rest[word.len()..].split('\n').next().unwrap_or_default();
+            let value: String = same_line
                 .chars()
                 .skip_while(|c| c.is_whitespace())
                 .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '`')
@@ -344,14 +347,8 @@ pub fn redact_secrets(text: &str) -> (String, usize) {
                 // value, and the value itself — everything after the value
                 // stays in the output (the previous math skipped the whole
                 // remaining text).
-                let skipped = word.len()
-                    + (after.len()
-                        - after
-                            .chars()
-                            .skip_while(|c| c.is_whitespace())
-                            .collect::<String>()
-                            .len())
-                    + value.len();
+                let ws_before_value = same_line.chars().take_while(|c| c.is_whitespace()).count();
+                let skipped = word.len() + ws_before_value + value.len();
                 rest = &rest[skipped..];
                 continue;
             }
@@ -553,19 +550,10 @@ fn budget_exceeded_notice(literal: &str) -> String {
     )
 }
 
-/// Resolves each unique reference ONCE, in first-appearance order, and
-/// records the substitutions at every parsed span carrying that literal.
-/// Budget-exceeded references keep their literal text with a typed notice.
-#[allow(clippy::type_complexity)]
-/// Builds the substitution text for one reference site (the fenced block
-/// for a successful read, or the typed failure notice attached after the
-/// literal), enforcing the 8 KiB pass budget and the 2 KiB per-reference
-/// cap. Returns (substitution, failure, `budget_hit`) — a budget hit leaves
-/// the literal with the typed notice (§9.49) and flips the pass budget.
 /// Enforces the §9.49 2 KiB per-reference cap: truncates the content at a
 /// CHAR boundary in BYTES, accounting for the header line, the suffix, and
-/// both fences — and re-appends the redaction announcement AFTER
-/// truncation so a redaction is never silent (§9.23).
+/// both fences — and preserves the redaction announcement line across the
+/// cut (a redaction is never silent).
 fn enforce_reference_cap(mut raw: String, header_len: usize, fence_len: usize) -> String {
     if header_len + raw.len() + fence_len * 2 + TRUNCATION_SUFFIX.len() + 2 > MAX_REFERENCE_CHARS {
         let byte_cap = MAX_REFERENCE_CHARS
@@ -611,6 +599,11 @@ fn block_len_of(substitution: &str) -> usize {
     substitution.len()
 }
 
+/// Builds the substitution text for one reference site (the fenced block
+/// for a successful read, or the typed failure notice attached after the
+/// literal), enforcing the 8 KiB pass budget and the 2 KiB per-reference
+/// cap. Returns (substitution, failure, `budget_hit`) — a budget hit leaves
+/// the literal with the typed notice (§9.49) and flips the pass budget.
 fn build_site_substitution(
     reference: &Reference,
     fields: &Result<ExpandedFields, ReferenceError>,
@@ -686,13 +679,13 @@ fn resolve_references(
         let (substitution, failure_label) = build_site_substitution(reference, &fields);
         let is_failure = failure_label.is_some();
         let mut budget_hit = false;
+        // §9.49: the 8 KiB bound applies to the WHOLE pass — EVERY site
+        // costs its block size (a repeated literal with N sites costs
+        // N × block.len()). Charge PER SITE in the span loop.
         for (_, start, end) in spans
             .iter()
             .filter(|(candidate, _, _)| candidate.literal == reference.literal)
         {
-            // §9.49: the 8 KiB bound applies to the WHOLE pass — EVERY site
-            // costs its block size (a repeated literal with N sites costs
-            // N × block.len()).
             if pass_chars + block_len_of(&substitution) > MAX_PASS_CHARS {
                 budget_hit = true;
                 budget_exceeded = true;
