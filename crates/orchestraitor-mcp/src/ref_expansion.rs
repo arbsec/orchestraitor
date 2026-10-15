@@ -281,7 +281,7 @@ fn is_secret_token(candidate: &str) -> bool {
         }
         let body: String = candidate[prefix.len()..]
             .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .collect();
         body.chars().count() >= 16
     })
@@ -494,24 +494,6 @@ pub struct ExpansionReport {
     pub budget_exceeded: bool,
 }
 
-/// Expands every reference in `payload` at the delegation boundary (§9.49).
-///
-/// The expansion is ONE pass over the payload; expanded block content is
-/// never re-scanned. References are processed in first-appearance order;
-/// the pass stops inlining at the 8 KiB budget (later references stay
-/// literal with a typed budget notice). Failures leave the reference as
-/// literal text with a typed notice and the payload is still delivered —
-/// the layer never retries synchronously (§9.26.1).
-///
-/// # Errors
-///
-/// Never returns an error for a lookup failure (those are typed notices in
-/// the report); returns [`ReferenceError`] only if the payload itself
-/// cannot be processed, which cannot occur for text input.
-/// The typed budget-exceeded notice for one literal (§9.49: the payload
-/// is still delivered; the reference stays literal with the notice).
-/// The typed budget-exceeded notice for one literal (§9.49: the payload
-/// is still delivered; the reference stays literal with the notice).
 fn budget_exceeded_notice(literal: &str) -> String {
     format!(
         "{literal} [budget-exceeded; the payload is still delivered — the pass budget \
@@ -519,19 +501,6 @@ fn budget_exceeded_notice(literal: &str) -> String {
     )
 }
 
-/// Expands every reference in `payload` at the delegation boundary (§9.49).
-///
-/// The expansion is ONE pass over the payload; expanded block content is
-/// never re-scanned. References are processed in first-appearance order;
-/// the pass stops inlining at the 8 KiB budget (later references stay
-/// literal with a typed budget notice). Failures leave the reference as
-/// literal text with a typed notice and the payload is still delivered —
-/// the layer never retries synchronously (§9.26.1).
-///
-/// # Errors
-///
-/// Only propagated transport-level construction failures; lookup failures
-/// are typed notices inside the returned report, never an error return.
 /// Resolves each unique reference ONCE, in first-appearance order, and
 /// records the substitutions at every parsed span carrying that literal.
 /// Budget-exceeded references keep their literal text with a typed notice.
@@ -548,7 +517,7 @@ fn budget_exceeded_notice(literal: &str) -> String {
 fn enforce_reference_cap(mut raw: String, header_len: usize, fence_len: usize) -> String {
     if header_len + raw.len() + fence_len * 2 + TRUNCATION_SUFFIX.len() + 2 > MAX_REFERENCE_CHARS {
         let byte_cap = MAX_REFERENCE_CHARS
-            .saturating_sub(header_len + FENCE.len() * 2 + TRUNCATION_SUFFIX.len() + 2)
+            .saturating_sub(header_len + fence_len * 2 + TRUNCATION_SUFFIX.len() + 2)
             .saturating_sub(
                 raw.lines()
                     .last()
