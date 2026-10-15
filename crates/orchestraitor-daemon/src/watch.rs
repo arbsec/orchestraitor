@@ -1029,6 +1029,7 @@ impl LoopWorkerStarter for DirectWatchStarter {
         config.guardrails = self.guardrails.clone();
         config.prior_daily_spend_usd = prior_daily_spend_usd;
         config.think_enabled = self.think_enabled;
+        config.record_payloads = self.record_payloads;
         let config = config.with_progress(beats_tx);
         let reasoning_sink = self.events.clone();
         let record_payloads = self.record_payloads;
@@ -1043,8 +1044,9 @@ impl LoopWorkerStarter for DirectWatchStarter {
                 &config,
             )
             .await;
-            // §9.48.8 persistence: accepted `think` steps append one
-            // hash-chained `agent reasoning` event each, as part of the
+            // §9.48.8 persistence: every receipted `think` call (accepted
+            // step or typed refusal) appends one hash-chained
+            // `agent reasoning` event, as part of the
             // run's receipted completion (crash semantics are §9.17's — a
             // crash loses at most the last step's record, the same gap
             // class as any un-persisted receipt). Payload-recording

@@ -302,7 +302,16 @@ fn parse_think(value: &serde_json::Value) -> Result<WorkerAction, ActionRejectio
     let branch_from_thought = optional_u32(value, "branch_from_thought")?;
     let branch_id = match value.get("branch_id") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(id)) => Some(id.clone()),
+        Some(serde_json::Value::String(id)) => {
+            // Reserved-and-refused, but still a model-supplied string: cap
+            // it like every other string field before it is stored.
+            if id.chars().count() > MAX_TOOL_NAME_CHARS {
+                return Err(ActionRejection::Malformed {
+                    reason: "field-too-large",
+                });
+            }
+            Some(id.clone())
+        }
         Some(_) => {
             return Err(ActionRejection::Malformed {
                 reason: "wrong-field-type",

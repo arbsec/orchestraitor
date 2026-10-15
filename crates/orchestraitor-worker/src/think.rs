@@ -134,9 +134,13 @@ impl ThoughtChain {
             }
             return Ok(());
         }
-        // A fresh sequence (`thought_number = 1` after a closed one) still
-        // validates the estimate shape: `total_thoughts` is part of the
-        // tool's contract on every non-revision call (§9.48.3).
+        // Defense in depth: the parser already rejects zero counters
+        // (`invalid-field-value`); this guard keeps the chain invariant
+        // should a caller bypass the parser. A zero estimate is a shape
+        // error, not a regression — but the receipted refusal surface is
+        // the §9.48.1 static reason set, and the closest typed code for a
+        // malformed sequence contract is `thought-number-regressed` (the
+        // number is not usable in this sequence).
         if total_thoughts == 0 {
             return Err(REASON_THOUGHT_NUMBER_REGRESSED);
         }

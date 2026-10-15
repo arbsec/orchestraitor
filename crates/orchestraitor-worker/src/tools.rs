@@ -231,12 +231,6 @@ impl<'a> ToolExecutor<'a> {
                 Some(self.push_refusal(name, true, "tool-not-allowed"))
             }
             InternalAction::Allowed(tool) => {
-                // The §9.48.2 trusted-layer kill-switch removes `think` at
-                // every depth; the allowlist governs the other internal
-                // tools (and think, inside a sub-session).
-                if !self.policy.think_enabled && tool == InternalTool::Think {
-                    return Some(self.push_refusal(tool.tool_name(), true, "tool-not-allowed"));
-                }
                 if self.policy.allowed_internal.contains(&tool) {
                     None
                 } else {
