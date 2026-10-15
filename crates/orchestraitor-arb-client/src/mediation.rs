@@ -577,15 +577,8 @@ mod linux_exec {
 
 #[cfg(test)]
 mod tests {
-    /// Serializes every test that materializes or drops
-    /// `arbitraitor-exec-<pid>-*` temp directories (issue #645): under the
-    /// parallel test runner, sibling constructions AND sibling drops
-    /// legitimately move the directory count, which made the gate-refusal
-    /// test's snapshot-assert-diff flake. Each such test holds this lock
-    /// across its whole body (construction, execution, and the final
-    /// drop), so inside the gate test's window the count can only move if
-    /// the GATE moved it. Test-only: production paths never take this
-    /// lock.
+    // NOTE: the `arbitraitor-exec-<pid>-*` snapshot lock is
+    // `crate::EXEC_TEMP_DIR_TEST_LOCK` (lib.rs); see its doc there.
     use super::*;
     use crate::sandbox::LandlockAbiVersion;
     use std::path::Path;
