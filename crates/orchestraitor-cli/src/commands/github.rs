@@ -1092,28 +1092,45 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         })?;
         (tree, Some(base_head))
     };
-    // 1c. Duplicate-subject guard (owner directive 2026-10-15): a push
-    //     whose NEW commits carry two or more CONSECUTIVE identical
-    //     subjects is refused — review-fix rounds must land as distinct
-    //     Conventional Commits subjects (or be squashed through this
-    //     command's single-commit landing). The comparison head is the
-    //     RESOLVED base head (the remote head for an existing branch, the
-    //     --base/default head for a new branch) from the SELECTED
-    //     repository, so the guard never compares against the wrong
-    //     history. Runs for new AND existing remote branches.
-    let guard_base_head = base_commit.clone().ok_or_else(|| {
-        miette!("cannot resolve the comparison base head for the duplicate-subject guard")
-    })?;
-    if !git_fetch_authenticated(
-        token.token().expose_secret(),
-        &owner,
-        &repo,
-        &guard_base_head,
-    ) {
-        // Fall through: the rev-parse in the guard produces the typed error
-        // when the object is truly unavailable.
+    let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
+    // Identical-tree pushes are NO-OPS: nothing lands, so the landing-
+    // headline guard does not apply (checked BEFORE the guard).
+    if changes.is_empty() && !args.re_land {
+        writeln!(
+            std::io::stderr(),
+            "branch `{local_branch}` tree {local_tree} is identical to the remote head tree — \
+             nothing to land (pass --re-land to re-sign the head with an empty verified commit)"
+        )
+        .into_diagnostic()?;
+        return Ok(());
     }
-    reject_duplicate_subjects(&local_branch, &guard_base_head)?;
+    // 1c. Duplicate-subject guard (owner directive 2026-10-15): the push
+    //     WILL create a landing commit with args.message — refuse when the
+    //     landing headline equals the COMPARISON head's subject (the
+    //     remote head for an existing branch, the resolved --base/default
+    //     head for a new one — base_commit covers both arms). Consecutive
+    //     identical subjects on the remote defeat PR review convergence.
+    //     Local commit subjects never reach the remote (push-branch
+    //     squashes), so local history is not examined. The subject is read
+    //     from the RESOLVED local OID (no extra fetch); an unreadable
+    //     subject emits a visible stderr warning and the guard fails open
+    //     (never blocks a push on tooling failure).
+    let remote_head_subject =
+        base_commit
+            .as_ref()
+            .and_then(|oid| match git(None, &["log", "-1", "--format=%s", oid]) {
+                Ok(subject) if !subject.is_empty() => Some(subject),
+                _ => {
+                    writeln!(
+                        std::io::stderr(),
+                        "warning: duplicate-subject guard skipped: could not read the \
+                     comparison head subject"
+                    )
+                    .ok();
+                    None
+                }
+            });
+    reject_duplicate_subjects(remote_head_subject.as_deref(), &args.message, &local_branch)?;
     let changes = diff_tree_changes(None, &diff_base_tree, &local_tree)?;
     if changes.is_empty() && !args.re_land {
         writeln!(
@@ -1276,49 +1293,38 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-/// Refuses a push whose NEW commits (commits on `local_branch` not
-/// reachable from the remote branch, or from `origin/<remote_branch>`
-/// default) carry two or more CONSECUTIVE identical subject lines
+/// Refuses a push whose LANDING headline (the one commit push-branch
+/// creates) duplicates the REMOTE branch head's subject — consecutive
+/// identical subjects on the remote branch defeat PR review convergence
 /// (owner directive 2026-10-15: review-fix rounds landed with only the
-/// body differing defeated PR review convergence — each round must be a
-/// distinct Conventional Commits subject or squashed into one commit).
-///
-/// The single-new-commit case is always allowed. Commits already on the
-/// remote are ignored, so re-landing an unchanged chain is unaffected.
+/// body differing). Local commit subjects NEVER reach the remote
+/// (push-branch squashes), so local history is not examined.
 ///
 /// # Errors
 ///
-/// Typed diagnostic naming the duplicated subject when two consecutive
-/// new commits share a subject line.
-fn reject_duplicate_subjects(local_branch: &str, base_head: &str) -> Result<()> {
-    // New commits: everything on local_branch not reachable from the base
-    // head (git log lists newest-first; adjacent-equality is
-    // order-insensitive, so the direction doesn't affect the check).
-    let range = format!("{base_head}..{local_branch}");
-    let subjects_raw = git(None, &["log", "--format=%s", &range])?;
-    let subjects: Vec<String> = subjects_raw.lines().map(str::to_string).collect();
-    reject_consecutive_duplicate_subjects(&subjects, local_branch)
+/// Typed diagnostic naming the duplicated subject when the landing
+/// headline equals the remote head's subject.
+fn reject_duplicate_subjects(
+    remote_head_subject: Option<&str>,
+    landing_headline: &str,
+    local_branch: &str,
+) -> Result<()> {
+    let Some(remote_subject) = remote_head_subject else {
+        return Ok(());
+    };
+    if remote_subject == landing_headline {
+        bail!(
+            "refusing to push: the landing commit on `{local_branch}` would carry the subject \
+             `{remote_subject}` — identical to the existing remote head's subject (consecutive \
+             identical subjects defeat PR review convergence). Distinct subjects are required; \
+             squash remediation rounds into one differently-titled commit"
+        );
+    }
+    Ok(())
 }
 
 /// The pure duplicate-subject check over an oldest-first subject list.
 ///
-/// # Errors
-///
-/// Typed diagnostic naming the duplicated subject when two consecutive
-/// entries share a subject line.
-fn reject_consecutive_duplicate_subjects(subjects: &[String], local_branch: &str) -> Result<()> {
-    for pair in subjects.windows(2) {
-        if pair[0] == pair[1] {
-            bail!(
-                "refusing to push: commits on `{local_branch}` carry the identical subject \
-                 `{pair0}` — review-fix rounds must land as distinct Conventional Commits \
-                 subjects, or squash the chain into one commit and land it via this command",
-                pair0 = pair[0]
-            );
-        }
-    }
-    Ok(())
-}
 /// Resolves the target `(owner, repo)` slug. `--repo owner/name` is used
 /// as-is; a bare `--repo name` combines with the owner (explicit `--owner`
 /// or the origin-derived one). With no flags both come from origin.
@@ -2864,51 +2870,6 @@ mod tests {
         assert!(error.contains("must not be empty"), "{error}");
     }
 
-    // --- reject_duplicate_subjects (owner directive 2026-10-15) --------------
-
-    #[test]
-    fn duplicate_consecutive_subjects_are_refused() {
-        // Two consecutive new commits sharing a subject: refused.
-        let subjects = vec![
-            String::from("feat: same subject"),
-            String::from("feat: same subject"),
-        ];
-        let error = reject_consecutive_duplicate_subjects(&subjects, "feature")
-            .expect_err("duplicates are refused");
-        let rendered = format!("{error:#}");
-        assert!(
-            rendered.contains("identical subject"),
-            "typed diagnostic must name the duplicated subject: {rendered}"
-        );
-    }
-
-    #[test]
-    fn distinct_subjects_pass() {
-        let subjects = vec![String::from("fix: first"), String::from("fix: second")];
-        reject_consecutive_duplicate_subjects(&subjects, "feature")
-            .expect("distinct subjects pass");
-    }
-
-    #[test]
-    fn single_new_commit_is_always_allowed() {
-        let subjects = vec![String::from("feat: only one")];
-        reject_consecutive_duplicate_subjects(&subjects, "feature")
-            .expect("a single new commit is allowed");
-    }
-
-    #[test]
-    fn non_consecutive_duplicates_are_allowed() {
-        // The guard targets CONSECUTIVE duplicates only: distinct subjects
-        // between them are fine.
-        let subjects = vec![
-            String::from("feat: same subject"),
-            String::from("fix: other"),
-            String::from("feat: same subject"),
-        ];
-        reject_consecutive_duplicate_subjects(&subjects, "feature")
-            .expect("non-consecutive duplicates pass");
-    }
-
     // --- error paths never carry token material ------------------------------
 
     #[test]
@@ -3617,5 +3578,45 @@ mod tests {
         assert!(resolve_repo_slug(None, Some("orchestraitor"), None, None).is_err());
         // No flags and no origin is a typed error.
         assert!(resolve_repo_slug(None, None, None, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_subject_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    // The guard logic (reject_duplicate_subjects) is a pure comparison
+    // over (remote_subject, landing_headline) — exercised directly.
+    #[test]
+    fn duplicate_landing_headline_is_refused() {
+        let error = reject_duplicate_subjects(
+            Some("feat(orchestration): reference expansion — review fixes"),
+            "feat(orchestration): reference expansion — review fixes",
+            "feat/614-ref-expansion",
+        )
+        .expect_err("duplicate landing headline is refused");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("identical to the existing remote head's subject"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn distinct_landing_headline_passes() {
+        reject_duplicate_subjects(
+            Some("feat(orchestration): reference expansion — round 1"),
+            "feat(orchestration): reference expansion — review fixes round 2",
+            "feat/614-ref-expansion",
+        )
+        .expect("distinct headlines pass");
+    }
+
+    #[test]
+    fn no_remote_head_subject_passes() {
+        reject_duplicate_subjects(None, "feat: anything", "feat/614-ref-expansion")
+            .expect("no remote head subject (new branch) passes");
     }
 }
