@@ -123,6 +123,9 @@ impl ThoughtChain {
             let Some(target) = revises_thought else {
                 return Err(REASON_REVISION_TARGET_UNKNOWN);
             };
+            if self.sequence_count >= MAX_THOUGHTS_PER_SEQUENCE {
+                return Err(REASON_THOUGHT_BUDGET_EXHAUSTED);
+            }
             if target == 0
                 || self.highest_number == 0
                 || target > self.highest_number

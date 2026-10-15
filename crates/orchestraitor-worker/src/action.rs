@@ -300,6 +300,15 @@ fn parse_think(value: &serde_json::Value) -> Result<WorkerAction, ActionRejectio
     };
     let revises_thought = optional_u32(value, "revises_thought")?;
     let branch_from_thought = optional_u32(value, "branch_from_thought")?;
+    // Cap the thought BEFORE it is cloned into the action: the receipted
+    // `thought-too-large` refusal still covers the near-miss range at the
+    // executor, but an unbounded model string must never be materialized
+    // here (the same cap shape every other string field applies).
+    if thought.chars().count() > 4 * crate::tools::MAX_THOUGHT_CHARS {
+        return Err(ActionRejection::Malformed {
+            reason: "field-too-large",
+        });
+    }
     let branch_id = match value.get("branch_id") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(id)) => {

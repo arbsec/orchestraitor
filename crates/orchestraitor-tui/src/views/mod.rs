@@ -350,6 +350,15 @@ pub fn neutralize_control_sequences(text: &str) -> String {
             control if control.is_control() => {
                 format!("<U+{:04X}>", u32::from(control))
             }
+            // Unicode bidi overrides/isolates and zero-width marks are not
+            // Cc but can reorder or hide rendered text - same untrusted-data
+            // rule as control characters (spec 9.48.8).
+            bidi @ ('\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{FEFF}') => {
+                format!("<U+{:04X}>", u32::from(bidi))
+            }
             character => character.to_string(),
         })
         .collect()

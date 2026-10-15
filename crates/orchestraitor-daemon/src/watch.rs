@@ -1056,18 +1056,19 @@ impl LoopWorkerStarter for DirectWatchStarter {
             // records, and the reasoning chain is reconstructable from the
             // receipts (the same best-effort class the daemon's other
             // event appends use — never silently dropped).
-            if let (Some(events), Ok(worker_run)) = (&reasoning_sink, &result)
-                && let Err(error) = append_reasoning_events(
-                    events,
-                    &run_task_id,
-                    &worker_run.reasoning_events,
-                    record_payloads,
-                )
-            {
-                tracing::warn!(
-                    task_id = %run_task_id,
-                    "reasoning event persistence failed: {error}"
-                );
+            if let (Some(events), Ok(worker_run)) = (&reasoning_sink, &result) {
+                // Synchronous SQLite I/O: move it off the async runtime
+                // (the same off-runtime convention the blocking wait uses).
+                let events = std::sync::Arc::clone(events);
+                let run_task_id = run_task_id.clone();
+                let records = worker_run.reasoning_events.clone();
+                let persistence = tokio::task::spawn_blocking(move || {
+                    append_reasoning_events(&events, &run_task_id, &records, record_payloads)
+                })
+                .await;
+                if let Ok(Err(error)) = persistence {
+                    tracing::warn!("reasoning event persistence failed: {error}");
+                }
             }
             result
         });
