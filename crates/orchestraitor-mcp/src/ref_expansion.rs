@@ -340,7 +340,18 @@ pub fn redact_secrets(text: &str) -> (String, usize) {
             if !value.is_empty() {
                 redacted.push_str("[REDACTED]");
                 count += 1;
-                let skipped = word.len() + (after.len() - value.len()) + value.len();
+                // Skip ONLY the scheme word, the whitespace before the
+                // value, and the value itself — everything after the value
+                // stays in the output (the previous math skipped the whole
+                // remaining text).
+                let skipped = word.len()
+                    + (after.len()
+                        - after
+                            .chars()
+                            .skip_while(|c| c.is_whitespace())
+                            .collect::<String>()
+                            .len())
+                    + value.len();
                 rest = &rest[skipped..];
                 continue;
             }
@@ -375,7 +386,7 @@ pub fn cap_value(text: &str, cap: usize) -> String {
 /// provider text can never close the fence early (§6.1 containment).
 #[must_use]
 fn build_block(scheme: &str, fields: &ExpandedFields) -> (String, String) {
-    let raw = build_block_unfenced(fields);
+    let (raw, _redaction_count) = build_block_unfenced(fields);
     let mut max_run = 0usize;
     let mut cur = 0usize;
     for c in raw.chars() {
@@ -393,7 +404,7 @@ fn build_block(scheme: &str, fields: &ExpandedFields) -> (String, String) {
 
 /// The unfenced block content (typed fields + redaction).
 #[must_use]
-fn build_block_unfenced(fields: &ExpandedFields) -> String {
+fn build_block_unfenced(fields: &ExpandedFields) -> (String, usize) {
     let mut block = String::new();
     match fields {
         ExpandedFields::Pr(pr) => {
@@ -440,12 +451,12 @@ fn build_block_unfenced(fields: &ExpandedFields) -> String {
             let _ = writeln!(block, "url: {}", issue.url);
         }
     }
-    let (mut redacted, count) = redact_secrets(&block);
-    if count > 0 {
+    let (mut redacted, redaction_count) = redact_secrets(&block);
+    if redaction_count > 0 {
         // §9.49: the redaction is ANNOUNCED — never a silent pass.
-        writeln!(redacted, "redacted ({count} instance(s))").ok();
+        writeln!(redacted, "redacted ({redaction_count} instance(s))").ok();
     }
-    redacted
+    (redacted, redaction_count)
 }
 
 /// The resolved fields for one reference (PR or issue flavor).
@@ -525,6 +536,95 @@ fn budget_exceeded_notice(literal: &str) -> String {
 /// records the substitutions at every parsed span carrying that literal.
 /// Budget-exceeded references keep their literal text with a typed notice.
 #[allow(clippy::type_complexity)]
+/// Builds the substitution text for one reference site (the fenced block
+/// for a successful read, or the typed failure notice attached after the
+/// literal), enforcing the 8 KiB pass budget and the 2 KiB per-reference
+/// cap. Returns (substitution, failure, `budget_hit`) — a budget hit leaves
+/// the literal with the typed notice (§9.49) and flips the pass budget.
+/// Enforces the §9.49 2 KiB per-reference cap: truncates the content at a
+/// CHAR boundary in BYTES, accounting for the header line, the suffix, and
+/// both fences — and re-appends the redaction announcement AFTER
+/// truncation so a redaction is never silent (§9.23).
+fn enforce_reference_cap(mut raw: String, header_len: usize, fence_len: usize) -> String {
+    if header_len + raw.len() + fence_len * 2 + TRUNCATION_SUFFIX.len() + 2 > MAX_REFERENCE_CHARS {
+        let byte_cap = MAX_REFERENCE_CHARS
+            .saturating_sub(header_len + FENCE.len() * 2 + TRUNCATION_SUFFIX.len() + 2)
+            .saturating_sub(
+                raw.lines()
+                    .last()
+                    .filter(|line| line.starts_with("redacted ("))
+                    .map_or(0, |line| line.len() + 1),
+            );
+        // Capture the redaction announcement BEFORE truncation (it is the
+        // last line) and re-append it after — a redaction is never silent.
+        let announcement = raw
+            .lines()
+            .last()
+            .filter(|line| line.starts_with("redacted ("))
+            .map_or_else(String::new, ToString::to_string);
+        let mut cut = byte_cap;
+        while cut > 0 && !raw.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        raw = format!("{}…[truncated]", &raw[..cut]);
+        if !announcement.is_empty() {
+            writeln!(raw, "{announcement}").ok();
+        }
+    }
+    raw
+}
+
+/// Builds the substitution text for one reference site (the fenced block
+/// for a successful read, or the typed failure notice attached after the
+/// literal), enforcing the 8 KiB pass budget and the 2 KiB per-reference
+/// cap. Returns (substitution, failure, `budget_hit`) — a budget hit leaves
+/// the literal with the typed notice (§9.49) and flips the pass budget.
+fn build_site_substitution(
+    reference: &Reference,
+    fields: &Result<ExpandedFields, ReferenceError>,
+    pass_chars: &mut usize,
+) -> (String, Option<String>, bool) {
+    let fields = match fields {
+        Ok(resolved) => resolved,
+        Err(ReferenceError::Failure(failure)) => {
+            let label = failure.label();
+            // The reference STAYS literal text with the typed notice
+            // attached after it (§9.49).
+            return (
+                format!(
+                    "{literal} [{label}; the payload is still delivered — the reference \
+                     could not be expanded]",
+                    literal = reference.literal
+                ),
+                Some(String::from(label)),
+                false,
+            );
+        }
+    };
+    let (raw, fence) = build_block(reference.kind.scheme(), fields);
+    let header_len = format!(
+        "expanded {}://{} (untrusted content below)",
+        reference.kind.scheme(),
+        reference.number
+    )
+    .len()
+        + 1;
+    let raw = enforce_reference_cap(raw, header_len, fence.len());
+    let block = format!(
+        "{fence}expanded {}://{} (untrusted content below)\n{raw}\n{fence}",
+        reference.kind.scheme(),
+        reference.number
+    );
+    // §9.49: the 8 KiB bound applies to the WHOLE pass — count the block at
+    // EVERY substitution site (a repeated literal with N sites costs
+    // N × block.len()).
+    if *pass_chars + block.len() > MAX_PASS_CHARS {
+        return (budget_exceeded_notice(&reference.literal), None, true);
+    }
+    *pass_chars += block.len();
+    (block, None, false)
+}
+
 fn resolve_references(
     unique: &[Reference],
     spans: &[(Reference, usize, usize)],
@@ -560,79 +660,22 @@ fn resolve_references(
                 .fetch_issue(owner, repo, reference.number)
                 .map(ExpandedFields::Issue),
         };
-        match fields {
-            Ok(resolved) => {
-                let (raw, fence) = build_block(reference.kind.scheme(), &resolved);
-                // §9.49: 2 KiB per expanded reference — truncate the
-                // content at a CHAR boundary in BYTES, leaving room for
-                // the suffix and the real closing fence, so the result
-                // never exceeds MAX_REFERENCE_CHARS and the fence always
-                // closes.
-                let mut raw = raw;
-                if raw.len() + fence.len() * 2 + 32 > MAX_REFERENCE_CHARS {
-                    let byte_cap = MAX_REFERENCE_CHARS.saturating_sub(fence.len() * 2 + 32);
-                    let mut cut = byte_cap;
-                    while cut > 0 && !raw.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    raw = format!("{}…[truncated]", &raw[..cut]);
-                }
-                let block = format!(
-                    "{fence}expanded {}://{} (untrusted content below)\n{raw}\n{fence}",
-                    reference.kind.scheme(),
-                    reference.number
-                );
-                if pass_chars + block.len() > MAX_PASS_CHARS {
-                    budget_exceeded = true;
-                    let notice = budget_exceeded_notice(&reference.literal);
-                    for (_, start, end) in spans
-                        .iter()
-                        .filter(|(candidate, _, _)| candidate.literal == reference.literal)
-                    {
-                        substitutions.push((*start, *end, notice.clone()));
-                    }
-                    outcomes.push(ExpansionOutcome {
-                        reference: reference.literal.clone(),
-                        expanded: false,
-                        failure: Some(String::from("budget-exceeded")),
-                    });
-                    continue;
-                }
-                for (_, start, end) in spans
-                    .iter()
-                    .filter(|(candidate, _, _)| candidate.literal == reference.literal)
-                {
-                    pass_chars += block.len();
-                    substitutions.push((*start, *end, block.clone()));
-                }
-                outcomes.push(ExpansionOutcome {
-                    reference: reference.literal.clone(),
-                    expanded: true,
-                    failure: None,
-                });
-            }
-            Err(ReferenceError::Failure(failure)) => {
-                let label = failure.label();
-                // The reference STAYS literal text with the typed notice
-                // attached after it (§9.49).
-                let notice = format!(
-                    "{literal} [{label}; the payload is still delivered — the reference \
-                     could not be expanded]",
-                    literal = reference.literal
-                );
-                for (_, start, end) in spans
-                    .iter()
-                    .filter(|(candidate, _, _)| candidate.literal == reference.literal)
-                {
-                    substitutions.push((*start, *end, notice.clone()));
-                }
-                outcomes.push(ExpansionOutcome {
-                    reference: reference.literal.clone(),
-                    expanded: false,
-                    failure: Some(String::from(label)),
-                });
-            }
+        let (substitution, failure_label, budget_hit) =
+            build_site_substitution(reference, &fields, &mut pass_chars);
+        if budget_hit {
+            budget_exceeded = true;
         }
+        for (_, start, end) in spans
+            .iter()
+            .filter(|(candidate, _, _)| candidate.literal == reference.literal)
+        {
+            substitutions.push((*start, *end, substitution.clone()));
+        }
+        outcomes.push(ExpansionOutcome {
+            reference: reference.literal.clone(),
+            expanded: !budget_hit && failure_label.is_none(),
+            failure: failure_label,
+        });
     }
     (outcomes, substitutions, budget_exceeded)
 }
