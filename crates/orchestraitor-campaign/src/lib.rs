@@ -37,9 +37,9 @@ pub use decision::{
 };
 pub use error::CampaignError;
 pub use guardrails::{
-    DEFAULT_CI_POLL_BUDGET_SECS, DEFAULT_MAX_TASK_ATTEMPTS, DEFAULT_NO_PROGRESS_TURNS,
-    DEFAULT_TASK_RETRY_BACKOFF_SECS, DEFAULT_TOOL_REPEAT_COUNT, DEFAULT_TOOL_REPEAT_WINDOW,
-    GuardrailsConfigValues, GuardrailsSettings,
+    DEFAULT_CI_POLL_BUDGET_SECS, DEFAULT_MAX_TASK_ATTEMPTS, DEFAULT_MAX_TURNS_PER_ATTEMPT,
+    DEFAULT_NO_PROGRESS_TURNS, DEFAULT_TASK_RETRY_BACKOFF_SECS, DEFAULT_TOOL_REPEAT_COUNT,
+    DEFAULT_TOOL_REPEAT_WINDOW, GuardrailsConfigValues, GuardrailsSettings,
 };
 pub use kickoff::{
     EmptyKickoffEvents, KickoffCondition, KickoffEventSource, KickoffExternalEvent,

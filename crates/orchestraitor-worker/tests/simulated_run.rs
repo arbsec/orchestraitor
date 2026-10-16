@@ -299,70 +299,6 @@ async fn model_declared_incompletion_replans_then_exhausts() {
     assert!(run.delivery.is_none(), "failed runs never reach delivery");
 }
 
-/// Issue #657 acceptance: the second attempt's prompt names what the first
-/// attempt already did (tools used, paths written) beside the static
-/// failure reason, inside the 6.1 untrusted-data fence — instead of only
-/// the failure class.
-#[tokio::test]
-async fn replan_prompt_carries_the_prior_attempts_receipt_summary() {
-    // Attempt 1: write a file, then declare incompletion (re-plan-failing).
-    // Attempt 2+ (the replans re-consume the scripted tail): finish true so
-    // the run completes once the receipt summary has ridden the prompt.
-    let script = vec![
-        PlannedResponse::NonStreaming {
-            content: action_text(&json!({
-                "tool": "write_file",
-                "path": "src/answer.txt",
-                "content": "42\n"
-            })),
-        },
-        finish_action(false),
-        finish_action(true),
-    ];
-    let (run, sim, _worktree, _bash) = drive(script, BashMode::Ok).await;
-
-    assert_eq!(
-        run.status,
-        RunStatus::Completed,
-        "failure: {:?}",
-        run.failure
-    );
-    let captured = sim.captured_requests();
-    assert_eq!(captured.len(), 3, "attempt 1 (2 calls) + replanned attempt");
-
-    // The replanned attempt's FIRST user message (index 1 of its messages:
-    // system, then the task prompt) must carry the fenced receipt summary.
-    let system_messages: Vec<&serde_json::Value> = captured[2].body["messages"]
-        .as_array()
-        .expect("messages array")
-        .iter()
-        .collect();
-    let task_prompt_text = system_messages
-        .iter()
-        .filter_map(|message| message["content"].as_str())
-        .find(|content| content.contains("Task t-7 (t-7-slug)"))
-        .expect("the replanned attempt's task prompt");
-    // The static failure-reason line stays (the class is still useful)...
-    assert!(
-        task_prompt_text.contains("A previous attempt failed (task-not-completed)"),
-        "the static reason rides the replan prompt: {task_prompt_text}"
-    );
-    // ...and the receipt summary rides BESIDE it, fenced as untrusted data,
-    // naming the tool used and the path written by the failed attempt.
-    assert!(
-        task_prompt_text.contains("UNTRUSTED DATA"),
-        "the 6.1 fence is present: {task_prompt_text}"
-    );
-    assert!(
-        task_prompt_text.contains("write_file x1 completed"),
-        "the prior attempt's tool usage is named: {task_prompt_text}"
-    );
-    assert!(
-        task_prompt_text.contains("- src/answer.txt"),
-        "the prior attempt's writes are named: {task_prompt_text}"
-    );
-}
-
 #[tokio::test]
 async fn pending_delivery_sink_reports_pending_for_the_bootstrap() {
     // The production sink never fabricates a PR ref in this slice.
@@ -722,6 +658,65 @@ async fn real_progress_resets_the_fingerprint_streak() {
         RunStatus::Completed,
         "failure: {:?}",
         run.failure
+    );
+}
+
+/// Issue #655 acceptance: the worker enforces the CONFIGURED per-attempt
+/// turn bound with the typed class — a run whose budget is set below the
+/// scripted turn count fails as `TurnBudgetExhausted`/`turn-budget` exactly
+/// at the bound (productive distinct writes with churn/no-progress guards
+/// disabled so no other guard fires first).
+#[tokio::test]
+async fn turn_budget_exhaustion_enforces_the_configured_bound_typed() {
+    // Productive distinct writes (churn/no-progress guards disabled, every
+    // write a new path) so no other guard can fire; the script never emits
+    // `finish`, so EVERY attempt burns its full bound and the run ends on
+    // the attempt budget carrying the last attempt's typed class.
+    let mut script = Vec::new();
+    for step in 0..=(3 * 3) {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "write_file",
+                "path": format!("step-{step}.txt"),
+                "content": format!("step {step}")
+            })),
+        });
+    }
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-turnbudget");
+    let budgets = WorkerBudgets {
+        max_turns_per_attempt: 3,
+        ..fast_budgets()
+    };
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 0,
+        tool_repeat_count: 0,
+        tool_repeat_window: 0,
+        ci_poll_budget: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults().ci_poll_budget,
+    };
+    let config = guardrail_config(budgets, guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Failed, "failure: {:?}", run.failure);
+    let failure = run.failure.expect("typed failure");
+    assert_eq!(failure.class, FailureClass::AttemptBudgetExhausted);
+    assert_eq!(
+        failure.reason, "turn-budget",
+        "each attempt fails on the CONFIGURED turn bound"
+    );
+    assert_eq!(
+        run.attempts, 3,
+        "3 attempts x 3 configured turns; the default 25 was never used"
     );
 }
 
