@@ -55,6 +55,38 @@ const OUTCOME_REFUSED: &str = "refused";
 /// would hide them anyway — this bounds only the temporary map's memory).
 const MAX_DISTINCT_TOOL_KEYS: usize = 64;
 
+/// Per-path cap (characters) in the written-paths list: a hostile or
+/// pathological path cannot consume the whole body cap on its own (a
+/// gen-11 review finding).
+const MAX_PATH_CHARS: usize = 200;
+
+/// Flattens one recorded write path onto a single framing-safe line:
+/// control characters (newlines included — `Path::components` keeps them
+/// inside a `Normal` component, so confinement does not refuse them) and
+/// the U+2028/U+2029 line/paragraph separators become spaces, so the path
+/// can never inject extra lines into the fenced block or impersonate the
+/// framing. Longer paths are cut at [`MAX_PATH_CHARS`] with an inline
+/// ellipsis.
+#[must_use]
+fn framing_safe_path(path: &str) -> String {
+    let flattened: String = path
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    if flattened.chars().count() <= MAX_PATH_CHARS {
+        flattened
+    } else {
+        let cut: String = flattened.chars().take(MAX_PATH_CHARS).collect();
+        format!("{cut}...")
+    }
+}
+
 /// Builds the fence for the untrusted-content block: `max(longest backtick
 /// run in the content + 1, 3)` backticks, so the content can never close
 /// the fence early (the ref-expansion containment posture).
@@ -107,8 +139,18 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
         // attempt made last — the ones the next approach most likely builds
         // on — survive the truncation (a gen-6 review finding: oldest-first
         // ordering preserved stale paths and dropped the recent ones).
+        //
+        // Each path is flattened to a single framing-safe line and
+        // length-capped: `resolve_confined` refuses absolute paths and `..`
+        // escapes but a `Normal` component may still carry newlines or
+        // other control characters (Rust's `Path::components` keeps them
+        // inside one component — verified), which would inject extra lines
+        // into the fenced block (a gen-11 review finding). Control
+        // characters (and the U+2028/U+2029 line separators) become
+        // spaces; a longer-than-200-character path is cut with an inline
+        // ellipsis.
         for path in untrusted_writes.iter().rev() {
-            let _ = writeln!(body, "- {path}");
+            let _ = writeln!(body, "- {}", framing_safe_path(path));
         }
     }
     if receipts.is_empty() {

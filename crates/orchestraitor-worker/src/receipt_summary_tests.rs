@@ -224,6 +224,50 @@ fn writes_only_attempt_still_summarizes() {
     assert!(summary.contains("- out.txt"));
 }
 
+/// Gen-11 review finding: a recorded path is flattened to one
+/// framing-safe line (control characters become spaces) and
+/// length-capped, so it can never inject lines into the fenced block or
+/// consume the whole body cap.
+#[test]
+fn written_paths_are_framing_safe_and_length_capped() {
+    // A path whose `Normal` component carries an embedded newline (Rust's
+    // Path::components keeps it inside one component — confinement does
+    // NOT refuse it) plus a path with a backtick run and an over-long path.
+    let writes = vec![
+        "src/a\nb/c.txt".to_string(),
+        "src/```json fake-frame/ends".to_string(),
+        format!("deep/{}", "x".repeat(400)),
+    ];
+    let summary = for_replan(&[], &writes).expect("summary");
+    // The newline is flattened: no line in the block is a bare fragment of
+    // the injected path.
+    assert!(
+        !summary.contains("\nb/c.txt"),
+        "the embedded newline must not survive as a line break"
+    );
+    assert!(
+        summary.contains("src/a b/c.txt"),
+        "the flattened path is listed on one line"
+    );
+    // The backtick run widened the fence: the path's 3-backtick fake frame
+    // cannot close the 4-backtick fence.
+    let fence = summary
+        .lines()
+        .find(|line| line.starts_with("```"))
+        .expect("fence line present");
+    assert!(
+        fence.chars().filter(|c| *c == '`').count() >= 4,
+        "fence widened over the path's backtick run"
+    );
+    // The over-long path is capped: 200 chars total (5 for "deep/"), so
+    // 195 x's survive, plus the ellipsis marker.
+    assert!(
+        summary.contains(&"x".repeat(195)) && !summary.contains(&"x".repeat(196)),
+        "the path is length-capped at 200 characters"
+    );
+    assert!(summary.contains("..."), "the cap cut is marked");
+}
+
 /// Gen-4 review finding: an oversized summary must still carry the
 /// signals that stop re-exploration. The last outcome and every written
 /// path render BEFORE the per-tool counts, so the prefix cut at
