@@ -116,6 +116,25 @@ body-fetch failure degrades to the title+URL description with a visible NOTICE
 (the spawn is not blocked by a content-read outage) — the worker is told the
 body is absent instead of inferring criteria from the title alone.
 
+## Delivery
+
+With `orc loop --deliver [--delivery-repo <owner/name>] [--delivery-base
+<branch>]` (issue #656), a COMPLETED task's worktree state is delivered
+through the App-signed landing primitive: the worktree state is committed
+onto the task's `orc-loop/<task-id>` branch, `orc github push-branch` lands
+it as ONE App-signed commit on `orc-delivery/<task-id>`, and
+`orc github gh-env-pr-create-chain` opens the PR (base `--delivery-base`,
+default `main`; repo defaults to the first board-config repo). The run
+result carries `delivery.kind = "pr-opened"` with the PR reference. Every
+delivery failure is a TYPED run failure (static reason code, spec §9.23.4 —
+`delivery-no-worktree`, `delivery-branch-state-failed`, `delivery-push-failed`,
+`delivery-empty-diff`, `delivery-pr-open-failed`): a push failure is never a
+silent drop and never silently blocks the loop's success accounting — the
+loop's run row records the typed failure and the cross-invocation retry
+accounting applies. Without `--deliver` the typed `Pending` outcome holds
+(the run completed, nothing landed). See
+[orc-worker.md](orc-worker.md) ("Delivery") for the full failure taxonomy.
+
 ## Retry and reselection
 
 One worker run per task per loop invocation. A task that failed, stalled, or was

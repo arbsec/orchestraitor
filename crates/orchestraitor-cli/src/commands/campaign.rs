@@ -28,7 +28,7 @@ use orchestraitor_worker::{
 use crate::cli::{CampaignCommand, CampaignRunArgs, ConfigPaths};
 use crate::commands::config::layers::load_layers;
 
-use super::WORKER_ROLE;
+use super::{WORKER_ROLE, current_branch_name, refuse_dirty_or_base_checkout};
 
 /// Production spawner: builds the bootstrap transport for the resolved
 /// routing, loads the fixture task, and drives the same bounded loop
@@ -42,6 +42,13 @@ struct DirectSpawner<'a> {
     /// broken tool definition is a typed startup error, never a per-spawn
     /// failure.
     declared_surface: super::DeclaredToolSurface,
+    /// The delivery sink (issue #656): a completed run's worktree state
+    /// lands through `orc github push-branch` + the labeling-chained PR
+    /// path. `None` keeps the typed `Pending` bootstrap outcome.
+    delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>>,
+    /// The PR base branch the delivery is refused against (the ambient
+    /// checkout must not BE the base; review gen-2 major).
+    delivery_base: String,
 }
 
 impl WorkerSpawner for DirectSpawner<'_> {
@@ -82,6 +89,34 @@ impl WorkerSpawner for DirectSpawner<'_> {
             ModelId::from_string(routing.model.clone()),
             WorkerBudgets::bootstrap_defaults(),
         );
+        // Issue #656: the one-shot campaign pass delivers the ambient
+        // checkout's own branch when `--deliver` is set; default OFF keeps
+        // the typed `Pending` bootstrap outcome. A push failure is a typed
+        // delivery outcome on the run, never a silent drop.
+        let mut config = config;
+        if self.delivery.is_some() {
+            // The delivery commits the ambient checkout's state onto the
+            // checked-out branch: refuse a dirty checkout or the base
+            // branch itself at spawn time (review gen-1/2 majors; the
+            // typed refusal rides the per-task Spawn error, never a
+            // silent drop).
+            let branch = current_branch_name(&self.paths.project_dir).map_err(|error| {
+                CampaignError::Spawn {
+                    task_id: task_id.to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+            refuse_dirty_or_base_checkout(&self.paths.project_dir, &branch, &self.delivery_base)
+                .map_err(|error| CampaignError::Spawn {
+                    task_id: task_id.to_string(),
+                    message: error.to_string(),
+                })?;
+            config.worktree_branch = Some(branch);
+        }
+        let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
+            Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
+            None => Arc::new(PendingDeliverySink),
+        };
         let config = super::attach_declared_surface(config, &self.declared_surface);
         runtime
             .block_on(run_worker(
@@ -89,7 +124,7 @@ impl WorkerSpawner for DirectSpawner<'_> {
                 &self.paths.project_dir,
                 &transport,
                 &MediatedBashMediator::new(),
-                &PendingDeliverySink,
+                &*delivery,
                 &config,
             ))
             .map_err(|error| CampaignError::Spawn {
@@ -168,11 +203,37 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
     // definition fails the invocation here, never per spawn.
     let declared_surface = super::build_declared_tools(&layers.resolver, &routing.role)
         .map_err(|error| miette!("{error}"))?;
+    // Issue #656: resolve the delivery sink ONCE at startup from the
+    // campaign flags. `--deliver` requires a repo; a missing orc binary is
+    // a typed startup error — the delivery must never discover a missing
+    // binary only after a task completes.
+    let delivery_base = args
+        .delivery_base
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+    let delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>> = if args.deliver {
+        let repo = args
+            .delivery_repo
+            .clone()
+            .ok_or_else(|| miette!("--deliver requires --delivery-repo owner/name"))?;
+        let orc_bin = args
+            .delivery_orc_bin
+            .clone()
+            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "orc".into()));
+        Some(Arc::new(
+            orchestraitor_worker::PushBranchDeliverySink::new(orc_bin, repo, delivery_base.clone())
+                .map_err(|error| miette!("delivery configuration invalid: {error}"))?,
+        ))
+    } else {
+        None
+    };
     let spawner = DirectSpawner {
         paths,
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
         declared_surface,
+        delivery,
+        delivery_base: delivery_base.clone(),
     };
     let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
         .into_diagnostic()?;
@@ -298,6 +359,8 @@ mod tests {
                 subsession_routing: std::collections::BTreeMap::new(),
                 think_enabled: true,
             },
+            delivery: None,
+            delivery_base: "main".to_string(),
         };
         let routing = RoleRoutingDecision {
             role: "implement".to_string(),

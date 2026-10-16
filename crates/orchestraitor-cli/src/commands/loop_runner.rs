@@ -131,6 +131,10 @@ struct DirectLoopStarter {
     /// App-identity route the poller reads): the starter materializes the
     /// task fixture WITH the issue content.
     board_client: Arc<BoardClient>,
+    /// The delivery sink (issue #656): a completed run's worktree state
+    /// lands through `orc github push-branch` + the labeling-chained PR
+    /// path. `None` keeps the typed `Pending` bootstrap outcome.
+    delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>>,
     budgets: WorkerBudgets,
     /// The worker-side anti-stuck guardrail thresholds resolved from
     /// `[loop]` — the same settings the runner validates and enforces.
@@ -409,6 +413,10 @@ impl LoopWorkerStarter for DirectLoopStarter {
     /// shared `task_description` posture (URLs are data, not pre-fetched
     /// content; the body is the one exception the loop fetches for the
     /// worker).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the spawn path (fixture materialization, transport, worktree, config assembly, delivery wiring, spawned run + reasoning persistence) is one linear audited sequence; splitting it would scatter the per-spawn gates the reviewer must see together"
+    )]
     async fn start(
         &self,
         selected: &SelectedTask,
@@ -450,6 +458,18 @@ impl LoopWorkerStarter for DirectLoopStarter {
         );
         config.guardrails = self.guardrails.clone();
         config.prior_daily_spend_usd = prior_daily_spend_usd;
+        // Issue #656: the run's delivery request carries the worktree
+        // branch the sink lands (`orc-loop/<task-id>` — the branch
+        // `prepare_worktree` checked out).
+        config.worktree_branch = Some(format!("orc-loop/{}", selected.task_id));
+        // The delivery sink is cloned per spawn (`Arc`): a push failure is
+        // a typed delivery outcome on the run, never a silent drop, and
+        // never blocks the loop's success accounting (the run result
+        // carries the typed `DeliveryFailed` failure).
+        let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
+            Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
+            None => Arc::new(PendingDeliverySink),
+        };
         let config = super::attach_declared_surface(
             config,
             &super::DeclaredToolSurface {
@@ -472,7 +492,7 @@ impl LoopWorkerStarter for DirectLoopStarter {
                 &project_dir,
                 &*transport,
                 &*mediator,
-                &PendingDeliverySink,
+                &*delivery,
                 &config,
             )
             .await;
@@ -700,6 +720,10 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
     let _lock = acquire_instance_lock(&paths.config_dir)?;
 
     let (config, _path) = BoardProjectConfig::load(&paths.project_dir).into_diagnostic()?;
+    // Issue #656: the delivery target defaults to the board config's first
+    // repo (the MVP single-repo loop). Captured BEFORE `config` moves into
+    // the poller.
+    let board_config_repos: Vec<String> = config.repos.clone();
     let token_uri = config
         .token_uri
         .clone()
@@ -809,6 +833,36 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             .map(|duration| duration.as_secs())
             .unwrap_or_default();
         let board_client = Arc::new(client);
+        // Issue #656: resolve the delivery sink ONCE at startup from the
+        // loop flags. `--deliver` requires a repo (the board config's first
+        // repo is the default for the MVP single-repo loop); a missing orc
+        // binary is a typed startup error — the delivery must never
+        // discover a missing binary only after a task completes.
+        let delivery_sink = if args.deliver {
+            let repo = args
+                .delivery_repo
+                .clone()
+                .or_else(|| board_config_repos.first().cloned())
+                .ok_or_else(|| {
+                    miette!(
+                        "--deliver requires --delivery-repo owner/name (no board-config repo found)"
+                    )
+                })?;
+            let orc_bin = args
+                .delivery_orc_bin
+                .clone()
+                .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "orc".into()));
+            let base = args
+                .delivery_base
+                .clone()
+                .unwrap_or_else(|| "main".to_string());
+            Some(Arc::new(
+                orchestraitor_worker::PushBranchDeliverySink::new(orc_bin, repo, base)
+                    .map_err(|error| miette!("delivery configuration invalid: {error}"))?,
+            ))
+        } else {
+            None
+        };
         let poller = BoardSnapshotPoller {
             client: Arc::clone(&board_client),
             config,
@@ -832,6 +886,11 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
             tasks_dir: args.worker_tasks_dir.clone(),
             provider_endpoint: args.worker_provider_endpoint.clone(),
             board_client,
+            // Issue #656: the delivery sink is resolved from the loop CLI
+            // flags (`--deliver` + repo/base); `None` keeps the typed
+            // `Pending` bootstrap outcome. The first configured repo is the
+            // delivery target for the MVP single-repo loop.
+            delivery: delivery_sink,
             // The same guard instance the runner validates and enforces:
             // the worker layer reads these pinned values, so the two
             // enforcement layers cannot drift.
@@ -1121,6 +1180,7 @@ mod tests {
             tasks_dir: None,
             provider_endpoint: None,
             board_client: Arc::new(client),
+            delivery: None,
             budgets: orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
             guardrails: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults(),
             cost_ledger: None,
@@ -1289,6 +1349,7 @@ mod tests {
             tasks_dir: None,
             provider_endpoint: None,
             board_client: Arc::new(client),
+            delivery: None,
             budgets: orchestraitor_worker::WorkerBudgets::bootstrap_defaults(),
             guardrails: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults(),
             cost_ledger: None,

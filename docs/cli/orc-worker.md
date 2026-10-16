@@ -72,8 +72,46 @@ Owner-adjustable (issue #310 bootstrap values):
 (`completed`/`failed`), `exit_code`, `summary`, `failure`, `delivery`, `attempts`,
 `replans`, `turns`, `model_calls`, `usage`, `spend_soft_cap_exceeded`,
 `untrusted_writes`, `receipts`, and the effective `budgets` echo. Delivery is a seam:
-the bootstrap sink reports `delivery.kind = "pending"` — worktree/commit/push/PR
-wiring is a later lane; tests substitute a fixture sink that returns a PR reference.
+the default sink reports `delivery.kind = "pending"`; with `--deliver` the
+real sink reports `delivery.kind = "pr-opened"` with the PR reference (below).
+
+## Delivery (`--deliver`)
+
+With `orc worker run --deliver --delivery-repo <owner/name>` (issue #656), a
+COMPLETED run's worktree state lands through the App-signed landing primitive
+and a PR opens:
+
+1. The worktree's current state is staged and committed onto the run's
+   checked-out branch.
+2. `orc github push-branch` lands the branch's committed tree as ONE
+   App-signed commit on `orc-delivery/<task-id>` (the branch the worktree
+   has checked out is verified; dirty-vs-committed distinction holds — the
+   landing carries the committed tree after the step-1 commit).
+3. `orc github gh-env-pr-create-chain` opens the PR (head
+   `orc-delivery/<task-id>`, base `--delivery-base`, default `main`) with
+   the run summary as the body — through the ONLY sanctioned `gh pr create`
+   route, so the deterministic attribution/labeling chain runs.
+
+Every delivery failure is a TYPED outcome on the run result (the run fails
+with `failure.class = "delivery-failed"` and a static reason code, spec
+§9.23.4): `delivery-no-worktree` (run carried no worktree/branch context),
+`delivery-branch-state-failed` (staging/committing or branch verification
+failed), `delivery-push-failed` (the landing failed),
+`delivery-empty-diff` (the committed tree is identical to the base —
+nothing to land), `delivery-pr-open-failed` (PR creation failed or
+returned no reference). A push failure is never a silent drop, and never
+silently blocks the loop's success accounting: the loop's run row carries
+the typed failure. Untrusted-write classification/promotion stays with
+Arbitraitor (spec §9.14); the sink performs no classification.
+
+`orc loop` arms delivery per invocation with `--deliver
+[--delivery-repo <owner/name>] [--delivery-base <branch>]` (repo defaults
+to the first board-config repo); `orcd watch` arms it through environment
+configuration: `ORCHESTRAITOR_DELIVERY_REPO=<owner/name>` (arming key —
+absent keeps the typed `Pending` outcome), `ORCHESTRAITOR_DELIVERY_BASE`
+(default `main`), `ORCHESTRAITOR_DELIVERY_ORC_BIN` (default: the `orcd`
+executable itself). Misconfiguration is a typed startup error, never
+discovered after a task completes.
 
 ## Test-only overrides
 

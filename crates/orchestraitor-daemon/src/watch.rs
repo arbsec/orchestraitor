@@ -729,6 +729,10 @@ pub struct DirectWatchStarter {
     /// task fixture WITH the issue content. `None` keeps the pre-#495
     /// description (title + URL only) with the typed notice.
     board_client: Option<Arc<BoardClient>>,
+    /// The delivery sink (issue #656): a completed run's worktree state
+    /// lands through `orc github push-branch` + the labeling-chained PR
+    /// path. `None` keeps the typed `Pending` bootstrap outcome.
+    delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>>,
     budgets: WorkerBudgets,
     /// The worker-side anti-stuck guardrail thresholds resolved from
     /// `[loop]` — the SAME settings the runner validates, so the daemon
@@ -765,6 +769,7 @@ impl DirectWatchStarter {
             config_dir,
             provider_endpoint,
             board_client: None,
+            delivery: None,
             budgets,
             guardrails,
             think_enabled: true,
@@ -779,6 +784,19 @@ impl DirectWatchStarter {
     #[must_use]
     pub fn with_board_client(mut self, client: Arc<BoardClient>) -> Self {
         self.board_client = Some(client);
+        self
+    }
+
+    /// Attaches the delivery sink (issue #656): completed runs land their
+    /// worktree state through `orc github push-branch` + the
+    /// labeling-chained PR path (the repo/base resolve at sink
+    /// construction).
+    #[must_use]
+    pub fn with_delivery(
+        mut self,
+        sink: Arc<orchestraitor_worker::PushBranchDeliverySink>,
+    ) -> Self {
+        self.delivery = Some(sink);
         self
     }
 
@@ -962,6 +980,10 @@ impl DirectWatchStarter {
 
 #[async_trait]
 impl LoopWorkerStarter for DirectWatchStarter {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the spawn path (fixture materialization, transport, worktree, config assembly, delivery wiring, spawned run + reasoning persistence) is one linear audited sequence; splitting it would scatter the per-spawn gates the reviewer must see together"
+    )]
     async fn start(
         &self,
         selected: &SelectedTask,
@@ -1033,6 +1055,17 @@ impl LoopWorkerStarter for DirectWatchStarter {
         config.prior_daily_spend_usd = prior_daily_spend_usd;
         config.think_enabled = self.think_enabled;
         config.record_payloads = self.record_payloads;
+        // Issue #656: the delivery request carries the worktree branch the
+        // sink lands (`orc-loop/<task-id>` — `prepare_worktree` checked it
+        // out). A push failure is a typed delivery outcome on the run,
+        // never a silent drop, and never blocks the loop's success
+        // accounting (the run result carries the typed `DeliveryFailed`
+        // failure).
+        config.worktree_branch = Some(format!("orc-loop/{}", selected.task_id));
+        let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
+            Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
+            None => Arc::new(PendingDeliverySink),
+        };
         let config = config.with_progress(beats_tx);
         let reasoning_sink = self.events.clone();
         let record_payloads = self.record_payloads;
@@ -1043,7 +1076,7 @@ impl LoopWorkerStarter for DirectWatchStarter {
                 &worktree,
                 &*transport,
                 &*mediator,
-                &PendingDeliverySink,
+                &*delivery,
                 &config,
             )
             .await;

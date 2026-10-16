@@ -9,7 +9,7 @@
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-use miette::{IntoDiagnostic, Result, WrapErr};
+use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use orchestraitor_daemon::{
     DaemonConfig, DaemonError, DirectWatchStarter, JournallessSink, ReconcilePoller, WatchConfig,
     acquire_instance_lock, run_until_signal, run_watch,
@@ -64,6 +64,35 @@ async fn watch_cycle() -> Result<ExitCode> {
         .map_or_else(|| PathBuf::from(".orchestraitor"), PathBuf::from);
     let project_dir = std::env::var_os("ORCHESTRAITOR_PROJECT_DIR")
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    // Issue #656: the daemon's delivery sink resolves from environment
+    // configuration (the daemon takes no per-invocation flags):
+    // `ORCHESTRAITOR_DELIVERY_REPO=<owner/name>` arms delivery; without it
+    // the typed `Pending` bootstrap outcome holds. `ORCHESTRAITOR_DELIVERY_BASE`
+    // (default `main`) names the PR base; `ORCHESTRAITOR_DELIVERY_ORC_BIN`
+    // (default: this executable) names the landing primitive's binary.
+    // A missing orc binary is a typed startup error — the delivery must
+    // never discover it only after a task completes.
+    let delivery_repo = std::env::var("ORCHESTRAITOR_DELIVERY_REPO").ok();
+    let delivery_base =
+        std::env::var("ORCHESTRAITOR_DELIVERY_BASE").unwrap_or_else(|_| "main".to_string());
+    let delivery: miette::Result<
+        Option<(Arc<orchestraitor_worker::PushBranchDeliverySink>, String)>,
+    > = delivery_repo
+        .map(|repo| {
+            let orc_bin = std::env::var_os("ORCHESTRAITOR_DELIVERY_ORC_BIN").map_or_else(
+                || std::env::current_exe().unwrap_or_else(|_| "orc".into()),
+                PathBuf::from,
+            );
+            let sink = orchestraitor_worker::PushBranchDeliverySink::new(
+                orc_bin,
+                repo.clone(),
+                delivery_base.clone(),
+            )
+            .map_err(|error| miette!("delivery configuration: {error}"))?;
+            Ok((Arc::new(sink), repo))
+        })
+        .transpose();
+    let delivery = delivery.map_err(|error| miette!("delivery configuration: {error}"))?;
 
     // Single-flight: the daemon takes over the loop's instance lock — a
     // foreground `orc loop` or a second watch daemon is refused.
@@ -341,15 +370,27 @@ async fn watch_cycle() -> Result<ExitCode> {
     // into — so the enforced bound matches the validated bound (a gen-2
     // review finding: passing the pre-threading `budgets` made the daemon
     // validate one bound and enforce another).
-    let starter = DirectWatchStarter::new(
-        project_dir,
-        config_dir.clone(),
-        None,
-        loop_config.budgets.clone(),
-        loop_config.guardrails.worker_guardrails(),
-    )
-    .with_board_client(Arc::clone(&client))
-    .with_think_enabled(think_enabled)
+    let starter = {
+        let base_starter = DirectWatchStarter::new(
+            project_dir,
+            config_dir.clone(),
+            None,
+            loop_config.budgets.clone(),
+            loop_config.guardrails.worker_guardrails(),
+        )
+        .with_board_client(Arc::clone(&client));
+        // Issue #656: arm the delivery ONLY when
+        // `ORCHESTRAITOR_DELIVERY_REPO` is set; without it the typed
+        // `Pending` bootstrap outcome holds (never a silent drop — the run
+        // result records it).
+        if let Some((sink, _repo)) = delivery {
+            base_starter
+                .with_delivery(sink)
+                .with_think_enabled(think_enabled)
+        } else {
+            base_starter.with_think_enabled(think_enabled)
+        }
+    }
     .with_event_store(Arc::new(std::sync::Mutex::new(
         orchestraitor_events::SqliteAuditStore::open(config_dir.join("reasoning-events.db"))
             .into_diagnostic()

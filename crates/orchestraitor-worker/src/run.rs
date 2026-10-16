@@ -126,6 +126,16 @@ pub async fn run_worker(
                     break AttemptOutcome::Failed(failure);
                 }
 
+                // Delivery failure is re-plan-fatal (issue #656, review
+                // gen-2/3 major): the task WORK completed; re-planning would
+                // re-run the whole model task and re-attempt the same
+                // delivery against the same landing path. The typed failure
+                // surfaces on the run result (the loop's run row + retry
+                // accounting own the response).
+                if failure.class == FailureClass::DeliveryFailed {
+                    break AttemptOutcome::Failed(failure);
+                }
+
                 // Anti-stuck guard kills are re-plan-fatal: a fresh re-plan
                 // note cannot fix a loop the model is mechanistically stuck
                 // in (churn, no progress, or an unbounded external poll).
@@ -312,10 +322,18 @@ async fn run_attempt(
                 if !success {
                     return attempt_failure(FailureClass::TaskNotCompleted, "task-not-completed");
                 }
+                // The delivery request carries the run's own worktree and
+                // checked-out branch (issue #656): the sink lands THIS
+                // branch's committed tree. `worktree_branch` is set by the
+                // caller (starter/CLI) on `WorkerConfig`; fixture runs
+                // without a filesystem worktree carry `None` (typed
+                // `delivery-no-worktree` at the sink, never a silent drop).
                 let request = DeliveryRequest {
                     task_id: task.id.clone(),
                     summary: summary.clone(),
                     untrusted_writes: executor.untrusted_writes().to_vec(),
+                    worktree: Some(state.worktree_root.clone()),
+                    worktree_branch: config.worktree_branch.clone(),
                 };
                 return match delivery.deliver(&request).await {
                     Ok(outcome) => AttemptOutcome::Completed {
