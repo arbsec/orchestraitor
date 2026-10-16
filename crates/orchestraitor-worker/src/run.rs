@@ -153,16 +153,19 @@ pub async fn run_worker(
                 }
                 replans += 1;
                 replan_note = Some(failure.reason);
-                replan_summary = crate::receipt_summary::for_replan(
-                    &executor.receipts,
-                    executor.untrusted_writes(),
-                );
+                // The summary build sits AFTER the deadline check: a
+                // WorkerTimeout break never runs another attempt, so the
+                // build would be dead work (a gen-7 review finding).
                 if started.elapsed() > deadline {
                     break AttemptOutcome::Failed(TypedFailure {
                         class: FailureClass::WorkerTimeout,
                         reason: "worker-timeout",
                     });
                 }
+                replan_summary = crate::receipt_summary::for_replan(
+                    &executor.receipts,
+                    executor.untrusted_writes(),
+                );
             }
         }
     };

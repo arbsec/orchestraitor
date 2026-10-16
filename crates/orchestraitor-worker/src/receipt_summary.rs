@@ -48,6 +48,13 @@ pub const MAX_SUMMARY_CHARS: usize = 2 * 1024;
 const OUTCOME_COMPLETED: &str = "completed";
 const OUTCOME_REFUSED: &str = "refused";
 
+/// Cap on DISTINCT keys in `render`'s temporary per-tool aggregation map:
+/// the cumulative receipt log plus the (sanitized, length-capped) echo of
+/// untrusted refused tool names makes distinct keys unbounded, so past
+/// this bound further names fold into one aggregate line (the body cap
+/// would hide them anyway — this bounds only the temporary map's memory).
+const MAX_DISTINCT_TOOL_KEYS: usize = 64;
+
 /// Builds the fence for the untrusted-content block: `max(longest backtick
 /// run in the content + 1, 3)` backticks, so the content can never close
 /// the fence early (the ref-expansion containment posture).
@@ -110,9 +117,21 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
         body.push_str("no tool calls were recorded before the failure\n");
         return body;
     }
+    // The receipt log is cumulative across attempts and the receipt `tool`
+    // name of a refused call is a (sanitized, length-capped) echo of
+    // untrusted model output, so DISTINCT keys are unbounded without the
+    // `MAX_DISTINCT_TOOL_KEYS` aggregate: past the bound, further distinct
+    // names fold into one bucket line (the body cap would hide them anyway
+    // — this bounds only the temporary map's memory, the prompt is already
+    // bounded). A gen-7 review finding.
     let mut per_tool: BTreeMap<&str, (u32, u32, u32)> = BTreeMap::new();
+    let mut other = (0_u32, 0_u32, 0_u32);
     for receipt in receipts {
-        let entry = per_tool.entry(receipt.tool.as_str()).or_default();
+        let entry = if per_tool.len() < MAX_DISTINCT_TOOL_KEYS {
+            per_tool.entry(receipt.tool.as_str()).or_default()
+        } else {
+            &mut other
+        };
         match receipt.outcome {
             OUTCOME_COMPLETED => entry.0 += 1,
             OUTCOME_REFUSED => entry.1 += 1,
@@ -121,18 +140,31 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
             _ => entry.2 += 1,
         }
     }
-    let _ = write!(body, "{} tool call(s):", receipts.len());
-    for (tool, (completed, refused, failed)) in &per_tool {
-        let _ = write!(body, " {tool} x{completed} completed");
+    let _ = writeln!(body, "{} tool call(s):", receipts.len());
+    // One line per tool: the line-boundary truncation cut then drops
+    // whole ENTRIES, never splits a count line (the aggregate line rides
+    // last — it is the first tail casualty, before the named entries).
+    for (tool, (completed, refused, failed)) in per_tool.iter().rev() {
+        let _ = write!(body, "- {tool} x{completed} completed");
         if *refused > 0 {
             let _ = write!(body, ", x{refused} refused");
         }
         if *failed > 0 {
             let _ = write!(body, ", x{failed} failed");
         }
-        body.push(';');
+        body.push('\n');
     }
-    body.push('\n');
+    let (completed, refused, failed) = other;
+    if completed + refused + failed > 0 {
+        let _ = write!(body, "- (other) x{completed} completed");
+        if refused > 0 {
+            let _ = write!(body, ", x{refused} refused");
+        }
+        if failed > 0 {
+            let _ = write!(body, ", x{failed} failed");
+        }
+        body.push('\n');
+    }
     body
 }
 

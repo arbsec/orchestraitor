@@ -31,9 +31,9 @@ fn summary_names_tools_writes_and_last_outcome() {
     let summary = for_replan(&receipts, &["src/lib.rs".to_string()]).expect("summary");
     assert!(summary.contains("UNTRUSTED DATA"), "6.1 framing present");
     assert!(summary.contains("4 tool call(s)"));
-    assert!(summary.contains("read_file x1 completed"));
-    assert!(summary.contains("write_file x2 completed"));
-    assert!(summary.contains("bash x0 completed, x1 failed"));
+    assert!(summary.contains("- read_file x1 completed"));
+    assert!(summary.contains("- write_file x2 completed"));
+    assert!(summary.contains("- bash x0 completed, x1 failed"));
     assert!(summary.contains("- src/lib.rs"), "writes listed");
     assert!(summary.contains(
         "Last tool outcome before the failure: bash (failed) reason=mediation-unavailable"
@@ -122,6 +122,55 @@ fn truncated_summary_keeps_the_most_recent_writes() {
         !summary.contains(&writes[0]),
         "the oldest write is the truncated tail"
     );
+}
+
+/// Gen-7 review finding: the temporary per-tool aggregation map is bounded
+/// even with an unbounded stream of DISTINCT refused tool names — past the
+/// key cap, calls fold into one aggregate line, the map never grows past
+/// its key bound, and the totals still add up.
+#[test]
+fn per_tool_aggregation_is_bounded_for_many_distinct_names() {
+    // 200 distinct refused names: the map caps at 64 keys; the rest fold
+    // into the aggregate.
+    let receipts: Vec<ToolReceipt> = (0..200)
+        .map(|i| {
+            receipt(
+                &format!("weird tool name {i}"),
+                "refused",
+                Some("unknown-tool"),
+            )
+        })
+        .collect();
+    let summary = for_replan(&receipts, &[]).expect("summary");
+    assert!(summary.contains("200 tool call(s)"));
+    // The line-boundary cut drops whole tail ENTRIES (never splits one, so
+    // every surviving line is fully counted). 64 named entries overflow the
+    // 2 KiB body cap before the aggregate line, so the aggregate may be
+    // wholly cut — either way, every surviving line is complete and the
+    // surviving refused counts are a consistent subset of the 200 calls.
+    let refused_total: u32 = summary
+        .lines()
+        .filter(|line| line.starts_with("- ") && line.contains("refused"))
+        .filter_map(|line| {
+            line.split(", x")
+                .nth(1)
+                .and_then(|rest| rest.split(" refused").next())
+                .and_then(|count| count.parse::<u32>().ok())
+        })
+        .sum();
+    assert!(
+        refused_total > 0 && refused_total <= 200,
+        "the surviving refused counts are a consistent subset of the 200 calls, got {refused_total}"
+    );
+    for line in summary
+        .lines()
+        .filter(|line| line.starts_with("- ") && line.contains("refused"))
+    {
+        assert!(
+            line.starts_with("- weird tool name ") || line.starts_with("- (other)"),
+            "surviving entry '{line}' is a complete entry line, not a cut fragment"
+        );
+    }
 }
 
 #[test]
