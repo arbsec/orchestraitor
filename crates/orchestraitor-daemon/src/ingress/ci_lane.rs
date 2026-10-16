@@ -663,6 +663,12 @@ impl CiLane {
                 event_type: event.event_type.clone(),
                 head_sha: event.head_sha.clone(),
                 number: event.number,
+                // CI-lane events carry no author launch facts (the lane
+                // derives from workflow/check-run shapes only): the
+                // intake attach fails closed on them, and PR intake
+                // (slice 3) restores the facts from the PR payload.
+                author_login: None,
+                author_is_bot: None,
                 accepted_at_secs: now_secs,
             };
             match self.queue.push(ingress_event, now_secs) {

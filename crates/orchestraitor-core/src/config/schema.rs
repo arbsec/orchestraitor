@@ -90,6 +90,27 @@ pub struct WatchConfigBlock {
     /// built-in defaults (ingress disabled: the shipped posture is
     /// poll-only, opt-in).
     pub ingress: Option<WatchIngressConfig>,
+    /// §9.52(a) bug-report intake settings (epic #624, leaf #664).
+    /// Absent block keeps the built-in default (the attach lane
+    /// disabled; the shipped posture never mutates the board from
+    /// external events without the operator's opt-in).
+    pub intake: Option<WatchIntakeConfig>,
+}
+
+/// Bug-report intake settings (`[watch.intake]`; spec
+/// `10-orchestrator.md` §9.52(a), leaf #664). The attach lane consumes
+/// the §9.50 ingress queue's `issues-opened` events and attaches each
+/// external bug report to the board at `Status=Triage` with mechanical
+/// fields only — Target unset, provisional P1, an author-class
+/// provenance label — and NEVER schedules: only the triage
+/// classification pass (slice 2) may promote. The lane requires the
+/// ingress to be enabled (`[watch.ingress].enabled`) to have anything to
+/// consume.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchIntakeConfig {
+    /// Enable the intake attach lane (default: false — board mutations
+    /// from external events stay an explicit operator opt-in).
+    pub enabled: Option<bool>,
 }
 
 /// Event-ingress settings (`[watch.ingress]`; spec `10-orchestrator.md`

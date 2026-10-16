@@ -183,6 +183,52 @@ which side of the pair is wrong:
 
 Consistent pairs (both enabled or both disabled) are silent.
 
+## Bug-report intake (§9.52(a), opt-in)
+
+The daemon can attach external bug reports to the board automatically —
+the §9.52(a) intake attach lane. When enabled, the lane consumes the
+ingress queue's `issues-opened` events (so it requires the ingress to be
+enabled) and attaches each external issue to the configured board with
+MECHANICAL FIELDS ONLY:
+
+```toml
+[watch.intake]
+enabled = true           # default false — the operator opts in
+```
+
+The mechanical field set (spec `10-orchestrator.md` §9.52(a)) derives
+from LAUNCH FACTS ONLY — the author identity and the event type; issue
+titles, bodies, and labels are never read:
+
+- `Type = Bug` (native issue type),
+- `Status = Triage`, always — never `Ready` (the trust asymmetry:
+  attachment is automatic, scheduling never is),
+- `Priority = P1` provisional (never the scheduling value),
+- `Target` unset — external reports' MVP-ness is unknowable at attach
+  time, so the MVP-only ready-queue predicate excludes the item until
+  the triage classification pass (slice 2 of epic #624) sets it;
+- a daemon-owned author-class provenance label:
+  `intake:human`, `intake:bot`, or `intake:agent`.
+
+An author in the configured `service_identities` set (§9.41 — the same
+set the ready queue's assignee exclusion reads) is `intake:agent`-class
+and NEVER attaches: the loop's own reports flow the internal paths. An
+event whose author launch facts are missing (the platform supplied no
+author) fails closed — it attaches nothing rather than guessing a class.
+Attachment is idempotent (§9.26.3): one board item per source issue; a
+re-delivered event updates rather than duplicates. The lane consumes
+its OWN durable intake store (`<config-dir>/intake-events.db`), which
+the ingress poller mirrors every accepted `issues-opened` event into:
+the kick-off source's consumption of the shared queue can never steal
+an attach, a dropped queue surplus is not a lost attach (the durable
+store still holds the event), and consumption is delete-on-take — an
+event is processed exactly once. A FAILED board write is re-put and
+retries on the next cadence tick. The §9.43 reconcile poll stays the
+completeness authority. An intake outage degrades nothing else. An
+enabled lane over a disabled
+ingress is dead configuration and warns at startup (the same
+observable-warning discipline as the ingress/kick-off pair).
+
 The pinned guard set (concurrency 2, stall 10m, worker timeout 45m,
 backoff 10s·2^n capped 5m, $10/day spend soft cap, 4h run budget) is
 unchanged from [`orc loop`](orc-loop.md#guard-set) — the daemon hands the
@@ -235,6 +281,9 @@ rows all behave exactly as documented for
   per-endpoint conditional-request bookkeeping (ETag, advised poll
   interval) for the events feed, the CI completions lane's check-runs
   endpoints (one per tracked head SHA), and the Actions-runs endpoint.
+- Intake store (when `[watch.intake].enabled`): `<config-dir>/intake-events.db`
+  — the durable per-event consumption surface the §9.52(a) lane takes
+  from (delete-on-take; untaken events persist across restarts).
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme

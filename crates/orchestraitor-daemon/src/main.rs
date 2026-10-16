@@ -10,6 +10,7 @@
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
+use orchestraitor_daemon::intake_module::IntakeStore as _;
 use orchestraitor_daemon::{
     DaemonConfig, DaemonError, DirectWatchStarter, JournallessSink, ReconcilePoller, WatchConfig,
     acquire_instance_lock, run_until_signal, run_watch,
@@ -286,7 +287,10 @@ async fn watch_cycle() -> Result<ExitCode> {
         .into_diagnostic()
         .wrap_err("watch event store open failed")?;
     let poller = ReconcilePoller::new(
-        orchestraitor_daemon::BoardSnapshotPoller::new(Arc::clone(&client), board_config_template),
+        orchestraitor_daemon::BoardSnapshotPoller::new(
+            Arc::clone(&client),
+            board_config_template.clone(),
+        ),
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
@@ -306,6 +310,47 @@ async fn watch_cycle() -> Result<ExitCode> {
     ) {
         tracing::warn!("{warning}");
     }
+    // The §9.52(a) intake attach lane (leaf #664): enabled only with an
+    // enabled ingress (the lane consumes the ingress queue); the mismatch
+    // is a startup warning, never a silent misconfiguration.
+    for warning in orchestraitor_daemon::intake_ingress_warnings(
+        watch_config.intake.enabled,
+        watch_config.ingress.enabled,
+    ) {
+        tracing::warn!("{warning}");
+    }
+    // The §9.52(a) intake attach lane (leaf #664): consumes its OWN
+    // durable intake store (the poller mirrors every accepted
+    // `issues-opened` event into it) and attaches external bug reports
+    // to the board at Triage with mechanical fields only — never
+    // scheduling. The lane's surface is independent of the shared
+    // queue: the kick-off source's consumption can never steal an
+    // attach, and a queue-surplus drop is not a lost attach (the
+    // durable store still holds the event).
+    let intake_store = if watch_config.intake.enabled {
+        let store = orchestraitor_daemon::intake_module::SqliteIntakeStore::open(
+            &config_dir.join("intake-events.db"),
+        )
+        .into_diagnostic()
+        .wrap_err("intake store open failed")?;
+        let intake_board = orchestraitor_daemon::intake_module::BoardIntake::new(
+            Arc::clone(&client),
+            board_config_template.clone(),
+        );
+        let attacher = orchestraitor_daemon::intake_module::IntakeAttacher::new(
+            Arc::new(intake_board),
+            watch_config.intake.service_identities.clone(),
+        );
+        let intake_shutdown = signal_rx.clone();
+        let store = Arc::new(store);
+        let lane_store = Arc::clone(&store);
+        tokio::spawn(async move {
+            intake_attach_loop(attacher, lane_store, intake_shutdown).await;
+        });
+        Some(store)
+    } else {
+        None
+    };
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
         .ingress
         .enabled
@@ -314,6 +359,7 @@ async fn watch_cycle() -> Result<ExitCode> {
             &config_dir.join("ingress-events.db"),
             Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
             watch_config.ingress.queue_capacity,
+            intake_store,
         )
         .into_diagnostic()
         .wrap_err("event ingress construction failed")?;
@@ -344,8 +390,9 @@ async fn watch_cycle() -> Result<ExitCode> {
             ci_lane_poll_loop(ci_lane, ci_targets, ci_queue, ci_shutdown).await;
         });
         let poll_shutdown = signal_rx.clone();
+        let poll_queue = Arc::clone(&ingress_queue);
         tokio::spawn(async move {
-            ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
+            ingress_poll_loop(ingress_poller, targets, poll_queue, poll_shutdown).await;
         });
         Some(Arc::new(source))
     } else {
@@ -734,6 +781,72 @@ fn primary_and_shards(
     shards.sort();
     files.extend(shards);
     Ok(files)
+}
+
+/// The §9.52(a) intake attach loop (leaf #664): drains the shared
+/// bounded ingress queue's `issues-opened` events each cadence tick,
+/// classifies each author from LAUNCH FACTS ONLY (§9.50(c)), and
+/// attaches external bug reports to the board at `Status=Triage` with
+/// the mechanical field set (§9.52(a)) — never scheduling anything.
+/// Fail-closed: an event with no author launch fact attaches nothing,
+/// and a board-write failure retries on the next tick.
+async fn intake_attach_loop(
+    attacher: orchestraitor_daemon::intake_module::IntakeAttacher,
+    store: std::sync::Arc<orchestraitor_daemon::intake_module::SqliteIntakeStore>,
+    mut shutdown: tokio::sync::watch::Receiver<u64>,
+) {
+    loop {
+        // Consume from the DURABLE intake store (delete-on-take): the
+        // kick-off source's consumption of the shared queue can never
+        // steal an attach, and a taken event is processed exactly once.
+        // A FAILED attach is re-put so the next tick retries it (the
+        // board seam's membership check makes a re-attach after a
+        // partial write safe).
+        const INTAKE_TICK_LIMIT: usize = 32;
+        match store.take(INTAKE_TICK_LIMIT).await {
+            Ok(events) if !events.is_empty() => {
+                let outcome = attacher.process(&events).await;
+                // Re-put EXACTLY the failed attaches for the next tick's
+                // retry — never the attached, skipped, or terminal
+                // events (a permanent failure such as an unresolvable
+                // issue type would otherwise cycle the whole batch and
+                // burn board API quota every tick).
+                for event in &outcome.failed_events {
+                    if let Err(reput_error) = store.put(event).await {
+                        tracing::warn!("orcd watch: intake retry re-put failed: {reput_error}");
+                    }
+                }
+                if outcome.attached > 0
+                    || outcome.already_attached > 0
+                    || outcome.failed > 0
+                    || outcome.missing_author > 0
+                    || outcome.skipped > 0
+                {
+                    tracing::info!(
+                        attached = outcome.attached,
+                        already_attached = outcome.already_attached,
+                        skipped = outcome.skipped,
+                        failed = outcome.failed,
+                        missing_author = outcome.missing_author,
+                        "orcd watch: intake attach tick processed stored events"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("orcd watch: intake store read failed: {error}");
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(
+                orchestraitor_daemon::DEFAULT_POLL_INTERVAL_SECS,
+            )) => {}
+            changed = shutdown.changed() => {
+                let _ = changed;
+                return;
+            }
+        }
+    }
 }
 
 /// The §9.50(b) ingress poll loop (issue #504): one conditional-request
