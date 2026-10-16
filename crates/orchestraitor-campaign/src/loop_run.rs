@@ -301,6 +301,22 @@ impl LoopConfig {
                     .to_string(),
             ));
         }
+        // The fields are public: a caller may mutate `guardrails` (or
+        // `budgets`) after construction and before `validate` re-runs at
+        // `LoopRunner::new`/`run`. Enforce the constructor's threading
+        // contract HERE so a post-construction mutation cannot validate one
+        // bound and enforce another (a gen-4 review finding): an explicitly
+        // configured bound must equal the enforced bound, and a zero
+        // override is rejected in its own right.
+        if let Some(configured) = self.guardrails.max_turns_per_attempt
+            && self.budgets.max_turns_per_attempt != configured
+        {
+            return Err(CampaignError::Loop(
+                "guard-weakening rejected: loop.max_turns_per_attempt must equal the \
+                 enforced WorkerBudgets bound (one source, no drift)"
+                    .to_string(),
+            ));
+        }
         if let Some(interval) = self.min_poll_interval
             && interval.is_zero()
         {

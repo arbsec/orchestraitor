@@ -724,6 +724,45 @@ fn turn_bound_resolves_from_the_parsed_loop_block() {
     assert!(default_warnings.is_empty());
 }
 
+/// Issue #655 gen-4 review finding: `LoopConfig` fields are public, so a
+/// post-construction mutation of `guardrails.max_turns_per_attempt` (or the
+/// budgets' bound) must be caught by the validation that re-runs at
+/// `LoopRunner::new`/`run` — one source, no drift.
+#[test]
+fn turn_bound_drift_after_construction_is_rejected() {
+    let mut config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings {
+            max_turns_per_attempt: Some(7),
+            ..GuardrailsSettings::default()
+        },
+    )
+    .unwrap();
+    // Mutate the configured override away from the enforced bound.
+    config.guardrails.max_turns_per_attempt = Some(9);
+    assert!(
+        config.validate().is_err(),
+        "a drifted override must not validate"
+    );
+    // A zero override mutated in after construction is also rejected (the
+    // constructor already threaded the nonzero bound; the drift check plus
+    // the zero-budget check both fire).
+    let mut zeroed = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    zeroed.budgets.max_turns_per_attempt = 0;
+    assert!(
+        zeroed.validate().is_err(),
+        "a post-construction zero budget bound is rejected"
+    );
+}
+
 /// Checks that shutdown aborts hung workers within the five-second drain budget.
 #[tokio::test(start_paused = true)]
 async fn shutdown_stops_cleanly_within_the_daemon_budget() {
