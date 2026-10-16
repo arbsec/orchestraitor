@@ -127,7 +127,13 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
     let mut per_tool: BTreeMap<&str, (u32, u32, u32)> = BTreeMap::new();
     let mut other = (0_u32, 0_u32, 0_u32);
     for receipt in receipts {
-        let entry = if per_tool.len() < MAX_DISTINCT_TOOL_KEYS {
+        // An EXISTING key keeps counting past the bound (the bound limits
+        // only how many DISTINCT keys can appear — a gen-8 review finding:
+        // without the contains_key check, later calls of an already-known
+        // tool would land in the aggregate and undercount it).
+        let entry = if per_tool.contains_key(receipt.tool.as_str())
+            || per_tool.len() < MAX_DISTINCT_TOOL_KEYS
+        {
             per_tool.entry(receipt.tool.as_str()).or_default()
         } else {
             &mut other

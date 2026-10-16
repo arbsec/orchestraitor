@@ -173,6 +173,32 @@ fn per_tool_aggregation_is_bounded_for_many_distinct_names() {
     }
 }
 
+/// Gen-8 review finding: an already-known tool keeps counting past the
+/// distinct-key bound (the bound limits only NEW distinct keys), so the
+/// displayed per-tool counts stay correct.
+#[test]
+fn existing_tool_keeps_counting_after_the_key_cap() {
+    // 64 distinct junk names fill the key bound, then a KNOWN tool
+    // (`write_file`, keyed by the very first receipt) keeps counting.
+    let mut receipts = vec![receipt("write_file", "completed", None)];
+    for i in 0..64 {
+        receipts.push(receipt(
+            &format!("junk {i}"),
+            "refused",
+            Some("unknown-tool"),
+        ));
+    }
+    for _ in 0..5 {
+        receipts.push(receipt("write_file", "completed", None));
+    }
+    let summary = for_replan(&receipts, &[]).expect("summary");
+    assert!(summary.contains("70 tool call(s)"));
+    assert!(
+        summary.contains("- write_file x6 completed"),
+        "the known tool's count includes the post-cap calls"
+    );
+}
+
 #[test]
 fn writes_only_attempt_still_summarizes() {
     let summary = for_replan(&[], &["out.txt".to_string()]).expect("summary");
