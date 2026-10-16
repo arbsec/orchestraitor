@@ -31,9 +31,11 @@ use crate::tools::ToolReceipt;
 
 /// Maximum characters of the rendered receipt summary BODY inlined into
 /// the replan prompt — the cap bounds the summary payload only; the
-/// labelled framing, the fences, and the truncation notice add a bounded
-/// constant on top (the framing is fixed text, so the whole block stays
-/// within `MAX_SUMMARY_CHARS + ~320` characters). A summary counts tools,
+/// labelled framing, the fences, and the truncation notice add a small
+/// fixed amount on top, EXCEPT the fence length, which is content-derived
+/// (it widens over the longest backtick run in the body, so a body full
+/// of backticks grows the fence with it — the containment posture costs
+/// what the content demands). A summary counts tools,
 /// paths, and outcome classes — small by construction; the cap is a
 /// fail-safe, not the design.
 pub const MAX_SUMMARY_CHARS: usize = 2 * 1024;

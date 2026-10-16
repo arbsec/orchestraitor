@@ -732,7 +732,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   failure-reason line, and now also carries a bounded summary of what the
   failed attempt already did — per-tool dispatch counts with outcome
   splits, the worktree-relative paths already written, and the last tool
-  outcome — rendered from the run's existing receipt log with its body
+  outcome — rendered from the run's existing receipt log as accumulated
+  across attempts so far, with its body
   capped at 2048 characters (the block's framing, fences, and notice add a
   small fixed amount) inside a fenced, labelled UNTRUSTED-DATA block (spec
   `40-arbitraitor-integration.md` §6.1; fence widened over any backtick

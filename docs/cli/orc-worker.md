@@ -41,7 +41,9 @@ that attempt already DID (issue #657): per-tool dispatch counts with outcome
 splits, the worktree-relative paths already written ("do not re-read them from
 scratch"), and the last tool outcome before the failure — so a re-plan stops
 re-reading the same files. The summary renders from the attempt's receipt log
-with its body capped at 2048 characters (the labelled framing, the fences, and
+as accumulated across all attempts SO FAR (the executor's log is cumulative —
+a second replan summarizes everything the first two attempts did), with its
+body capped at 2048 characters (the labelled framing, the fences, and
 the truncation notice add a small fixed amount) inside a fenced, labelled
 UNTRUSTED-DATA block
 (spec `40-arbitraitor-integration.md` §6.1; the fence is widened over any

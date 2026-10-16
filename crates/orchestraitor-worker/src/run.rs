@@ -94,11 +94,12 @@ pub async fn run_worker(
     let mut attempts = 0_u32;
     let mut replans = 0_u32;
     let mut replan_note: Option<&'static str> = None;
-    // The failed attempt's bounded receipt summary (issue #657): rebuilt
-    // after each re-plan-failing attempt from the executor's CURRENT receipt
-    // log and untrusted-write list — the cumulative log across attempts so
-    // far, bounded by `receipt_summary::MAX_SUMMARY_CHARS`, so a replan
-    // names what previous attempts already did instead of only the failure
+    // The failed attempt's receipt summary (issue #657): rebuilt after
+    // each re-plan-failing attempt from the executor's CUMULATIVE receipt
+    // log and untrusted-write list (not reset between attempts, so the
+    // second replan summarizes everything the first two attempts did),
+    // bounded by `receipt_summary::MAX_SUMMARY_CHARS`, so a replan names
+    // what previous attempts already did instead of only the failure
     // class.
     let mut replan_summary: Option<String> = None;
     let outcome = loop {
