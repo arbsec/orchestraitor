@@ -119,20 +119,24 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
     }
     // The receipt log is cumulative across attempts and the receipt `tool`
     // name of a refused call is a (sanitized, length-capped) echo of
-    // untrusted model output, so DISTINCT keys are unbounded without the
-    // `MAX_DISTINCT_TOOL_KEYS` aggregate: past the bound, further distinct
-    // names fold into one bucket line (the body cap would hide them anyway
-    // — this bounds only the temporary map's memory, the prompt is already
-    // bounded). A gen-7 review finding.
+    // untrusted model output, so DISTINCT keys are unbounded without a
+    // bound: past `MAX_DISTINCT_TOOL_KEYS`, further DISTINCT names fold
+    // into one aggregate line (the body cap would hide them anyway — this
+    // bounds only the temporary map's memory, the prompt is already
+    // bounded). A gen-7 review finding. The bound reserves the map's slots
+    // for DISPATCHED (admitted) tools — the counts a replan most needs —
+    // and never lets an unknown-tool echo consume one: a refusal receipt
+    // with a name that is NOT already keyed goes straight to the
+    // `(unrecognized calls)` aggregate (a gen-10 review finding: 64 junk
+    // refusals arriving first would otherwise evict `write_file`'s named
+    // count from the summary).
     let mut per_tool: BTreeMap<&str, (u32, u32, u32)> = BTreeMap::new();
     let mut other = (0_u32, 0_u32, 0_u32);
     for receipt in receipts {
         // An EXISTING key keeps counting past the bound (the bound limits
-        // only how many DISTINCT keys can appear — a gen-8 review finding:
-        // without the contains_key check, later calls of an already-known
-        // tool would land in the aggregate and undercount it).
+        // only how many DISTINCT keys can appear — a gen-8 review finding).
         let entry = if per_tool.contains_key(receipt.tool.as_str())
-            || per_tool.len() < MAX_DISTINCT_TOOL_KEYS
+            || (receipt.admitted && per_tool.len() < MAX_DISTINCT_TOOL_KEYS)
         {
             per_tool.entry(receipt.tool.as_str()).or_default()
         } else {
@@ -162,7 +166,7 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
     }
     let (completed, refused, failed) = other;
     if completed + refused + failed > 0 {
-        let _ = write!(body, "- (other) x{completed} completed");
+        let _ = write!(body, "- (unrecognized calls) x{completed} completed");
         if refused > 0 {
             let _ = write!(body, ", x{refused} refused");
         }

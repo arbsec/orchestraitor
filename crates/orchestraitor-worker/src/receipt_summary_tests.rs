@@ -130,44 +130,33 @@ fn truncated_summary_keeps_the_most_recent_writes() {
 /// its key bound, and the totals still add up.
 #[test]
 fn per_tool_aggregation_is_bounded_for_many_distinct_names() {
-    // 200 distinct refused names: the map caps at 64 keys; the rest fold
-    // into the aggregate.
+    // 200 distinct refused (unrecognized) names: the map's slots stay
+    // reserved for ADMITTED tools (gen-10), so every refusal folds into
+    // the aggregate — no junk echo ever occupies a named slot.
     let receipts: Vec<ToolReceipt> = (0..200)
-        .map(|i| {
-            receipt(
-                &format!("weird tool name {i}"),
-                "refused",
-                Some("unknown-tool"),
-            )
+        .map(|i| ToolReceipt {
+            sequence: 1,
+            tool: format!("weird tool name {i}"),
+            admitted: false,
+            outcome: "refused",
+            reason: Some("unknown-tool"),
+            exit_code: None,
         })
         .collect();
     let summary = for_replan(&receipts, &[]).expect("summary");
     assert!(summary.contains("200 tool call(s)"));
-    // The line-boundary cut drops whole tail ENTRIES (never splits one, so
-    // every surviving line is fully counted). 64 named entries overflow the
-    // 2 KiB body cap before the aggregate line, so the aggregate may be
-    // wholly cut — either way, every surviving line is complete and the
-    // surviving refused counts are a consistent subset of the 200 calls.
-    let refused_total: u32 = summary
-        .lines()
-        .filter(|line| line.starts_with("- ") && line.contains("refused"))
-        .filter_map(|line| {
-            line.split(", x")
-                .nth(1)
-                .and_then(|rest| rest.split(" refused").next())
-                .and_then(|count| count.parse::<u32>().ok())
-        })
-        .sum();
     assert!(
-        refused_total > 0 && refused_total <= 200,
-        "the surviving refused counts are a consistent subset of the 200 calls, got {refused_total}"
+        summary.contains("- (unrecognized calls) x0 completed, x200 refused"),
+        "all refusals aggregate into the unrecognized bucket"
     );
+    // The line-boundary cut drops whole tail ENTRIES (never splits one, so
+    // every surviving line is fully counted).
     for line in summary
         .lines()
         .filter(|line| line.starts_with("- ") && line.contains("refused"))
     {
         assert!(
-            line.starts_with("- weird tool name ") || line.starts_with("- (other)"),
+            line.starts_with("- (unrecognized calls)") || line.starts_with("- weird tool name "),
             "surviving entry '{line}' is a complete entry line, not a cut fragment"
         );
     }
@@ -178,8 +167,9 @@ fn per_tool_aggregation_is_bounded_for_many_distinct_names() {
 /// displayed per-tool counts stay correct.
 #[test]
 fn existing_tool_keeps_counting_after_the_key_cap() {
-    // 64 distinct junk names fill the key bound, then a KNOWN tool
-    // (`write_file`, keyed by the very first receipt) keeps counting.
+    // 64 distinct junk refusals fill the aggregate (they NEVER occupy map
+    // slots — gen-10), then a KNOWN tool (`write_file`, keyed by the very
+    // first receipt) keeps counting.
     let mut receipts = vec![receipt("write_file", "completed", None)];
     for i in 0..64 {
         receipts.push(receipt(
@@ -196,6 +186,35 @@ fn existing_tool_keeps_counting_after_the_key_cap() {
     assert!(
         summary.contains("- write_file x6 completed"),
         "the known tool's count includes the post-cap calls"
+    );
+}
+
+/// Gen-10 review finding: a flood of distinct unknown-tool refusals can
+/// never evict a dispatched tool's named count from the summary — the
+/// map's slots are reserved for admitted tools.
+#[test]
+fn unrecognized_refusals_never_evict_a_dispatched_tool_count() {
+    // 64 junk refusals FIRST (they would have filled the old bound), then
+    // a single write_file dispatch.
+    let mut receipts: Vec<ToolReceipt> = (0..64)
+        .map(|i| ToolReceipt {
+            sequence: 1,
+            tool: format!("junk {i}"),
+            admitted: false,
+            outcome: "refused",
+            reason: Some("unknown-tool"),
+            exit_code: None,
+        })
+        .collect();
+    receipts.push(receipt("write_file", "completed", None));
+    let summary = for_replan(&receipts, &[]).expect("summary");
+    assert!(
+        summary.contains("- write_file x1 completed"),
+        "the dispatched tool keeps its named count despite the junk flood"
+    );
+    assert!(
+        summary.contains("- (unrecognized calls) x0 completed, x64 refused"),
+        "the junk refusals ride the aggregate"
     );
 }
 
