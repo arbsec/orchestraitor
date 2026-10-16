@@ -302,9 +302,9 @@ impl PushBranchDeliverySink {
                     "--repo",
                     &self.repo,
                     "--json",
-                    "url",
+                    "url,state",
                     "--jq",
-                    ".url",
+                    "\"\\(.url) \\(.state)\"",
                 ]);
                 lookup.kill_on_drop(true);
                 let lookup_output = tokio::time::timeout(
@@ -326,10 +326,18 @@ impl PushBranchDeliverySink {
                 let url = String::from_utf8_lossy(&lookup_output.stdout)
                     .trim()
                     .to_string();
-                if url.is_empty() {
+                // Only an OPEN PR counts (review gen-6 minor): `gh pr view
+                // <branch>` can resolve a CLOSED or MERGED PR for the same
+                // head branch — a stale reference would report `pr-opened`
+                // with no open PR.
+                let mut parts = url.split_whitespace();
+                let (Some(reference), Some(state)) = (parts.next(), parts.next()) else {
+                    return Err(DELIVERY_PR_OPEN_FAILED);
+                };
+                if state != "OPEN" {
                     return Err(DELIVERY_PR_OPEN_FAILED);
                 }
-                return Ok(url);
+                return Ok(reference.to_string());
             }
             return Err(DELIVERY_PR_OPEN_FAILED);
         }
@@ -382,11 +390,12 @@ impl DeliverySink for PushBranchDeliverySink {
 /// 1. BRANCH FIRST: the checked-out branch is verified BEFORE any mutation
 ///    — a drifted worktree is a typed refusal, never a commit onto the
 ///    wrong branch.
-/// 2. SCOPED STAGING: only the run's recorded write paths are staged
-///    (`untrusted_writes`), never `git add -A` — the loop worktrees are
-///    task-owned (staging everything there is safe), but the same sink
-///    code also serves the one-shot paths, where the ambient checkout may
-///    carry unrelated operator state that must never land.
+/// 2. STAGE ALL: `git add -A` in every delivery-armed run (review gen-5
+///    major): the mediated `bash` tool can edit, create, and DELETE files
+///    beyond the recorded `untrusted_writes` list, so scoped staging would
+///    silently drop part of the work. The one-shot paths are safe because
+///    their startup gate refuses a DIRTY checkout or the base branch
+///    itself — every change after startup comes from the run.
 /// 3. EXPLICIT IDENTITY: the commit pins `user.name`/`user.email` via
 ///    `-c` (the service-identity bot attribution the loop environment
 ///    provides; `git commit` fails typed on a host with no ambient git

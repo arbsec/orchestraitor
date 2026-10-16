@@ -88,11 +88,11 @@ async fn watch_cycle() -> Result<ExitCode> {
                 repo.clone(),
                 delivery_base.clone(),
             )
-            .map_err(|error| miette!("delivery configuration invalid: {error}"))?;
+            .map_err(|error| miette!("delivery configuration: {error}"))?;
             Ok((Arc::new(sink), repo))
         })
         .transpose();
-    let delivery = delivery.map_err(|error| miette!("delivery configuration invalid: {error}"))?;
+    let delivery = delivery.map_err(|error| miette!("delivery configuration: {error}"))?;
 
     // Single-flight: the daemon takes over the loop's instance lock — a
     // foreground `orc loop` or a second watch daemon is refused.
