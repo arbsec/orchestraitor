@@ -979,6 +979,18 @@ async fn intake_attach_is_idempotent_for_an_attached_issue() -> Result<(), Board
             needle: "projectItems(first",
             response: RuleResponse::Json(FIND_ITEM),
         },
+        // The repair policy reads the item's current single-select
+        // fields: Status=Ready and Priority=P2 are SET (never touched —
+        // a promotion is not reversed); the issue type is absent (unset
+        // → repaired via updateIssueIssueType below).
+        Rule {
+            needle: "fieldValues(first",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValues":{"totalCount":2,"nodes":[
+                    {"name":"Ready","field":{"name":"Status"}},
+                    {"name":"P2","field":{"name":"Priority"}}]}}}}"#,
+            ),
+        },
         Rule {
             needle: "updateProjectV2ItemFieldValue",
             response: RuleResponse::Json(

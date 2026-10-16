@@ -806,27 +806,31 @@ async fn intake_attach_loop(
         match store.take(INTAKE_TICK_LIMIT).await {
             Ok(events) if !events.is_empty() => {
                 let outcome = attacher.process(&events).await;
-                if outcome.failed > 0 {
-                    // Re-put ONLY the failed attaches: an attach failure
-                    // is a board-write error, and the store no longer
-                    // holds the taken events. Identifying failures per
-                    // event is unnecessary — the attach is idempotent,
-                    // so re-putting the whole batch is safe (already-
-                    // attached items take the update path) and bounded.
-                    for event in &events {
-                        if let Err(reput_error) = store.put(event).await {
-                            tracing::warn!("orcd watch: intake retry re-put failed: {reput_error}");
-                        }
+                // Re-put EXACTLY the failed attaches for the next tick's
+                // retry — never the attached, skipped, or terminal
+                // events (a permanent failure such as an unresolvable
+                // issue type would otherwise cycle the whole batch and
+                // burn board API quota every tick).
+                for event in &outcome.failed_events {
+                    if let Err(reput_error) = store.put(event).await {
+                        tracing::warn!("orcd watch: intake retry re-put failed: {reput_error}");
                     }
                 }
-                tracing::info!(
-                    attached = outcome.attached,
-                    already_attached = outcome.already_attached,
-                    skipped = outcome.skipped,
-                    failed = outcome.failed,
-                    missing_author = outcome.missing_author,
-                    "orcd watch: intake attach tick processed stored events"
-                );
+                if outcome.attached > 0
+                    || outcome.already_attached > 0
+                    || outcome.failed > 0
+                    || outcome.missing_author > 0
+                    || outcome.skipped > 0
+                {
+                    tracing::info!(
+                        attached = outcome.attached,
+                        already_attached = outcome.already_attached,
+                        skipped = outcome.skipped,
+                        failed = outcome.failed,
+                        missing_author = outcome.missing_author,
+                        "orcd watch: intake attach tick processed stored events"
+                    );
+                }
             }
             Ok(_) => {}
             Err(error) => {

@@ -721,15 +721,23 @@ impl EventPoller {
             };
             // The §9.52(a) intake fan-out (leaf #664): mirror every
             // accepted `issues-opened` event into the DURABLE intake
-            // store BEFORE the queue push. A store write failure counts
-            // as a drop (the event stays out of the lane's surface; the
-            // kick-off path is untouched) — never a silent miss.
-            if event.event_type == "issues-opened"
-                && let Some(intake) = &self.intake_store
-                && intake.put(&event).await.is_err()
-            {
+            // store BEFORE the queue push. A store-write failure does
+            // NOT lose the event: the queue push happens regardless
+            // (the kick-off path is intact) and the drop is counted for
+            // the intake surface only — the durable store's own
+            // idempotency (INSERT OR IGNORE) means the lane never
+            // double-attaches, and the §9.43 reconcile poll stays the
+            // completeness authority for a missed attach.
+            let intake_mirrored = if event.event_type == "issues-opened" {
+                match &self.intake_store {
+                    Some(intake) => intake.put(&event).await.is_ok(),
+                    None => true,
+                }
+            } else {
+                true
+            };
+            if !intake_mirrored {
                 dropped += 1;
-                continue;
             }
             match self.queue.push(event, now_secs) {
                 PushOutcome::Accepted => accepted += 1,
@@ -901,7 +909,9 @@ fn author_facts(
         let login = actor.login.clone().filter(|login| !login.is_empty());
         if login.is_some() {
             // The actor shape carries no user-type; the bot fact is
-            // unknown, not false — the attach classifies conservatively.
+            // unknown, not false — the attach classifies conservatively
+            // (bot) AFTER the service-identity check, and the report
+            // still attaches.
             return (login, None);
         }
     }

@@ -19,7 +19,7 @@ use crate::auth::BoardAuth;
 use crate::cache::{FieldNodeIds, NodeIdCacheFile, ProjectNodeIds};
 use crate::config::BoardProjectConfig;
 use crate::error::BoardError;
-use crate::item::{GraphQlEnvelope, ItemFacts, ItemPage};
+use crate::item::{GraphQlEnvelope, ItemFacts, ItemPage, NameRef};
 use crate::queue::{self, ReadyItem, SkipWarning};
 
 const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
@@ -86,6 +86,7 @@ const FIND_ITEM_QUERY: &str = r"query($owner: String!, $name: String!, $number: 
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       id
+      issueType { name }
       projectItems(first: 20) { totalCount nodes { id project { id } } }
     }
   }
@@ -157,6 +158,22 @@ const READ_BACK_QUERY: &str = r"query($id: ID!, $name: String!) {
     ... on ProjectV2Item {
       fieldValueByName(name: $name) {
         ... on ProjectV2ItemFieldSingleSelectValue { name }
+      }
+    }
+  }
+}";
+
+const ITEM_FIELD_VALUES_QUERY: &str = r"query($id: ID!, $first: Int!) {
+  node(id: $id) {
+    ... on ProjectV2Item {
+      fieldValues(first: $first) {
+        totalCount
+        nodes {
+          ... on ProjectV2ItemFieldSingleSelectValue {
+            name
+            field { ... on ProjectV2ItemSingleSelectField { name } }
+          }
+        }
       }
     }
   }
@@ -469,21 +486,55 @@ impl BoardClient {
                     source: Box::new(decode_error("mutation returned no item id")),
                 })?
         };
-        // The mechanical field writes apply ONLY to a NEWLY added item
-        // (§9.52: promotion authority is the triage pass's alone). An
-        // ALREADY-attached item may have been promoted by the triage
-        // pass or moved by a human since attach — overwriting Status or
-        // Priority here would reverse a promotion the attach lane has
-        // no authority over. The label stays additive either way.
-        if existing_item.is_none() {
-            // Status: the verified write (same read-back discipline as
-            // `move_item` — the write round-trips before success).
+        // The mechanical field policy (§9.52: promotion authority is
+        // the triage pass's alone; the attach lane's authority is to
+        // make an intake item COMPLETE, never to downgrade it):
+        //
+        // - NEWLY ADDED item: write Status, Priority, and the issue
+        //   type (the full mechanical set).
+        // - ALREADY-ATTACHED item: REPAIR only — a field that is
+        //   currently UNSET is written (a partial first attach left the
+        //   item without its mechanical fields; the retry must repair),
+        //   a field that is SET is left alone (the triage pass or a
+        //   human may have promoted it; overwriting would reverse a
+        //   promotion the lane has no authority over).
+        let current_fields = if existing_item.is_some() {
+            Some(self.current_single_selects(&item_id).await?)
+        } else {
+            None
+        };
+        let needs_status = existing_item.is_none()
+            || current_fields
+                .as_ref()
+                .is_some_and(|fields| !fields.contains_key(&config.ready_field));
+        let needs_priority = existing_item.is_none()
+            || current_fields
+                .as_ref()
+                .is_some_and(|fields| !fields.contains_key(&config.priority_field));
+        // The native issue type is NOT a project field: its current
+        // value rides the issue itself (`issueType`), read in the same
+        // lookup as the node id.
+        let needs_type = existing_item.is_none()
+            || issue
+                .issue_type
+                .as_ref()
+                .and_then(|issue_type| {
+                    let name = &issue_type.name;
+                    (!name.is_empty()).then_some(name.as_str())
+                })
+                .is_none();
+        if needs_status {
+            // Verified write (the read-back round-trips before success).
             self.set_single_select(&ids, &item_id, &config.ready_field, fields.status)
                 .await?;
-            // Priority: the §9.52(d) provisional value (never the
-            // scheduling value; the triage pass owns any change).
+        }
+        if needs_priority {
+            // The §9.52(d) provisional value (never the scheduling
+            // value; the triage pass owns any change).
             self.set_single_select(&ids, &item_id, &config.priority_field, fields.priority)
                 .await?;
+        }
+        if needs_type {
             // Native issue type: resolved by NAME against the org (then
             // the repository); an unresolvable type name is a typed
             // error, never a silently skipped write (the ready queue's
@@ -497,6 +548,43 @@ impl BoardClient {
         // paths.
         self.apply_label(repo, &issue_id, fields.label).await?;
         Ok(existing_item.is_none())
+    }
+
+    /// Reads the item's currently SET single-select fields (name →
+    /// value). Used by the already-attached repair policy: a field the
+    /// map lacks is UNSET and may be written by the intake attach; a
+    /// field the map carries belongs to whoever set it (the triage pass
+    /// or a human) and is never overwritten.
+    async fn current_single_selects(
+        &self,
+        item_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, BoardError> {
+        let data = self
+            .execute(
+                ITEM_FIELD_VALUES_QUERY,
+                serde_json::json!({ "id": item_id, "first": 25 }),
+            )
+            .await?;
+        let response: ItemFieldValuesResponse = decode(data, "item field values")?;
+        let node = response.node.ok_or(BoardError::ResponseShape {
+            context: "item field values",
+            source: Box::new(decode_error("query returned no node")),
+        })?;
+        let connection = node.field_values;
+        if crate::item::truncated(connection.nodes.len(), connection.total_count) {
+            return Err(BoardError::TruncatedConnection {
+                window: "fieldValues",
+            });
+        }
+        let mut fields = std::collections::BTreeMap::new();
+        for value in connection.nodes {
+            let field_name = value.field.and_then(|field| field.name);
+            let name = value.name;
+            if let (Some(field_name), Some(name)) = (field_name, name) {
+                fields.insert(field_name, name);
+            }
+        }
+        Ok(fields)
     }
 
     /// Writes one single-select field and verifies by read-back (the
@@ -1056,6 +1144,35 @@ struct ReadBackNode {
 }
 
 #[derive(Debug, Deserialize)]
+struct ItemFieldValuesResponse {
+    node: Option<ItemFieldValuesNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ItemFieldValuesNode {
+    field_values: ItemFieldValuesConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ItemFieldValuesConnection {
+    nodes: Vec<ItemFieldValue>,
+    total_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemFieldValue {
+    name: Option<String>,
+    field: Option<ItemFieldValueField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemFieldValueField {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReadBackValue {
     name: Option<String>,
 }
@@ -1095,6 +1212,7 @@ struct IssueWithContentRepo {
 #[serde(rename_all = "camelCase")]
 struct IssueWithContent {
     id: String,
+    issue_type: Option<NameRef>,
     project_items: ProjectItemConnection,
 }
 

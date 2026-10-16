@@ -87,6 +87,20 @@ pub fn classify_author(
     platform_bot: bool,
     service_identities: &[String],
 ) -> AuthorClass {
+    classify_author_opt(login, Some(platform_bot), service_identities)
+}
+
+/// The optional-bot-fact variant: `None` (the platform supplied no bot
+/// fact) classifies conservatively as a bot AFTER the service-identity
+/// check — the trust asymmetry prefers mislabeling a human as a bot
+/// over the reverse, and the label is provenance, never a scheduling
+/// value, so the report still attaches.
+#[must_use]
+pub fn classify_author_opt(
+    login: &str,
+    platform_bot: Option<bool>,
+    service_identities: &[String],
+) -> AuthorClass {
     let normalized = login.trim().to_lowercase();
     let stripped = normalized.strip_suffix("[bot]").unwrap_or(&normalized);
     if service_identities
@@ -95,7 +109,13 @@ pub fn classify_author(
     {
         return AuthorClass::Agent;
     }
-    if platform_bot {
+    // A `[bot]`-suffixed login is itself a launch fact: the platform's
+    // login convention marks automation regardless of the user-type
+    // field.
+    if stripped != normalized {
+        return AuthorClass::Bot;
+    }
+    if platform_bot.unwrap_or(true) {
         return AuthorClass::Bot;
     }
     AuthorClass::Human
@@ -230,7 +250,7 @@ pub struct IntakeAttacher {
 }
 
 /// One attach tick's observability counts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntakeOutcome {
     /// Board items newly attached.
     pub attached: usize,
@@ -244,6 +264,10 @@ pub struct IntakeOutcome {
     pub missing_author: usize,
     /// Board-write failures: retried on a later tick, never fatal.
     pub failed: usize,
+    /// The events whose attach FAILED (exactly the events the caller
+    /// must re-put for the next tick's retry — never the attached,
+    /// skipped, or terminal events).
+    pub failed_events: Vec<IngressEvent>,
 }
 
 /// The durable intake store (the §9.52(a) lane's own consumption
@@ -441,23 +465,21 @@ impl IntakeAttacher {
     pub async fn process(&self, events: &[IngressEvent]) -> IntakeOutcome {
         let mut outcome = IntakeOutcome::default();
         for event in events {
+            // The launch-fact contract (§9.50(c) via §9.52(a)): the
+            // LOGIN is required — without it there is no author fact at
+            // all and the event fails closed (terminal: a re-delivery
+            // would decide identically). The BOT fact is optional: an
+            // unknown bot fact classifies conservatively as a bot AFTER
+            // the service-identity check (the trust asymmetry prefers
+            // mislabeling a human as a bot over the reverse; the label
+            // is provenance, never a scheduling value) — the event
+            // still attaches (gen-3 review fix: an unknown bot fact
+            // from an actor-only event must not drop the report).
             let Some(login) = event.author_login.as_deref() else {
-                // A launch fact the platform did not supply: fail closed
-                // to no-attach. The event stays OUT of the board; the
-                // §9.43 reconcile poll and a human triage stay the
-                // completeness authority. Never guess a class. The event
-                // was already deleted from the durable store by the
-                // take; a re-delivery of the same delivery key re-put's
-                // and re-decides identically — terminal, not a retry
-                // loop.
                 outcome.missing_author += 1;
                 continue;
             };
-            let Some(platform_bot) = event.author_is_bot else {
-                outcome.missing_author += 1;
-                continue;
-            };
-            let class = classify_author(login, platform_bot, &self.service_identities);
+            let class = classify_author_opt(login, event.author_is_bot, &self.service_identities);
             let Some(attachment) = intake_attachment(event, class) else {
                 // A non-bug-report event type or an agent-class author:
                 // the classification is a pure function of launch facts.
@@ -485,11 +507,15 @@ impl IntakeAttacher {
                 }
                 Err(_error) => {
                     // Log-safe failure: identifiers only, never content.
-                    // The event is re-put by the caller so the next tick
-                    // retries the attach (the board seam's membership
-                    // check makes a re-attach after a partial write
-                    // safe).
+                    // The event is returned in `failed_events` so the
+                    // caller re-puts EXACTLY the failed batch (never the
+                    // attached, skipped, or terminal events) and the
+                    // next tick retries the attach. The repair policy in
+                    // the board seam makes a re-attach after a partial
+                    // write complete the item (unset fields are
+                    // written; set fields are left alone).
                     outcome.failed += 1;
+                    outcome.failed_events.push(event.clone());
                 }
             }
         }
