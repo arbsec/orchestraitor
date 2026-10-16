@@ -462,6 +462,9 @@ impl LoopWorkerStarter for DirectLoopStarter {
         // branch the sink lands (`orc-loop/<task-id>` — the branch
         // `prepare_worktree` checked out).
         config.worktree_branch = Some(format!("orc-loop/{}", selected.task_id));
+        // Task-OWNED worktree: stage everything (the mediated bash tool can
+        // touch files beyond the recorded write list; review gen-3/4).
+        config.stage_all = Some(true);
         // The delivery sink is cloned per spawn (`Arc`): a push failure is
         // a typed delivery outcome on the run, never a silent drop, and
         // never blocks the loop's success accounting (the run result

@@ -33,6 +33,17 @@ pub struct DeliveryRequest {
     /// THIS branch's tree; dirty working-copy state never lands (the
     /// push-branch primitive lands committed content only).
     pub worktree_branch: Option<String>,
+    /// How the worktree state is staged (review gen-4 major: one explicit
+    /// source, never inferred from a branch-name convention — a one-shot
+    /// run can sit on an `orc-loop/`-prefixed operator branch):
+    /// `StageAll` = `git add -A` (task-OWNED loop/daemon worktrees — the
+    /// mediated `bash` tool can edit/create/DELETE files beyond the
+    /// recorded write list, so scoped staging would silently drop work);
+    /// `ScopedWrites` = stage the recorded `untrusted_writes` paths only
+    /// (ambient one-shot checkouts — the startup gate refuses a dirty
+    /// checkout, but unrelated untracked files must never land). `None`
+    /// = scoped (the conservative default).
+    pub stage_all: Option<bool>,
 }
 
 /// Delivery result reported back in the structured run result.
@@ -421,7 +432,7 @@ async fn commit_worktree_state(
     // would misreport a no-write completion as `branch-state-failed`
     // (review gen-2 minor); the commit then reports "nothing to commit"
     // and the landing reports the correct `delivery-empty-diff` outcome.
-    let staging_is_scoped = !branch.starts_with("orc-loop/");
+    let staging_is_scoped = !request.stage_all.unwrap_or(false);
     if staging_is_scoped {
         if !request.untrusted_writes.is_empty() {
             let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];

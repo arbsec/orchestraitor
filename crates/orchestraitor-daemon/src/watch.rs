@@ -789,8 +789,8 @@ impl DirectWatchStarter {
 
     /// Attaches the delivery sink (issue #656): completed runs land their
     /// worktree state through `orc github push-branch` + the
-    /// labeling-chained PR path. `repo` is the `owner/name` slug;
-    /// `base_branch` is the PR base (default `main`).
+    /// labeling-chained PR path (the repo/base resolve at sink
+    /// construction).
     #[must_use]
     pub fn with_delivery(
         mut self,
@@ -1062,6 +1062,8 @@ impl LoopWorkerStarter for DirectWatchStarter {
         // accounting (the run result carries the typed `DeliveryFailed`
         // failure).
         config.worktree_branch = Some(format!("orc-loop/{}", selected.task_id));
+        // Task-OWNED worktree: stage everything (see the loop starter).
+        config.stage_all = Some(true);
         let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
             Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
             None => Arc::new(PendingDeliverySink),

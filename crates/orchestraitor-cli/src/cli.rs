@@ -151,8 +151,8 @@ pub struct LoopArgs {
     /// Default OFF (the typed `Pending` bootstrap outcome).
     #[arg(long)]
     pub deliver: bool,
-    /// The `owner/name` repository the delivery lands in (REQUIRED with
-    /// `--deliver`).
+    /// The `owner/name` repository the delivery lands in (defaults to the
+    /// first repo in the board config).
     #[arg(long)]
     pub delivery_repo: Option<String>,
     /// The PR base branch for the delivery (default `main`).

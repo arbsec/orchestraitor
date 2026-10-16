@@ -97,6 +97,12 @@ pub struct WorkerConfig {
     /// `None` (the default) = no delivery branch context (fixture runs;
     /// the sink reports the typed `delivery-no-worktree` outcome).
     pub worktree_branch: Option<String>,
+    /// How the delivery sink stages the worktree state (issue #656, review
+    /// gen-4 major): `Some(true)` = `git add -A` (task-OWNED loop/daemon
+    /// worktrees — the mediated `bash` tool can touch files beyond the
+    /// recorded write list); `Some(false)`/`None` = scoped staging of the
+    /// recorded `untrusted_writes` only (ambient one-shot checkouts).
+    pub stage_all: Option<bool>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -139,6 +145,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("think_enabled", &self.think_enabled)
             .field("record_payloads", &self.record_payloads)
             .field("worktree_branch", &self.worktree_branch)
+            .field("stage_all", &self.stage_all)
             .finish()
     }
 }
@@ -167,6 +174,7 @@ impl WorkerConfig {
             think_enabled: true,
             record_payloads: false,
             worktree_branch: None,
+            stage_all: None,
         }
     }
 
