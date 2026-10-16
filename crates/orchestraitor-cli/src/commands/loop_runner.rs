@@ -992,16 +992,20 @@ mod tests {
         endpoint: String,
         shutdown: Arc<std::sync::Mutex<bool>>,
         join: Option<std::thread::JoinHandle<()>>,
+        // The listener thread holds its own Arc of the payload (cloned
+        // before spawn), so no field is needed here.
     }
 
     impl OneShotServer {
-        fn start(payload: &'static str) -> std::io::Result<Self> {
+        fn start(payload: String) -> std::io::Result<Self> {
             use std::net::TcpListener;
+            let payload: Arc<str> = payload.into();
             let listener = TcpListener::bind(("127.0.0.1", 0))?;
             listener.set_nonblocking(true)?;
             let endpoint = format!("http://{}/graphql", listener.local_addr()?);
             let shutdown = Arc::new(std::sync::Mutex::new(false));
             let thread_shutdown = Arc::clone(&shutdown);
+            let thread_payload = Arc::clone(&payload);
             let join = std::thread::spawn(move || {
                 loop {
                     if let Ok(guard) = thread_shutdown.lock()
@@ -1011,9 +1015,9 @@ mod tests {
                     }
                     match listener.accept() {
                         Ok((stream, _addr)) => {
-                            let connection_payload = payload;
+                            let connection_payload = Arc::clone(&thread_payload);
                             let _ignore = std::thread::spawn(move || {
-                                serve_one(stream, connection_payload);
+                                serve_one(stream, &connection_payload);
                             });
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1102,7 +1106,7 @@ mod tests {
     /// A starter whose board client answers the `issueBody` query with
     /// `payload` (every request; the fixture path needs one query).
     fn starter_with_body(
-        payload: &'static str,
+        payload: String,
     ) -> std::io::Result<(DirectLoopStarter, OneShotServer, Arc<tempfile::TempDir>)> {
         let server = OneShotServer::start(payload)?;
         let auth: Arc<dyn orchestraitor_board::BoardAuth> = Arc::new(FixtureAuth);
@@ -1190,8 +1194,7 @@ mod tests {
             }
         })
         .to_string();
-        let leaked_payload: &'static str = Box::leak(body_payload.into_boxed_str());
-        let (starter, _server, _event_dir) = starter_with_body(leaked_payload).into_diagnostic()?;
+        let (starter, _server, _event_dir) = starter_with_body(body_payload).into_diagnostic()?;
         let task = starter
             .materialize_task_fixture(dir, &selected)
             .await
@@ -1333,11 +1336,15 @@ mod tests {
         let tasks_dir = tempfile::tempdir().into_diagnostic()?;
         let dir = tasks_dir.path();
         let long_body = "y".repeat(orchestraitor_campaign::MAX_INLINE_BODY_CHARS + 500);
-        let payload = format!(
-            r#"{{"data":{{"repository":{{"issue":{{"title":"t","body":"{long_body}"}}}}}}}}"#
-        );
-        let leaked: &'static str = Box::leak(payload.into_boxed_str());
-        let (starter, _server, _event_dir) = starter_with_body(leaked).into_diagnostic()?;
+        let payload = serde_json::json!({
+            "data": {
+                "repository": {
+                    "issue": { "title": "t", "body": long_body }
+                }
+            }
+        })
+        .to_string();
+        let (starter, _server, _event_dir) = starter_with_body(payload).into_diagnostic()?;
         let selected = SelectedTask {
             repo: "arbsec/orchestraitor".to_string(),
             number: 496,

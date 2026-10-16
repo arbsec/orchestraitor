@@ -18,6 +18,17 @@ pub use arbitraitor_receipt as receipt;
 pub use arbitraitor_sandbox as sandbox;
 
 pub use arbitraitor_mcp::{ApprovalTokenIssuer, PlanContext};
+
+/// Test-only: serializes every TEST that materializes or drops
+/// `arbitraitor-exec-<pid>-*` temp directories (issue #645) — the
+/// mediation tests' `mediated_stack_or_skip` and the bash_child live-stack
+/// tests. Under the parallel test runner, sibling constructions AND drops
+/// legitimately move the directory count, which made the gate-refusal
+/// test's snapshot-assert-diff flake. Production paths never take this
+/// lock; the gate-refusal test holds it across its snapshot window.
+#[doc(hidden)]
+pub static EXEC_TEMP_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use arbitraitor_model::finding::Finding;
 pub use arbitraitor_model::verdict::Verdict;
 pub use arbitraitor_policy::{EvalContext, PolicyEngine, PolicyError};
