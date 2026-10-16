@@ -16,8 +16,9 @@ use async_trait::async_trait;
 use orchestraitor_agent_catalog::RoleRoutingDecision;
 use orchestraitor_board::ReadyItem;
 use orchestraitor_campaign::{
-    BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, LoopConfig, LoopRunStore,
-    LoopRunner, LoopWorkerStarter, RunRow, SelectedTask, StopReason, WorkerProcess,
+    BoardPoller, BoardSnapshot, CampaignDecisionStore, CampaignError, GuardrailsSettings,
+    LoopConfig, LoopRunStore, LoopRunner, LoopWorkerStarter, RunRow, SelectedTask, StopReason,
+    WorkerProcess,
 };
 use orchestraitor_worker::{BudgetEcho, RunStatus, UsageTotals, WorkerBudgets, WorkerRun};
 
@@ -619,6 +620,146 @@ async fn guardrail_weakening_is_rejected_fail_closed() {
     assert!(
         zero_deadline.is_err(),
         "zero run deadline never bounds work"
+    );
+
+    // Issue #655: a zero per-attempt turn bound is a weakened guard, not an
+    // opt-out (an attempt that may not take a single turn cannot run). The
+    // configured value rides the guardrails settings, so the configured `0`
+    // is rejected fail-closed by LoopConfig::validate.
+    let zero_turns_via_guardrails = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings {
+            max_turns_per_attempt: Some(0),
+            ..GuardrailsSettings::default()
+        },
+    );
+    assert!(
+        zero_turns_via_guardrails.is_err(),
+        "a configured loop.max_turns_per_attempt = 0 is rejected fail-closed"
+    );
+}
+
+/// Issue #655 precedence: an explicit `loop.max_turns_per_attempt` pins the
+/// worker's enforced bound; an absent key inherits the `WorkerBudgets`
+/// bound (the bootstrap default) — a caller-supplied explicit budget is
+/// never clobbered by the defaults.
+#[test]
+fn turn_bound_precedence_explicit_key_overrides_default() {
+    // Explicit key: the configured value lands in the WorkerBudgets the
+    // loop hands its worker starter (the worker's enforcement is the
+    // loop's enforcement — no drift).
+    let configured = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings {
+            max_turns_per_attempt: Some(7),
+            ..GuardrailsSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        configured.budgets.max_turns_per_attempt, 7,
+        "the configured bound is the enforced bound"
+    );
+
+    // Absent key: the caller's budget bound is preserved verbatim. With the
+    // bootstrap budgets that is the raised implement-phase default (issue
+    // #496 RCA: 25 turns per attempt exhausts on real slices through the
+    // 4-tool JSON protocol).
+    let default = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        default.budgets.max_turns_per_attempt,
+        orchestraitor_campaign::DEFAULT_MAX_TURNS_PER_ATTEMPT,
+        "the absent key inherits the bootstrap default"
+    );
+
+    // Absent key over a caller-supplied budget: the supplied bound survives
+    // (an explicit WorkerBudgets value is never overwritten by the defaults).
+    let supplied = LoopConfig::with_guardrails(
+        WorkerBudgets {
+            max_turns_per_attempt: 9,
+            ..WorkerBudgets::bootstrap_defaults()
+        },
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        supplied.budgets.max_turns_per_attempt, 9,
+        "an explicit budget bound survives the absent config key"
+    );
+}
+
+/// Issue #655 config resolution: `GuardrailsSettings::from_config` carries
+/// the parsed `max_turns_per_attempt` value (the same shape as every other
+/// `[loop]` key) and the absent block leaves the override unset.
+#[test]
+fn turn_bound_resolves_from_the_parsed_loop_block() {
+    let (settings, warnings) =
+        GuardrailsSettings::from_config(Some(&orchestraitor_campaign::GuardrailsConfigValues {
+            max_turns_per_attempt: Some(42),
+            ..orchestraitor_campaign::GuardrailsConfigValues::default()
+        }));
+    assert_eq!(settings.max_turns_per_attempt, Some(42));
+    assert!(
+        warnings.is_empty(),
+        "an explicit nonzero turn bound is not an opt-out warning"
+    );
+
+    let (default_settings, default_warnings) = GuardrailsSettings::from_config(None);
+    assert_eq!(
+        default_settings.max_turns_per_attempt, None,
+        "the absent block leaves the bound inherited from the budgets"
+    );
+    assert!(default_warnings.is_empty());
+}
+
+/// Issue #655 gen-4 review finding: `LoopConfig` fields are public, so a
+/// post-construction mutation of `guardrails.max_turns_per_attempt` (or the
+/// budgets' bound) must be caught by the validation that re-runs at
+/// `LoopRunner::new`/`run` — one source, no drift.
+#[test]
+fn turn_bound_drift_after_construction_is_rejected() {
+    let mut config = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings {
+            max_turns_per_attempt: Some(7),
+            ..GuardrailsSettings::default()
+        },
+    )
+    .unwrap();
+    // Mutate the configured override away from the enforced bound.
+    config.guardrails.max_turns_per_attempt = Some(9);
+    assert!(
+        config.validate().is_err(),
+        "a drifted override must not validate"
+    );
+    // A zero override mutated in after construction is also rejected (the
+    // constructor already threaded the nonzero bound; the drift check plus
+    // the zero-budget check both fire).
+    let mut zeroed = LoopConfig::with_guardrails(
+        WorkerBudgets::bootstrap_defaults(),
+        Duration::from_secs(5),
+        None,
+        GuardrailsSettings::default(),
+    )
+    .unwrap();
+    zeroed.budgets.max_turns_per_attempt = 0;
+    assert!(
+        zeroed.validate().is_err(),
+        "a post-construction zero budget bound is rejected"
     );
 }
 
