@@ -334,7 +334,6 @@ async fn run_attempt(
                     untrusted_writes: executor.untrusted_writes().to_vec(),
                     worktree: Some(state.worktree_root.clone()),
                     worktree_branch: config.worktree_branch.clone(),
-                    stage_all: config.stage_all,
                 };
                 return match delivery.deliver(&request).await {
                     Ok(outcome) => AttemptOutcome::Completed {

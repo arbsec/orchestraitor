@@ -1062,8 +1062,6 @@ impl LoopWorkerStarter for DirectWatchStarter {
         // accounting (the run result carries the typed `DeliveryFailed`
         // failure).
         config.worktree_branch = Some(format!("orc-loop/{}", selected.task_id));
-        // Task-OWNED worktree: stage everything (see the loop starter).
-        config.stage_all = Some(true);
         let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
             Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
             None => Arc::new(PendingDeliverySink),

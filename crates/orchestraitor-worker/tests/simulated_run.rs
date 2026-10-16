@@ -310,7 +310,6 @@ async fn pending_delivery_sink_reports_pending_for_the_bootstrap() {
             untrusted_writes: Vec::new(),
             worktree: None,
             worktree_branch: None,
-            stage_all: None,
         })
         .await
         .unwrap();

@@ -12,7 +12,6 @@ fn request() -> DeliveryRequest {
         untrusted_writes: vec!["src/lib.rs".to_string()],
         worktree: None,
         worktree_branch: None,
-        stage_all: None,
     }
 }
 
@@ -42,7 +41,6 @@ async fn non_git_worktree_is_a_typed_branch_state_failure() {
     let request = DeliveryRequest {
         worktree: Some(worktree),
         worktree_branch: Some("orc-loop/t-1".to_string()),
-        stage_all: Some(true),
         ..request()
     };
     // A real file: construction passes; the COMMIT step fails first (the

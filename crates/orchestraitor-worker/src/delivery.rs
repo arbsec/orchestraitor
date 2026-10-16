@@ -33,17 +33,6 @@ pub struct DeliveryRequest {
     /// THIS branch's tree; dirty working-copy state never lands (the
     /// push-branch primitive lands committed content only).
     pub worktree_branch: Option<String>,
-    /// How the worktree state is staged (review gen-4 major: one explicit
-    /// source, never inferred from a branch-name convention — a one-shot
-    /// run can sit on an `orc-loop/`-prefixed operator branch):
-    /// `StageAll` = `git add -A` (task-OWNED loop/daemon worktrees — the
-    /// mediated `bash` tool can edit/create/DELETE files beyond the
-    /// recorded write list, so scoped staging would silently drop work);
-    /// `ScopedWrites` = stage the recorded `untrusted_writes` paths only
-    /// (ambient one-shot checkouts — the startup gate refuses a dirty
-    /// checkout, but unrelated untracked files must never land). `None`
-    /// = scoped (the conservative default).
-    pub stage_all: Option<bool>,
 }
 
 /// Delivery result reported back in the structured run result.
@@ -325,14 +314,22 @@ impl PushBranchDeliverySink {
                 .await
                 .map_err(|_| DELIVERY_PR_OPEN_FAILED)?
                 .map_err(|_| DELIVERY_PR_OPEN_FAILED)?;
+                // The lookup's exit status gates the PrOpened report (review
+                // gen-5 major): a failed lookup is the documented
+                // `delivery-pr-open-failed`, never a fabricated reference —
+                // and "already exists" text can also come from other errors
+                // (e.g. an existing branch), so a non-confirmed PR is never
+                // reported as opened.
+                if !lookup_output.status.success() {
+                    return Err(DELIVERY_PR_OPEN_FAILED);
+                }
                 let url = String::from_utf8_lossy(&lookup_output.stdout)
                     .trim()
                     .to_string();
-                return Ok(if url.is_empty() {
-                    format!("pr-existing:{remote_branch}")
-                } else {
-                    url
-                });
+                if url.is_empty() {
+                    return Err(DELIVERY_PR_OPEN_FAILED);
+                }
+                return Ok(url);
             }
             return Err(DELIVERY_PR_OPEN_FAILED);
         }
@@ -418,36 +415,18 @@ async fn commit_worktree_state(
     if current_branch != branch {
         return Err(DELIVERY_BRANCH_STATE_FAILED);
     }
-    // STAGING (review gen-3 major + gen-2 minor): the mediated `bash` tool
-    // can edit, create, and DELETE files that are not on the recorded
-    // `untrusted_writes` list, so scoped staging would silently drop part
-    // of the work (and a deleted path would make `git add -- <path>` fail).
-    // Task-OWNED worktrees (`orc-loop/<task-id>` — the loop/daemon path)
-    // stage everything with `git add -A`. The AMBIENT one-shot checkouts
-    // (`orc worker run`/`orc campaign run --deliver`) keep SCOPED staging
-    // of the recorded write paths only — their startup gate already
-    // refuses a dirty checkout, but the operator's unrelated untracked
-    // files must never land. An EMPTY write list in the ambient case skips
-    // staging entirely — `git add --` with no pathspec is a git error and
-    // would misreport a no-write completion as `branch-state-failed`
-    // (review gen-2 minor); the commit then reports "nothing to commit"
-    // and the landing reports the correct `delivery-empty-diff` outcome.
-    let staging_is_scoped = !request.stage_all.unwrap_or(false);
-    if staging_is_scoped {
-        if !request.untrusted_writes.is_empty() {
-            let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
-            add_args.extend(request.untrusted_writes.iter().cloned());
-            let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
-            let add = git_async(worktree, &add_args).await?;
-            if !add.status.success() {
-                return Err(DELIVERY_BRANCH_STATE_FAILED);
-            }
-        }
-    } else {
-        let add = git_async(worktree, &["add", "-A"]).await?;
-        if !add.status.success() {
-            return Err(DELIVERY_BRANCH_STATE_FAILED);
-        }
+    // STAGING = `git add -A` in EVERY delivery-armed run (review gen-5
+    // major, superseding the gen-3/4 scoped-staging split): the mediated
+    // `bash` tool can edit, create, and DELETE files that are not on the
+    // recorded `untrusted_writes` list, so scoped staging silently drops
+    // part of the work (and a deleted-but-recorded path makes
+    // `git add -- <path>` fail). The one-shot paths are safe: their
+    // startup gate refuses a DIRTY checkout, so every change after startup
+    // comes from the run itself. The loop/daemon worktrees are task-owned
+    // by construction.
+    let add = git_async(worktree, &["add", "-A"]).await?;
+    if !add.status.success() {
+        return Err(DELIVERY_BRANCH_STATE_FAILED);
     }
     // Commit with the pinned identity. "nothing to commit" is the empty
     // diff — the landing reports the typed empty-diff outcome.
