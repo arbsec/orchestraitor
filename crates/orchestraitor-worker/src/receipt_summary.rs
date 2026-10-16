@@ -95,8 +95,12 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
     if untrusted_writes.is_empty() {
         body.push_str("No files were written before the failure.\n");
     } else {
-        body.push_str("Paths already written (do not re-read them from scratch; change only what the new approach needs):\n");
-        for path in untrusted_writes {
+        body.push_str("Paths already written (most recent first; do not re-read them from scratch; change only what the new approach needs):\n");
+        // Most recent FIRST: a cap cut keeps the prefix, so the writes the
+        // attempt made last — the ones the next approach most likely builds
+        // on — survive the truncation (a gen-6 review finding: oldest-first
+        // ordering preserved stale paths and dropped the recent ones).
+        for path in untrusted_writes.iter().rev() {
             let _ = writeln!(body, "- {path}");
         }
     }

@@ -92,6 +92,38 @@ fn oversized_summary_is_truncated_with_a_notice() {
     );
 }
 
+/// Gen-6 review finding: the path list renders MOST RECENT FIRST, so a
+/// cap cut keeps the writes the attempt made last (the ones the next
+/// approach most likely builds on) instead of the stale earliest ones.
+#[test]
+fn truncated_summary_keeps_the_most_recent_writes() {
+    let writes: Vec<String> = (0..400)
+        .map(|i| format!("very/long/path/component/{i}/file.rs"))
+        .collect();
+    let receipts: Vec<ToolReceipt> = (0..300)
+        .map(|i| receipt(&format!("tool{i}"), "completed", None))
+        .collect();
+    let summary = for_replan(&receipts, &writes).expect("summary");
+    assert!(
+        summary.contains("most recent first"),
+        "ordering is labelled"
+    );
+    // The LAST (most recent) writes survive the prefix cut...
+    assert!(
+        summary.contains(&writes[399]),
+        "the most recent write survives truncation"
+    );
+    assert!(
+        summary.contains(&writes[398]),
+        "recent writes survive truncation"
+    );
+    // ...while the earliest (stale) ones are the dropped tail.
+    assert!(
+        !summary.contains(&writes[0]),
+        "the oldest write is the truncated tail"
+    );
+}
+
 #[test]
 fn writes_only_attempt_still_summarizes() {
     let summary = for_replan(&[], &["out.txt".to_string()]).expect("summary");
