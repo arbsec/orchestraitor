@@ -268,6 +268,26 @@ fn written_paths_are_framing_safe_and_length_capped() {
     assert!(summary.contains("..."), "the cap cut is marked");
 }
 
+/// Gen-12 review finding: repeated writes of one path deduplicate to a
+/// single entry (the most recent occurrence position), so duplicates
+/// cannot fill the body cap and hide other written paths or the counts.
+#[test]
+fn duplicate_writes_deduplicate_to_one_entry() {
+    // The FIRST path is written twice; three distinct paths exist overall.
+    let writes = vec![
+        "src/early.txt".to_string(),
+        "src/early.txt".to_string(),
+        "src/middle.txt".to_string(),
+        "src/early.txt".to_string(),
+    ];
+    let summary = for_replan(&[], &writes).expect("summary");
+    assert!(
+        summary.matches("- src/early.txt").count() == 1,
+        "the repeated path appears exactly once"
+    );
+    assert!(summary.contains("- src/middle.txt"));
+}
+
 /// Gen-4 review finding: an oversized summary must still carry the
 /// signals that stop re-exploration. The last outcome and every written
 /// path render BEFORE the per-tool counts, so the prefix cut at

@@ -149,7 +149,16 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
         // characters (and the U+2028/U+2029 line separators) become
         // spaces; a longer-than-200-character path is cut with an inline
         // ellipsis.
+        //
+        // Duplicate writes deduplicate to their MOST RECENT occurrence
+        // first (a gen-12 review finding: repeated writes of one path
+        // would otherwise fill the body cap and hide other written paths
+        // and the tool counts entirely).
+        let mut seen = std::collections::HashSet::new();
         for path in untrusted_writes.iter().rev() {
+            if !seen.insert(path.as_str()) {
+                continue;
+            }
             let _ = writeln!(body, "- {}", framing_safe_path(path));
         }
     }
