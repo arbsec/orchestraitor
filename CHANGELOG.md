@@ -454,6 +454,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- **Operator-configurable per-attempt turn bound, default raised to 100**
+  (issue #655): the worker's per-attempt turn limit
+  (`loop.max_turns_per_attempt`, new layered `[loop]` config key) is now
+  operator-configurable and applies to both `orc loop` and `orcd watch`.
+  The default rises from 25 to 100: the 4-tool JSON protocol spends turns
+  on exploration that native tool calling would not, and real
+  implementation slices exhausted the old bound (issue 496). An absent key
+  keeps the default; an explicit `0` is rejected fail-closed at loop
+  startup (a weakened guard, not an opt-out — unlike the anti-stuck
+  guardrails). Exhaustion surfaces as the typed `turn-budget` failure
+  reason (the run-level class on the final attempt is
+  `AttemptBudgetExhausted`). Documented in
+  [docs/cli/orc-loop.md](docs/cli/orc-loop.md) ("Guard set").
 - **`orc github gh-env` refuses `gh pr create` in `required` enforcement**:
   PR creation through gh-env bypasses the deterministic PR-labeling chain,
   so the child command is classified by argv shape — the `gh pr create`

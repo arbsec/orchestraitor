@@ -31,6 +31,7 @@ guard deliberately with a loud warning):
 | backoff | 10s·2^n capped at 5m | loop pass pacing (same schedule the worker uses for provider retries) |
 | spend | $10/day soft cap | worker records exceedance; loop seals the intake (inert by default — the per-token spend estimate is `0.0` until the cost-ledger lane wires provider pricing in, so no accrual crosses the cap) |
 | run budget | 4h | loop (aborts in-flight runs, records them) |
+| turns per attempt | 100 | worker (attempt fails typed `turn-budget`; on the final attempt the run carries `FailureClass::AttemptBudgetExhausted` with reason `turn-budget`) |
 | tool-loop churn | 4 repeats in an 8-turn window | worker (`FailureClass::ToolLoopChurn`; re-plan-fatal) |
 | no-progress fingerprint | 5 consecutive identical worktree fingerprints | worker (`FailureClass::NoProgress`; re-plan-fatal) |
 | CI-poll budget | 30m cumulative poll-shaped bash per attempt | worker (`FailureClass::PollBudgetExhausted`; typed `poll-budget-exhausted` failure class on the attempt, then ordinary cross-invocation retry accounting + backoff apply — no dedicated board lifecycle state) |
@@ -45,7 +46,18 @@ operator's deliberate opt-out — reported as a stderr warning, never silent.
 
 Config keys (layered, spec §9.22): `loop.no_progress_turns`,
 `loop.tool_repeat_count`, `loop.tool_repeat_window`, `loop.ci_poll_budget_secs`,
-`loop.max_task_attempts`, `loop.task_retry_backoff_secs`.
+`loop.max_task_attempts`, `loop.task_retry_backoff_secs`,
+`loop.max_turns_per_attempt`.
+
+`loop.max_turns_per_attempt` (issue #655) bounds the model turns one worker
+attempt may spend before the attempt fails as a typed `turn-budget` failure
+(and re-plans; a run that exhausts every attempt this way carries the
+run-level `AttemptBudgetExhausted` class). The implement-phase default is
+100: the 4-tool JSON protocol spends
+turns on exploration that native tool calling would not, and 25 was measured
+to exhaust real implementation slices (issue 496). Unlike the anti-stuck
+guardrails, an explicit `0` is NOT a disable: it is a weakened guard and is
+rejected fail-closed at loop startup.
 
 ## Supervision semantics
 

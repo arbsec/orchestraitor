@@ -661,6 +661,65 @@ async fn real_progress_resets_the_fingerprint_streak() {
     );
 }
 
+/// Issue #655 acceptance: the worker enforces the CONFIGURED per-attempt
+/// turn bound with the typed class — a run whose budget is set below the
+/// scripted turn count fails as `TurnBudgetExhausted`/`turn-budget` exactly
+/// at the bound (productive distinct writes with churn/no-progress guards
+/// disabled so no other guard fires first).
+#[tokio::test]
+async fn turn_budget_exhaustion_enforces_the_configured_bound_typed() {
+    // Productive distinct writes (churn/no-progress guards disabled, every
+    // write a new path) so no other guard can fire; the script never emits
+    // `finish`, so EVERY attempt burns its full bound and the run ends on
+    // the attempt budget carrying the last attempt's typed class.
+    let mut script = Vec::new();
+    for step in 0..=(3 * 3) {
+        script.push(PlannedResponse::NonStreaming {
+            content: action_text(&json!({
+                "tool": "write_file",
+                "path": format!("step-{step}.txt"),
+                "content": format!("step {step}")
+            })),
+        });
+    }
+    let sim = serve(script).await;
+    let transport = test_transport(sim.base_url());
+    let worktree = tempfile::tempdir().unwrap();
+    let task = fixture_task("t-turnbudget");
+    let budgets = WorkerBudgets {
+        max_turns_per_attempt: 3,
+        ..fast_budgets()
+    };
+    let guardrails = orchestraitor_worker::GuardrailsConfig {
+        no_progress_turns: 0,
+        tool_repeat_count: 0,
+        tool_repeat_window: 0,
+        ci_poll_budget: orchestraitor_worker::GuardrailsConfig::bootstrap_defaults().ci_poll_budget,
+    };
+    let config = guardrail_config(budgets, guardrails);
+    let run = run_worker(
+        &task,
+        worktree.path(),
+        &transport,
+        &FixtureSlowBash,
+        &FixtureDelivery,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Failed, "failure: {:?}", run.failure);
+    let failure = run.failure.expect("typed failure");
+    assert_eq!(failure.class, FailureClass::AttemptBudgetExhausted);
+    assert_eq!(
+        failure.reason, "turn-budget",
+        "each attempt fails on the CONFIGURED turn bound"
+    );
+    assert_eq!(
+        run.attempts, 3,
+        "3 attempts x 3 configured turns; the default 25 was never used"
+    );
+}
+
 /// Fixture mediator that actually sleeps the script's first `sleep N`
 /// argument (a bounded stand-in for the mediated interpreter).
 struct FixtureSleepingBash;

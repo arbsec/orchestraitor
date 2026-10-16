@@ -40,9 +40,13 @@ pub const DEFAULT_DAILY_SPEND_SOFT_CAP_USD: f64 = 10.0;
 pub const DEFAULT_RUN_BUDGET: Duration = Duration::from_hours(4);
 /// Bootstrap default: per-attempt conversation bound. The issue bounds
 /// attempts, re-plans, and wall clock; a per-attempt turn bound keeps one
-/// attempt finite without depending on wall-clock in tests (mini-swe-agent
-/// step-limit analog).
-pub const DEFAULT_MAX_TURNS_PER_ATTEMPT: u32 = 25;
+/// attempt finite without depending on wall-clock in tests. The
+/// implement-phase default (issue #655) is 100: the mini-swe-agent 25-turn
+/// step-limit analog assumed native tool calling, and the 4-tool JSON
+/// protocol is far less token-efficient (the #496 RCA evidence shows ~48
+/// turns spent per attempt on a real implementation slice). Operators
+/// override through the `loop.max_turns_per_attempt` layered config key.
+pub const DEFAULT_MAX_TURNS_PER_ATTEMPT: u32 = 100;
 /// Bootstrap default: consecutive malformed model responses that fail an
 /// attempt (bounded format-error handling, mini-swe-agent analog).
 pub const DEFAULT_MAX_CONSECUTIVE_FORMAT_ERRORS: u32 = 3;

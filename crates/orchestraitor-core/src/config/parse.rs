@@ -139,6 +139,7 @@ fn is_known_key(key: &str) -> bool {
                 | "loop.ci_poll_budget_secs"
                 | "loop.max_task_attempts"
                 | "loop.task_retry_backoff_secs"
+                | "loop.max_turns_per_attempt"
         )
         // The §9.36 watch-daemon block (a PR #564 review finding: a valid
         // `[watch]` table must not surface as `unknown config keys`) and
