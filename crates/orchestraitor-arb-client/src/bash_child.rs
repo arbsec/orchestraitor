@@ -612,7 +612,14 @@ mod tests {
                 .is_ok_and(|status| status.success())
     }
 
-    fn stack_or_skip() -> Option<()> {
+    fn stack_or_skip() -> Option<std::sync::MutexGuard<'static, ()>> {
+        // Hold the crate-wide test lock for the WHOLE test body (the caller
+        // binds the guard): this test materializes and drops
+        // `arbitraitor-exec-<pid>-*` dirs, which must never overlap the
+        // gate-refusal test's snapshot window (issue #645).
+        let guard = crate::EXEC_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
             return None;
         }
@@ -625,7 +632,7 @@ mod tests {
         let child = BashChild::spawn().ok()?;
         let run = child.wait(b"true\n").ok()?;
         if run.exit_code == Some(0) {
-            Some(())
+            Some(guard)
         } else {
             None
         }
@@ -705,9 +712,9 @@ mod tests {
     /// would leave the descendant running; the group kill does not.
     #[test]
     fn dropping_the_guard_kills_the_interpreter_and_its_descendants() -> TestResult {
-        if stack_or_skip().is_none() {
+        let Some(_exec_dir_lock) = stack_or_skip() else {
             return Ok(());
-        }
+        };
         // The interpreter touches nothing outside its mediated dirs: the
         // observation surface is /proc, not the filesystem (Landlock
         // confines /tmp to read-execute).
@@ -768,9 +775,9 @@ mod tests {
     /// output captured, and the child is reaped (no kill on drop needed).
     #[test]
     fn benign_script_completes_and_captures_output() -> TestResult {
-        if stack_or_skip().is_none() {
+        let Some(_exec_dir_lock) = stack_or_skip() else {
             return Ok(());
-        }
+        };
         let child = BashChild::spawn()?;
         let run = child.wait(b"printf 'orc-434-bootstrap\\n'\n")?;
         assert_eq!(run.stdout, b"orc-434-bootstrap\n");
@@ -802,14 +809,21 @@ mod kill_tests {
     /// The full mediated stack must complete a benign run (exit 0) — hosts
     /// where the wrapper dies before the interpreter starts skip the live
     /// tests rather than fabricate a weaker claim.
-    fn stack_or_skip() -> Option<()> {
+    fn stack_or_skip() -> Option<std::sync::MutexGuard<'static, ()>> {
+        // Hold the crate-wide test lock for the WHOLE test body (the caller
+        // binds the guard): this test materializes and drops
+        // `arbitraitor-exec-<pid>-*` dirs, which must never overlap the
+        // gate-refusal test's snapshot window (issue #645).
+        let guard = crate::EXEC_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
             return None;
         }
         let child = BashChild::spawn().ok()?;
         let run = child.wait(b"true\n").ok()?;
         if run.exit_code == Some(0) {
-            Some(())
+            Some(guard)
         } else {
             None
         }
@@ -822,9 +836,9 @@ mod kill_tests {
     /// kill must come from outside it).
     #[test]
     fn kill_group_from_another_thread_unblocks_the_wait() -> TestResult {
-        if stack_or_skip().is_none() {
+        let Some(_exec_dir_lock) = stack_or_skip() else {
             return Ok(());
-        }
+        };
         let child = Arc::new(BashChild::spawn()?);
         let waiter_child = Arc::clone(&child);
         let script = "sleep 300 &\nwhile true; do sleep 0.1; done\n";
