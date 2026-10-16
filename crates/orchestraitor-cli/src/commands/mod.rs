@@ -1,5 +1,7 @@
 //! Implementations for `orc` subcommands.
 
+use miette::bail;
+
 pub mod board;
 pub mod campaign;
 pub mod chat;
@@ -259,6 +261,78 @@ pub(crate) fn attach_declared_surface(
 ///
 /// # Errors
 ///
+/// Resolves the ambient checkout's current branch (issue #656): the
+/// one-shot run delivers the branch the project directory has checked out.
+/// A detached HEAD or an unreadable ref is a typed startup error — the
+/// delivery must never land an unknown tree.
+pub(crate) fn current_branch_name(project_dir: &std::path::Path) -> miette::Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(project_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|error| miette!("git rev-parse --abbrev-ref HEAD failed: {error}"))?;
+    if !output.status.success() {
+        return Err(miette!(
+            "cannot resolve the project directory's current branch: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(miette!(
+            "the project directory is on a detached HEAD; delivery needs a named branch"
+        ));
+    }
+    Ok(branch)
+}
+
+/// Refuses a delivery-armed one-shot run when the ambient checkout is DIRTY
+/// or checked out on the PR base branch itself (issue #656, review gen-1/2
+/// majors): the sink commits the worktree state onto the checked-out
+/// branch, so a dirty checkout would sweep the operator's unrelated local
+/// state into the landed PR, and a base-branch checkout would land the
+/// whole tree against itself. A typed startup error — never a mid-run
+/// discovery.
+///
+/// # Errors
+///
+/// Returns a diagnostic naming the refusing condition.
+pub(crate) fn refuse_dirty_or_base_checkout(
+    project_dir: &std::path::Path,
+    branch: &str,
+    base_branch: &str,
+) -> miette::Result<()> {
+    if branch == base_branch {
+        bail!(
+            "--deliver refuses to run on the base branch '{base_branch}': the delivery \
+             would land the whole checkout tree against itself; run on a task branch"
+        );
+    }
+    let status = std::process::Command::new("git")
+        .current_dir(project_dir)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+        .map_err(|error| miette!("git status failed: {error}"))?;
+    if !status.status.success() {
+        return Err(miette!(
+            "cannot read the checkout state: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    if !output_is_blank(&status.stdout) {
+        bail!(
+            "--deliver refuses a DIRTY checkout: uncommitted/untracked state would be \
+             committed into the landed PR; commit or stash it first"
+        );
+    }
+    Ok(())
+}
+
+/// Blank-check: `git status --porcelain` prints nothing on a clean checkout.
+fn output_is_blank(bytes: &[u8]) -> bool {
+    bytes.iter().all(u8::is_ascii_whitespace)
+}
+
 /// Returns the bootstrap-only-provider diagnostic carrying the resolved
 /// provider id.
 pub(crate) fn require_bootstrap_provider(

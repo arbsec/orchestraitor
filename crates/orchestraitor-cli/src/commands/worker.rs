@@ -17,7 +17,9 @@ use crate::cli::{ConfigPaths, WorkerCommand, WorkerRunArgs};
 use crate::commands::config::layers::load_layers;
 use orchestraitor_agent_catalog::RoleRouter;
 
-use super::{WORKER_ROLE, require_bootstrap_provider};
+use super::{
+    WORKER_ROLE, current_branch_name, refuse_dirty_or_base_checkout, require_bootstrap_provider,
+};
 
 /// Runs an `orc worker` subcommand.
 ///
@@ -54,6 +56,10 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
     let bash = MediatedBashMediator::new();
     // Issue #656: `--deliver` wires the real push-branch delivery sink;
     // default OFF keeps the typed `Pending` bootstrap outcome.
+    let delivery_base = args
+        .delivery_base
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
     let delivery: std::sync::Arc<dyn orchestraitor_worker::DeliverySink> = if args.deliver {
         let repo = args
             .delivery_repo
@@ -63,13 +69,10 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
             .delivery_orc_bin
             .clone()
             .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "orc".into()));
-        std::sync::Arc::new(orchestraitor_worker::PushBranchDeliverySink::new(
-            orc_bin,
-            repo,
-            args.delivery_base
-                .clone()
-                .unwrap_or_else(|| "main".to_string()),
-        ))
+        std::sync::Arc::new(
+            orchestraitor_worker::PushBranchDeliverySink::new(orc_bin, repo, delivery_base.clone())
+                .map_err(|error| miette!("delivery configuration invalid: {error}"))?,
+        )
     } else {
         std::sync::Arc::new(PendingDeliverySink)
     };
@@ -83,9 +86,15 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
     // branch (the run operates directly in `paths.project_dir`) — resolved
     // ONLY when delivery is armed, so a `--deliver`-less run never hits the
     // branch-resolution startup gate (a fixture worktree is not a git
-    // checkout).
+    // checkout). Delivery commits the worktree state onto that branch, so
+    // a DIRTY checkout or the BASE branch itself is refused at startup (a
+    // gen-1/2 review major: `git add -A` in the operator's checkout would
+    // sweep unrelated local state into the landed PR; landing onto the
+    // base branch would carry the whole tree).
     if args.deliver {
-        config.worktree_branch = Some(current_branch_name(&paths.project_dir)?);
+        let branch = current_branch_name(&paths.project_dir)?;
+        refuse_dirty_or_base_checkout(&paths.project_dir, &branch, &delivery_base)?;
+        config.worktree_branch = Some(branch);
     }
     let surface = super::build_declared_tools(&layers.resolver, WORKER_ROLE)?;
     let config = super::attach_declared_surface(config, &surface);
@@ -120,29 +129,4 @@ fn run_task<W: Write>(paths: &ConfigPaths, args: &WorkerRunArgs, writer: &mut W)
     }
     let failure = run.failure.as_ref().map_or("unknown", |f| f.reason);
     Err(miette!("worker run failed: {failure}"))
-}
-
-/// Resolves the ambient checkout's current branch (issue #656): the
-/// one-shot run delivers the branch the project directory has checked out.
-/// A detached HEAD or an unreadable ref is a typed startup error — the
-/// delivery must never land an unknown tree.
-fn current_branch_name(project_dir: &std::path::Path) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(project_dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .map_err(|error| miette!("git rev-parse --abbrev-ref HEAD failed: {error}"))?;
-    if !output.status.success() {
-        return Err(miette!(
-            "cannot resolve the project directory's current branch: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err(miette!(
-            "the project directory is on a detached HEAD; delivery needs a named branch"
-        ));
-    }
-    Ok(branch)
 }

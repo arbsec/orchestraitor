@@ -9,7 +9,7 @@
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-use miette::{IntoDiagnostic, Result, WrapErr};
+use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use orchestraitor_daemon::{
     DaemonConfig, DaemonError, DirectWatchStarter, JournallessSink, ReconcilePoller, WatchConfig,
     acquire_instance_lock, run_until_signal, run_watch,
@@ -75,21 +75,24 @@ async fn watch_cycle() -> Result<ExitCode> {
     let delivery_repo = std::env::var("ORCHESTRAITOR_DELIVERY_REPO").ok();
     let delivery_base =
         std::env::var("ORCHESTRAITOR_DELIVERY_BASE").unwrap_or_else(|_| "main".to_string());
-    let delivery: Option<(Arc<orchestraitor_worker::PushBranchDeliverySink>, String)> =
-        delivery_repo.map(|repo| {
+    let delivery: miette::Result<
+        Option<(Arc<orchestraitor_worker::PushBranchDeliverySink>, String)>,
+    > = delivery_repo
+        .map(|repo| {
             let orc_bin = std::env::var_os("ORCHESTRAITOR_DELIVERY_ORC_BIN").map_or_else(
                 || std::env::current_exe().unwrap_or_else(|_| "orc".into()),
                 PathBuf::from,
             );
-            (
-                Arc::new(orchestraitor_worker::PushBranchDeliverySink::new(
-                    orc_bin,
-                    repo.clone(),
-                    delivery_base.clone(),
-                )),
-                repo,
+            let sink = orchestraitor_worker::PushBranchDeliverySink::new(
+                orc_bin,
+                repo.clone(),
+                delivery_base.clone(),
             )
-        });
+            .map_err(|error| miette!("delivery configuration invalid: {error}"))?;
+            Ok((Arc::new(sink), repo))
+        })
+        .transpose();
+    let delivery = delivery.map_err(|error| miette!("delivery configuration invalid: {error}"))?;
 
     // Single-flight: the daemon takes over the loop's instance lock — a
     // foreground `orc loop` or a second watch daemon is refused.

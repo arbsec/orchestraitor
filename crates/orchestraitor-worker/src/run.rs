@@ -126,6 +126,16 @@ pub async fn run_worker(
                     break AttemptOutcome::Failed(failure);
                 }
 
+                // Delivery failure is re-plan-fatal (issue #656, review
+                // gen-2/3 major): the task WORK completed; re-planning would
+                // re-run the whole model task and re-attempt the same
+                // delivery against the same landing path. The typed failure
+                // surfaces on the run result (the loop's run row + retry
+                // accounting own the response).
+                if failure.class == FailureClass::DeliveryFailed {
+                    break AttemptOutcome::Failed(failure);
+                }
+
                 // Anti-stuck guard kills are re-plan-fatal: a fresh re-plan
                 // note cannot fix a loop the model is mechanistically stuck
                 // in (churn, no progress, or an unbounded external poll).

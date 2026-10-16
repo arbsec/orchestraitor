@@ -19,11 +19,12 @@ fn request() -> DeliveryRequest {
 /// `delivery-no-worktree` failure — never a silent drop, never a panic.
 #[tokio::test]
 async fn missing_worktree_context_is_a_typed_failure() {
-    let sink = PushBranchDeliverySink::new(
-        "orc-never-invoked".into(),
-        "arbsec/orchestraitor".into(),
-        "main".into(),
-    );
+    // A real (non-executed) file: construction validates existence only.
+    let orc_dir = tempfile::tempdir().unwrap();
+    let orc_stub = orc_dir.path().join("orc");
+    std::fs::write(&orc_stub, b"").unwrap();
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
     let error = sink
         .deliver(&request())
         .await
@@ -42,12 +43,13 @@ async fn non_git_worktree_is_a_typed_branch_state_failure() {
         worktree_branch: Some("orc-loop/t-1".to_string()),
         ..request()
     };
-    let sink = PushBranchDeliverySink::new(
-        // The orc binary is never reached: the commit step fails first.
-        std::path::PathBuf::from("/nonexistent/orc/binary"),
-        "arbsec/orchestraitor".into(),
-        "main".into(),
-    );
+    // A real file: construction passes; the COMMIT step fails first (the
+    // orc binary is never reached).
+    let orc_dir = tempfile::tempdir().unwrap();
+    let orc_stub = orc_dir.path().join("orc");
+    std::fs::write(&orc_stub, b"").unwrap();
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
     let error = sink
         .deliver(&request)
         .await

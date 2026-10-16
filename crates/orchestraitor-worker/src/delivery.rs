@@ -102,6 +102,20 @@ pub const DELIVERY_PR_OPEN_FAILED: &str = "delivery-pr-open-failed";
 /// Typed reason: the landed tree is identical to the base — nothing to
 /// deliver (the landing primitive's benign no-op, surfaced as typed).
 pub const DELIVERY_EMPTY_DIFF: &str = "delivery-empty-diff";
+/// Typed reason: the configured `owner/name` repo slug is malformed
+/// (startup-shape validation, review gen-3).
+pub const DELIVERY_REPO_INVALID: &str = "delivery-repo-invalid";
+/// Typed reason: the configured `orc` binary does not exist (startup-shape
+/// validation, review gen-3).
+pub const DELIVERY_ORC_BIN_MISSING: &str = "delivery-orc-bin-missing";
+/// Typed reason: an existing open PR for the delivery branch was reused
+/// instead of creating a duplicate (idempotent retry, review gen-3).
+pub const DELIVERY_PR_EXISTS: &str = "delivery-pr-exists";
+
+/// Bounded wait for one `orc` child invocation (landing or PR): a hung
+/// child is killed and reported typed — never blocks the run (review
+/// gen-3 minor).
+const ORC_CHILD_TIMEOUT_SECS: u64 = 300;
 
 /// Real delivery sink (issue #656): hands a completed run's committed
 /// worktree state to `orc github push-branch` (the App-signed landing
@@ -137,13 +151,44 @@ impl PushBranchDeliverySink {
     /// Builds the sink for one loop/daemon starter: `orc_bin` is the
     /// resolved `orc` binary path, `repo` the `owner/name` slug, and
     /// `base_branch` the PR base (default `main`).
-    #[must_use]
-    pub fn new(orc_bin: std::path::PathBuf, repo: String, base_branch: String) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`DeliveryError`] when the repo slug is not a
+    /// non-empty `owner/name` pair ([`DELIVERY_REPO_INVALID`]) or the
+    /// `orc` binary does not exist ([`DELIVERY_ORC_BIN_MISSING`]) —
+    /// startup-shape validation, never a mid-task discovery.
+    pub fn new(
+        orc_bin: std::path::PathBuf,
+        repo: String,
+        base_branch: String,
+    ) -> Result<Self, DeliveryError> {
+        // Startup-shape validation (review gen-1/2/3 findings): a malformed
+        // repo slug or a missing orc binary must fail HERE — typed, before
+        // any task runs — never as a per-task `delivery-push-failed` after
+        // completion.
+        let mut parts = repo.split('/');
+        let (owner, name) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => {
+                (owner, name)
+            }
+            _ => {
+                return Err(DeliveryError {
+                    reason: DELIVERY_REPO_INVALID,
+                });
+            }
+        };
+        if !orc_bin.is_file() {
+            return Err(DeliveryError {
+                reason: DELIVERY_ORC_BIN_MISSING,
+            });
+        }
+        let _ = (owner, name);
+        Ok(Self {
             orc_bin,
             base_branch,
             repo,
-        }
+        })
     }
 
     /// Runs the App-signed landing step (`orc github push-branch`) for one
@@ -172,7 +217,16 @@ impl PushBranchDeliverySink {
             .args(["--message", &message])
             .args(["--owner", self.repo.split('/').next().unwrap_or_default()])
             .args(["--repo", self.repo.split('/').nth(1).unwrap_or_default()]);
-        let landing_output = landing.output().await.map_err(|_| DELIVERY_PUSH_FAILED)?;
+        // A hung child must never block the run: bounded wait, killed on
+        // drop (review gen-3 minor).
+        landing.kill_on_drop(true);
+        let landing_output = tokio::time::timeout(
+            std::time::Duration::from_secs(ORC_CHILD_TIMEOUT_SECS),
+            landing.output(),
+        )
+        .await
+        .map_err(|_| DELIVERY_PUSH_FAILED)?
+        .map_err(|_| DELIVERY_PUSH_FAILED)?;
         if !landing_output.status.success() {
             // An empty diff is a benign no-op (the worktree committed
             // nothing beyond the base): typed, not a silent drop, but the
@@ -221,8 +275,22 @@ impl PushBranchDeliverySink {
             "--body",
             &request.summary,
         ]);
-        let pr_output = pr.output().await.map_err(|_| DELIVERY_PR_OPEN_FAILED)?;
+        pr.kill_on_drop(true);
+        let pr_output = tokio::time::timeout(
+            std::time::Duration::from_secs(ORC_CHILD_TIMEOUT_SECS),
+            pr.output(),
+        )
+        .await
+        .map_err(|_| DELIVERY_PR_OPEN_FAILED)?
+        .map_err(|_| DELIVERY_PR_OPEN_FAILED)?;
         if !pr_output.status.success() {
+            // Idempotent retry (review gen-3 minor): an existing open PR
+            // for this delivery branch is the previous delivery's success —
+            // typed `delivery-pr-exists`, never a duplicate-PR failure.
+            let stderr = String::from_utf8_lossy(&pr_output.stderr);
+            if stderr.contains("already exists") {
+                return Err(DELIVERY_PR_EXISTS);
+            }
             return Err(DELIVERY_PR_OPEN_FAILED);
         }
         let pr_url = String::from_utf8_lossy(&pr_output.stdout)
@@ -250,7 +318,7 @@ impl DeliverySink for PushBranchDeliverySink {
         //    worktrees carry UNCOMMITTED worker writes; push-branch lands a
         //    branch's COMMITTED tree, so stage and commit here (failures are
         //    typed; the working tree is left for the post-run prune).
-        if let Err(reason) = commit_worktree_state(worktree, branch, request) {
+        if let Err(reason) = commit_worktree_state(worktree, branch, request).await {
             return Err(DeliveryError { reason });
         }
         // 2. Land the branch tree as ONE App-signed commit (the #491
@@ -268,54 +336,101 @@ impl DeliverySink for PushBranchDeliverySink {
     }
 }
 
-/// Commits the worktree's current state onto the delivery branch: `git add
-/// -A` + `git commit` with the service-identity author (the loop worktree
-/// inherits the ambient identity; the App-signed landing path re-signs the
-/// landing commit on the remote, so the local author attribution rides the
-/// commit only locally). Every failure maps to a static reason code.
-fn commit_worktree_state(
+/// Commits the worktree's current state onto the delivery branch (issue
+/// #656). Ordering and safety (review gen-2/3 majors):
+///
+/// 1. BRANCH FIRST: the checked-out branch is verified BEFORE any mutation
+///    — a drifted worktree is a typed refusal, never a commit onto the
+///    wrong branch.
+/// 2. SCOPED STAGING: only the run's recorded write paths are staged
+///    (`untrusted_writes`), never `git add -A` — the loop worktrees are
+///    task-owned (staging everything there is safe), but the same sink
+///    code also serves the one-shot paths, where the ambient checkout may
+///    carry unrelated operator state that must never land.
+/// 3. EXPLICIT IDENTITY: the commit pins `user.name`/`user.email` via
+///    `-c` (the service-identity bot attribution the loop environment
+///    provides; `git commit` fails typed on a host with no ambient git
+///    identity otherwise). The App-signed landing path re-signs the landing
+///    commit on the remote, so local attribution is bookkeeping only.
+/// 4. ENV SCRUBBED: `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` are removed
+///    (the loop runner's `git` idiom) so a hostile ambient environment
+///    cannot redirect the operations.
+///
+/// The git steps are synchronous and short (local file operations); they
+/// run under `spawn_blocking` from the async `deliver` so a runtime worker
+/// thread is never blocked.
+///
+/// Every failure maps to a static reason code.
+async fn commit_worktree_state(
     worktree: &std::path::Path,
     branch: &str,
     request: &DeliveryRequest,
 ) -> Result<(), &'static str> {
-    let git = |args: &[&str]| -> Result<std::process::Output, &'static str> {
-        std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(args)
-            .output()
-            .map_err(|_| DELIVERY_BRANCH_STATE_FAILED)
-    };
-    // Stage everything the worker wrote (uncommitted work is the norm for
-    // the loop's worktrees).
-    let add = git(&["add", "-A"])?;
+    // BRANCH FIRST (before any mutation).
+    let current = git_async(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    if !current.status.success() {
+        return Err(DELIVERY_BRANCH_STATE_FAILED);
+    }
+    let current_branch = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    if current_branch != branch {
+        return Err(DELIVERY_BRANCH_STATE_FAILED);
+    }
+    // SCOPED STAGING: the run's recorded write paths only. A write path
+    // that no longer resolves (deleted then re-created, etc.) leaves the
+    // `git add` exit status to decide.
+    let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+    add_args.extend(request.untrusted_writes.iter().cloned());
+    let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
+    let add = git_async(worktree, &add_args).await?;
     if !add.status.success() {
         return Err(DELIVERY_BRANCH_STATE_FAILED);
     }
-    // Commit on the worktree's own branch (the loop checks out
-    // `orc-loop/<task-id>` per worktree; one-shot `orc worker run` carries
-    // the ambient HEAD branch).
-    let commit = git(&[
-        "commit",
-        "-m",
-        &format!("feat(loop): task {} work", request.task_id),
-    ])?;
+    // Commit with the pinned identity. "nothing to commit" is the empty
+    // diff — the landing reports the typed empty-diff outcome.
+    let commit = git_async(
+        worktree,
+        &[
+            "-c",
+            "user.name=arbsec-agent[bot]",
+            "-c",
+            "user.email=334074867+arbsec-agent[bot]@users.noreply.github.com",
+            "commit",
+            "-m",
+            &format!("feat(loop): task {} work", request.task_id),
+        ],
+    )
+    .await?;
     if !commit.status.success() {
-        // "nothing to commit" is an empty diff — the landing will report
-        // the typed empty-diff outcome.
         let stderr = String::from_utf8_lossy(&commit.stderr);
         if !stderr.contains("nothing to commit") {
             return Err(DELIVERY_BRANCH_STATE_FAILED);
         }
     }
-    // The branch name is the worktree's checked-out branch; verify it
-    // matches the caller's expectation (a drifted branch would land the
-    // wrong tree).
-    let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let current_branch = String::from_utf8_lossy(&current.stdout).trim().to_string();
-    if current_branch != branch {
-        return Err(DELIVERY_BRANCH_STATE_FAILED);
-    }
     Ok(())
+}
+
+/// One short synchronous git invocation, run under `spawn_blocking` (a
+/// local file operation must never block a runtime worker thread — review
+/// gen-3 minor). Environment repository-location variables are scrubbed.
+async fn git_async(
+    dir: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output, &'static str> {
+    let dir = dir.to_path_buf();
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new("git");
+        command.current_dir(&dir);
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            command.env_remove(variable);
+        }
+        command
+            .args(&args)
+            .output()
+            .map_err(|_| DELIVERY_BRANCH_STATE_FAILED)
+    })
+    .await
+    .map_err(|_| DELIVERY_BRANCH_STATE_FAILED)?
 }
 
 #[cfg(test)]

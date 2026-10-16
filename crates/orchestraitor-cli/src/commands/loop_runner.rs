@@ -856,9 +856,10 @@ pub fn run(paths: &ConfigPaths, args: &LoopArgs, writer: &mut dyn Write) -> Resu
                 .delivery_base
                 .clone()
                 .unwrap_or_else(|| "main".to_string());
-            Some(Arc::new(orchestraitor_worker::PushBranchDeliverySink::new(
-                orc_bin, repo, base,
-            )))
+            Some(Arc::new(
+                orchestraitor_worker::PushBranchDeliverySink::new(orc_bin, repo, base)
+                    .map_err(|error| miette!("delivery configuration invalid: {error}"))?,
+            ))
         } else {
             None
         };
