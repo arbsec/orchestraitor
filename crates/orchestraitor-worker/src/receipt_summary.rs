@@ -142,8 +142,18 @@ pub fn for_replan(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> Opti
         return None;
     }
     let body = render(receipts, untrusted_writes);
+    // The cut lands at the last COMPLETE line before the cap: a raw
+    // character cut could split a written path mid-line (the model would
+    // read `src/module-5` instead of `src/module-52/file.rs`) — exactly
+    // the wrong-path feedback the summary exists to prevent (a gen-5
+    // review finding). UTF-8 safety holds either way (`char_indices`
+    // yields char boundaries); line integrity needs the newline cut.
     let (inline, truncated) = match body.char_indices().nth(MAX_SUMMARY_CHARS) {
-        Some((cut, _)) => (&body[..cut], true),
+        Some((cut, _)) => {
+            let head = &body[..cut];
+            let end = head.rfind('\n').map_or(cut, |newline| newline + 1);
+            (&body[..end], true)
+        }
         None => (body.as_str(), false),
     };
     let fence = fence_for(inline);

@@ -126,3 +126,32 @@ fn oversized_summary_preserves_last_outcome_and_paths() {
         );
     }
 }
+
+/// Gen-5 review finding: the truncation cut lands on a line boundary — a
+/// raw character cut could split a path mid-line (`src/module-5` instead
+/// of `src/module-52/file.rs`), feeding the model exactly the wrong-path
+/// feedback the summary exists to prevent.
+#[test]
+fn truncation_cut_never_splits_a_path_line() {
+    // Paths whose 20-char prefixes are valid shorter paths: a mid-line cut
+    // would fabricate one of these decoys.
+    let writes: Vec<String> = (0..80).map(|i| format!("src/module-{i}/leaf.rs")).collect();
+    let receipts: Vec<ToolReceipt> = (0..200)
+        .map(|i| receipt(&format!("tool{i}"), "completed", None))
+        .collect();
+    let summary = for_replan(&receipts, &writes).expect("summary");
+    let inline = summary
+        .lines()
+        .filter(|line| line.starts_with("- src/"))
+        .collect::<Vec<_>>();
+    assert!(!inline.is_empty(), "some paths survived the cut");
+    // Every surviving path line is a COMPLETE path: a mid-line cut would
+    // leave a truncated last line that matches a decoy prefix.
+    for line in inline {
+        let path = line.trim_start_matches("- ");
+        assert!(
+            writes.iter().any(|write| write == path),
+            "surviving path line '{path}' is a complete written path, not a cut fragment"
+        );
+    }
+}
