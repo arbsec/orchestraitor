@@ -94,6 +94,14 @@ pub async fn run_worker(
     let mut attempts = 0_u32;
     let mut replans = 0_u32;
     let mut replan_note: Option<&'static str> = None;
+    // The failed attempt's receipt summary (issue #657): rebuilt after
+    // each re-plan-failing attempt from the executor's CUMULATIVE receipt
+    // log and untrusted-write list (not reset between attempts, so the
+    // second replan summarizes everything the first two attempts did),
+    // bounded by `receipt_summary::MAX_SUMMARY_CHARS`, so a replan names
+    // what previous attempts already did instead of only the failure
+    // class.
+    let mut replan_summary: Option<String> = None;
     let outcome = loop {
         attempts += 1;
         debug!(task = %task.id, attempt = attempts, "worker attempt started");
@@ -105,6 +113,7 @@ pub async fn run_worker(
             &mut executor,
             &mut state,
             replan_note,
+            replan_summary.as_deref(),
             started,
         )
         .await;
@@ -144,12 +153,19 @@ pub async fn run_worker(
                 }
                 replans += 1;
                 replan_note = Some(failure.reason);
+                // The summary build sits AFTER the deadline check: a
+                // WorkerTimeout break never runs another attempt, so the
+                // build would be dead work (a gen-7 review finding).
                 if started.elapsed() > deadline {
                     break AttemptOutcome::Failed(TypedFailure {
                         class: FailureClass::WorkerTimeout,
                         reason: "worker-timeout",
                     });
                 }
+                replan_summary = crate::receipt_summary::for_replan(
+                    &executor.receipts,
+                    executor.untrusted_writes(),
+                );
             }
         }
     };
@@ -220,6 +236,7 @@ async fn run_attempt(
     executor: &mut ToolExecutor<'_>,
     state: &mut RunState<'_>,
     replan_note: Option<&'static str>,
+    replan_summary: Option<&str>,
     started: Instant,
 ) -> AttemptOutcome {
     let budgets = &config.budgets;
@@ -230,7 +247,7 @@ async fn run_attempt(
         },
         ModelMessage {
             role: MessageRole::User,
-            content: task_prompt(task, replan_note),
+            content: task_prompt(task, replan_note, replan_summary),
         },
     ];
     let mut format_errors = 0_u32;

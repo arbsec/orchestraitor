@@ -37,6 +37,7 @@ mod mediator;
 mod model;
 mod paths;
 mod prompt;
+mod receipt_summary;
 mod result;
 mod run;
 mod search;

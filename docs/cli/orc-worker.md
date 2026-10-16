@@ -33,6 +33,24 @@ receipt log (`reason: "unknown-tool"`) and fed back to the model; the loop conti
 within budget. Every tool call produces a receipt carrying static reason codes only —
 never arguments, command lines, or captured output (spec §9.23.4).
 
+## Re-plan feedback
+
+A failed attempt's static failure reason still opens the re-plan prompt (the class
+is still useful). Beside it, the re-plan prompt carries a bounded summary of what
+that attempt already DID (issue #657): per-tool dispatch counts with outcome
+splits, the worktree-relative paths already written ("do not re-read them from
+scratch"), and the last tool outcome before the failure — so a re-plan stops
+re-reading the same files. The summary renders from the attempt's receipt log
+as accumulated across all attempts SO FAR (the executor's log is cumulative —
+a second replan summarizes everything the first two attempts did), with its
+body capped at 2048 characters (the labelled framing, the fences, and
+the truncation notice add a small fixed amount) inside a fenced, labelled
+UNTRUSTED-DATA block
+(spec `40-arbitraitor-integration.md` §6.1; the fence is widened over any
+backtick run so the content can never close its own fence), with an explicit
+truncation NOTICE when the cap cuts the payload. An attempt that recorded
+neither tool calls nor writes contributes no summary block.
+
 ## Budgets
 
 Owner-adjustable (issue #310 bootstrap values):
