@@ -67,8 +67,11 @@ fn fence_for(content: &str) -> String {
 }
 
 /// Renders one attempt's receipt log into the bounded summary BODY (no
-/// fence, no framing): per-tool dispatch counts with outcome splits, the
-/// worktree-relative paths written, and the last receipt's outcome class.
+/// fence, no framing). Order matters: the LAST tool outcome and the
+/// written paths come FIRST, then the per-tool counts — a body cut at
+/// [`MAX_SUMMARY_CHARS`] can only ever drop the tail (redundant per-tool
+/// detail), never the signals that stop a replan from re-exploring (the
+/// paths written and where the attempt ended).
 ///
 /// Tool names appear verbatim: known names are static, and refused-call
 /// names are the sanitizer's bounded printable-ASCII echo (which is exactly
@@ -76,14 +79,31 @@ fn fence_for(content: &str) -> String {
 #[must_use]
 fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
     let mut body = String::new();
-    if receipts.is_empty() {
-        // A writes-only attempt (receipts lost/absent) still names its
-        // writes — the paths are the part that stops re-exploration.
-        body.push_str("no tool calls were recorded before the failure\n");
+    // The attempt's END STATE first: where it stopped and what it changed.
+    // These are the two signals a truncated prefix must always carry.
+    if let Some(last) = receipts.last() {
+        let _ = write!(
+            body,
+            "Last tool outcome before the failure: {} ({})",
+            last.tool, last.outcome
+        );
+        if let Some(reason) = last.reason {
+            let _ = write!(body, " reason={reason}");
+        }
+        body.push('\n');
+    }
+    if untrusted_writes.is_empty() {
+        body.push_str("No files were written before the failure.\n");
+    } else {
         body.push_str("Paths already written (do not re-read them from scratch; change only what the new approach needs):\n");
         for path in untrusted_writes {
             let _ = writeln!(body, "- {path}");
         }
+    }
+    if receipts.is_empty() {
+        // A writes-only attempt (receipts lost/absent) still names its
+        // writes — the paths are the part that stops re-exploration.
+        body.push_str("no tool calls were recorded before the failure\n");
         return body;
     }
     let mut per_tool: BTreeMap<&str, (u32, u32, u32)> = BTreeMap::new();
@@ -108,25 +128,7 @@ fn render(receipts: &[ToolReceipt], untrusted_writes: &[String]) -> String {
         }
         body.push(';');
     }
-    if untrusted_writes.is_empty() {
-        body.push_str("\nNo files were written before the failure.\n");
-    } else {
-        body.push_str("\nPaths already written (do not re-read them from scratch; change only what the new approach needs):\n");
-        for path in untrusted_writes {
-            let _ = writeln!(body, "- {path}");
-        }
-    }
-    if let Some(last) = receipts.last() {
-        let _ = write!(
-            body,
-            "Last tool outcome before the failure: {} ({})",
-            last.tool, last.outcome
-        );
-        if let Some(reason) = last.reason {
-            let _ = write!(body, " reason={reason}");
-        }
-        body.push('\n');
-    }
+    body.push('\n');
     body
 }
 

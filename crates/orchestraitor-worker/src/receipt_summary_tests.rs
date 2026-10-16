@@ -38,6 +38,12 @@ fn summary_names_tools_writes_and_last_outcome() {
     assert!(summary.contains(
         "Last tool outcome before the failure: bash (failed) reason=mediation-unavailable"
     ));
+    // Truncation-survival ordering: the last outcome and the paths come
+    // BEFORE the per-tool counts, so a cap cut can only drop the tail.
+    let last_pos = summary.find("Last tool outcome").expect("last outcome");
+    let paths_pos = summary.find("- src/lib.rs").expect("paths");
+    let counts_pos = summary.find("4 tool call(s)").expect("counts");
+    assert!(last_pos < counts_pos && paths_pos < counts_pos);
 }
 
 #[test]
@@ -90,4 +96,33 @@ fn oversized_summary_is_truncated_with_a_notice() {
 fn writes_only_attempt_still_summarizes() {
     let summary = for_replan(&[], &["out.txt".to_string()]).expect("summary");
     assert!(summary.contains("- out.txt"));
+}
+
+/// Gen-4 review finding: an oversized summary must still carry the
+/// signals that stop re-exploration. The last outcome and every written
+/// path render BEFORE the per-tool counts, so the prefix cut at
+/// `MAX_SUMMARY_CHARS` preserves them (the per-tool tail is dropped).
+#[test]
+fn oversized_summary_preserves_last_outcome_and_paths() {
+    let writes: Vec<String> = (0..60).map(|i| format!("src/module-{i}/file.rs")).collect();
+    let receipts: Vec<ToolReceipt> = (0..400)
+        .map(|i| receipt(&format!("tool{i}"), "completed", None))
+        .collect();
+    let summary = for_replan(&receipts, &writes).expect("summary");
+    assert!(
+        summary.contains("exceeded the 2048-character inline cap and was truncated"),
+        "truncation notice present"
+    );
+    // The end state survived the cut.
+    assert!(
+        summary.contains("Last tool outcome before the failure: tool399 (completed)"),
+        "the last outcome survives truncation"
+    );
+    // ALL written paths survived the cut (they render before the counts).
+    for path in &writes {
+        assert!(
+            summary.contains(path),
+            "written path {path} survives truncation"
+        );
+    }
 }
