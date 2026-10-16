@@ -42,8 +42,8 @@ pub use ingress::{
     KickoffIngressSource, build_ingress,
     ci_lane::{CHECK_RUN_COMPLETED, CiLane, CiRepoTarget, WORKFLOW_RUN_COMPLETED, ci_targets},
     intake::{
-        AuthorClass, INTAKE_CONFIG_KEY_PREFIX, IntakeAttacher, IntakeBoard, IntakeCursor,
-        IntakeOutcome, SqliteIntakeCursor, classify_author, intake_attachment,
+        AuthorClass, INTAKE_CONFIG_KEY_PREFIX, IntakeAttacher, IntakeBoard, IntakeOutcome,
+        IntakeStore, SqliteIntakeStore, classify_author, intake_attachment,
     },
     poller::{DEFAULT_POLL_AFTER_SECS, EventPoller, PollTarget, poll_targets},
     queue::{DEFAULT_QUEUE_CAPACITY, DEGRADED_QUIET_WINDOW, IngressQueue, PushOutcome},

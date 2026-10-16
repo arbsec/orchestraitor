@@ -469,23 +469,32 @@ impl BoardClient {
                     source: Box::new(decode_error("mutation returned no item id")),
                 })?
         };
-        // Status: the verified write (same read-back discipline as
-        // `move_item` — the write round-trips before success).
-        self.set_single_select(&ids, &item_id, &config.ready_field, fields.status)
-            .await?;
-        // Priority: the §9.52(d) provisional value (never the scheduling
-        // value; the triage pass owns any change).
-        self.set_single_select(&ids, &item_id, &config.priority_field, fields.priority)
-            .await?;
-        // Native issue type: resolved by NAME against the org (then the
-        // repository); an unresolvable type name is a typed error, never
-        // a silently skipped write (the ready queue's leaf predicate
-        // reads this exact field).
-        self.set_issue_type(repo, &issue_id, fields.item_type)
-            .await?;
+        // The mechanical field writes apply ONLY to a NEWLY added item
+        // (§9.52: promotion authority is the triage pass's alone). An
+        // ALREADY-attached item may have been promoted by the triage
+        // pass or moved by a human since attach — overwriting Status or
+        // Priority here would reverse a promotion the attach lane has
+        // no authority over. The label stays additive either way.
+        if existing_item.is_none() {
+            // Status: the verified write (same read-back discipline as
+            // `move_item` — the write round-trips before success).
+            self.set_single_select(&ids, &item_id, &config.ready_field, fields.status)
+                .await?;
+            // Priority: the §9.52(d) provisional value (never the
+            // scheduling value; the triage pass owns any change).
+            self.set_single_select(&ids, &item_id, &config.priority_field, fields.priority)
+                .await?;
+            // Native issue type: resolved by NAME against the org (then
+            // the repository); an unresolvable type name is a typed
+            // error, never a silently skipped write (the ready queue's
+            // leaf predicate reads this exact field).
+            self.set_issue_type(repo, &issue_id, fields.item_type)
+                .await?;
+        }
         // The daemon-owned provenance label (§9.50(c) discipline): label
         // ids resolve by exact name; a missing label is created — the
-        // name is a lane constant, never content.
+        // name is a lane constant, never content. Additive on both
+        // paths.
         self.apply_label(repo, &issue_id, fields.label).await?;
         Ok(existing_item.is_none())
     }

@@ -97,13 +97,15 @@ pub fn build_ingress(
     store_path: &std::path::Path,
     auth: Arc<dyn orchestraitor_board::BoardAuth>,
     queue_capacity: usize,
+    intake_store: Option<Arc<crate::ingress::intake::SqliteIntakeStore>>,
 ) -> Result<(Arc<IngressQueue>, poller::EventPoller, KickoffIngressSource), DaemonError> {
     let store = store::IngressStore::open(store_path)?;
     let queue = Arc::new(queue::IngressQueue::new(queue_capacity)?);
-    let poller = poller::EventPoller::new(
+    let poller = poller::EventPoller::with_intake(
         auth,
         Arc::new(std::sync::Mutex::new(store)),
         Arc::clone(&queue),
+        intake_store.map(|store| store as Arc<dyn crate::ingress::intake::IntakeStore>),
     )?;
     let source = KickoffIngressSource::new(Arc::clone(&queue));
     Ok((queue, poller, source))

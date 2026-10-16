@@ -10,6 +10,7 @@
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
+use orchestraitor_daemon::intake_module::IntakeStore as _;
 use orchestraitor_daemon::{
     DaemonConfig, DaemonError, DirectWatchStarter, JournallessSink, ReconcilePoller, WatchConfig,
     acquire_instance_lock, run_until_signal, run_watch,
@@ -318,6 +319,38 @@ async fn watch_cycle() -> Result<ExitCode> {
     ) {
         tracing::warn!("{warning}");
     }
+    // The §9.52(a) intake attach lane (leaf #664): consumes its OWN
+    // durable intake store (the poller mirrors every accepted
+    // `issues-opened` event into it) and attaches external bug reports
+    // to the board at Triage with mechanical fields only — never
+    // scheduling. The lane's surface is independent of the shared
+    // queue: the kick-off source's consumption can never steal an
+    // attach, and a queue-surplus drop is not a lost attach (the
+    // durable store still holds the event).
+    let intake_store = if watch_config.intake.enabled {
+        let store = orchestraitor_daemon::intake_module::SqliteIntakeStore::open(
+            &config_dir.join("intake-events.db"),
+        )
+        .into_diagnostic()
+        .wrap_err("intake store open failed")?;
+        let intake_board = orchestraitor_daemon::intake_module::BoardIntake::new(
+            Arc::clone(&client),
+            board_config_template.clone(),
+        );
+        let attacher = orchestraitor_daemon::intake_module::IntakeAttacher::new(
+            Arc::new(intake_board),
+            watch_config.intake.service_identities.clone(),
+        );
+        let intake_shutdown = signal_rx.clone();
+        let store = Arc::new(store);
+        let lane_store = Arc::clone(&store);
+        tokio::spawn(async move {
+            intake_attach_loop(attacher, lane_store, intake_shutdown).await;
+        });
+        Some(store)
+    } else {
+        None
+    };
     let event_source: Option<Arc<dyn orchestraitor_campaign::KickoffEventSource>> = if watch_config
         .ingress
         .enabled
@@ -326,6 +359,7 @@ async fn watch_cycle() -> Result<ExitCode> {
             &config_dir.join("ingress-events.db"),
             Arc::clone(&auth) as Arc<dyn orchestraitor_board::BoardAuth>,
             watch_config.ingress.queue_capacity,
+            intake_store,
         )
         .into_diagnostic()
         .wrap_err("event ingress construction failed")?;
@@ -360,34 +394,6 @@ async fn watch_cycle() -> Result<ExitCode> {
         tokio::spawn(async move {
             ingress_poll_loop(ingress_poller, targets, poll_queue, poll_shutdown).await;
         });
-        // The §9.52(a) intake attach lane (leaf #664): drains the SAME
-        // bounded queue's `issues-opened` events and attaches external
-        // bug reports to the board at Triage with mechanical fields only
-        // — never scheduling. The lane shares the queue with the
-        // kick-off source: every drained event still reaches the
-        // kick-off evaluation (the lane ATTACHES; the kick-off gate
-        // decides whether a session runs).
-        if watch_config.intake.enabled {
-            let intake_board = orchestraitor_daemon::intake_module::BoardIntake::new(
-                Arc::clone(&client),
-                board_config_template.clone(),
-            );
-            let cursor = orchestraitor_daemon::intake_module::SqliteIntakeCursor::open(
-                &config_dir.join("intake-cursor.db"),
-            )
-            .into_diagnostic()
-            .wrap_err("intake cursor store open failed")?;
-            let attacher = orchestraitor_daemon::intake_module::IntakeAttacher::new(
-                Arc::new(intake_board),
-                Box::new(cursor),
-                watch_config.intake.service_identities.clone(),
-            );
-            let intake_queue = Arc::clone(&ingress_queue);
-            let intake_shutdown = signal_rx.clone();
-            tokio::spawn(async move {
-                intake_attach_loop(attacher, intake_queue, intake_shutdown).await;
-            });
-        }
         Some(Arc::new(source))
     } else {
         None
@@ -786,35 +792,45 @@ fn primary_and_shards(
 /// and a board-write failure retries on the next tick.
 async fn intake_attach_loop(
     attacher: orchestraitor_daemon::intake_module::IntakeAttacher,
-    queue: std::sync::Arc<orchestraitor_daemon::IngressQueue>,
+    store: std::sync::Arc<orchestraitor_daemon::intake_module::SqliteIntakeStore>,
     mut shutdown: tokio::sync::watch::Receiver<u64>,
 ) {
     loop {
-        // PEEK, not drain: the events stay pending for the kick-off
-        // source (the lane ATTACHES; the kick-off gate decides whether a
-        // session runs — one event accelerates both, consumed by each
-        // consumer independently). The lane's DURABLE cursor makes the
-        // peek safe: an event the kick-off source drained first is
-        // still attached here (and vice versa), and an event the lane
-        // already finished with is never re-processed — so repeated
-        // peeks cost no board writes.
-        let pending = queue.peek();
-        if !pending.is_empty() {
-            let outcome = attacher.process(&pending).await;
-            if outcome.attached > 0
-                || outcome.already_attached > 0
-                || outcome.failed > 0
-                || outcome.missing_author > 0
-                || outcome.skipped > 0
-            {
+        // Consume from the DURABLE intake store (delete-on-take): the
+        // kick-off source's consumption of the shared queue can never
+        // steal an attach, and a taken event is processed exactly once.
+        // A FAILED attach is re-put so the next tick retries it (the
+        // board seam's membership check makes a re-attach after a
+        // partial write safe).
+        const INTAKE_TICK_LIMIT: usize = 32;
+        match store.take(INTAKE_TICK_LIMIT).await {
+            Ok(events) if !events.is_empty() => {
+                let outcome = attacher.process(&events).await;
+                if outcome.failed > 0 {
+                    // Re-put ONLY the failed attaches: an attach failure
+                    // is a board-write error, and the store no longer
+                    // holds the taken events. Identifying failures per
+                    // event is unnecessary — the attach is idempotent,
+                    // so re-putting the whole batch is safe (already-
+                    // attached items take the update path) and bounded.
+                    for event in &events {
+                        if let Err(reput_error) = store.put(event).await {
+                            tracing::warn!("orcd watch: intake retry re-put failed: {reput_error}");
+                        }
+                    }
+                }
                 tracing::info!(
                     attached = outcome.attached,
                     already_attached = outcome.already_attached,
                     skipped = outcome.skipped,
                     failed = outcome.failed,
                     missing_author = outcome.missing_author,
-                    "orcd watch: intake attach tick processed ingress events"
+                    "orcd watch: intake attach tick processed stored events"
                 );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("orcd watch: intake store read failed: {error}");
             }
         }
         tokio::select! {

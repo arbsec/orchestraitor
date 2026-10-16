@@ -1104,3 +1104,103 @@ async fn shapeless_events_carry_no_author_facts() {
     assert!(events[0].author_login.is_none());
     assert!(events[0].author_is_bot.is_none());
 }
+
+/// §9.52(a) fan-out (gen-2 review fix): the poller mirrors every
+/// accepted `issues-opened` event into the DURABLE intake store — the
+/// kick-off source's consumption of the shared queue cannot steal an
+/// attach (the store still holds the event), and a store-write failure
+/// counts as a drop rather than a silent miss.
+#[tokio::test(flavor = "current_thread")]
+async fn poller_mirrors_issues_opened_into_the_intake_store() {
+    use orchestraitor_daemon::intake_module::{IntakeStore as _, SqliteIntakeStore};
+
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([
+        {
+            "id": "301",
+            "type": "IssuesEvent",
+            "payload": {
+                "action": "opened",
+                "issue": { "number": 720, "user": { "login": "somehuman", "type": "User" } }
+            }
+        },
+        {
+            "id": "302",
+            "type": "IssuesEvent",
+            "payload": { "action": "opened", "issue": { "number": 721 } }
+        }
+    ])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let intake_store =
+        Arc::new(SqliteIntakeStore::open(&temp.path().join("intake-events.db")).expect("store"));
+    let (queue, _store, poller) = {
+        let ingress_store = Arc::new(std::sync::Mutex::new(
+            IngressStore::open_in_memory().expect("in-memory store"),
+        ));
+        let queue = Arc::new(IngressQueue::new(8).expect("valid capacity"));
+        let poller = EventPoller::with_intake(
+            Arc::new(StaticAuth),
+            Arc::clone(&ingress_store),
+            Arc::clone(&queue),
+            Some(intake_store.clone()),
+        )
+        .expect("poller builds");
+        (queue, ingress_store, poller)
+    };
+    let target = server.target("events", "events");
+    let _ = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("baseline");
+    poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("delta")
+        .remove(0)
+        .expect("poll ok");
+
+    // The shared queue holds both events (kick-off surface unchanged)…
+    assert_eq!(queue.take().len(), 2);
+    // …and the DURABLE intake store independently holds both, launch
+    // facts included (the lane's own consumption surface).
+    let stored = intake_store.take(8).await.expect("take");
+    assert_eq!(stored.len(), 2, "both opened events mirrored durably");
+    assert!(
+        stored
+            .iter()
+            .all(|event| event.event_type == "issues-opened")
+    );
+    let with_author = stored
+        .iter()
+        .find(|event| event.number == 720)
+        .expect("the event is stored");
+    assert_eq!(with_author.author_login.as_deref(), Some("somehuman"));
+    // Delete-on-take: a second take is empty.
+    assert!(intake_store.take(8).await.expect("take").is_empty());
+}

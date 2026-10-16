@@ -221,51 +221,75 @@ impl IntakeBoard for BoardIntake {
     }
 }
 
-/// The §9.52(a) intake attacher: drains `issues-opened` events from the
-/// shared bounded ingress queue and attaches board items through the
+/// The §9.52(a) intake attacher: consumes `issues-opened` events taken
+/// from the durable intake store and attaches board items through the
 /// [`IntakeBoard`] seam.
 pub struct IntakeAttacher {
     board: Arc<dyn IntakeBoard>,
-    cursor: Box<dyn IntakeCursor>,
     service_identities: Vec<String>,
 }
 
-/// The durable intake cursor (the §9.52(a) lane's own consumption
-/// record): records every delivery key the lane has FINISHED with —
-/// attached, already-attached, skipped, or terminally failed-closed — so
-/// a processed event is never re-processed, and the SHARED queue's
-/// consumption by the kick-off source never loses an attach. Failed
-/// attaches are NOT recorded: they retry on a later tick until the
-/// cursor records them.
+/// One attach tick's observability counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IntakeOutcome {
+    /// Board items newly attached.
+    pub attached: usize,
+    /// Events whose source issue was already on the board (idempotent
+    /// update, not a duplicate).
+    pub already_attached: usize,
+    /// Events skipped without attaching (non-bug-report event types,
+    /// agent-class authors).
+    pub skipped: usize,
+    /// Events with no author launch fact: failed closed, never guessed.
+    pub missing_author: usize,
+    /// Board-write failures: retried on a later tick, never fatal.
+    pub failed: usize,
+}
+
+/// The durable intake store (the §9.52(a) lane's own consumption
+/// queue, decoupled from the SHARED in-memory ingress queue): the
+/// poller's accept path writes every accepted `issues-opened` event
+/// here, and the lane consumes with delete-on-finish. An event the
+/// kick-off source drains from the shared queue FIRST is still here —
+/// the two consumers cannot steal from each other, a dropped
+/// queue-surplus event is not lost (the store holds it), and a daemon
+/// restart re-attaches from durable state instead of memory.
+///
+/// A FINISHED event (attached, already-attached, skipped, or terminally
+/// failed-closed) is deleted; a FAILED attach stays in the store and
+/// retries on a later tick. Every board write is idempotent behind the
+/// board seam's membership check, so even an interrupted tick cannot
+/// duplicate an item.
 #[async_trait::async_trait]
-pub trait IntakeCursor: Send + Sync {
-    /// Filters `keys` down to the ones not yet processed (durable).
+pub trait IntakeStore: Send + Sync {
+    /// Stores one accepted event (idempotent per delivery key). Called
+    /// on the poller's accept path.
+    ///
+    /// # Errors
+    ///
+    /// Durable-state failure — surfaced to the caller, never swallowed.
+    async fn put(&self, event: &IngressEvent) -> Result<(), String>;
+
+    /// Takes up to `limit` stored events (durable, delete-on-read):
+    /// each taken event leaves the store, so a taken event is processed
+    /// exactly once. A caller that fails to finish an event re-`put`s
+    /// it.
     ///
     /// # Errors
     ///
     /// Durable-state failure — the tick refuses to process rather than
-    /// risk re-attaching (the board seam's idempotency makes a re-attach
-    /// safe, but refusing keeps the failure observable).
-    async fn unprocessed(&self, keys: &[String]) -> Result<Vec<String>, String>;
-
-    /// Records keys as processed (durable, idempotent).
-    ///
-    /// # Errors
-    ///
-    /// Durable-state failure surfaces to the caller; the keys stay
-    /// unrecorded and re-process on the next tick (safe: the board
-    /// seam's attach is idempotent).
-    async fn record_processed(&self, keys: &[String]) -> Result<(), String>;
+    /// process nothing silently.
+    async fn take(&self, limit: usize) -> Result<Vec<IngressEvent>, String>;
 }
 
-/// The production cursor: a sqlite table keyed by delivery key. A
-/// processed key is never re-processed, across restarts.
-pub struct SqliteIntakeCursor {
+/// The production store: a sqlite table keyed by delivery key, deleted
+/// on take. A daemon restart re-attaches from durable state.
+pub struct SqliteIntakeStore {
     conn: std::sync::Mutex<rusqlite::Connection>,
 }
 
-impl SqliteIntakeCursor {
-    /// Opens (creating if absent) the cursor store at `path`.
+impl SqliteIntakeStore {
+    /// Opens (creating if absent) the intake store at `path`.
     ///
     /// # Errors
     ///
@@ -288,9 +312,13 @@ impl SqliteIntakeCursor {
         })?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS intake_processed (
-                 delivery_key    TEXT PRIMARY KEY,
-                 processed_secs  INTEGER NOT NULL
+             CREATE TABLE IF NOT EXISTS intake_events (
+                 delivery_key   TEXT PRIMARY KEY,
+                 repo           TEXT NOT NULL,
+                 number         INTEGER NOT NULL,
+                 author_login   TEXT,
+                 author_is_bot  INTEGER,
+                 accepted_secs  INTEGER NOT NULL
              );",
         )
         .map_err(|error| crate::error::DaemonError::IngressStore {
@@ -301,130 +329,139 @@ impl SqliteIntakeCursor {
             conn: std::sync::Mutex::new(conn),
         })
     }
-}
 
-#[async_trait::async_trait]
-impl IntakeCursor for SqliteIntakeCursor {
-    async fn unprocessed(&self, keys: &[String]) -> Result<Vec<String>, String> {
+    /// Synchronous put (the async trait wraps this).
+    fn put_sync(&self, event: &IngressEvent) -> Result<(), String> {
         let conn = self
             .conn
             .lock()
-            .map_err(|_| "cursor mutex poisoned".to_string())?;
-        let mut pending = Vec::with_capacity(keys.len());
-        for key in keys {
-            let seen: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM intake_processed WHERE delivery_key = ?1 LIMIT 1",
-                    [key],
-                    |row| row.get(0),
-                )
-                .map(Some)
-                .or_else(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other.to_string()),
-                })?;
-            if seen.is_none() {
-                pending.push(key.clone());
-            }
-        }
-        Ok(pending)
+            .map_err(|_| "store mutex poisoned".to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO intake_events \
+             (delivery_key, repo, number, author_login, author_is_bot, accepted_secs) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                event.delivery_key,
+                event.repo,
+                i64::try_from(event.number).unwrap_or(i64::MAX),
+                event.author_login,
+                event.author_is_bot.map(i64::from),
+                i64::try_from(event.accepted_at_secs).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
-    async fn record_processed(&self, keys: &[String]) -> Result<(), String> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        let conn = self
+    /// Synchronous take (the async trait wraps this): reads up to
+    /// `limit` rows oldest-first and deletes exactly those rows in the
+    /// same transaction.
+    fn take_sync(&self, limit: usize) -> Result<Vec<IngressEvent>, String> {
+        let mut conn = self
             .conn
             .lock()
-            .map_err(|_| "cursor mutex poisoned".to_string())?;
-        for key in keys {
-            conn.execute(
-                "INSERT OR IGNORE INTO intake_processed (delivery_key, processed_secs) \
-                 VALUES (?1, ?2)",
-                rusqlite::params![key, i64::try_from(now_secs).unwrap_or(i64::MAX)],
+            .map_err(|_| "store mutex poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let mut statement = tx
+            .prepare(
+                "SELECT delivery_key, repo, number, author_login, author_is_bot, accepted_secs \
+                 FROM intake_events ORDER BY accepted_secs, delivery_key LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (delivery_key, repo, number, author_login, author_is_bot, accepted_secs) =
+                row.map_err(|error| error.to_string())?;
+            events.push(IngressEvent {
+                delivery_key,
+                repo,
+                number: u64::try_from(number).unwrap_or(u64::MAX),
+                event_type: String::from("issues-opened"),
+                head_sha: None,
+                author_login,
+                author_is_bot: author_is_bot.map(|bot| bot != 0),
+                accepted_at_secs: u64::try_from(accepted_secs).unwrap_or(u64::MAX),
+            });
+        }
+        drop(statement);
+        for event in &events {
+            tx.execute(
+                "DELETE FROM intake_events WHERE delivery_key = ?1",
+                [&event.delivery_key],
             )
             .map_err(|error| error.to_string())?;
         }
-        Ok(())
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(events)
+    }
+}
+
+#[async_trait::async_trait]
+impl IntakeStore for SqliteIntakeStore {
+    async fn put(&self, event: &IngressEvent) -> Result<(), String> {
+        self.put_sync(event)
+    }
+
+    async fn take(&self, limit: usize) -> Result<Vec<IngressEvent>, String> {
+        self.take_sync(limit)
     }
 }
 
 impl IntakeAttacher {
-    /// Builds the attacher over the board seam, the durable cursor, and
-    /// the configured §9.41 service-identity set.
+    /// Builds the attacher over the board seam and the configured
+    /// §9.41 service-identity set.
     #[must_use]
-    pub fn new(
-        board: Arc<dyn IntakeBoard>,
-        cursor: Box<dyn IntakeCursor>,
-        service_identities: Vec<String>,
-    ) -> Self {
+    pub fn new(board: Arc<dyn IntakeBoard>, service_identities: Vec<String>) -> Self {
         Self {
             board,
-            cursor,
             service_identities,
         }
     }
 
-    /// Processes one tick's events: classifies each author from launch
-    /// facts, derives the mechanical attachment, and attaches. An event
-    /// the durable cursor has already recorded is never re-processed; a
-    /// FAILED attach stays unrecorded so it retries on a later tick.
-    /// Returns the outcome counts for observability.
+    /// Processes one tick's events (taken from the durable intake
+    /// store): classifies each author from launch facts, derives the
+    /// mechanical attachment, and attaches. Returns the outcome counts
+    /// for observability.
     ///
-    /// Idempotent by construction: the same event processed twice yields
-    /// at most one board item (the cursor, and behind it the board
-    /// seam's membership check).
+    /// Idempotent by construction: the board seam's membership check
+    /// yields at most one board item per source issue, so even a tick
+    /// interrupted mid-way cannot duplicate.
     pub async fn process(&self, events: &[IngressEvent]) -> IntakeOutcome {
         let mut outcome = IntakeOutcome::default();
-        // The durable cursor filters first: a key the lane already
-        // finished with never re-enters the pipeline (the SHARED queue's
-        // consumption by the kick-off source cannot cause a duplicate
-        // attach, and a tick with no new work costs no board writes).
-        let all_keys: Vec<String> = events
-            .iter()
-            .map(|event| event.delivery_key.clone())
-            .collect();
-        let pending_keys = match self.cursor.unprocessed(&all_keys).await {
-            Ok(pending) => pending,
-            Err(_error) => {
-                // Durable-state failure: refuse the whole tick (never
-                // risk re-attaching with a cursor that cannot record).
-                outcome.failed += events.len();
-                return outcome;
-            }
-        };
-        let pending: std::collections::HashSet<&str> =
-            pending_keys.iter().map(String::as_str).collect();
-        let mut finished: Vec<String> = Vec::new();
         for event in events {
-            if !pending.contains(event.delivery_key.as_str()) {
-                // Already processed durably — nothing to do.
-                continue;
-            }
             let Some(login) = event.author_login.as_deref() else {
                 // A launch fact the platform did not supply: fail closed
                 // to no-attach. The event stays OUT of the board; the
                 // §9.43 reconcile poll and a human triage stay the
-                // completeness authority. Never guess a class. This is a
-                // TERMINAL outcome (re-delivery of the same delivery key
-                // would decide identically), so it records.
+                // completeness authority. Never guess a class. The event
+                // was already deleted from the durable store by the
+                // take; a re-delivery of the same delivery key re-put's
+                // and re-decides identically — terminal, not a retry
+                // loop.
                 outcome.missing_author += 1;
-                finished.push(event.delivery_key.clone());
                 continue;
             };
             let Some(platform_bot) = event.author_is_bot else {
                 outcome.missing_author += 1;
-                finished.push(event.delivery_key.clone());
                 continue;
             };
             let class = classify_author(login, platform_bot, &self.service_identities);
             let Some(attachment) = intake_attachment(event, class) else {
                 // A non-bug-report event type or an agent-class author:
-                // terminal (the classification is a pure function of
-                // launch facts), so it records.
+                // the classification is a pure function of launch facts.
                 outcome.skipped += 1;
-                finished.push(event.delivery_key.clone());
                 continue;
             };
             match self
@@ -445,44 +482,19 @@ impl IntakeAttacher {
                     } else {
                         outcome.already_attached += 1;
                     }
-                    finished.push(event.delivery_key.clone());
                 }
                 Err(_error) => {
                     // Log-safe failure: identifiers only, never content.
-                    // The key stays UNRECORDED — the next tick retries
-                    // the attach (the board seam's membership check
-                    // makes a re-attach after a partial write safe).
+                    // The event is re-put by the caller so the next tick
+                    // retries the attach (the board seam's membership
+                    // check makes a re-attach after a partial write
+                    // safe).
                     outcome.failed += 1;
                 }
             }
         }
-        if !finished.is_empty()
-            && let Err(_error) = self.cursor.record_processed(&finished).await
-        {
-            // The record failure means those keys re-process next tick —
-            // safe (the board attach is idempotent), so the tick still
-            // reports its counts; the failure is counted for visibility.
-            outcome.failed += finished.len();
-        }
         outcome
     }
-}
-
-/// One attach tick's observability counts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IntakeOutcome {
-    /// Board items newly attached.
-    pub attached: usize,
-    /// Events whose source issue was already on the board (idempotent
-    /// update, not a duplicate).
-    pub already_attached: usize,
-    /// Events skipped without attaching (non-bug-report event types,
-    /// agent-class authors).
-    pub skipped: usize,
-    /// Events with no author launch fact: failed closed, never guessed.
-    pub missing_author: usize,
-    /// Board-write failures: retried on a later tick, never fatal.
-    pub failed: usize,
 }
 
 #[cfg(test)]
@@ -521,47 +533,39 @@ mod tests {
         }
     }
 
-    /// An in-memory cursor: the same contract as the sqlite cursor.
+    /// An in-memory intake store: the same contract as the sqlite
+    /// store (put is idempotent per key; take is delete-on-read).
     #[derive(Clone, Default)]
-    struct MemoryCursor {
-        processed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-        fail_unprocessed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    struct MemoryStore {
+        events: std::sync::Arc<std::sync::Mutex<Vec<IngressEvent>>>,
+        fail_take: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl MemoryCursor {
-        fn recorded(&self) -> Vec<String> {
-            self.processed
-                .lock()
-                .expect("cursor lock")
-                .iter()
-                .cloned()
-                .collect()
+    impl MemoryStore {
+        fn len(&self) -> usize {
+            self.events.lock().expect("store lock").len()
         }
     }
 
     #[async_trait::async_trait]
-    impl IntakeCursor for MemoryCursor {
-        async fn unprocessed(&self, keys: &[String]) -> Result<Vec<String>, String> {
-            if self
-                .fail_unprocessed
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                return Err(String::from("cursor unavailable"));
+    impl IntakeStore for MemoryStore {
+        async fn put(&self, event: &IngressEvent) -> Result<(), String> {
+            let mut events = self.events.lock().expect("store lock");
+            if events.iter().any(|e| e.delivery_key == event.delivery_key) {
+                return Ok(());
             }
-            let seen = self.processed.lock().expect("cursor lock");
-            Ok(keys
-                .iter()
-                .filter(|key| !seen.contains(*key))
-                .cloned()
-                .collect())
+            events.push(event.clone());
+            Ok(())
         }
 
-        async fn record_processed(&self, keys: &[String]) -> Result<(), String> {
-            let mut seen = self.processed.lock().expect("cursor lock");
-            for key in keys {
-                seen.insert(key.clone());
+        async fn take(&self, limit: usize) -> Result<Vec<IngressEvent>, String> {
+            if self.fail_take.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(String::from("store unavailable"));
             }
-            Ok(())
+            let mut events = self.events.lock().expect("store lock");
+            let take_count = limit.min(events.len());
+            let taken: Vec<IngressEvent> = events.drain(..take_count).collect();
+            Ok(taken)
         }
     }
 
@@ -618,7 +622,6 @@ mod tests {
         let board = RecordingBoard::new(vec![]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -646,7 +649,6 @@ mod tests {
         let board = RecordingBoard::new(vec![]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -664,7 +666,6 @@ mod tests {
         let board = RecordingBoard::new(vec![]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -705,7 +706,6 @@ mod tests {
         let board = RecordingBoard::new(vec![]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -726,7 +726,6 @@ mod tests {
         let board = RecordingBoard::new(vec![]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -744,7 +743,6 @@ mod tests {
         let board = RecordingBoard::new(vec![Ok(false)]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -767,7 +765,6 @@ mod tests {
         let board = RecordingBoard::new(vec![Err(String::from("transport down"))]);
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(MemoryCursor::default()),
             vec![String::from("arbsec-agent")],
         );
         let outcome = attacher
@@ -777,120 +774,107 @@ mod tests {
         assert_eq!(outcome.failed, 1);
     }
 
-    /// Gen-1 review fix: a processed event is NEVER re-processed on a
-    /// later tick (the durable cursor records terminal outcomes), and a
-    /// FAILED attach stays unrecorded so it retries.
+    /// Gen-2 review fix (durable intake store): a FAILED attach is
+    /// re-put by the caller and retried on the next tick — the take
+    /// deleted it, so the retry path is re-put → take → process.
     #[tokio::test]
-    async fn cursor_prevents_reprocessing_and_failed_attaches_retry() {
-        // First tick: the attach FAILS (board down).
+    async fn failed_attach_is_reput_and_retried() {
         let board = RecordingBoard::new(vec![Err(String::from("transport down"))]);
-        let cursor = MemoryCursor::default();
         let attacher = IntakeAttacher::new(
             std::sync::Arc::new(board.clone()),
-            Box::new(cursor.clone()),
             vec![String::from("arbsec-agent")],
         );
+        let store = MemoryStore::default();
         let event = event(710, "issues-opened", Some("somehuman"), Some(false));
-        let outcome = attacher.process(std::slice::from_ref(&event)).await;
+        store.put(&event).await.expect("put");
+
+        // Tick 1: the attach FAILS.
+        let taken = store.take(8).await.expect("take");
+        let outcome = attacher.process(&taken).await;
         assert_eq!(outcome.failed, 1, "the attach failed");
-        assert_eq!(
-            cursor.recorded().len(),
-            0,
-            "a failed attach stays unrecorded"
-        );
+        assert_eq!(store.len(), 0, "the take deleted the event");
+        assert_eq!(board.calls().len(), 1, "one attempted board write");
 
-        // Second tick: the attach SUCCEEDS — the event retried.
-        let outcome = attacher.process(std::slice::from_ref(&event)).await;
+        // The loop re-puts the failed batch.
+        for event in &taken {
+            store.put(event).await.expect("re-put");
+        }
+        // Tick 2: the attach SUCCEEDS (board healed).
+        let board2 = RecordingBoard::new(vec![]);
+        let attacher2 = IntakeAttacher::new(
+            std::sync::Arc::new(board2),
+            vec![String::from("arbsec-agent")],
+        );
+        let taken = store.take(8).await.expect("take");
+        let outcome = attacher2.process(&taken).await;
         assert_eq!(outcome.attached, 1);
-        assert_eq!(cursor.recorded(), vec![event.delivery_key.clone()]);
-
-        // Third tick: the same delivery (e.g. the kick-off source never
-        // drained it) does NOT re-attach.
-        let outcome = attacher.process(std::slice::from_ref(&event)).await;
-        assert_eq!(
-            (outcome.attached, outcome.already_attached, outcome.skipped),
-            (0, 0, 0),
-            "a cursor-recorded event is never re-processed"
-        );
-        assert_eq!(board.calls().len(), 2, "exactly two board writes total");
+        assert_eq!(store.len(), 0, "the finished event stays deleted");
     }
 
-    /// Gen-1 review fix: terminal classifications (missing author facts,
-    /// skipped events) record — they never re-process nor re-log.
+    /// The durable store's take is delete-on-read: an event taken by
+    /// one tick is NEVER handed to another (exactly-once consumption).
     #[tokio::test]
-    async fn terminal_outcomes_record_once() {
-        let board = RecordingBoard::new(vec![]);
-        let cursor = MemoryCursor::default();
-        let attacher = IntakeAttacher::new(
-            std::sync::Arc::new(board),
-            Box::new(cursor.clone()),
-            vec![String::from("arbsec-agent")],
-        );
-        let missing = event(711, "issues-opened", None, None);
-        let skipped = event(712, "issue-commented", Some("somehuman"), Some(false));
-        // Tick 1: both terminal outcomes fire and record.
-        let outcome = attacher.process(&[missing.clone(), skipped.clone()]).await;
-        assert_eq!(outcome.missing_author, 1);
-        assert_eq!(outcome.skipped, 1);
-        assert_eq!(cursor.recorded().len(), 2);
-        // Ticks 2 and 3: the same deliveries neither re-log nor re-record.
-        for _ in 0..2 {
-            let outcome = attacher.process(&[missing.clone(), skipped.clone()]).await;
-            assert_eq!(
-                (outcome.missing_author, outcome.skipped, outcome.attached),
-                (0, 0, 0),
-                "a recorded terminal outcome is silent on re-delivery"
-            );
-        }
-        assert_eq!(
-            cursor.recorded().len(),
-            2,
-            "both terminal outcomes recorded exactly once"
-        );
-    }
-
-    /// A cursor READ failure refuses the whole tick (never re-attaches
-    /// with a cursor that cannot record).
-    #[tokio::test]
-    async fn cursor_read_failure_refuses_the_tick() {
-        let board = RecordingBoard::new(vec![]);
-        let cursor = MemoryCursor::default();
-        cursor
-            .fail_unprocessed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let attacher = IntakeAttacher::new(
-            std::sync::Arc::new(board.clone()),
-            Box::new(cursor),
-            vec![String::from("arbsec-agent")],
-        );
-        let outcome = attacher
-            .process(&[event(713, "issues-opened", Some("somehuman"), Some(false))])
-            .await;
-        assert_eq!(outcome.failed, 1);
-        assert!(
-            board.calls().is_empty(),
-            "no board write happens when the cursor cannot read"
-        );
-    }
-
-    /// The production sqlite cursor round-trips (open → filter → record
-    /// → filter) across a fresh open (restart persistence).
-    #[tokio::test]
-    async fn sqlite_cursor_persists_across_reopen() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("intake-cursor.db");
-        {
-            let cursor = SqliteIntakeCursor::open(&path).expect("open");
-            cursor
-                .record_processed(&[String::from("key-a")])
-                .await
-                .expect("record");
-        }
-        let cursor = SqliteIntakeCursor::open(&path).expect("reopen");
-        let pending = cursor
-            .unprocessed(&[String::from("key-a"), String::from("key-b")])
+    async fn store_take_is_delete_on_read() {
+        let store = MemoryStore::default();
+        store
+            .put(&event(713, "issues-opened", Some("a"), Some(false)))
             .await
-            .expect("filter");
-        assert_eq!(pending, vec![String::from("key-b")]);
+            .expect("put");
+        store
+            .put(&event(714, "issues-opened", Some("b"), Some(false)))
+            .await
+            .expect("put");
+        let first = store.take(8).await.expect("take");
+        assert_eq!(first.len(), 2);
+        let second = store.take(8).await.expect("take");
+        assert!(
+            second.is_empty(),
+            "taken events leave the store — no double consumption"
+        );
+        // Re-put of the same delivery key is idempotent while held, and
+        // after take it re-enters as a fresh event (the board seam's
+        // membership check makes the re-attach safe).
+        store.put(&first[0]).await.expect("re-put");
+        assert_eq!(store.len(), 1);
+    }
+
+    /// A store READ failure surfaces to the loop (which logs and
+    /// retries); the lane never processes nothing silently.
+    #[tokio::test]
+    async fn store_read_failure_surfaces() {
+        let store = MemoryStore::default();
+        store
+            .fail_take
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = store.take(8).await.expect_err("the read fails");
+        assert_eq!(error, "store unavailable");
+    }
+
+    /// The production sqlite intake store round-trips put → take with
+    /// delete-on-take, and persists across a fresh open (restart
+    /// durability — a taken-but-unprocessed event survives... no: a
+    /// TAKEN event is deleted; an UNTAKEN event persists).
+    #[tokio::test]
+    async fn sqlite_store_persists_untaken_events_across_reopen() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("intake-events.db");
+        {
+            let store = SqliteIntakeStore::open(&path).expect("open");
+            store
+                .put(&event(715, "issues-opened", Some("a"), Some(false)))
+                .await
+                .expect("put");
+            store
+                .put(&event(716, "issues-opened", Some("b"), Some(true)))
+                .await
+                .expect("put");
+        }
+        let store = SqliteIntakeStore::open(&path).expect("reopen");
+        let taken = store.take(8).await.expect("take");
+        assert_eq!(taken.len(), 2, "untaken events persist across restart");
+        assert_eq!(taken[0].author_login.as_deref(), Some("a"));
+        assert_eq!(taken[1].author_is_bot, Some(true));
+        let again = store.take(8).await.expect("take");
+        assert!(again.is_empty(), "delete-on-take");
     }
 }

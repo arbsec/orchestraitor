@@ -283,11 +283,18 @@ pub struct EventPoller {
     http: reqwest::Client,
     store: Arc<std::sync::Mutex<IngressStore>>,
     queue: Arc<IngressQueue>,
+    /// The §9.52(a) intake store (leaf #664): every accepted
+    /// `issues-opened` event is ALSO written here (durable), so the
+    /// intake attach lane consumes from its own durable surface — the
+    /// kick-off source's consumption of the shared queue can never
+    /// steal an attach, and a queue-surplus drop is not a lost attach.
+    /// `None` when the lane is disabled (no intake writes).
+    intake_store: Option<Arc<dyn crate::ingress::intake::IntakeStore>>,
 }
 
 impl EventPoller {
     /// Builds the poller over the given auth, ETag/dedup store, and
-    /// bounded queue.
+    /// bounded queue (no intake fan-out — the lane disabled).
     ///
     /// # Errors
     ///
@@ -297,6 +304,23 @@ impl EventPoller {
         auth: Arc<dyn BoardAuth>,
         store: Arc<std::sync::Mutex<IngressStore>>,
         queue: Arc<IngressQueue>,
+    ) -> Result<Self, DaemonError> {
+        Self::with_intake(auth, store, queue, None)
+    }
+
+    /// Builds the poller with an optional §9.52(a) intake fan-out
+    /// store. `Some(store)` mirrors every accepted `issues-opened`
+    /// event into the durable intake surface (leaf #664).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressHttp`] when the HTTP client cannot
+    /// be constructed.
+    pub fn with_intake(
+        auth: Arc<dyn BoardAuth>,
+        store: Arc<std::sync::Mutex<IngressStore>>,
+        queue: Arc<IngressQueue>,
+        intake_store: Option<Arc<dyn crate::ingress::intake::IntakeStore>>,
     ) -> Result<Self, DaemonError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -308,6 +332,7 @@ impl EventPoller {
             http,
             store,
             queue,
+            intake_store,
         })
     }
 
@@ -619,8 +644,9 @@ impl EventPoller {
                 poll_after_secs: poll_after,
             });
         }
-        let (accepted, duplicates, dropped) =
-            self.process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)?;
+        let (accepted, duplicates, dropped) = self
+            .process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)
+            .await?;
         if let Some(max_id) = max_raw_id_this_poll {
             self.lock_store()
                 .map_err(|_| PollError::Failed)?
@@ -639,7 +665,7 @@ impl EventPoller {
 
     /// Processes one endpoint's event items through dedup and the bounded
     /// queue; returns (accepted, duplicates, dropped) counts.
-    fn process_items(
+    async fn process_items(
         &self,
         items: &[RestEventItem],
         target: &PollTarget,
@@ -693,6 +719,18 @@ impl EventPoller {
                 author_is_bot: derived.author_is_bot,
                 accepted_at_secs: now_secs,
             };
+            // The §9.52(a) intake fan-out (leaf #664): mirror every
+            // accepted `issues-opened` event into the DURABLE intake
+            // store BEFORE the queue push. A store write failure counts
+            // as a drop (the event stays out of the lane's surface; the
+            // kick-off path is untouched) — never a silent miss.
+            if event.event_type == "issues-opened"
+                && let Some(intake) = &self.intake_store
+                && intake.put(&event).await.is_err()
+            {
+                dropped += 1;
+                continue;
+            }
             match self.queue.push(event, now_secs) {
                 PushOutcome::Accepted => accepted += 1,
                 PushOutcome::Duplicate => duplicates += 1, // unreachable via this path; kept for exhaustiveness

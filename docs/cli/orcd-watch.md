@@ -216,14 +216,16 @@ and NEVER attaches: the loop's own reports flow the internal paths. An
 event whose author launch facts are missing (the platform supplied no
 author) fails closed — it attaches nothing rather than guessing a class.
 Attachment is idempotent (§9.26.3): one board item per source issue; a
-re-delivered event updates rather than duplicates. The lane keeps its
-own durable cursor (`<config-dir>/intake-cursor.db`): an event it has
-finished with is never re-processed (so the shared queue's consumption
-by the kick-off source can neither lose an attach nor cause a duplicate),
-and a FAILED board write stays unrecorded — it retries on the next
-cadence tick. The lane shares the ingress queue with the kick-off
-source; the §9.43 reconcile poll stays the completeness authority. An
-intake outage degrades nothing else. An enabled lane over a disabled
+re-delivered event updates rather than duplicates. The lane consumes
+its OWN durable intake store (`<config-dir>/intake-events.db`), which
+the ingress poller mirrors every accepted `issues-opened` event into:
+the kick-off source's consumption of the shared queue can never steal
+an attach, a dropped queue surplus is not a lost attach (the durable
+store still holds the event), and consumption is delete-on-take — an
+event is processed exactly once. A FAILED board write is re-put and
+retries on the next cadence tick. The §9.43 reconcile poll stays the
+completeness authority. An intake outage degrades nothing else. An
+enabled lane over a disabled
 ingress is dead configuration and warns at startup (the same
 observable-warning discipline as the ingress/kick-off pair).
 
@@ -279,9 +281,9 @@ rows all behave exactly as documented for
   per-endpoint conditional-request bookkeeping (ETag, advised poll
   interval) for the events feed, the CI completions lane's check-runs
   endpoints (one per tracked head SHA), and the Actions-runs endpoint.
-- Intake cursor (when `[watch.intake].enabled`): `<config-dir>/intake-cursor.db`
-  — the durable per-delivery-key record of the §9.52(a) lane's finished
-  events (idempotency across restarts).
+- Intake store (when `[watch.intake].enabled`): `<config-dir>/intake-events.db`
+  — the durable per-event consumption surface the §9.52(a) lane takes
+  from (delete-on-take; untaken events persist across restarts).
 - Instance lock: `<config-dir>/loop.lock` — shared with `orc loop`.
 - Worker fixtures and task worktrees: `<config-dir>/worker-tasks/` and
   `<config-dir>/loop-worktrees/` — the same layouts and branch scheme

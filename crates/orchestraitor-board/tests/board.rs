@@ -1045,12 +1045,23 @@ async fn intake_attach_is_idempotent_for_an_attached_issue() -> Result<(), Board
         !attached,
         "an already-attached issue takes the idempotent update path"
     );
+    let recorded = server.recorded();
     assert!(
-        !server
-            .recorded()
+        !recorded
             .iter()
             .any(|(_headers, body)| body.contains("addProjectV2ItemById")),
         "no duplicate project item is created (§9.26.3)"
+    );
+    // Gen-2 review fix: the mechanical FIELD writes apply only to a
+    // newly added item — an already-attached item may have been
+    // promoted (Status=Triage -> Ready) by the triage pass or a human;
+    // an attach must never reverse that (§9.52: promotion authority is
+    // the triage pass's alone).
+    assert!(
+        !recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("updateProjectV2ItemFieldValue")),
+        "no Status/Priority overwrite on the already-attached path"
     );
     Ok(())
 }
