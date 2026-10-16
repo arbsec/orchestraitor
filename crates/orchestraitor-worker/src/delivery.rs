@@ -407,18 +407,33 @@ async fn commit_worktree_state(
     if current_branch != branch {
         return Err(DELIVERY_BRANCH_STATE_FAILED);
     }
-    // SCOPED STAGING: the run's recorded write paths only. A write path
-    // that no longer resolves (deleted then re-created, etc.) leaves the
-    // `git add` exit status to decide. An EMPTY write list skips staging
-    // entirely — `git add --` with no pathspec is a git error and would
-    // misreport a no-write completion as `branch-state-failed` (review
-    // gen-2 minor); the commit then reports "nothing to commit" and the
-    // landing reports the correct `delivery-empty-diff` outcome.
-    if !request.untrusted_writes.is_empty() {
-        let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
-        add_args.extend(request.untrusted_writes.iter().cloned());
-        let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
-        let add = git_async(worktree, &add_args).await?;
+    // STAGING (review gen-3 major + gen-2 minor): the mediated `bash` tool
+    // can edit, create, and DELETE files that are not on the recorded
+    // `untrusted_writes` list, so scoped staging would silently drop part
+    // of the work (and a deleted path would make `git add -- <path>` fail).
+    // Task-OWNED worktrees (`orc-loop/<task-id>` — the loop/daemon path)
+    // stage everything with `git add -A`. The AMBIENT one-shot checkouts
+    // (`orc worker run`/`orc campaign run --deliver`) keep SCOPED staging
+    // of the recorded write paths only — their startup gate already
+    // refuses a dirty checkout, but the operator's unrelated untracked
+    // files must never land. An EMPTY write list in the ambient case skips
+    // staging entirely — `git add --` with no pathspec is a git error and
+    // would misreport a no-write completion as `branch-state-failed`
+    // (review gen-2 minor); the commit then reports "nothing to commit"
+    // and the landing reports the correct `delivery-empty-diff` outcome.
+    let staging_is_scoped = !branch.starts_with("orc-loop/");
+    if staging_is_scoped {
+        if !request.untrusted_writes.is_empty() {
+            let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+            add_args.extend(request.untrusted_writes.iter().cloned());
+            let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
+            let add = git_async(worktree, &add_args).await?;
+            if !add.status.success() {
+                return Err(DELIVERY_BRANCH_STATE_FAILED);
+            }
+        }
+    } else {
+        let add = git_async(worktree, &["add", "-A"]).await?;
         if !add.status.success() {
             return Err(DELIVERY_BRANCH_STATE_FAILED);
         }

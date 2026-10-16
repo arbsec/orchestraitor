@@ -383,9 +383,9 @@ async fn watch_cycle() -> Result<ExitCode> {
         // `ORCHESTRAITOR_DELIVERY_REPO` is set; without it the typed
         // `Pending` bootstrap outcome holds (never a silent drop — the run
         // result records it).
-        if let Some((sink, repo)) = delivery {
+        if let Some((sink, _repo)) = delivery {
             base_starter
-                .with_delivery(sink, repo, delivery_base)
+                .with_delivery(sink)
                 .with_think_enabled(think_enabled)
         } else {
             base_starter.with_think_enabled(think_enabled)

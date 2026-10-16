@@ -269,6 +269,9 @@ pub(crate) fn current_branch_name(project_dir: &std::path::Path) -> miette::Resu
     let output = std::process::Command::new("git")
         .current_dir(project_dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .map_err(|error| miette!("git rev-parse --abbrev-ref HEAD failed: {error}"))?;
     if !output.status.success() {
@@ -311,6 +314,9 @@ pub(crate) fn refuse_dirty_or_base_checkout(
     let status = std::process::Command::new("git")
         .current_dir(project_dir)
         .args(["status", "--porcelain", "--untracked-files=normal"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .map_err(|error| miette!("git status failed: {error}"))?;
     if !status.status.success() {

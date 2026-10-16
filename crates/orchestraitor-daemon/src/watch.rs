@@ -733,11 +733,6 @@ pub struct DirectWatchStarter {
     /// lands through `orc github push-branch` + the labeling-chained PR
     /// path. `None` keeps the typed `Pending` bootstrap outcome.
     delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>>,
-    /// The `owner/name` slug the delivery lands in (the first board-config
-    /// repo; the MVP single-repo loop).
-    delivery_repo: Option<String>,
-    /// The PR base branch for the delivery (default `main`).
-    delivery_base: String,
     budgets: WorkerBudgets,
     /// The worker-side anti-stuck guardrail thresholds resolved from
     /// `[loop]` — the SAME settings the runner validates, so the daemon
@@ -775,8 +770,6 @@ impl DirectWatchStarter {
             provider_endpoint,
             board_client: None,
             delivery: None,
-            delivery_repo: None,
-            delivery_base: "main".to_string(),
             budgets,
             guardrails,
             think_enabled: true,
@@ -802,12 +795,8 @@ impl DirectWatchStarter {
     pub fn with_delivery(
         mut self,
         sink: Arc<orchestraitor_worker::PushBranchDeliverySink>,
-        repo: String,
-        base_branch: String,
     ) -> Self {
         self.delivery = Some(sink);
-        self.delivery_repo = Some(repo);
-        self.delivery_base = base_branch;
         self
     }
 

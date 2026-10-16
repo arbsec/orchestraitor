@@ -408,15 +408,15 @@ impl LoopWorkerStarter for DirectLoopStarter {
     /// fixture is (re)written on every spawn from the `SelectedTask` the
     /// board produced — the board is the description's source of truth, and
     /// a stale file from an earlier selection can never shadow it. The
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the spawn path (fixture materialization, transport, worktree, config assembly, delivery wiring, spawned run + reasoning persistence) is one linear audited sequence; splitting it would scatter the per-spawn gates the reviewer must see together"
-    )]
     /// description carries the issue body VERBATIM (issue #495), fetched at
     /// fixture-creation time through the board client and bounded by the
     /// shared `task_description` posture (URLs are data, not pre-fetched
     /// content; the body is the one exception the loop fetches for the
     /// worker).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the spawn path (fixture materialization, transport, worktree, config assembly, delivery wiring, spawned run + reasoning persistence) is one linear audited sequence; splitting it would scatter the per-spawn gates the reviewer must see together"
+    )]
     async fn start(
         &self,
         selected: &SelectedTask,

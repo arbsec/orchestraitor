@@ -152,7 +152,7 @@ pub struct LoopArgs {
     #[arg(long)]
     pub deliver: bool,
     /// The `owner/name` repository the delivery lands in (REQUIRED with
-    /// `--deliver`; defaults to the first repo in the board config).
+    /// `--deliver`).
     #[arg(long)]
     pub delivery_repo: Option<String>,
     /// The PR base branch for the delivery (default `main`).
