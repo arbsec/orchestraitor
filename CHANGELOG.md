@@ -454,6 +454,42 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- **Delivery is wired: completed tasks land as App-signed commits + PRs**
+  (issue #656): `orc worker run --deliver`, `orc loop --deliver`, `orc
+  campaign run --deliver`, and `orcd watch` (env
+  `ORCHESTRAITOR_DELIVERY_REPO` arming key + `ORCHESTRAITOR_DELIVERY_BASE`
+  / `ORCHESTRAITOR_DELIVERY_ORC_BIN`) now hand a completed run's worktree
+  state to the App-signed landing primitive (`orc github push-branch`):
+  the state is committed onto the task's branch, lands as ONE signed
+  commit on `orc-delivery/<task-id>`, and a PR opens through the
+  labeling-chained creation path (head `orc-delivery/<task-id>`, body =
+  the run summary). The run result carries
+  `delivery.kind = "pr-opened"` with the reference; every delivery
+  failure is a TYPED run failure with a static reason code
+  (`delivery-no-worktree`, `delivery-branch-state-failed`,
+  `delivery-push-failed`, `delivery-empty-diff`,
+  `delivery-pr-open-failed`) — never a silent drop, never a silent block
+  on the loop's success accounting. Without the new flags the typed
+  `Pending` outcome holds (behavior unchanged for non-adopters).
+  Documented in [docs/cli/orc-worker.md](docs/cli/orc-worker.md)
+  ("Delivery") and [docs/cli/orc-loop.md](docs/cli/orc-loop.md)
+  ("Delivery").
+- **Operator-configurable per-attempt turn bound, default raised to 100**
+  (issue #655): the worker's per-attempt turn limit
+  (`loop.max_turns_per_attempt`, new layered `[loop]` config key) is now
+  operator-configurable and applies to both `orc loop` and `orcd watch`.
+  The default rises from 25 to 100: the 4-tool JSON protocol spends turns
+  on exploration that native tool calling would not, and real
+  implementation slices exhausted the old bound (issue 496). An absent key
+  keeps the default; an explicit `0` is rejected fail-closed at loop
+  startup (a weakened guard, not an opt-out — unlike the anti-stuck
+  guardrails). Exhaustion surfaces as the typed `turn-budget` failure
+  reason (the run-level class on the final attempt is
+  `AttemptBudgetExhausted`). Documented in
+  [docs/cli/orc-loop.md](docs/cli/orc-loop.md) ("Guard set").
+  (Restored: this entry was accidentally dropped from `[Unreleased]` by a
+  stale-tree replay during the #662 review loop; the #655 code itself
+  landed intact in #661.)
 - **`orc github gh-env` refuses `gh pr create` in `required` enforcement**:
   PR creation through gh-env bypasses the deterministic PR-labeling chain,
   so the child command is classified by argv shape — the `gh pr create`

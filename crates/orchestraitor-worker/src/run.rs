@@ -312,10 +312,18 @@ async fn run_attempt(
                 if !success {
                     return attempt_failure(FailureClass::TaskNotCompleted, "task-not-completed");
                 }
+                // The delivery request carries the run's own worktree and
+                // checked-out branch (issue #656): the sink lands THIS
+                // branch's committed tree. `worktree_branch` is set by the
+                // caller (starter/CLI) on `WorkerConfig`; fixture runs
+                // without a filesystem worktree carry `None` (typed
+                // `delivery-no-worktree` at the sink, never a silent drop).
                 let request = DeliveryRequest {
                     task_id: task.id.clone(),
                     summary: summary.clone(),
                     untrusted_writes: executor.untrusted_writes().to_vec(),
+                    worktree: Some(state.worktree_root.clone()),
+                    worktree_branch: config.worktree_branch.clone(),
                 };
                 return match delivery.deliver(&request).await {
                     Ok(outcome) => AttemptOutcome::Completed {

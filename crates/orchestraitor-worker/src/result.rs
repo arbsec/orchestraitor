@@ -91,6 +91,12 @@ pub struct WorkerConfig {
     /// the audit metadata persists, the text does not. Enforced at the
     /// SOURCE — the executor strips text before it can enter any serializer.
     pub record_payloads: bool,
+    /// The local branch the run's worktree has checked out (issue #656):
+    /// the delivery request carries it so the sink lands THIS branch's
+    /// committed tree (`orc-loop/<task-id>` for the loop/daemon starters).
+    /// `None` (the default) = no delivery branch context (fixture runs;
+    /// the sink reports the typed `delivery-no-worktree` outcome).
+    pub worktree_branch: Option<String>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -132,6 +138,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("structured_summary", &self.structured_summary)
             .field("think_enabled", &self.think_enabled)
             .field("record_payloads", &self.record_payloads)
+            .field("worktree_branch", &self.worktree_branch)
             .finish()
     }
 }
@@ -159,6 +166,7 @@ impl WorkerConfig {
             structured_summary: false,
             think_enabled: true,
             record_payloads: false,
+            worktree_branch: None,
         }
     }
 

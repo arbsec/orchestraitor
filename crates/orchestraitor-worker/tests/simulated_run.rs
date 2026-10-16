@@ -308,6 +308,8 @@ async fn pending_delivery_sink_reports_pending_for_the_bootstrap() {
             task_id: "t-1".to_string(),
             summary: "s".to_string(),
             untrusted_writes: Vec::new(),
+            worktree: None,
+            worktree_branch: None,
         })
         .await
         .unwrap();

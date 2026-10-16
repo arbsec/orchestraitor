@@ -55,7 +55,9 @@ pub use budget::{
     backoff_delay,
 };
 pub use delivery::{
-    DeliveryError, DeliveryOutcome, DeliveryRequest, DeliverySink, PendingDeliverySink,
+    DELIVERY_BRANCH_STATE_FAILED, DELIVERY_EMPTY_DIFF, DELIVERY_NO_WORKTREE,
+    DELIVERY_PR_OPEN_FAILED, DELIVERY_PUSH_FAILED, DeliveryError, DeliveryOutcome, DeliveryRequest,
+    DeliverySink, PendingDeliverySink, PushBranchDeliverySink,
 };
 pub use error::WorkerError;
 pub use guardrails::{

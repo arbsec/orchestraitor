@@ -145,6 +145,23 @@ pub struct LoopArgs {
     /// Alternate provider base URL for simulator-backed tests.
     #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
     pub worker_provider_endpoint: Option<String>,
+    /// Deliver each completed task through `orc github push-branch` + the
+    /// labeling-chained PR path (issue #656): the task worktree state lands
+    /// as an App-signed commit on `orc-delivery/<task-id>` and a PR opens.
+    /// Default OFF (the typed `Pending` bootstrap outcome).
+    #[arg(long)]
+    pub deliver: bool,
+    /// The `owner/name` repository the delivery lands in (REQUIRED with
+    /// `--deliver`; defaults to the first repo in the board config).
+    #[arg(long)]
+    pub delivery_repo: Option<String>,
+    /// The PR base branch for the delivery (default `main`).
+    #[arg(long)]
+    pub delivery_base: Option<String>,
+    /// Path to the `orc` binary the delivery sink shells out to (defaults
+    /// to this executable).
+    #[arg(long, hide = true)]
+    pub delivery_orc_bin: Option<PathBuf>,
 }
 
 /// `orc stats` subcommands.
@@ -193,6 +210,23 @@ pub struct CampaignRunArgs {
     /// Alternate provider base URL for simulator-backed tests.
     #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
     pub worker_provider_endpoint: Option<String>,
+    /// Deliver the completed task through `orc github push-branch` + the
+    /// labeling-chained PR path (issue #656): the checkout's committed
+    /// state lands as an App-signed commit on `orc-delivery/<task-id>` and
+    /// a PR opens. Default OFF (the typed `Pending` bootstrap outcome).
+    #[arg(long)]
+    pub deliver: bool,
+    /// The `owner/name` repository the delivery lands in (REQUIRED with
+    /// `--deliver`).
+    #[arg(long)]
+    pub delivery_repo: Option<String>,
+    /// The PR base branch for the delivery (default `main`).
+    #[arg(long)]
+    pub delivery_base: Option<String>,
+    /// Path to the `orc` binary the delivery sink shells out to (defaults
+    /// to this executable).
+    #[arg(long, hide = true)]
+    pub delivery_orc_bin: Option<PathBuf>,
 }
 
 /// `orc github` subcommands.
@@ -626,6 +660,24 @@ pub struct WorkerRunArgs {
     /// Alternate provider base URL for simulator-backed tests.
     #[arg(long, env = "ORCHESTRAITOR_WORKER_PROVIDER_ENDPOINT", hide = true)]
     pub worker_provider_endpoint: Option<String>,
+    /// Deliver the completed run through `orc github push-branch` + the
+    /// labeling-chained PR path (issue #656): the run's worktree state
+    /// lands as an App-signed commit on `orc-delivery/<task-id>` and a PR
+    /// opens. Default OFF (the bootstrap `Pending` sink reports the typed
+    /// not-wired outcome).
+    #[arg(long)]
+    pub deliver: bool,
+    /// The `owner/name` repository the delivery lands in (REQUIRED with
+    /// `--deliver`).
+    #[arg(long)]
+    pub delivery_repo: Option<String>,
+    /// The PR base branch for the delivery (default `main`).
+    #[arg(long)]
+    pub delivery_base: Option<String>,
+    /// Path to the `orc` binary the delivery sink shells out to (defaults
+    /// to this executable).
+    #[arg(long, hide = true)]
+    pub delivery_orc_bin: Option<PathBuf>,
 }
 
 /// `orc simplify` subcommands.

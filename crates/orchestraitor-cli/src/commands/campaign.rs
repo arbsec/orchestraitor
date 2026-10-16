@@ -42,6 +42,10 @@ struct DirectSpawner<'a> {
     /// broken tool definition is a typed startup error, never a per-spawn
     /// failure.
     declared_surface: super::DeclaredToolSurface,
+    /// The delivery sink (issue #656): a completed run's worktree state
+    /// lands through `orc github push-branch` + the labeling-chained PR
+    /// path. `None` keeps the typed `Pending` bootstrap outcome.
+    delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>>,
 }
 
 impl WorkerSpawner for DirectSpawner<'_> {
@@ -82,6 +86,23 @@ impl WorkerSpawner for DirectSpawner<'_> {
             ModelId::from_string(routing.model.clone()),
             WorkerBudgets::bootstrap_defaults(),
         );
+        // Issue #656: the one-shot campaign pass delivers the ambient
+        // checkout's own branch when `--deliver` is set; default OFF keeps
+        // the typed `Pending` bootstrap outcome. A push failure is a typed
+        // delivery outcome on the run, never a silent drop.
+        let mut config = config;
+        if self.delivery.is_some() {
+            config.worktree_branch = Some(current_branch_name(&self.paths.project_dir).map_err(
+                |error| CampaignError::Spawn {
+                    task_id: task_id.to_string(),
+                    message: error.to_string(),
+                },
+            )?);
+        }
+        let delivery: Arc<dyn orchestraitor_worker::DeliverySink> = match &self.delivery {
+            Some(sink) => Arc::clone(sink) as Arc<dyn orchestraitor_worker::DeliverySink>,
+            None => Arc::new(PendingDeliverySink),
+        };
         let config = super::attach_declared_surface(config, &self.declared_surface);
         runtime
             .block_on(run_worker(
@@ -89,7 +110,7 @@ impl WorkerSpawner for DirectSpawner<'_> {
                 &self.paths.project_dir,
                 &transport,
                 &MediatedBashMediator::new(),
-                &PendingDeliverySink,
+                &*delivery,
                 &config,
             ))
             .map_err(|error| CampaignError::Spawn {
@@ -168,11 +189,35 @@ fn run_pass<W: Write>(paths: &ConfigPaths, args: &CampaignRunArgs, writer: &mut 
     // definition fails the invocation here, never per spawn.
     let declared_surface = super::build_declared_tools(&layers.resolver, &routing.role)
         .map_err(|error| miette!("{error}"))?;
+    // Issue #656: resolve the delivery sink ONCE at startup from the
+    // campaign flags. `--deliver` requires a repo; a missing orc binary is
+    // a typed startup error — the delivery must never discover a missing
+    // binary only after a task completes.
+    let delivery: Option<Arc<orchestraitor_worker::PushBranchDeliverySink>> = if args.deliver {
+        let repo = args
+            .delivery_repo
+            .clone()
+            .ok_or_else(|| miette!("--deliver requires --delivery-repo owner/name"))?;
+        let orc_bin = args
+            .delivery_orc_bin
+            .clone()
+            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "orc".into()));
+        Some(Arc::new(orchestraitor_worker::PushBranchDeliverySink::new(
+            orc_bin,
+            repo,
+            args.delivery_base
+                .clone()
+                .unwrap_or_else(|| "main".to_string()),
+        )))
+    } else {
+        None
+    };
     let spawner = DirectSpawner {
         paths,
         tasks_dir: args.worker_tasks_dir.clone(),
         provider_endpoint: args.worker_provider_endpoint.clone(),
         declared_surface,
+        delivery,
     };
     let outcome = run_once_with_selector(&snapshot, &routing, &store, &spawner, task_selector)
         .into_diagnostic()?;
@@ -273,6 +318,31 @@ fn check_exit(outcome: &CampaignOutcome) -> Result<()> {
     Ok(())
 }
 
+/// Resolves the ambient checkout's current branch (issue #656): the
+/// one-shot campaign delivery lands the branch the project directory has
+/// checked out. A detached HEAD or an unreadable ref is a typed startup
+/// error — the delivery must never land an unknown tree.
+fn current_branch_name(project_dir: &std::path::Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(project_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|error| miette!("git rev-parse --abbrev-ref HEAD failed: {error}"))?;
+    if !output.status.success() {
+        return Err(miette!(
+            "cannot resolve the project directory's current branch: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(miette!(
+            "the project directory is on a detached HEAD; delivery needs a named branch"
+        ));
+    }
+    Ok(branch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +368,7 @@ mod tests {
                 subsession_routing: std::collections::BTreeMap::new(),
                 think_enabled: true,
             },
+            delivery: None,
         };
         let routing = RoleRoutingDecision {
             role: "implement".to_string(),
