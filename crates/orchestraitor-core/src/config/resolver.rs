@@ -443,6 +443,5 @@ impl LoopGuardrailsConfig {
             &mut self.task_retry_backoff_secs,
             next.task_retry_backoff_secs,
         );
-        merge_scalar(&mut self.max_turns_per_attempt, next.max_turns_per_attempt);
     }
 }

@@ -30,12 +30,6 @@ pub const DEFAULT_TASK_RETRY_BACKOFF: Duration = Duration::from_mins(15);
 pub const DEFAULT_CI_POLL_BUDGET_SECS: u64 = 30 * 60;
 /// Bootstrap default (whole seconds): task re-selection backoff.
 pub const DEFAULT_TASK_RETRY_BACKOFF_SECS: u64 = 15 * 60;
-/// Bootstrap default: per-attempt turn bound (issue #655). The #496 RCA
-/// evidence (~48 turns spent per attempt on a real implementation slice,
-/// loop.db rows 33-37) shows the mini-swe-agent 25-turn step-limit analog
-/// assumed native tool calling; the 4-tool JSON protocol is far less
-/// token-efficient, so the implement-phase default is raised to 100.
-pub const DEFAULT_MAX_TURNS_PER_ATTEMPT: u32 = 100;
 
 /// The parsed `[loop]` config block (serde shape; every key
 /// optional — absent keys inherit the bootstrap defaults). Durations are
@@ -60,9 +54,6 @@ pub struct GuardrailsConfigValues {
     /// Re-selection backoff after a failed task attempt (seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_retry_backoff_secs: Option<u64>,
-    /// Per-attempt turn bound enforced by the worker (issue #655).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turns_per_attempt: Option<u32>,
 }
 
 /// Resolved guardrail thresholds for one `orc loop` invocation.
@@ -81,14 +72,6 @@ pub struct GuardrailsSettings {
     pub max_task_attempts: u32,
     /// Re-selection backoff after a failed task attempt (`0` disables it).
     pub task_retry_backoff: Duration,
-    /// Per-attempt conversation bound override (issue #655): `Some(n)`
-    /// pins the worker's enforced turn bound to `n`; `None` (the default)
-    /// inherits whatever bound the `WorkerBudgets` carry (the bootstrap
-    /// default is 100). A configured `0` is a weakened guard, not an
-    /// opt-out: it is applied and then rejected fail-closed at
-    /// `LoopConfig::validate` (a worker that may not take a single turn
-    /// cannot run).
-    pub max_turns_per_attempt: Option<u32>,
 }
 
 impl Default for GuardrailsSettings {
@@ -100,7 +83,6 @@ impl Default for GuardrailsSettings {
             ci_poll_budget: DEFAULT_CI_POLL_BUDGET,
             max_task_attempts: DEFAULT_MAX_TASK_ATTEMPTS,
             task_retry_backoff: DEFAULT_TASK_RETRY_BACKOFF,
-            max_turns_per_attempt: None,
         }
     }
 }
@@ -186,12 +168,6 @@ impl GuardrailsSettings {
             }
             settings.task_retry_backoff = Duration::from_secs(value);
         }
-        // A zero turn bound is a weakened guard, not an opt-out (the worker
-        // could not take a single turn): carried as an explicit override,
-        // rejected fail-closed at `LoopConfig::validate` — the same
-        // fail-closed shape the other weakened guards use. `None` (the
-        // absent key) inherits the budgets' own bound.
-        settings.max_turns_per_attempt = config.max_turns_per_attempt;
         (settings, warnings)
     }
 

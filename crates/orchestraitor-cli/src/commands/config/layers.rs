@@ -43,8 +43,6 @@ enforcement = "recommended"
 
 # Anti-stuck guardrails for `orc loop` (spec §9.27.1/§9.36): defaults are
 # active; an explicit `0` disables a guard deliberately (warned).
-# max_turns_per_attempt is a weakened-guard key, not an opt-out: a `0` is
-# rejected fail-closed (issue #655).
 [loop]
 no_progress_turns = 5
 tool_repeat_count = 4
@@ -52,7 +50,6 @@ tool_repeat_window = 8
 ci_poll_budget_secs = 1800
 max_task_attempts = 3
 task_retry_backoff_secs = 900
-max_turns_per_attempt = 100
 
 # Static heuristic role routing table for the bootstrap (spec
 # 30-model-routing.md §9.45): every built-in orchestration role routes to the

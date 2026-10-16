@@ -160,7 +160,6 @@ async fn watch_cycle() -> Result<ExitCode> {
                 ci_poll_budget_secs: block.ci_poll_budget_secs,
                 max_task_attempts: block.max_task_attempts,
                 task_retry_backoff_secs: block.task_retry_backoff_secs,
-                max_turns_per_attempt: block.max_turns_per_attempt,
             });
     let (guardrails, warnings) =
         orchestraitor_campaign::GuardrailsSettings::from_config(values.as_ref());
@@ -335,17 +334,12 @@ async fn watch_cycle() -> Result<ExitCode> {
     let daily_spend_cap_usd = budgets.daily_spend_soft_cap_usd;
     // §9.48.8: the daemon's event store persists accepted `think` steps as
     // `agent reasoning` events; `[observability].record_payloads` (spec 50
-    // §20.4.2) gates `thought_text`. Resolved once at startup. The starter
-    // receives `loop_config.budgets` — the SAME instance `with_guardrails`
-    // threaded the operator's `loop.max_turns_per_attempt` (issue #655)
-    // into — so the enforced bound matches the validated bound (a gen-2
-    // review finding: passing the pre-threading `budgets` made the daemon
-    // validate one bound and enforce another).
+    // §20.4.2) gates `thought_text`. Resolved once at startup.
     let starter = DirectWatchStarter::new(
         project_dir,
         config_dir.clone(),
         None,
-        loop_config.budgets.clone(),
+        budgets,
         loop_config.guardrails.worker_guardrails(),
     )
     .with_board_client(Arc::clone(&client))

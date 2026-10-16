@@ -182,7 +182,7 @@ impl LoopConfig {
         max_cycles: Option<u64>,
         min_poll_interval: Option<Duration>,
     ) -> Result<Self, CampaignError> {
-        let mut config = Self {
+        let config = Self {
             budgets,
             shutdown_budget,
             max_cycles,
@@ -190,13 +190,6 @@ impl LoopConfig {
             guardrails: GuardrailsSettings::default(),
             kickoff: crate::kickoff::KickoffSettings::builtin_defaults(),
         };
-        // The operator's `loop.max_turns_per_attempt` (issue #655) pins the
-        // worker's per-attempt turn bound ONLY when the key is explicitly
-        // configured; an absent key inherits the budgets' own bound (the
-        // bootstrap default). One source, no worker/loop drift.
-        if let Some(bound) = config.guardrails.max_turns_per_attempt {
-            config.budgets.max_turns_per_attempt = bound;
-        }
         config.validate()?;
         Ok(config)
     }
@@ -213,7 +206,7 @@ impl LoopConfig {
         max_cycles: Option<u64>,
         guardrails: GuardrailsSettings,
     ) -> Result<Self, CampaignError> {
-        let mut config = Self {
+        let config = Self {
             budgets,
             shutdown_budget,
             max_cycles,
@@ -221,13 +214,6 @@ impl LoopConfig {
             guardrails,
             kickoff: crate::kickoff::KickoffSettings::builtin_defaults(),
         };
-        // The operator's `loop.max_turns_per_attempt` (issue #655) pins the
-        // worker's per-attempt turn bound ONLY when the key is explicitly
-        // configured; an absent key inherits the budgets' own bound (the
-        // bootstrap default). One source, no worker/loop drift.
-        if let Some(bound) = config.guardrails.max_turns_per_attempt {
-            config.budgets.max_turns_per_attempt = bound;
-        }
         config.validate()?;
         Ok(config)
     }
@@ -291,30 +277,6 @@ impl LoopConfig {
         if self.budgets.run_deadline().is_zero() {
             return Err(CampaignError::Loop(
                 "guard-weakening rejected: worker run deadline must be positive".to_string(),
-            ));
-        }
-        if self.budgets.max_turns_per_attempt == 0 {
-            return Err(CampaignError::Loop(
-                "guard-weakening rejected: max turns per attempt must be at least 1 \
-                 (loop.max_turns_per_attempt = 0 would stop every attempt before its \
-                 first turn)"
-                    .to_string(),
-            ));
-        }
-        // The fields are public: a caller may mutate `guardrails` (or
-        // `budgets`) after construction and before `validate` re-runs at
-        // `LoopRunner::new`/`run`. Enforce the constructor's threading
-        // contract HERE so a post-construction mutation cannot validate one
-        // bound and enforce another (a gen-4 review finding): an explicitly
-        // configured bound must equal the enforced bound, and a zero
-        // override is rejected in its own right.
-        if let Some(configured) = self.guardrails.max_turns_per_attempt
-            && self.budgets.max_turns_per_attempt != configured
-        {
-            return Err(CampaignError::Loop(
-                "guard-weakening rejected: loop.max_turns_per_attempt must equal the \
-                 enforced WorkerBudgets bound (one source, no drift)"
-                    .to_string(),
             ));
         }
         if let Some(interval) = self.min_poll_interval

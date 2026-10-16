@@ -78,7 +78,6 @@ fn config_values(
         ci_poll_budget_secs: block.ci_poll_budget_secs,
         max_task_attempts: block.max_task_attempts,
         task_retry_backoff_secs: block.task_retry_backoff_secs,
-        max_turns_per_attempt: block.max_turns_per_attempt,
     }
 }
 

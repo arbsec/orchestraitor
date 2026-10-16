@@ -126,12 +126,23 @@ fn subsession_tool_line(tool: crate::tooldef::InternalTool) -> &'static str {
     }
 }
 
-pub(super) fn task_prompt(task: &WorkerTask, replan_note: Option<&'static str>) -> String {
+/// The failed attempt's receipt log rides beside the static failure-reason
+/// line as a fenced untrusted-data block (issue #657): `receipt_summary`
+/// carries the prior attempt's bounded "what was already done" payload, or
+/// `None` when the attempt recorded nothing worth summarizing.
+pub(super) fn task_prompt(
+    task: &WorkerTask,
+    replan_note: Option<&'static str>,
+    receipt_summary: Option<&str>,
+) -> String {
     let mut prompt = format!("Task {} ({}):\n{}", task.id, task.slug, task.description);
     if let Some(note) = replan_note {
         prompt.push_str("\n\nA previous attempt failed (");
         prompt.push_str(note);
         prompt.push_str("); re-plan and try a different approach.");
+    }
+    if let Some(summary) = receipt_summary {
+        prompt.push_str(summary);
     }
     prompt
 }

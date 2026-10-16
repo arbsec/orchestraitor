@@ -156,11 +156,6 @@ pub struct LoopGuardrailsConfig {
     /// Re-selection backoff after a failed task attempt, in whole seconds
     /// (default 900 = 15m; `0` disables).
     pub task_retry_backoff_secs: Option<u64>,
-    /// Per-attempt conversation bound: model turns within one worker
-    /// attempt before the attempt fails as `turn-budget` (issue #655;
-    /// default 100; `0` is rejected fail-closed — a zero turn bound is a
-    /// weakened guard, not an opt-out).
-    pub max_turns_per_attempt: Option<u32>,
 }
 
 /// Decision-provider selection for model routing (spec
