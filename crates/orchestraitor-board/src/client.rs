@@ -428,6 +428,19 @@ impl BoardClient {
                 number: issue_number,
             })?;
         let issue_id = issue.id;
+        // Fail closed on a truncated projectItems window (the same
+        // discipline as `find_item`): an issue on more projects than the
+        // window holds may already be attached OUTSIDE the window —
+        // treating it as unattached would duplicate the item and break
+        // the §9.26.3 idempotency signal.
+        if crate::item::truncated(
+            issue.project_items.nodes.len(),
+            issue.project_items.total_count,
+        ) {
+            return Err(BoardError::TruncatedConnection {
+                window: "projectItems",
+            });
+        }
         let existing_item = issue
             .project_items
             .nodes

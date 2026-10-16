@@ -372,8 +372,14 @@ async fn watch_cycle() -> Result<ExitCode> {
                 Arc::clone(&client),
                 board_config_template.clone(),
             );
+            let cursor = orchestraitor_daemon::intake_module::SqliteIntakeCursor::open(
+                &config_dir.join("intake-cursor.db"),
+            )
+            .into_diagnostic()
+            .wrap_err("intake cursor store open failed")?;
             let attacher = orchestraitor_daemon::intake_module::IntakeAttacher::new(
                 Arc::new(intake_board),
+                Box::new(cursor),
                 watch_config.intake.service_identities.clone(),
             );
             let intake_queue = Arc::clone(&ingress_queue);
@@ -787,11 +793,16 @@ async fn intake_attach_loop(
         // PEEK, not drain: the events stay pending for the kick-off
         // source (the lane ATTACHES; the kick-off gate decides whether a
         // session runs — one event accelerates both, consumed by each
-        // consumer independently).
+        // consumer independently). The lane's DURABLE cursor makes the
+        // peek safe: an event the kick-off source drained first is
+        // still attached here (and vice versa), and an event the lane
+        // already finished with is never re-processed — so repeated
+        // peeks cost no board writes.
         let pending = queue.peek();
         if !pending.is_empty() {
             let outcome = attacher.process(&pending).await;
             if outcome.attached > 0
+                || outcome.already_attached > 0
                 || outcome.failed > 0
                 || outcome.missing_author > 0
                 || outcome.skipped > 0
