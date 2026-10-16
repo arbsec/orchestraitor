@@ -111,6 +111,47 @@ const UPDATE_STATUS_MUTATION: &str = r"mutation($projectId: ID!, $itemId: ID!, $
   }
 }";
 
+const ADD_PROJECT_ITEM_MUTATION: &str = r"mutation($projectId: ID!, $contentId: ID!) {
+  addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+    item { id }
+  }
+}";
+
+const ISSUE_TYPE_ID_QUERY: &str = r"query($org: String!, $name: String!) {
+  organization(login: $org) {
+    issueTypes(first: 100) { nodes { id name } }
+  }
+  repository(owner: $org, name: $name) { issueTypes(first: 100) { nodes { id name } } }
+}";
+
+const UPDATE_ISSUE_TYPE_MUTATION: &str = r"mutation($issueId: ID!, $issueTypeId: ID!) {
+  updateIssueIssueType(input: { issueId: $issueId, issueTypeId: $issueTypeId }) {
+    issue { id }
+  }
+}";
+
+const LABEL_ID_QUERY: &str = r"query($owner: String!, $name: String!, $labelName: String!) {
+  repository(owner: $owner, name: $name) {
+    label(name: $labelName) { id }
+  }
+}";
+
+const REPOSITORY_ID_QUERY: &str = r"query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id }
+}";
+
+const CREATE_LABEL_MUTATION: &str = r#"mutation($repositoryId: ID!, $labelName: String!) {
+  createLabel(input: { repositoryId: $repositoryId, name: $labelName, color: "1D76DB" }) {
+    label { id }
+  }
+}"#;
+
+const ADD_LABEL_MUTATION: &str = r"mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  addLabelsToLabelable(input: { labelableId: $labelableId, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}";
+
 const READ_BACK_QUERY: &str = r"query($id: ID!, $name: String!) {
   node(id: $id) {
     ... on ProjectV2Item {
@@ -150,6 +191,21 @@ pub struct BoardClient {
     endpoint: String,
     auth: Arc<dyn BoardAuth>,
     cache_path: Option<PathBuf>,
+}
+
+/// The mechanical field set §9.52(a) prescribes for one attached bug
+/// report, as the board write path receives it (epic #624, leaf #664).
+/// Every value is a lane constant or a launch fact — never content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntakeFields<'a> {
+    /// The native issue type to set (`Bug` for issue reports).
+    pub item_type: &'a str,
+    /// The status the item lands at (`Triage`, always).
+    pub status: &'a str,
+    /// The provisional priority (`P1`; §9.52(d)).
+    pub priority: &'a str,
+    /// The daemon-owned author-class provenance label.
+    pub label: &'a str,
 }
 
 impl BoardClient {
@@ -318,6 +374,279 @@ impl BoardClient {
             item_id,
             status: status.to_string(),
         })
+    }
+
+    /// Attaches `issue_number` to the board with the §9.52(a) mechanical
+    /// field set (epic #624, leaf #664): adds the issue to the project
+    /// (idempotent — an already-attached issue is detected and NOT
+    /// duplicated), sets the Status, Priority, and native issue type, and
+    /// applies the daemon-owned author-class provenance label.
+    ///
+    /// Every argument is a LAUNCH FACT or a lane constant (§9.52(a)):
+    /// issue content never flows through this path. Returns `true` when
+    /// the item was newly added, `false` when it was already on the board
+    /// (the idempotent update path — the callers treat both as success).
+    ///
+    /// # Errors
+    ///
+    /// Typed transport/GraphQL failures — the caller retries on a later
+    /// tick, never fails open into scheduling.
+    pub async fn attach_issue(
+        &self,
+        config: &BoardProjectConfig,
+        repo: &str,
+        issue_number: u64,
+        fields: IntakeFields<'_>,
+    ) -> Result<bool, BoardError> {
+        let ids = self.resolved_ids(config).await?;
+        // The exact-repo issue lookup (the same shape `issue_body` uses):
+        // never a configured-repository walk, never a guessed owner.
+        let Some((owner, name)) = split_repo(repo) else {
+            return Err(BoardError::IssueNotFound {
+                number: issue_number,
+            });
+        };
+        // Node ids are cached per project; the issue node id is fetched
+        // through the same FIND_ITEM_QUERY the move path uses (which also
+        // answers the §9.26.3 idempotency question: is the issue already
+        // a project item?).
+        let data = self
+            .execute(
+                FIND_ITEM_QUERY,
+                serde_json::json!({
+                    "owner": owner,
+                    "name": name,
+                    "number": issue_number,
+                }),
+            )
+            .await?;
+        let response: IssueWithContentResponse = decode(data, "issue lookup")?;
+        let issue = response
+            .repository
+            .and_then(|repository| repository.issue)
+            .ok_or(BoardError::IssueNotFound {
+                number: issue_number,
+            })?;
+        let issue_id = issue.id;
+        let existing_item = issue
+            .project_items
+            .nodes
+            .iter()
+            .find(|project_item| project_item.project.id == ids.project_id)
+            .map(|project_item| project_item.id.clone());
+        let item_id = if let Some(item_id) = existing_item.clone() {
+            item_id
+        } else {
+            let data = self
+                .execute(
+                    ADD_PROJECT_ITEM_MUTATION,
+                    serde_json::json!({
+                        "projectId": ids.project_id,
+                        "contentId": issue_id,
+                    }),
+                )
+                .await?;
+            let response: AddItemResponse = decode(data, "project item add")?;
+            response
+                .add_project_v2_item_by_id
+                .and_then(|added| added.item)
+                .map(|item| item.id)
+                .ok_or(BoardError::ResponseShape {
+                    context: "project item add",
+                    source: Box::new(decode_error("mutation returned no item id")),
+                })?
+        };
+        // Status: the verified write (same read-back discipline as
+        // `move_item` — the write round-trips before success).
+        self.set_single_select(&ids, &item_id, &config.ready_field, fields.status)
+            .await?;
+        // Priority: the §9.52(d) provisional value (never the scheduling
+        // value; the triage pass owns any change).
+        self.set_single_select(&ids, &item_id, &config.priority_field, fields.priority)
+            .await?;
+        // Native issue type: resolved by NAME against the org (then the
+        // repository); an unresolvable type name is a typed error, never
+        // a silently skipped write (the ready queue's leaf predicate
+        // reads this exact field).
+        self.set_issue_type(repo, &issue_id, fields.item_type)
+            .await?;
+        // The daemon-owned provenance label (§9.50(c) discipline): label
+        // ids resolve by exact name; a missing label is created — the
+        // name is a lane constant, never content.
+        self.apply_label(repo, &issue_id, fields.label).await?;
+        Ok(existing_item.is_none())
+    }
+
+    /// Writes one single-select field and verifies by read-back (the
+    /// `move_item` discipline, generalized over the field name).
+    async fn set_single_select(
+        &self,
+        ids: &ProjectNodeIds,
+        item_id: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<(), BoardError> {
+        let field = ids
+            .fields
+            .get(field_name)
+            .ok_or(BoardError::FieldNotFound {
+                name: field_name.to_string(),
+            })?;
+        let option_id = field.options.get(value).ok_or(BoardError::OptionNotFound {
+            field: field_name.to_string(),
+            option: value.to_string(),
+        })?;
+        self.execute(
+            UPDATE_STATUS_MUTATION,
+            serde_json::json!({
+                "projectId": ids.project_id,
+                "itemId": item_id,
+                "fieldId": field.field_id,
+                "optionId": option_id,
+            }),
+        )
+        .await?;
+        let read_back = self
+            .execute(
+                READ_BACK_QUERY,
+                serde_json::json!({ "id": item_id, "name": field_name }),
+            )
+            .await?;
+        let response: ReadBackResponse = decode(read_back, "single-select read-back")?;
+        let observed = response
+            .node
+            .and_then(|node| node.field_value_by_name)
+            .and_then(|value| value.name);
+        if observed.as_deref() != Some(value) {
+            return Err(BoardError::StatusVerification {
+                field: field_name.to_string(),
+                expected: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolves the native issue-type node id by name (org types first,
+    /// then repository types) and writes it onto the issue.
+    async fn set_issue_type(
+        &self,
+        repo: &str,
+        issue_id: &str,
+        type_name: &str,
+    ) -> Result<(), BoardError> {
+        let Some((owner, name)) = split_repo(repo) else {
+            return Err(BoardError::IssueNotFound { number: 0 });
+        };
+        let data = self
+            .execute(
+                ISSUE_TYPE_ID_QUERY,
+                serde_json::json!({ "org": owner, "name": name }),
+            )
+            .await?;
+        let response: IssueTypesResponse = decode(data, "issue type resolution")?;
+        let type_id = response
+            .organization
+            .and_then(|org| org.issue_types)
+            .and_then(|connection| connection.nodes)
+            .unwrap_or_default()
+            .iter()
+            .chain(
+                response
+                    .repository
+                    .and_then(|repository| repository.issue_types)
+                    .and_then(|connection| connection.nodes)
+                    .unwrap_or_default()
+                    .iter(),
+            )
+            .find(|node| node.name.as_deref() == Some(type_name))
+            .and_then(|node| node.id.clone());
+        let Some(type_id) = type_id else {
+            return Err(BoardError::IssueTypeNotFound {
+                name: type_name.to_string(),
+            });
+        };
+        self.execute(
+            UPDATE_ISSUE_TYPE_MUTATION,
+            serde_json::json!({
+                "issueId": issue_id,
+                "issueTypeId": type_id,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Applies the daemon-owned provenance label by exact name,
+    /// creating it (a fixed color; the name is configuration, never
+    /// content) when the repository does not have it yet.
+    async fn apply_label(
+        &self,
+        repo: &str,
+        issue_id: &str,
+        label_name: &str,
+    ) -> Result<(), BoardError> {
+        let Some((owner, name)) = split_repo(repo) else {
+            return Err(BoardError::IssueNotFound { number: 0 });
+        };
+        let data = self
+            .execute(
+                LABEL_ID_QUERY,
+                serde_json::json!({
+                    "owner": owner,
+                    "name": name,
+                    "labelName": label_name,
+                }),
+            )
+            .await?;
+        let response: LabelIdResponse = decode(data, "label resolution")?;
+        let label_id = response
+            .repository
+            .and_then(|repository| repository.label)
+            .and_then(|label| label.id);
+        let label_id = if let Some(label_id) = label_id {
+            label_id
+        } else {
+            // The label does not exist: create it (daemon-owned; a
+            // fixed color — the name is the only carrier of meaning).
+            let repo_data = self
+                .execute(
+                    REPOSITORY_ID_QUERY,
+                    serde_json::json!({ "owner": owner, "name": name }),
+                )
+                .await?;
+            let repo_response: RepositoryIdResponse = decode(repo_data, "repository id")?;
+            let repository_id = repo_response
+                .repository
+                .and_then(|repository| repository.id)
+                .ok_or(BoardError::IssueNotFound { number: 0 })?;
+            let data = self
+                .execute(
+                    CREATE_LABEL_MUTATION,
+                    serde_json::json!({
+                        "repositoryId": repository_id,
+                        "labelName": label_name,
+                    }),
+                )
+                .await?;
+            let response: CreateLabelResponse = decode(data, "label create")?;
+            response
+                .create_label
+                .and_then(|created| created.label)
+                .and_then(|label| label.id)
+                .ok_or(BoardError::ResponseShape {
+                    context: "label create",
+                    source: Box::new(decode_error("mutation returned no label id")),
+                })?
+        };
+        self.execute(
+            ADD_LABEL_MUTATION,
+            serde_json::json!({
+                "labelableId": issue_id,
+                "labelIds": [label_id],
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Fetches the verbatim title and body of one board issue through the
@@ -726,4 +1055,120 @@ struct IssueBody {
     // error path), never a silently-empty body — an issue with a genuinely
     // empty body still serializes `""` from GitHub.
     body: String,
+}
+
+/// The `FIND_ITEM_QUERY` response extended with the issue node id (the
+/// intake attach needs the content id the add-item mutation takes).
+#[derive(Debug, Deserialize)]
+struct IssueWithContentResponse {
+    repository: Option<IssueWithContentRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueWithContentRepo {
+    issue: Option<IssueWithContent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueWithContent {
+    id: String,
+    project_items: ProjectItemConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddItemResponse {
+    add_project_v2_item_by_id: Option<AddedItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddedItem {
+    item: Option<AddedItemRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddedItemRef {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypesResponse {
+    organization: Option<OrgIssueTypes>,
+    repository: Option<RepoIssueTypes>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrgIssueTypes {
+    issue_types: Option<IssueTypeConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoIssueTypes {
+    issue_types: Option<IssueTypeConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypeConnection {
+    nodes: Option<Vec<IssueTypeNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypeNode {
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelIdResponse {
+    repository: Option<LabelRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelRepo {
+    label: Option<LabelNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelNode {
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepositoryIdResponse {
+    repository: Option<RepositoryNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepositoryNode {
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateLabelResponse {
+    create_label: Option<CreatedLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatedLabel {
+    label: Option<LabelNode>,
+}
+
+/// Splits one `owner/name` repository slug; a malformed slug is a typed
+/// not-found, never a guessed owner or name.
+fn split_repo(repo: &str) -> Option<(&str, &str)> {
+    let (owner, name) = repo.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some((owner, name))
+}
+
+/// Builds a serde error carrying a static message (the typed
+/// `ResponseShape` path for shapeless GraphQL answers).
+fn decode_error(message: &'static str) -> serde_json::Error {
+    serde::de::Error::custom(message)
 }

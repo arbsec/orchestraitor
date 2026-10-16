@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use orchestraitor_board::cache::FieldNodeIds;
 use orchestraitor_board::{
-    BoardAuth, BoardClient, BoardError, BoardProjectConfig, NodeIdCacheFile, ProjectNodeIds,
+    BoardAuth, BoardClient, BoardError, BoardProjectConfig, IntakeFields, NodeIdCacheFile,
+    ProjectNodeIds,
 };
 use secrecy::SecretString;
 
@@ -822,6 +823,299 @@ async fn issue_body_missing_issue_is_typed() -> Result<(), BoardError> {
     assert!(
         matches!(error, BoardError::IssueNotFound { number: 999_999 }),
         "typed not-found: {error:?}"
+    );
+    Ok(())
+}
+
+// --- §9.52(a) intake attach (epic #624, leaf #664) ------------------------
+
+const RESOLVE_FIELDS_WITH_PRIORITY: &str =
+    include_str!("fixtures/resolve-fields-with-priority.json");
+const FIND_ITEM_UNATTACHED: &str = include_str!("fixtures/find-item-unattached.json");
+
+/// AC 1 (§9.52(a)): a mechanical-only attach round-trips: add-to-project,
+/// verified Status write, verified Priority write, native issue-type
+/// write, provenance label — and reports `true` (newly added).
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // declarative fixture data, not logic
+async fn intake_attach_round_trips_the_mechanical_field_set() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS_WITH_PRIORITY),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(FIND_ITEM_UNATTACHED),
+        },
+        Rule {
+            needle: "addProjectV2ItemById",
+            response: RuleResponse::Json(
+                r#"{"data":{"addProjectV2ItemById":{"item":{"id":"PVTI_NEW_700"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_NEW_700"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "issueTypes(first",
+            response: RuleResponse::Json(
+                r#"{"data":{"organization":{"issueTypes":{"nodes":[{"id":"IT_fixture_bug","name":"Bug"}]}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateIssueIssueType",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateIssueIssueType":{"issue":{"id":"I_fixture_700"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "label(name",
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"label":{"id":"L_fixture_intake_human"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "addLabelsToLabelable",
+            response: RuleResponse::Json(
+                r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"Issue"}}}}"#,
+            ),
+        },
+        // The Priority read-back rule must precede the generic
+        // Status read-back rule (first-needle matching).
+        Rule {
+            needle: "\"name\":\"Priority\"",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"P1"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "fieldValueByName",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"Triage"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let attached = client
+        .attach_issue(
+            &config_fixture(),
+            "arbsec/orchestraitor",
+            700,
+            IntakeFields {
+                item_type: "Bug",
+                status: "Triage",
+                priority: "P1",
+                label: "intake:human",
+            },
+        )
+        .await?;
+    assert!(attached, "an unattached issue is newly added");
+
+    let recorded = server.recorded();
+    let body_of = |needle: &str| {
+        recorded
+            .iter()
+            .find(|(_headers, body)| body.contains(needle))
+            .map(|(_headers, body)| body.clone())
+    };
+    // Every write in the mechanical set must reach the server; a missing
+    // body is a test failure, typed (no expect/unwrap in test code).
+    let Some(add) = body_of("addProjectV2ItemById") else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["the add-to-project write never reached the server".to_string()],
+        });
+    };
+    assert!(add.contains("PVT_fixture_project"));
+    assert!(add.contains("I_fixture_700"));
+    // The status write targets Triage.
+    let Some(status) = body_of("updateProjectV2ItemFieldValue") else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["the status write never reached the server".to_string()],
+        });
+    };
+    assert!(status.contains("OPT_fixture_triage"));
+    // The issue-type write resolves the Bug type id.
+    let Some(issue_type) = body_of("updateIssueIssueType") else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["the issue-type write never reached the server".to_string()],
+        });
+    };
+    assert!(issue_type.contains("IT_fixture_bug"));
+    // The label write carries the resolved label id.
+    let Some(label) = body_of("addLabelsToLabelable") else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["the label write never reached the server".to_string()],
+        });
+    };
+    assert!(label.contains("L_fixture_intake_human"));
+    Ok(())
+}
+
+/// AC 2 (§9.26.3): an ALREADY-attached issue takes the update path — no
+/// add-to-project mutation is issued, and the method reports `false`.
+#[tokio::test]
+async fn intake_attach_is_idempotent_for_an_attached_issue() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS_WITH_PRIORITY),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(FIND_ITEM),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_F_42"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "issueTypes(first",
+            response: RuleResponse::Json(
+                r#"{"data":{"organization":{"issueTypes":{"nodes":[{"id":"IT_fixture_bug","name":"Bug"}]}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateIssueIssueType",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateIssueIssueType":{"issue":{"id":"I_fixture_42"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "label(name",
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"label":{"id":"L_fixture_intake_human"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "addLabelsToLabelable",
+            response: RuleResponse::Json(
+                r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"Issue"}}}}"#,
+            ),
+        },
+        // The Priority read-back rule must precede the generic
+        // Status read-back rule (first-needle matching).
+        Rule {
+            needle: "\"name\":\"Priority\"",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"P1"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "fieldValueByName",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"Triage"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let attached = client
+        .attach_issue(
+            &config_fixture(),
+            "arbsec/orchestraitor",
+            42,
+            IntakeFields {
+                item_type: "Bug",
+                status: "Triage",
+                priority: "P1",
+                label: "intake:human",
+            },
+        )
+        .await?;
+    assert!(
+        !attached,
+        "an already-attached issue takes the idempotent update path"
+    );
+    assert!(
+        !server
+            .recorded()
+            .iter()
+            .any(|(_headers, body)| body.contains("addProjectV2ItemById")),
+        "no duplicate project item is created (§9.26.3)"
+    );
+    Ok(())
+}
+
+/// A read-back MISMATCH is a typed verification failure — the field
+/// write never reports success unverified.
+#[tokio::test]
+async fn intake_attach_read_back_mismatch_is_typed() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS_WITH_PRIORITY),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(FIND_ITEM_UNATTACHED),
+        },
+        Rule {
+            needle: "addProjectV2ItemById",
+            response: RuleResponse::Json(
+                r#"{"data":{"addProjectV2ItemById":{"item":{"id":"PVTI_NEW_700"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_NEW_700"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "fieldValueByName",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"Ready"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let result = client
+        .attach_issue(
+            &config_fixture(),
+            "arbsec/orchestraitor",
+            700,
+            IntakeFields {
+                item_type: "Bug",
+                status: "Triage",
+                priority: "P1",
+                label: "intake:human",
+            },
+        )
+        .await;
+    let Err(error) = result else {
+        return Err(BoardError::GraphQl {
+            messages: vec!["the Triage read-back mismatch must fail".to_string()],
+        });
+    };
+    assert!(
+        matches!(error, BoardError::StatusVerification { ref field, .. } if field == "Status"),
+        "the verification error names the field, typed: {error}"
     );
     Ok(())
 }

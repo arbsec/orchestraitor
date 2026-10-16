@@ -29,6 +29,7 @@
 //! §9.50); the sandbox boundary remains Arbitraitor's.
 
 pub mod ci_lane;
+pub mod intake;
 pub mod poller;
 pub mod queue;
 pub mod store;

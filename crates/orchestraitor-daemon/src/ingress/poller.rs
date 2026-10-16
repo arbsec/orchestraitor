@@ -179,8 +179,34 @@ struct RestEventItem {
     /// `PullRequestEvent`, ...).
     #[serde(rename = "type")]
     kind: String,
+    /// The acting principal (§9.50(c) launch fact; §9.52(a) author-class
+    /// derivation input). Absent on malformed items — the derived event
+    /// then carries no author and the intake attach fails closed.
+    #[serde(default)]
+    actor: Option<RestActor>,
     #[serde(default)]
     payload: Option<RestPayload>,
+}
+
+/// The event's actor: the launch-fact author identity.
+#[derive(Debug, serde::Deserialize)]
+struct RestActor {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// The author (issue/PR creator) when the payload carries one: for issue
+/// events the ACTOR is the author, but the payload's `user` is the
+/// authoritative author identity, so both are read and the payload wins
+/// when present.
+#[derive(Debug, serde::Deserialize)]
+struct RestUser {
+    #[serde(default)]
+    login: Option<String>,
+    /// The platform's user type (`"User"`, `"Bot"`, ...): the launch
+    /// fact the §9.52(a) bot classification reads.
+    #[serde(rename = "type", default)]
+    user_type: Option<String>,
 }
 
 /// The `payload` object; which fields carry the number depends on the
@@ -207,6 +233,9 @@ struct RestIssueRef {
     number: u64,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
+    /// The issue author (§9.52(a) launch fact).
+    #[serde(default)]
+    user: Option<RestUser>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -214,6 +243,9 @@ struct RestPullRef {
     number: u64,
     #[serde(default)]
     head: Option<RestPullHead>,
+    /// The PR author (§9.52(a) launch fact).
+    #[serde(default)]
+    user: Option<RestUser>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -657,6 +689,8 @@ impl EventPoller {
                 event_type: derived.event_type,
                 head_sha: derived.head_sha,
                 number: derived.number,
+                author_login: derived.author_login,
+                author_is_bot: derived.author_is_bot,
                 accepted_at_secs: now_secs,
             };
             match self.queue.push(event, now_secs) {
@@ -728,6 +762,11 @@ struct DerivedItem {
     head_sha: Option<String>,
     /// The issue or PR number the event is about.
     number: u64,
+    /// The author login (§9.50(c) launch fact; `None` = the platform
+    /// supplied none and the intake attach fails closed).
+    author_login: Option<String>,
+    /// Whether the platform declared the author a bot.
+    author_is_bot: Option<bool>,
 }
 
 /// Derives [`DerivedItem`] (None when the item would be filtered or
@@ -769,6 +808,27 @@ fn item_derived(item: &RestEventItem, target: &PollTarget) -> Option<DerivedItem
             .as_ref()
             .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
     }?;
+    // Author launch facts (§9.50(c), §9.52(a)): the payload's author
+    // (`user`) is authoritative when present; the event's `actor` is the
+    // fallback. The bot fact rides whichever identity won — reading the
+    // actor's bot flag for a payload author would mix two principals.
+    let (author_login, author_is_bot) = if is_pull {
+        author_facts(
+            item.payload
+                .as_ref()
+                .and_then(|payload| payload.pull_request.as_ref())
+                .and_then(|pr| pr.user.as_ref()),
+            item.actor.as_ref(),
+        )
+    } else {
+        author_facts(
+            item.payload
+                .as_ref()
+                .and_then(|payload| payload.issue.as_ref())
+                .and_then(|issue| issue.user.as_ref()),
+            item.actor.as_ref(),
+        )
+    };
     Some(DerivedItem {
         delivery_key: IngressStore::delivery_key(
             &delivery_id,
@@ -779,7 +839,35 @@ fn item_derived(item: &RestEventItem, target: &PollTarget) -> Option<DerivedItem
         event_type,
         head_sha,
         number,
+        author_login,
+        author_is_bot,
     })
+}
+
+/// Resolves the (`login`, `is_bot`) author launch facts: the payload
+/// author wins over the event actor; a `Bot` user type is the platform's
+/// bot declaration. `None` login = no usable launch fact (fail closed).
+fn author_facts(
+    payload_user: Option<&RestUser>,
+    actor: Option<&RestActor>,
+) -> (Option<String>, Option<bool>) {
+    if let Some(user) = payload_user {
+        let login = user.login.clone().filter(|login| !login.is_empty());
+        let is_bot = user
+            .user_type
+            .as_deref()
+            .map(|user_type| user_type == "Bot");
+        return (login, is_bot);
+    }
+    if let Some(actor) = actor {
+        let login = actor.login.clone().filter(|login| !login.is_empty());
+        if login.is_some() {
+            // The actor shape carries no user-type; the bot fact is
+            // unknown, not false — the attach classifies conservatively.
+            return (login, None);
+        }
+    }
+    (None, None)
 }
 
 /// Extracts the delivery identifier from the REST item's `id` field

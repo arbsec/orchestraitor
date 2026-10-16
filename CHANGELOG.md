@@ -13,6 +13,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Added
 
+- **`orcd watch` bug-report intake** (spec `10-orchestrator.md` §9.52(a)):
+  an opt-in attach lane (`[watch.intake].enabled`, default off, requires
+  the event ingress) that attaches external bug reports to the configured
+  board automatically with mechanical fields only — `Type=Bug`,
+  `Status=Triage`, provisional `P1`, `Target` unset, and a daemon-owned
+  author-class provenance label (`intake:human` / `intake:bot` /
+  `intake:agent`). Field values derive from launch facts only (author
+  identity + event type); issue content is never read. Items land
+  unschedulable (Target unset keeps them out of the ready queue) until
+  the triage classification pass promotes them — intake attaches,
+  it never schedules. Attachment is idempotent per source issue, and an
+  author in the `service_identities` set never attaches (the loop's own
+  reports keep their internal paths). Documented in
+  [docs/cli/orcd-watch.md](docs/cli/orcd-watch.md).
 - **`pr.status` MCP decision tool** — the §9.48 PR-status aggregation engine
   is now SHARED between `orc pr status` and the daemon's MCP gateway
   ("one engine, three surfaces"; spec `10-orchestrator.md` §9.39, §9.48):

@@ -286,7 +286,10 @@ async fn watch_cycle() -> Result<ExitCode> {
         .into_diagnostic()
         .wrap_err("watch event store open failed")?;
     let poller = ReconcilePoller::new(
-        orchestraitor_daemon::BoardSnapshotPoller::new(Arc::clone(&client), board_config_template),
+        orchestraitor_daemon::BoardSnapshotPoller::new(
+            Arc::clone(&client),
+            board_config_template.clone(),
+        ),
         Arc::new(std::sync::Mutex::new(events)),
         Arc::new(JournallessSink),
     );
@@ -303,6 +306,15 @@ async fn watch_cycle() -> Result<ExitCode> {
     for warning in orchestraitor_daemon::ingress_kickoff_warnings(
         watch_config.ingress.enabled,
         watch_config.kickoff.external_event,
+    ) {
+        tracing::warn!("{warning}");
+    }
+    // The §9.52(a) intake attach lane (leaf #664): enabled only with an
+    // enabled ingress (the lane consumes the ingress queue); the mismatch
+    // is a startup warning, never a silent misconfiguration.
+    for warning in orchestraitor_daemon::intake_ingress_warnings(
+        watch_config.intake.enabled,
+        watch_config.ingress.enabled,
     ) {
         tracing::warn!("{warning}");
     }
@@ -344,9 +356,32 @@ async fn watch_cycle() -> Result<ExitCode> {
             ci_lane_poll_loop(ci_lane, ci_targets, ci_queue, ci_shutdown).await;
         });
         let poll_shutdown = signal_rx.clone();
+        let poll_queue = Arc::clone(&ingress_queue);
         tokio::spawn(async move {
-            ingress_poll_loop(ingress_poller, targets, ingress_queue, poll_shutdown).await;
+            ingress_poll_loop(ingress_poller, targets, poll_queue, poll_shutdown).await;
         });
+        // The §9.52(a) intake attach lane (leaf #664): drains the SAME
+        // bounded queue's `issues-opened` events and attaches external
+        // bug reports to the board at Triage with mechanical fields only
+        // — never scheduling. The lane shares the queue with the
+        // kick-off source: every drained event still reaches the
+        // kick-off evaluation (the lane ATTACHES; the kick-off gate
+        // decides whether a session runs).
+        if watch_config.intake.enabled {
+            let intake_board = orchestraitor_daemon::intake_module::BoardIntake::new(
+                Arc::clone(&client),
+                board_config_template.clone(),
+            );
+            let attacher = orchestraitor_daemon::intake_module::IntakeAttacher::new(
+                Arc::new(intake_board),
+                watch_config.intake.service_identities.clone(),
+            );
+            let intake_queue = Arc::clone(&ingress_queue);
+            let intake_shutdown = signal_rx.clone();
+            tokio::spawn(async move {
+                intake_attach_loop(attacher, intake_queue, intake_shutdown).await;
+            });
+        }
         Some(Arc::new(source))
     } else {
         None
@@ -734,6 +769,53 @@ fn primary_and_shards(
     shards.sort();
     files.extend(shards);
     Ok(files)
+}
+
+/// The §9.52(a) intake attach loop (leaf #664): drains the shared
+/// bounded ingress queue's `issues-opened` events each cadence tick,
+/// classifies each author from LAUNCH FACTS ONLY (§9.50(c)), and
+/// attaches external bug reports to the board at `Status=Triage` with
+/// the mechanical field set (§9.52(a)) — never scheduling anything.
+/// Fail-closed: an event with no author launch fact attaches nothing,
+/// and a board-write failure retries on the next tick.
+async fn intake_attach_loop(
+    attacher: orchestraitor_daemon::intake_module::IntakeAttacher,
+    queue: std::sync::Arc<orchestraitor_daemon::IngressQueue>,
+    mut shutdown: tokio::sync::watch::Receiver<u64>,
+) {
+    loop {
+        // PEEK, not drain: the events stay pending for the kick-off
+        // source (the lane ATTACHES; the kick-off gate decides whether a
+        // session runs — one event accelerates both, consumed by each
+        // consumer independently).
+        let pending = queue.peek();
+        if !pending.is_empty() {
+            let outcome = attacher.process(&pending).await;
+            if outcome.attached > 0
+                || outcome.failed > 0
+                || outcome.missing_author > 0
+                || outcome.skipped > 0
+            {
+                tracing::info!(
+                    attached = outcome.attached,
+                    already_attached = outcome.already_attached,
+                    skipped = outcome.skipped,
+                    failed = outcome.failed,
+                    missing_author = outcome.missing_author,
+                    "orcd watch: intake attach tick processed ingress events"
+                );
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(
+                orchestraitor_daemon::DEFAULT_POLL_INTERVAL_SECS,
+            )) => {}
+            changed = shutdown.changed() => {
+                let _ = changed;
+                return;
+            }
+        }
+    }
 }
 
 /// The §9.50(b) ingress poll loop (issue #504): one conditional-request
