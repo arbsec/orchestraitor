@@ -108,9 +108,6 @@ pub const DELIVERY_REPO_INVALID: &str = "delivery-repo-invalid";
 /// Typed reason: the configured `orc` binary does not exist (startup-shape
 /// validation, review gen-3).
 pub const DELIVERY_ORC_BIN_MISSING: &str = "delivery-orc-bin-missing";
-/// Typed reason: an existing open PR for the delivery branch was reused
-/// instead of creating a duplicate (idempotent retry, review gen-3).
-pub const DELIVERY_PR_EXISTS: &str = "delivery-pr-exists";
 
 /// Bounded wait for one `orc` child invocation (landing or PR): a hung
 /// child is killed and reported typed — never blocks the run (review
@@ -284,12 +281,47 @@ impl PushBranchDeliverySink {
         .map_err(|_| DELIVERY_PR_OPEN_FAILED)?
         .map_err(|_| DELIVERY_PR_OPEN_FAILED)?;
         if !pr_output.status.success() {
-            // Idempotent retry (review gen-3 minor): an existing open PR
-            // for this delivery branch is the previous delivery's success —
-            // typed `delivery-pr-exists`, never a duplicate-PR failure.
+            // Idempotent retry (review gen-2/3 findings): an existing open
+            // PR for this delivery branch IS the previous delivery's
+            // success — return its reference (a rerun that already landed
+            // its commit must not fail the run). The reference is fetched
+            // read-only via `gh pr view`; a lookup failure falls back to a
+            // branch-identifying reference so the outcome is still
+            // PrOpened-shaped and never a duplicate-PR failure.
             let stderr = String::from_utf8_lossy(&pr_output.stderr);
             if stderr.contains("already exists") {
-                return Err(DELIVERY_PR_EXISTS);
+                let mut lookup = tokio::process::Command::new(&self.orc_bin);
+                lookup.current_dir(worktree).args([
+                    "github",
+                    "gh-env",
+                    "--",
+                    "gh",
+                    "pr",
+                    "view",
+                    remote_branch,
+                    "--repo",
+                    &self.repo,
+                    "--json",
+                    "url",
+                    "--jq",
+                    ".url",
+                ]);
+                lookup.kill_on_drop(true);
+                let lookup_output = tokio::time::timeout(
+                    std::time::Duration::from_secs(ORC_CHILD_TIMEOUT_SECS),
+                    lookup.output(),
+                )
+                .await
+                .map_err(|_| DELIVERY_PR_OPEN_FAILED)?
+                .map_err(|_| DELIVERY_PR_OPEN_FAILED)?;
+                let url = String::from_utf8_lossy(&lookup_output.stdout)
+                    .trim()
+                    .to_string();
+                return Ok(if url.is_empty() {
+                    format!("pr-existing:{remote_branch}")
+                } else {
+                    url
+                });
             }
             return Err(DELIVERY_PR_OPEN_FAILED);
         }
@@ -377,13 +409,19 @@ async fn commit_worktree_state(
     }
     // SCOPED STAGING: the run's recorded write paths only. A write path
     // that no longer resolves (deleted then re-created, etc.) leaves the
-    // `git add` exit status to decide.
-    let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
-    add_args.extend(request.untrusted_writes.iter().cloned());
-    let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
-    let add = git_async(worktree, &add_args).await?;
-    if !add.status.success() {
-        return Err(DELIVERY_BRANCH_STATE_FAILED);
+    // `git add` exit status to decide. An EMPTY write list skips staging
+    // entirely — `git add --` with no pathspec is a git error and would
+    // misreport a no-write completion as `branch-state-failed` (review
+    // gen-2 minor); the commit then reports "nothing to commit" and the
+    // landing reports the correct `delivery-empty-diff` outcome.
+    if !request.untrusted_writes.is_empty() {
+        let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+        add_args.extend(request.untrusted_writes.iter().cloned());
+        let add_args: Vec<&str> = add_args.iter().map(String::as_str).collect();
+        let add = git_async(worktree, &add_args).await?;
+        if !add.status.success() {
+            return Err(DELIVERY_BRANCH_STATE_FAILED);
+        }
     }
     // Commit with the pinned identity. "nothing to commit" is the empty
     // diff — the landing reports the typed empty-diff outcome.
