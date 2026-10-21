@@ -175,7 +175,7 @@ jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
 schemars = { version = "1.0", features = ["uuid1", "url2"] }
 
 # Provider transport (tech-stack.md §1, §4.4)
-genai = "0.6.5"
+genai = "0.7.0"
 lsp-types = "0.97.0"
 
 # Filesystem (tech-stack.md §1)
