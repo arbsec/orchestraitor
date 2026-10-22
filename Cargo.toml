@@ -136,7 +136,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Concurrency primitives (short critical sections; guard-returning locks
 # remove poisoning boilerplate at call sites)
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 
 # Git (tech-stack.md §1, §6)
 gix = { version = "0.89.0", default-features = false, features = ["sha1", "worktree-mutation", "status", "attributes", "excludes", "mailmap", "blob-diff"] }
