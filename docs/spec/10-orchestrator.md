@@ -216,6 +216,9 @@ retry policy                         # per §9.26
 completion evidence                  # what proves the task is done
 ```
 
+Values MUST be non-blank: an empty or whitespace-only entry does not satisfy the
+field it appears in.
+
 Prefer thin vertical slices. Preserve traceability from spec requirement to task, implementation, review findings, verification evidence, and final changes.
 
 The user MUST be able to review and edit the generated backlog before autonomous execution begins. `orc backlog show` displays the DAG; `orc backlog approve` starts the autonomous run.
