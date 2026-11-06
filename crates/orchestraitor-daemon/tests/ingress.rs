@@ -477,6 +477,8 @@ async fn flood_drops_surplus_records_degraded_and_recovers() {
         event_type: "issue-commented".to_string(),
         head_sha: None,
         number: n,
+        author_login: Some("somehuman".to_string()),
+        author_is_bot: Some(false),
         accepted_at_secs: n,
     };
     // Fill to capacity, then flood.
@@ -935,4 +937,375 @@ async fn untracked_actions_are_filtered() {
         "untracked actions produce nothing"
     );
     assert!(queue.take().is_empty());
+}
+
+// --- §9.52(a) intake launch facts (leaf #664) -----------------------------
+
+/// AC 1 (§9.52(a) launch facts): an `issues-opened` event carries the
+/// author launch facts through the queue — the payload author wins over
+/// the actor, and the platform's `Bot` user type rides the winning
+/// identity.
+#[tokio::test(flavor = "current_thread")]
+async fn issue_events_carry_author_launch_facts() {
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([
+        {
+            "id": "201",
+            "type": "IssuesEvent",
+            "actor": { "login": "comment-actor" },
+            "payload": {
+                "action": "opened",
+                "issue": {
+                    "number": 700,
+                    "user": { "login": "the-author", "type": "User" }
+                }
+            }
+        },
+        {
+            "id": "202",
+            "type": "IssuesEvent",
+            "payload": {
+                "action": "opened",
+                "issue": {
+                    "number": 701,
+                    "user": { "login": "renovate[bot]", "type": "Bot" }
+                }
+            }
+        },
+        {
+            "id": "203",
+            "type": "IssuesEvent",
+            "actor": { "login": "actor-only" },
+            "payload": { "action": "opened", "issue": { "number": 702 } }
+        }
+    ])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, poller) = fixture_ingress();
+    let target = server.target("events", "events");
+    let baseline = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("baseline poll ok");
+    assert_eq!(baseline.accepted, 0, "the baseline enqueues nothing");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("poll round")
+        .remove(0)
+        .expect("poll ok");
+    assert_eq!(outcome.accepted, 3, "all three opened events enqueue");
+    let events = queue.take();
+    let by_number = |number: u64| {
+        events
+            .iter()
+            .find(|event| event.number == number)
+            .expect("the event is in the queue")
+    };
+    // The payload author wins over the actor.
+    let payload_author = by_number(700);
+    assert_eq!(
+        payload_author.author_login.as_deref(),
+        Some("the-author"),
+        "the payload author is the authoritative identity"
+    );
+    assert_eq!(payload_author.author_is_bot, Some(false));
+    // A bot-typed author carries the platform's bot declaration.
+    let bot_author = by_number(701);
+    assert_eq!(bot_author.author_login.as_deref(), Some("renovate[bot]"));
+    assert_eq!(bot_author.author_is_bot, Some(true));
+    // An actor-only event still carries the actor login (fallback), with
+    // the bot fact UNKNOWN — the attach classifies conservatively.
+    let actor_only = by_number(702);
+    assert_eq!(actor_only.author_login.as_deref(), Some("actor-only"));
+    assert_eq!(
+        actor_only.author_is_bot, None,
+        "the actor shape carries no user-type; the bot fact is unknown"
+    );
+}
+
+/// AC 3 (§21.4 posture): a payload with NO author shape yields an event
+/// with no launch facts — the intake attach fails closed on it, never
+/// guesses a class.
+#[tokio::test(flavor = "current_thread")]
+async fn shapeless_events_carry_no_author_facts() {
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([{
+        "id": "204",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 703 } }
+    }])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, poller) = fixture_ingress();
+    let target = server.target("events", "events");
+    let _ = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("baseline");
+    poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("delta")
+        .remove(0)
+        .expect("poll ok");
+    let events = queue.take();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].author_login.is_none());
+    assert!(events[0].author_is_bot.is_none());
+}
+
+/// §9.52(a) fan-out (gen-2 review fix): the poller mirrors every
+/// accepted `issues-opened` event into the DURABLE intake store — the
+/// kick-off source's consumption of the shared queue cannot steal an
+/// attach (the store still holds the event). A store-write failure is
+/// its own signal (see the failing-store test below), never a queue
+/// drop.
+#[tokio::test(flavor = "current_thread")]
+async fn poller_mirrors_issues_opened_into_the_intake_store() {
+    use orchestraitor_daemon::intake_module::{IntakeStore as _, SqliteIntakeStore};
+
+    let baseline_body = json!([{
+        "id": "100",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([
+        {
+            "id": "301",
+            "type": "IssuesEvent",
+            "payload": {
+                "action": "opened",
+                "issue": { "number": 720, "user": { "login": "somehuman", "type": "User" } }
+            }
+        },
+        {
+            "id": "302",
+            "type": "IssuesEvent",
+            "payload": { "action": "opened", "issue": { "number": 721 } }
+        }
+    ])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let intake_store =
+        Arc::new(SqliteIntakeStore::open(&temp.path().join("intake-events.db")).expect("store"));
+    let (queue, _store, poller) = {
+        let ingress_store = Arc::new(std::sync::Mutex::new(
+            IngressStore::open_in_memory().expect("in-memory store"),
+        ));
+        let queue = Arc::new(IngressQueue::new(8).expect("valid capacity"));
+        let poller = EventPoller::with_intake(
+            Arc::new(StaticAuth),
+            Arc::clone(&ingress_store),
+            Arc::clone(&queue),
+            Some(intake_store.clone()),
+        )
+        .expect("poller builds");
+        (queue, ingress_store, poller)
+    };
+    let target = server.target("events", "events");
+    let _ = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("baseline");
+    poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("delta")
+        .remove(0)
+        .expect("poll ok");
+
+    // The shared queue holds both events (kick-off surface unchanged)…
+    assert_eq!(queue.take().len(), 2);
+    // …and the DURABLE intake store independently holds both, launch
+    // facts included (the lane's own consumption surface).
+    let stored = intake_store.take(8).await.expect("take");
+    assert_eq!(stored.len(), 2, "both opened events mirrored durably");
+    assert!(
+        stored
+            .iter()
+            .all(|event| event.event_type == "issues-opened")
+    );
+    let with_author = stored
+        .iter()
+        .find(|event| event.number == 720)
+        .expect("the event is stored");
+    assert_eq!(with_author.author_login.as_deref(), Some("somehuman"));
+    // Delete-on-take: a second take is empty.
+    assert!(intake_store.take(8).await.expect("take").is_empty());
+}
+
+/// An intake store whose every `put` fails (a disk-full / corrupt-DB
+/// outage). `take` is never reached in this test.
+struct FailingIntakeStore;
+
+#[async_trait]
+impl orchestraitor_daemon::intake_module::IntakeStore for FailingIntakeStore {
+    async fn put(
+        &self,
+        _event: &orchestraitor_daemon::ingress::store::IngressEvent,
+    ) -> Result<(), String> {
+        Err("no space left on device".to_string())
+    }
+
+    async fn take(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<orchestraitor_daemon::ingress::store::IngressEvent>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// A failed intake-store mirror is reported as `intake_mirror_failed`,
+/// NEVER as a queue drop: an intake-store outage must not surface as a
+/// phantom "queue flooded" (§7.3 `dropped` feeds that log line). The
+/// kick-off path stays intact — the event is still on the shared queue.
+#[tokio::test(flavor = "current_thread")]
+async fn poller_reports_a_failed_intake_mirror_separately_from_queue_drops() {
+    let baseline_body = json!([{
+        "id": "500",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([{
+        "id": "701",
+        "type": "IssuesEvent",
+        "payload": {
+            "action": "opened",
+            "issue": { "number": 740, "user": { "login": "somehuman", "type": "User" } }
+        }
+    }])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, poller) = {
+        let ingress_store = Arc::new(std::sync::Mutex::new(
+            IngressStore::open_in_memory().expect("in-memory store"),
+        ));
+        let queue = Arc::new(IngressQueue::new(8).expect("valid capacity"));
+        let intake_store: Arc<dyn orchestraitor_daemon::intake_module::IntakeStore> =
+            Arc::new(FailingIntakeStore);
+        let poller = EventPoller::with_intake(
+            Arc::new(StaticAuth),
+            Arc::clone(&ingress_store),
+            Arc::clone(&queue),
+            Some(intake_store),
+        )
+        .expect("poller builds");
+        (queue, ingress_store, poller)
+    };
+    let target = server.target("events", "events");
+    let _ = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("baseline");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("delta")
+        .remove(0)
+        .expect("poll ok");
+
+    // The failure is its own signal…
+    assert_eq!(
+        outcome.intake_mirror_failed, 1,
+        "a failed intake-store mirror is counted on its own surface"
+    );
+    // …and NOT a queue drop (the forbidden effect: a phantom flood).
+    assert_eq!(
+        outcome.dropped, 0,
+        "an intake-store outage is never reported as a queue flood"
+    );
+    // The kick-off path is intact: the event is still on the shared queue.
+    assert_eq!(queue.take().len(), 1);
 }
