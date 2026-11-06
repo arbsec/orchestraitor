@@ -1,0 +1,43 @@
+{
+  "data": {
+    "node": {
+      "fields": {
+        "nodes": [
+          {},
+          {
+            "id": "PVTSSF_fixture_status",
+            "name": "Status",
+            "options": [
+              { "id": "OPT_fixture_triage", "name": "Triage" },
+              { "id": "OPT_fixture_backlog", "name": "Backlog" },
+              { "id": "OPT_fixture_ready", "name": "Ready" },
+              { "id": "OPT_fixture_in_progress", "name": "In Progress" },
+              { "id": "OPT_fixture_in_review", "name": "In Review" },
+              { "id": "OPT_fixture_done", "name": "Done" }
+            ]
+          },
+          {
+            "id": "PVTSSF_fixture_target",
+            "name": "Target",
+            "options": [
+              { "id": "OPT_fixture_mvp", "name": "MVP" },
+              { "id": "OPT_fixture_next", "name": "Next" },
+              { "id": "OPT_fixture_later", "name": "Later" },
+              { "id": "OPT_fixture_icebox", "name": "Icebox" }
+            ]
+          },
+          {
+            "id": "PVTSSF_fixture_priority",
+            "name": "Priority",
+            "options": [
+              { "id": "OPT_fixture_p0", "name": "P0" },
+              { "id": "OPT_fixture_p1", "name": "P1" },
+              { "id": "OPT_fixture_p2", "name": "P2" },
+              { "id": "OPT_fixture_p3", "name": "P3" }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
