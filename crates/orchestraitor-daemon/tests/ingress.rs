@@ -1108,8 +1108,9 @@ async fn shapeless_events_carry_no_author_facts() {
 /// §9.52(a) fan-out (gen-2 review fix): the poller mirrors every
 /// accepted `issues-opened` event into the DURABLE intake store — the
 /// kick-off source's consumption of the shared queue cannot steal an
-/// attach (the store still holds the event), and a store-write failure
-/// counts as a drop rather than a silent miss.
+/// attach (the store still holds the event). A store-write failure is
+/// its own signal (see the failing-store test below), never a queue
+/// drop.
 #[tokio::test(flavor = "current_thread")]
 async fn poller_mirrors_issues_opened_into_the_intake_store() {
     use orchestraitor_daemon::intake_module::{IntakeStore as _, SqliteIntakeStore};
@@ -1203,4 +1204,108 @@ async fn poller_mirrors_issues_opened_into_the_intake_store() {
     assert_eq!(with_author.author_login.as_deref(), Some("somehuman"));
     // Delete-on-take: a second take is empty.
     assert!(intake_store.take(8).await.expect("take").is_empty());
+}
+
+/// An intake store whose every `put` fails (a disk-full / corrupt-DB
+/// outage). `take` is never reached in this test.
+struct FailingIntakeStore;
+
+#[async_trait]
+impl orchestraitor_daemon::intake_module::IntakeStore for FailingIntakeStore {
+    async fn put(
+        &self,
+        _event: &orchestraitor_daemon::ingress::store::IngressEvent,
+    ) -> Result<(), String> {
+        Err("no space left on device".to_string())
+    }
+
+    async fn take(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<orchestraitor_daemon::ingress::store::IngressEvent>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// A failed intake-store mirror is reported as `intake_mirror_failed`,
+/// NEVER as a queue drop: an intake-store outage must not surface as a
+/// phantom "queue flooded" (§7.3 `dropped` feeds that log line). The
+/// kick-off path stays intact — the event is still on the shared queue.
+#[tokio::test(flavor = "current_thread")]
+async fn poller_reports_a_failed_intake_mirror_separately_from_queue_drops() {
+    let baseline_body = json!([{
+        "id": "500",
+        "type": "IssuesEvent",
+        "payload": { "action": "opened", "issue": { "number": 1 } }
+    }])
+    .to_string();
+    let body = json!([{
+        "id": "701",
+        "type": "IssuesEvent",
+        "payload": {
+            "action": "opened",
+            "issue": { "number": 740, "user": { "login": "somehuman", "type": "User" } }
+        }
+    }])
+    .to_string();
+    let server = FixtureServer::start(vec![
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body: baseline_body,
+            headers: vec![
+                ("ETag", "\"baseline\"".to_string()),
+                ("X-Poll-Interval", "60".to_string()),
+            ],
+        },
+        Rule {
+            path_needle: "arbsec/orchestraitor/events",
+            requires_etag: None,
+            status: 200,
+            body,
+            headers: vec![("X-Poll-Interval", "60".to_string())],
+        },
+    ])
+    .await;
+    let (queue, _store, poller) = {
+        let ingress_store = Arc::new(std::sync::Mutex::new(
+            IngressStore::open_in_memory().expect("in-memory store"),
+        ));
+        let queue = Arc::new(IngressQueue::new(8).expect("valid capacity"));
+        let intake_store: Arc<dyn orchestraitor_daemon::intake_module::IntakeStore> =
+            Arc::new(FailingIntakeStore);
+        let poller = EventPoller::with_intake(
+            Arc::new(StaticAuth),
+            Arc::clone(&ingress_store),
+            Arc::clone(&queue),
+            Some(intake_store),
+        )
+        .expect("poller builds");
+        (queue, ingress_store, poller)
+    };
+    let target = server.target("events", "events");
+    let _ = poller
+        .poll_all(std::slice::from_ref(&target), 1_000)
+        .await
+        .expect("baseline");
+    let outcome = poller
+        .poll_all(std::slice::from_ref(&target), 1_100)
+        .await
+        .expect("delta")
+        .remove(0)
+        .expect("poll ok");
+
+    // The failure is its own signal…
+    assert_eq!(
+        outcome.intake_mirror_failed, 1,
+        "a failed intake-store mirror is counted on its own surface"
+    );
+    // …and NOT a queue drop (the forbidden effect: a phantom flood).
+    assert_eq!(
+        outcome.dropped, 0,
+        "an intake-store outage is never reported as a queue flood"
+    );
+    // The kick-off path is intact: the event is still on the shared queue.
+    assert_eq!(queue.take().len(), 1);
 }

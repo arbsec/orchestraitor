@@ -12,8 +12,12 @@
 //! widening of the poll cadence beyond rate-limit feedback").
 //!
 //! Accepted events flow through the durable dedup table into the bounded
-//! queue; the §9.43 reconcile poll stays the completeness authority, so
-//! a missed or delayed event never loses work.
+//! queue; for that queue/kick-off path the §9.43 reconcile poll stays the
+//! completeness authority, so a missed or delayed event never loses work.
+//! The §9.52(a) intake mirror is NOT covered by that authority: a failed
+//! intake-store write loses the attach — the delivery key is already
+//! dedup-recorded, so the event never re-enters the poller — and the
+//! failure surfaces only as `PollOutcome::intake_mirror_failed`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,6 +116,13 @@ pub struct PollOutcome {
     pub duplicates: usize,
     /// How many were dropped (queue at capacity; `degraded` recorded).
     pub dropped: usize,
+    /// How many accepted `issues-opened` events could NOT be mirrored
+    /// into the §9.52(a) intake store (the durable store write failed).
+    /// Kept DISTINCT from `dropped`: an intake-store outage is not a
+    /// queue flood, and a mirror failure loses the attach (the delivery
+    /// key is already dedup-recorded, so the event never re-enters the
+    /// poller) until a later slice adds a completeness pass.
+    pub intake_mirror_failed: usize,
     /// The minimum wait before the NEXT poll of this endpoint (the
     /// honored `X-Poll-Interval`, widened ONLY by rate-limit feedback —
     /// never past the limit's reset).
@@ -427,6 +438,7 @@ impl EventPoller {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
@@ -641,10 +653,11 @@ impl EventPoller {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
-        let (accepted, duplicates, dropped) = self
+        let (accepted, duplicates, dropped, intake_mirror_failed) = self
             .process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)
             .await?;
         if let Some(max_id) = max_raw_id_this_poll {
@@ -659,22 +672,25 @@ impl EventPoller {
             accepted,
             duplicates,
             dropped,
+            intake_mirror_failed,
             poll_after_secs: poll_after,
         })
     }
 
     /// Processes one endpoint's event items through dedup and the bounded
-    /// queue; returns (accepted, duplicates, dropped) counts.
+    /// queue; returns (accepted, duplicates, dropped,
+    /// `intake_mirror_failed`) counts.
     async fn process_items(
         &self,
         items: &[RestEventItem],
         target: &PollTarget,
         now_secs: u64,
         last_seen_raw_id: Option<u64>,
-    ) -> Result<(usize, usize, usize), PollError> {
+    ) -> Result<(usize, usize, usize, usize), PollError> {
         let mut accepted = 0_usize;
         let mut duplicates = 0_usize;
         let mut dropped = 0_usize;
+        let mut intake_mirror_failed = 0_usize;
         for item in items {
             // The full derivation (filter, shape, action) is shared with
             // the pagination boundary via `item_derived` — one copy, so
@@ -721,13 +737,21 @@ impl EventPoller {
             };
             // The §9.52(a) intake fan-out (leaf #664): mirror every
             // accepted `issues-opened` event into the DURABLE intake
-            // store BEFORE the queue push. A store-write failure does
-            // NOT lose the event: the queue push happens regardless
-            // (the kick-off path is intact) and the drop is counted for
-            // the intake surface only — the durable store's own
-            // idempotency (INSERT OR IGNORE) means the lane never
-            // double-attaches, and the §9.43 reconcile poll stays the
-            // completeness authority for a missed attach.
+            // store BEFORE the queue push. The queue push happens
+            // regardless, so the kick-off path is intact either way.
+            //
+            // A store-write failure (disk full, corrupt DB) is NOT
+            // recovered: the delivery key was already dedup-recorded
+            // above, so the event never re-enters the poller and is
+            // never mirrored — the external report stays un-attached
+            // until a later slice adds a completeness pass that can
+            // enumerate repository issues. The §9.43 reconcile poll is
+            // NOT such a pass (it reads the board snapshot only, so it
+            // cannot rediscover an un-boarded issue), and the
+            // completeness-authority sentence in §9.52(h) covers
+            // third-party PRs (slice 3), not this lane. The failure
+            // therefore carries its own `intake_mirror_failed` signal,
+            // never the queue-flood `dropped` count.
             let intake_mirrored = if event.event_type == "issues-opened" {
                 match &self.intake_store {
                     Some(intake) => intake.put(&event).await.is_ok(),
@@ -737,7 +761,7 @@ impl EventPoller {
                 true
             };
             if !intake_mirrored {
-                dropped += 1;
+                intake_mirror_failed += 1;
             }
             match self.queue.push(event, now_secs) {
                 PushOutcome::Accepted => accepted += 1,
@@ -745,7 +769,7 @@ impl EventPoller {
                 PushOutcome::Dropped => dropped += 1,
             }
         }
-        Ok((accepted, duplicates, dropped))
+        Ok((accepted, duplicates, dropped, intake_mirror_failed))
     }
 
     /// The rate-limit wait (§9.43 feedback, §9.50(b): the cadence never

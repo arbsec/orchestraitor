@@ -783,13 +783,22 @@ fn primary_and_shards(
     Ok(files)
 }
 
-/// The §9.52(a) intake attach loop (leaf #664): drains the shared
-/// bounded ingress queue's `issues-opened` events each cadence tick,
-/// classifies each author from LAUNCH FACTS ONLY (§9.50(c)), and
-/// attaches external bug reports to the board at `Status=Triage` with
-/// the mechanical field set (§9.52(a)) — never scheduling anything.
+/// The §9.52(a) intake attach loop (leaf #664): consumes the lane's OWN
+/// durable intake store each cadence tick (the ingress poller mirrors
+/// accepted `issues-opened` events into it), classifies each author from
+/// LAUNCH FACTS ONLY (§9.50(c)), and attaches external bug reports to
+/// the board at `Status=Triage` with the mechanical field set
+/// (§9.52(a)) — never scheduling anything.
 /// Fail-closed: an event with no author launch fact attaches nothing,
 /// and a board-write failure retries on the next tick.
+///
+/// An event the poller could NOT mirror (its intake-store write failed)
+/// never reaches this loop: the delivery key is already dedup-recorded,
+/// so nothing re-queues it. No completeness pass covers this lane yet —
+/// the §9.43 reconcile poll reads the board snapshot only and cannot
+/// rediscover an un-boarded issue — so that report stays un-attached
+/// until a later slice adds repository-issue enumeration. The poller
+/// surfaces the loss as `intake_mirror_failed`.
 async fn intake_attach_loop(
     attacher: orchestraitor_daemon::intake_module::IntakeAttacher,
     store: std::sync::Arc<orchestraitor_daemon::intake_module::SqliteIntakeStore>,
@@ -894,6 +903,18 @@ async fn ingress_poll_loop(
                             dropped = poll_outcome.dropped,
                             "orcd watch: ingress queue flooded; surplus events \
                              dropped (degraded)"
+                        );
+                    }
+                    if poll_outcome.intake_mirror_failed > 0 {
+                        // The intake store refused the mirror: the delivery
+                        // key is already dedup-recorded, so this report is
+                        // never attached (no completeness pass covers the
+                        // lane yet). Its own signal — never a queue flood.
+                        tracing::warn!(
+                            endpoint = %target.key,
+                            intake_mirror_failed = poll_outcome.intake_mirror_failed,
+                            "orcd watch: intake store mirror failed; the external \
+                             report is not attached until a completeness pass exists"
                         );
                     }
                     wait_secs = wait_secs.max(poll_outcome.poll_after_secs);

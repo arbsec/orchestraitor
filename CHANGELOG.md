@@ -16,10 +16,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 - **`orcd watch` bug-report intake** (spec `10-orchestrator.md` §9.52(a)):
   an opt-in attach lane (`[watch.intake].enabled`, default off, requires
   the event ingress) that attaches external bug reports to the configured
-  board automatically with mechanical fields only — `Type=Bug`,
-  `Status=Triage`, provisional `P1`, `Target` unset, and a daemon-owned
-  author-class provenance label (`intake:human` / `intake:bot` /
-  `intake:agent`). Field values derive from launch facts only (author
+  board automatically with mechanical fields only — `Type=Bug` only when
+  the issue has no native type yet (an existing type such as `Feature` is
+  preserved, never downgraded), `Status=Triage`, provisional `P1`,
+  `Target` unset, and a daemon-owned author-class provenance label
+  (`intake:human` for human accounts, `intake:bot` for other automation).
+  Field values derive from launch facts only (author
   identity + event type); issue content is never read. Items land
   unschedulable (Target unset keeps them out of the ready queue) until
   the triage classification pass promotes them — intake attaches,

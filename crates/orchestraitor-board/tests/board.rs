@@ -832,6 +832,7 @@ async fn issue_body_missing_issue_is_typed() -> Result<(), BoardError> {
 const RESOLVE_FIELDS_WITH_PRIORITY: &str =
     include_str!("fixtures/resolve-fields-with-priority.json");
 const FIND_ITEM_UNATTACHED: &str = include_str!("fixtures/find-item-unattached.json");
+const FIND_ITEM_UNATTACHED_TYPED: &str = include_str!("fixtures/find-item-unattached-typed.json");
 
 /// AC 1 (§9.52(a)): a mechanical-only attach round-trips: add-to-project,
 /// verified Status write, verified Priority write, native issue-type
@@ -1074,6 +1075,123 @@ async fn intake_attach_is_idempotent_for_an_attached_issue() -> Result<(), Board
             .iter()
             .any(|(_headers, body)| body.contains("updateProjectV2ItemFieldValue")),
         "no Status/Priority overwrite on the already-attached path"
+    );
+    Ok(())
+}
+
+/// §9.52(a) "original type preserved": an UNATTACHED issue that already
+/// carries a human-set native type (`Feature`) is added to the board
+/// WITHOUT an `updateIssueIssueType` mutation — "new to this board" is
+/// no evidence that no type is set (the type is issue-global, not
+/// item-scoped). Asserts the forbidden effect: the mutation never
+/// reaches the server.
+#[tokio::test]
+async fn intake_attach_preserves_an_existing_native_issue_type() -> Result<(), BoardError> {
+    let server = ScriptServer::start(vec![
+        Rule {
+            needle: "projectV2(number",
+            response: RuleResponse::Json(RESOLVE_PROJECT),
+        },
+        Rule {
+            needle: "fields(first",
+            response: RuleResponse::Json(RESOLVE_FIELDS_WITH_PRIORITY),
+        },
+        Rule {
+            needle: "projectItems(first",
+            response: RuleResponse::Json(FIND_ITEM_UNATTACHED_TYPED),
+        },
+        Rule {
+            needle: "addProjectV2ItemById",
+            response: RuleResponse::Json(
+                r#"{"data":{"addProjectV2ItemById":{"item":{"id":"PVTI_NEW_705"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "updateProjectV2ItemFieldValue",
+            response: RuleResponse::Json(
+                r#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_NEW_705"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "label(name",
+            response: RuleResponse::Json(
+                r#"{"data":{"repository":{"label":{"id":"L_fixture_intake_human"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "addLabelsToLabelable",
+            response: RuleResponse::Json(
+                r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"Issue"}}}}"#,
+            ),
+        },
+        // The Priority read-back rule must precede the generic
+        // Status read-back rule (first-needle matching).
+        Rule {
+            needle: "\"name\":\"Priority\"",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"P1"}}}}"#,
+            ),
+        },
+        Rule {
+            needle: "fieldValueByName",
+            response: RuleResponse::Json(
+                r#"{"data":{"node":{"fieldValueByName":{"name":"Triage"}}}}"#,
+            ),
+        },
+    ])
+    .map_err(io_error)?;
+    let temp = tempfile::tempdir().map_err(io_error)?;
+    let client = client_on(&server, Some(temp.path().join("cache.json")))?;
+
+    let attached = client
+        .attach_issue(
+            &config_fixture(),
+            "arbsec/orchestraitor",
+            705,
+            IntakeFields {
+                item_type: "Bug",
+                status: "Triage",
+                priority: "P1",
+                label: "intake:human",
+            },
+        )
+        .await?;
+    assert!(attached, "the issue is newly added to the board");
+
+    let recorded = server.recorded();
+    // The forbidden effect: no type mutation (and no issue-type lookup)
+    // is issued for an issue whose native type is already set.
+    assert!(
+        !recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("updateIssueIssueType")),
+        "an existing native issue type must never be overwritten (§9.52(a))"
+    );
+    assert!(
+        !recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("issueTypes(first")),
+        "no issue-type resolution is needed when the type is already set"
+    );
+    // The positive control: the item is still added and still gets its
+    // item-scoped mechanical fields and provenance label.
+    assert!(
+        recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("addProjectV2ItemById")),
+        "the issue is attached even though its type is preserved"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("updateProjectV2ItemFieldValue")),
+        "the item-scoped mechanical fields are still written"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(_headers, body)| body.contains("addLabelsToLabelable")),
+        "the provenance label is still applied"
     );
     Ok(())
 }

@@ -469,6 +469,7 @@ impl CiLane {
                     accepted: 0,
                     duplicates: 0,
                     dropped: 0,
+                    intake_mirror_failed: 0,
                     poll_after_secs: poll_after,
                 },
                 snapshot,
@@ -573,6 +574,7 @@ impl CiLane {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
@@ -622,6 +624,7 @@ impl CiLane {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
@@ -681,6 +684,7 @@ impl CiLane {
             accepted,
             duplicates,
             dropped,
+            intake_mirror_failed: 0,
             poll_after_secs: 0,
         })
     }

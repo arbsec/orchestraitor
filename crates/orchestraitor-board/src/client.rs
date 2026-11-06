@@ -396,7 +396,8 @@ impl BoardClient {
     /// Attaches `issue_number` to the board with the §9.52(a) mechanical
     /// field set (epic #624, leaf #664): adds the issue to the project
     /// (idempotent — an already-attached issue is detected and NOT
-    /// duplicated), sets the Status, Priority, and native issue type, and
+    /// duplicated), ensures Status and Priority are set, repairs a
+    /// MISSING native issue type (an already-set type is preserved), and
     /// applies the daemon-owned author-class provenance label.
     ///
     /// Every argument is a LAUNCH FACT or a lane constant (§9.52(a)):
@@ -490,14 +491,20 @@ impl BoardClient {
         // the triage pass's alone; the attach lane's authority is to
         // make an intake item COMPLETE, never to downgrade it):
         //
-        // - NEWLY ADDED item: write Status, Priority, and the issue
-        //   type (the full mechanical set).
-        // - ALREADY-ATTACHED item: REPAIR only — a field that is
-        //   currently UNSET is written (a partial first attach left the
-        //   item without its mechanical fields; the retry must repair),
-        //   a field that is SET is left alone (the triage pass or a
-        //   human may have promoted it; overwriting would reverse a
-        //   promotion the lane has no authority over).
+        // - Status and Priority are ITEM fields. A NEWLY ADDED item gets
+        //   them written (the full mechanical set); an ALREADY-ATTACHED
+        //   item is REPAIRED only — a field that is currently UNSET is
+        //   written (a partial first attach left the item without its
+        //   mechanical fields; the retry must repair), a field that is
+        //   SET is left alone (the triage pass or a human may have
+        //   promoted it; overwriting would reverse a promotion the lane
+        //   has no authority over).
+        // - The native issue TYPE is issue-GLOBAL, not item-scoped, so
+        //   "new to this board" says nothing about whether a type is
+        //   already set. The type write is therefore repair-only on BOTH
+        //   paths: an existing native type (e.g. `Feature`) is never
+        //   downgraded to `Bug` (§9.52(a): the original type is
+        //   preserved; the triage pass owns any later change).
         let current_fields = if existing_item.is_some() {
             Some(self.current_single_selects(&item_id).await?)
         } else {
@@ -511,18 +518,16 @@ impl BoardClient {
             || current_fields
                 .as_ref()
                 .is_some_and(|fields| !fields.contains_key(&config.priority_field));
-        // The native issue type is NOT a project field: its current
-        // value rides the issue itself (`issueType`), read in the same
-        // lookup as the node id.
-        let needs_type = existing_item.is_none()
-            || issue
-                .issue_type
-                .as_ref()
-                .and_then(|issue_type| {
-                    let name = &issue_type.name;
-                    (!name.is_empty()).then_some(name.as_str())
-                })
-                .is_none();
+        // The native issue type rides the issue itself (`issueType`),
+        // read in the same lookup as the node id.
+        let needs_type = issue
+            .issue_type
+            .as_ref()
+            .and_then(|issue_type| {
+                let name = &issue_type.name;
+                (!name.is_empty()).then_some(name.as_str())
+            })
+            .is_none();
         if needs_status {
             // Verified write (the read-back round-trips before success).
             self.set_single_select(&ids, &item_id, &config.ready_field, fields.status)
