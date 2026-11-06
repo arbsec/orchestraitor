@@ -7,20 +7,8 @@ db-path = "~/.cargo/advisory-dbs"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 # RUSTSEC-2025-0141: bincode is unmaintained. Transitive via yara-x, which
-# enters the graph through arbitraitor-analysis at the pinned rev 982517f; same
+# enters the graph through arbitraitor-analysis at the pinned rev b352278; same
 # ignore arbitraitor itself carries at that revision.
-#
-# RUSTSEC-2026-0367/0368/0369/0429: zip advisories, all patched in zip 9.0.0,
-# and all in the extraction API (`ZipArchive::extract`,
-# `ZipStreamReader::extract`, or permission handling during extraction). The
-# vulnerable copy is zip 8.6.0, required by `arbitraitor-archive` at the pinned
-# arbsec/arbitraitor revision 982517f; Orchestraitor has no direct zip
-# dependency, so it cannot be bumped from this repository. The vulnerable path
-# is unreachable: arbitraitor-archive never calls the extraction API — it reads
-# entries through `ZipArchive::by_index`/`by_name` and copies bytes into a
-# caller-provided sink (crates/arbitraitor-archive/src/lib.rs:487-545), and
-# skips symlink entries when walking payloads
-# (crates/arbitraitor-archive/src/payload.rs:365-376).
 #
 # RUSTSEC-2026-0370/0371/0372: the zbus 5 wire-format crates (`zvariant`,
 # `zbus_names`, `zvariant_derive`) are unmaintained with no patched release —
@@ -33,10 +21,6 @@ yanked = "deny"
 # .github/workflows/security.yml.
 ignore = [
     "RUSTSEC-2025-0141",
-    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 transitively via arbitraitor-archive at pinned rev 982517f; patched in zip 9.0.0. Flaw is SUID/SGID/sticky bits preserved by ZipArchive::extract()/ZipStreamReader::extract(), which arbitraitor-archive never calls (reads via by_index/by_name). Drop when the pinned arbitraitor rev declares zip >= 9.0.0." },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 transitively via arbitraitor-archive at pinned rev 982517f; patched in zip 9.0.0. Flaw is symlink targets escaping the destination in ZipArchive::extract(), which arbitraitor-archive never calls (by_index/by_name reads only, symlink entries skipped). Drop when the pinned arbitraitor rev declares zip >= 9.0.0." },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 transitively via arbitraitor-archive at pinned rev 982517f; patched in zip 9.0.0. Flaw is Unix permissions applied through extracted symlinks by ZipStreamReader::extract()/ZipArchive::extract(), neither of which arbitraitor-archive calls. Drop when the pinned arbitraitor rev declares zip >= 9.0.0." },
-    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 transitively via arbitraitor-archive at pinned rev 982517f; patched in zip 9.0.0. Flaw is a process abort in ZipArchive::extract() on a symlink entry with a huge declared size, which arbitraitor-archive never calls (symlink entries are rejected before any read). Drop when the pinned arbitraitor rev declares zip >= 9.0.0." },
     { id = "RUSTSEC-2026-0370", reason = "zvariant 5.15.0 is unmaintained and merged into zbus 6; no patched release exists. Held at zbus 5 by secret-service 5.2.0 (latest) via zbus-secret-service-keyring-store 1.0.1 (latest), which backs secret://keyring/... resolution. Informational only. Drop when that keyring store supports zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.3.4 is unmaintained and merged into zbus 6; no patched release exists. Held at zbus 5 by secret-service 5.2.0 (latest) via zbus-secret-service-keyring-store 1.0.1 (latest), which backs secret://keyring/... resolution. Informational only. Drop when that keyring store supports zbus 6." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.x is unmaintained and merged into zbus 6; no patched release exists. Held at zbus 5 by secret-service 5.2.0 (latest) via zbus-secret-service-keyring-store 1.0.1 (latest), which backs secret://keyring/... resolution. Informational only. Drop when that keyring store supports zbus 6." },
