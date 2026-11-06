@@ -61,17 +61,22 @@ print_stderr = "deny"
 multiple_crate_versions = "allow"
 
 [workspace.dependencies]
-# Arbitraitor crates — pinned to commit 1b269e06 (2026-10-13 main HEAD).
-# Update weekly; CI "Arbitraitor bump" job catches API drift.
+# Arbitraitor crates — all eight pinned together to commit b352278
+# (2026-11-06 main HEAD), the single audited consumer surface required by
+# Arbitraitor ADR-0044: one revision, no independently drifting crates.
+# No CI job tracks this pin. Bumping is a manual step: edit every `rev` below
+# to the new commit, then run `cargo update -p arbitraitor-core` so
+# `Cargo.lock` records the new git source; the full gates above are the drift
+# check (an upstream public-API change surfaces as a compile error here).
 # When Arbitraitor publishes a semver tag, switch to tag = "v0.x.y".
-arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-model      = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-policy     = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-receipt    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-mcp        = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
-arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "982517f3e3a0a607d35ef2a717c170cd9368485b" }
+arbitraitor-core       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-model      = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-policy     = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-sandbox    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-exec       = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-receipt    = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-mcp        = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
+arbitraitor-plugin-api = { git = "https://github.com/arbsec/arbitraitor.git", rev = "b3522780253b5afc99ac0e5fdbad8f91aadc1dbb" }
 
 # Core async + serialization (tech-stack.md §1)
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net", "process", "io-util", "signal"] }
