@@ -158,6 +158,9 @@ fn is_known_key(key: &str) -> bool {
             key,
             "watch.ingress.enabled" | "watch.ingress.queue_capacity"
         )
+        // The §9.52(a) bug-report intake block (leaf #664,
+        // `[watch.intake]`).
+        || key == "watch.intake.enabled"
 }
 
 fn matches_agent_domain_routing_key(key: &str) -> bool {

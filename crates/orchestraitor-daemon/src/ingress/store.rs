@@ -42,6 +42,15 @@ pub struct IngressEvent {
     pub head_sha: Option<String>,
     /// Issue or PR number the event is about.
     pub number: u64,
+    /// The author login the platform attached to the event (§9.50(c)
+    /// launch fact; §9.52(a) author-class derivation input). `None` when
+    /// the platform supplied none — the intake attach fails closed on a
+    /// missing launch fact, never guesses a class.
+    pub author_login: Option<String>,
+    /// Whether the platform declared the author a bot (the `Bot` user
+    /// type on the event's actor): the second author-class launch fact.
+    /// `None` carries the same fail-closed meaning as `author_login`.
+    pub author_is_bot: Option<bool>,
     /// Unix seconds the poller accepted the event.
     pub accepted_at_secs: u64,
 }
