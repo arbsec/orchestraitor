@@ -216,8 +216,9 @@ retry policy                         # per §9.26
 completion evidence                  # what proves the task is done
 ```
 
-Values MUST be non-blank: an empty or whitespace-only entry does not satisfy the
-field it appears in.
+An empty or whitespace-only entry does not satisfy the fields validated here: stable ID, title and
+objective, spec requirement references, acceptance criteria, domain, required verification, required
+reviewer domains, retry policy, and completion evidence; the remaining fields are not blank-checked.
 
 Prefer thin vertical slices. Preserve traceability from spec requirement to task, implementation, review findings, verification evidence, and final changes.
 
