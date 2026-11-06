@@ -120,6 +120,14 @@ pub enum BoardError {
         /// Human-readable field name from the board config.
         name: String,
     },
+    /// The requested native issue type name resolved to no org or
+    /// repository issue type (the ready queue's leaf predicate reads the
+    /// type field — a silent skip would leave the item unclassifiable).
+    #[error("issue type `{name}` was not found on the organization or repository")]
+    IssueTypeNotFound {
+        /// Human-readable issue type name from the intake lane.
+        name: String,
+    },
     /// A required field option name was not resolved on the field.
     #[error("option `{option}` was not found on project field `{field}`")]
     OptionNotFound {

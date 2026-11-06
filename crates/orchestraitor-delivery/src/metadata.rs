@@ -147,6 +147,26 @@ pub enum CompletionEvidence {
     },
 }
 
+impl CompletionEvidence {
+    /// Validates that the evidence carries a non-blank payload (spec §9.33.2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataError::BlankCompletionEvidence`] when the payload is
+    /// empty or whitespace-only.
+    fn validate(&self, id: &str) -> Result<(), MetadataError> {
+        let payload = match self {
+            Self::Verification { name } => name,
+            Self::Report { path } => path,
+            Self::Note { text } => text,
+        };
+        if payload.trim().is_empty() {
+            return Err(MetadataError::BlankCompletionEvidence { id: id.to_string() });
+        }
+        Ok(())
+    }
+}
+
 /// Structural validation failure for [`TaskMetadata`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MetadataError {
@@ -192,9 +212,21 @@ pub enum MetadataError {
         /// Offending task.
         id: String,
     },
+    /// A required reviewer-domain entry is empty or whitespace.
+    #[error("task {id} must not list a blank reviewer domain")]
+    BlankReviewerDomain {
+        /// Offending task.
+        id: String,
+    },
     /// No completion evidence kinds; done-ness cannot be proven (§9.33.2).
     #[error("task {id} must name at least one completion-evidence kind")]
     NoCompletionEvidence {
+        /// Offending task.
+        id: String,
+    },
+    /// A completion-evidence payload is empty or whitespace, so it proves nothing.
+    #[error("task {id} must not carry blank completion evidence")]
+    BlankCompletionEvidence {
         /// Offending task.
         id: String,
     },
@@ -319,8 +351,18 @@ impl TaskMetadata {
         if self.required_reviewer_domains.is_empty() {
             return Err(MetadataError::NoReviewerDomains { id });
         }
+        if self
+            .required_reviewer_domains
+            .iter()
+            .any(|d| d.as_str().trim().is_empty())
+        {
+            return Err(MetadataError::BlankReviewerDomain { id });
+        }
         if self.completion_evidence.is_empty() {
             return Err(MetadataError::NoCompletionEvidence { id });
+        }
+        for evidence in &self.completion_evidence {
+            evidence.validate(&id)?;
         }
         if self.retry_policy.trim().is_empty() {
             return Err(MetadataError::EmptyRetryPolicy { id });
@@ -503,6 +545,28 @@ mod tests {
     }
 
     #[test]
+    fn blank_reviewer_domain_among_valid_ones_is_rejected() {
+        let mut task = sample();
+        task.required_reviewer_domains = vec![DomainId::new("backend"), DomainId::new("")];
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::BlankReviewerDomain { .. })
+        ));
+    }
+
+    #[test]
+    fn whitespace_reviewer_domain_is_rejected() {
+        let mut task = sample();
+        task.required_reviewer_domains = vec![DomainId::new("\u{2003}")];
+        assert_eq!(
+            task.validate(),
+            Err(MetadataError::BlankReviewerDomain {
+                id: "delivery-dag-toposort".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn missing_completion_evidence_is_rejected() {
         let mut task = sample();
         task.completion_evidence.clear();
@@ -510,6 +574,65 @@ mod tests {
             task.validate(),
             Err(MetadataError::NoCompletionEvidence { .. })
         ));
+    }
+
+    #[test]
+    fn blank_verification_evidence_name_is_rejected() {
+        let mut task = sample();
+        task.completion_evidence
+            .push(CompletionEvidence::Verification {
+                name: " ".to_string(),
+            });
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::BlankCompletionEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn blank_report_evidence_path_is_rejected() {
+        let mut task = sample();
+        task.completion_evidence.push(CompletionEvidence::Report {
+            path: String::new(),
+        });
+        assert!(matches!(
+            task.validate(),
+            Err(MetadataError::BlankCompletionEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn blank_note_evidence_text_is_rejected() {
+        let mut task = sample();
+        task.completion_evidence.push(CompletionEvidence::Note {
+            text: "\u{2003}".to_string(),
+        });
+        assert_eq!(
+            task.validate(),
+            Err(MetadataError::BlankCompletionEvidence {
+                id: "delivery-dag-toposort".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn valid_reviewer_domains_and_evidence_payloads_pass_validation() -> TestResult {
+        let mut task = sample();
+        task.required_reviewer_domains = vec![DomainId::new("backend"), DomainId::new("security")];
+        task.risk = RiskClass::Critical;
+        task.completion_evidence = vec![
+            CompletionEvidence::Verification {
+                name: "nextest-workspace".to_string(),
+            },
+            CompletionEvidence::Report {
+                path: "evidence/run.log".to_string(),
+            },
+            CompletionEvidence::Note {
+                text: "manual smoke recorded".to_string(),
+            },
+        ];
+        task.validate()?;
+        Ok(())
     }
 
     #[test]

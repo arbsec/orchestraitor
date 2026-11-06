@@ -68,6 +68,11 @@ pub const KICKOFF_CONFIG_KEY_PREFIX: &str = "watch.kickoff";
 /// event-ingress settings (issue #504).
 pub const INGRESS_CONFIG_KEY_PREFIX: &str = "watch.ingress";
 
+/// The §9.22 layered configuration key prefix carrying the §9.52(a)
+/// intake settings (epic #624, leaf #664). Aliased from the intake
+/// module so the config error paths and the lane agree on one name.
+pub use crate::ingress::intake::INTAKE_CONFIG_KEY_PREFIX;
+
 /// Operator-configurable §9.50 event-ingress settings (issue #504).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngressSettings {
@@ -93,6 +98,37 @@ impl IngressSettings {
     }
 }
 
+/// Operator-configurable §9.52(a) bug-report intake settings (epic #624,
+/// leaf #664). The attach lane rides the ingress: it is meaningful only
+/// when the ingress itself is enabled, and ships OFF for the same
+/// opt-in posture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntakeSettings {
+    /// Enable the intake attach lane (default OFF). With the lane
+    /// disabled nothing attaches and the daemon's behavior is
+    /// byte-identical to pre-intake builds.
+    pub enabled: bool,
+    /// The configured §9.41 service-identity slugs: an author in this
+    /// set is `intake:agent`-class and NEVER attaches (the loop's own
+    /// reports flow the internal paths). Configured through the top-level
+    /// `service_identities` key; the attach lane resolves it through the
+    /// same layered resolver.
+    pub service_identities: Vec<String>,
+}
+
+impl IntakeSettings {
+    /// The built-in default: the lane disabled; the documented default
+    /// service-identity slug (the same default the ready-queue script
+    /// applies).
+    #[must_use]
+    pub fn builtin_defaults() -> Self {
+        Self {
+            enabled: false,
+            service_identities: vec![String::from("arbsec-agent")],
+        }
+    }
+}
+
 /// The built-in defaults TOML data for the `[watch]` block (§9.22.1:
 /// built-in defaults ship as TOML data, never as compile-time constants
 /// in business logic). Layered under `ConfigLayer::BuiltInDefaults`, so
@@ -111,10 +147,13 @@ external_event = false
 [watch.ingress]
 enabled = false
 queue_capacity = 256
+
+[watch.intake]
+enabled = false
 ";
 
 /// Operator-configurable watch settings (spec §9.22 via §9.36).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchConfig {
     /// Seconds between poll ticks. Each tick is a full reconcile +
     /// supervise pass; the loop runner's supervision ticks and backoff
@@ -129,6 +168,11 @@ pub struct WatchConfig {
     /// runs when the operator enables it, feeding the bounded queue the
     /// external-event kick-off condition drains.
     pub ingress: IngressSettings,
+    /// The §9.52(a) bug-report intake settings (epic #624, leaf #664):
+    /// the attach lane runs when the operator enables it, attaching
+    /// external bug reports to the board at Triage with mechanical
+    /// fields only — never scheduling them.
+    pub intake: IntakeSettings,
 }
 
 impl WatchConfig {
@@ -162,6 +206,30 @@ impl WatchConfig {
         kickoff: orchestraitor_campaign::KickoffSettings,
         ingress: IngressSettings,
     ) -> Result<Self, DaemonError> {
+        Self::with_intake(
+            poll_interval_secs,
+            kickoff,
+            ingress,
+            IntakeSettings::builtin_defaults(),
+        )
+    }
+
+    /// Builds and validates the watch configuration with explicit
+    /// §9.50 event-ingress AND §9.52(a) intake settings (leaf #664).
+    /// The intake attach lane is meaningful only over an enabled
+    /// ingress; the mismatch is a startup warning, never a silent
+    /// misconfiguration (the same discipline as the ingress/kick-off
+    /// pair).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] naming the rejected value.
+    pub fn with_intake(
+        poll_interval_secs: u64,
+        kickoff: orchestraitor_campaign::KickoffSettings,
+        ingress: IngressSettings,
+        intake: IntakeSettings,
+    ) -> Result<Self, DaemonError> {
         if poll_interval_secs == 0 {
             return Err(DaemonError::WatchConfig(format!(
                 "{POLL_INTERVAL_CONFIG_KEY} must be at least 1 second (got 0)"
@@ -176,17 +244,19 @@ impl WatchConfig {
             poll_interval_secs,
             kickoff,
             ingress,
+            intake,
         })
     }
 
     /// The documented fixed default cadence (§9.36) with the built-in
-    /// default kick-off enables and ingress settings.
+    /// default kick-off, ingress, and intake settings.
     #[must_use]
-    pub const fn default_cadence() -> Self {
+    pub fn default_cadence() -> Self {
         Self {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             kickoff: orchestraitor_campaign::KickoffSettings::builtin_defaults(),
             ingress: IngressSettings::builtin_defaults(),
+            intake: IntakeSettings::builtin_defaults(),
         }
     }
 
@@ -211,18 +281,20 @@ impl WatchConfig {
                 DaemonError::WatchConfig(format!("{POLL_INTERVAL_CONFIG_KEY}: {error}"))
             })?;
         match configured {
-            Some(resolved_value) => Self::with_ingress(
+            Some(resolved_value) => Self::with_intake(
                 resolved_value.value,
                 Self::resolve_kickoff(resolver)?,
                 Self::resolve_ingress(resolver)?,
+                Self::resolve_intake(resolver)?,
             ),
             // Routed through the same constructor as the configured arm:
             // the zero-capacity rejection must hold whether or not the
             // cadence key is present (a gen-5 review finding).
-            None => Self::with_ingress(
+            None => Self::with_intake(
                 DEFAULT_POLL_INTERVAL_SECS,
                 Self::resolve_kickoff(resolver)?,
                 Self::resolve_ingress(resolver)?,
+                Self::resolve_intake(resolver)?,
             ),
         }
     }
@@ -290,6 +362,42 @@ impl WatchConfig {
         Ok(IngressSettings {
             enabled: block.enabled.unwrap_or(defaults.enabled),
             queue_capacity: block.queue_capacity.unwrap_or(defaults.queue_capacity),
+        })
+    }
+
+    /// Resolves the §9.52(a) intake settings (leaf #664) from the
+    /// layered `[watch.intake]` block and the top-level
+    /// `service_identities` key (§9.41 — the same set the ready queue's
+    /// assignee exclusion reads). Absent keys inherit the built-in
+    /// defaults (lane disabled; the documented default slug).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::WatchConfig`] when the layered config
+    /// cannot be resolved.
+    fn resolve_intake(
+        resolver: &orchestraitor_core::config::ConfigResolver,
+    ) -> Result<IntakeSettings, DaemonError> {
+        let merged = resolver.resolve_config().map_err(|error| {
+            DaemonError::WatchConfig(format!("{INTAKE_CONFIG_KEY_PREFIX}: {error}"))
+        })?;
+        let defaults = IntakeSettings::builtin_defaults();
+        let enabled = merged
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.intake.as_ref())
+            .and_then(|intake| intake.enabled)
+            .unwrap_or(defaults.enabled);
+        let service_identities = merged.service_identities.clone().unwrap_or_else(|| {
+            // The schema default (layers.rs ships the same list): an
+            // absent key keeps the documented default slug rather than an
+            // EMPTY set — an empty set would classify the loop's own
+            // identity as external and attach its reports.
+            defaults.service_identities.clone()
+        });
+        Ok(IntakeSettings {
+            enabled,
+            service_identities,
         })
     }
 }
@@ -691,6 +799,24 @@ pub fn ingress_kickoff_warnings(
             "orcd watch: watch.kickoff.external_event is true but \
              watch.ingress.enabled is false - the external-event condition \
              can never fire; enable the ingress or disarm external_event",
+        );
+    }
+    warnings
+}
+
+/// The §9.52(a) intake/ingress mismatch warnings (leaf #664): the attach
+/// lane consumes the ingress queue, so the pair must be consistent or one
+/// side is dead configuration. The same observable-warning discipline as
+/// `ingress_kickoff_warnings` (issues #504, #603).
+#[must_use]
+pub fn intake_ingress_warnings(intake_enabled: bool, ingress_enabled: bool) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if intake_enabled && !ingress_enabled {
+        warnings.push(
+            "orcd watch: watch.intake.enabled is true but \
+             watch.ingress.enabled is false - the intake attach lane has \
+             no event source and can never attach; enable the ingress or \
+             disable the intake",
         );
     }
     warnings

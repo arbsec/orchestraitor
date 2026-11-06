@@ -12,8 +12,12 @@
 //! widening of the poll cadence beyond rate-limit feedback").
 //!
 //! Accepted events flow through the durable dedup table into the bounded
-//! queue; the §9.43 reconcile poll stays the completeness authority, so
-//! a missed or delayed event never loses work.
+//! queue; for that queue/kick-off path the §9.43 reconcile poll stays the
+//! completeness authority, so a missed or delayed event never loses work.
+//! The §9.52(a) intake mirror is NOT covered by that authority: a failed
+//! intake-store write loses the attach — the delivery key is already
+//! dedup-recorded, so the event never re-enters the poller — and the
+//! failure surfaces only as `PollOutcome::intake_mirror_failed`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,6 +116,13 @@ pub struct PollOutcome {
     pub duplicates: usize,
     /// How many were dropped (queue at capacity; `degraded` recorded).
     pub dropped: usize,
+    /// How many accepted `issues-opened` events could NOT be mirrored
+    /// into the §9.52(a) intake store (the durable store write failed).
+    /// Kept DISTINCT from `dropped`: an intake-store outage is not a
+    /// queue flood, and a mirror failure loses the attach (the delivery
+    /// key is already dedup-recorded, so the event never re-enters the
+    /// poller) until a later slice adds a completeness pass.
+    pub intake_mirror_failed: usize,
     /// The minimum wait before the NEXT poll of this endpoint (the
     /// honored `X-Poll-Interval`, widened ONLY by rate-limit feedback —
     /// never past the limit's reset).
@@ -179,8 +190,34 @@ struct RestEventItem {
     /// `PullRequestEvent`, ...).
     #[serde(rename = "type")]
     kind: String,
+    /// The acting principal (§9.50(c) launch fact; §9.52(a) author-class
+    /// derivation input). Absent on malformed items — the derived event
+    /// then carries no author and the intake attach fails closed.
+    #[serde(default)]
+    actor: Option<RestActor>,
     #[serde(default)]
     payload: Option<RestPayload>,
+}
+
+/// The event's actor: the launch-fact author identity.
+#[derive(Debug, serde::Deserialize)]
+struct RestActor {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// The author (issue/PR creator) when the payload carries one: for issue
+/// events the ACTOR is the author, but the payload's `user` is the
+/// authoritative author identity, so both are read and the payload wins
+/// when present.
+#[derive(Debug, serde::Deserialize)]
+struct RestUser {
+    #[serde(default)]
+    login: Option<String>,
+    /// The platform's user type (`"User"`, `"Bot"`, ...): the launch
+    /// fact the §9.52(a) bot classification reads.
+    #[serde(rename = "type", default)]
+    user_type: Option<String>,
 }
 
 /// The `payload` object; which fields carry the number depends on the
@@ -207,6 +244,9 @@ struct RestIssueRef {
     number: u64,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
+    /// The issue author (§9.52(a) launch fact).
+    #[serde(default)]
+    user: Option<RestUser>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -214,6 +254,9 @@ struct RestPullRef {
     number: u64,
     #[serde(default)]
     head: Option<RestPullHead>,
+    /// The PR author (§9.52(a) launch fact).
+    #[serde(default)]
+    user: Option<RestUser>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -251,11 +294,18 @@ pub struct EventPoller {
     http: reqwest::Client,
     store: Arc<std::sync::Mutex<IngressStore>>,
     queue: Arc<IngressQueue>,
+    /// The §9.52(a) intake store (leaf #664): every accepted
+    /// `issues-opened` event is ALSO written here (durable), so the
+    /// intake attach lane consumes from its own durable surface — the
+    /// kick-off source's consumption of the shared queue can never
+    /// steal an attach, and a queue-surplus drop is not a lost attach.
+    /// `None` when the lane is disabled (no intake writes).
+    intake_store: Option<Arc<dyn crate::ingress::intake::IntakeStore>>,
 }
 
 impl EventPoller {
     /// Builds the poller over the given auth, ETag/dedup store, and
-    /// bounded queue.
+    /// bounded queue (no intake fan-out — the lane disabled).
     ///
     /// # Errors
     ///
@@ -265,6 +315,23 @@ impl EventPoller {
         auth: Arc<dyn BoardAuth>,
         store: Arc<std::sync::Mutex<IngressStore>>,
         queue: Arc<IngressQueue>,
+    ) -> Result<Self, DaemonError> {
+        Self::with_intake(auth, store, queue, None)
+    }
+
+    /// Builds the poller with an optional §9.52(a) intake fan-out
+    /// store. `Some(store)` mirrors every accepted `issues-opened`
+    /// event into the durable intake surface (leaf #664).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::IngressHttp`] when the HTTP client cannot
+    /// be constructed.
+    pub fn with_intake(
+        auth: Arc<dyn BoardAuth>,
+        store: Arc<std::sync::Mutex<IngressStore>>,
+        queue: Arc<IngressQueue>,
+        intake_store: Option<Arc<dyn crate::ingress::intake::IntakeStore>>,
     ) -> Result<Self, DaemonError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -276,6 +343,7 @@ impl EventPoller {
             http,
             store,
             queue,
+            intake_store,
         })
     }
 
@@ -370,6 +438,7 @@ impl EventPoller {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
@@ -584,11 +653,13 @@ impl EventPoller {
                 accepted: 0,
                 duplicates: 0,
                 dropped: 0,
+                intake_mirror_failed: 0,
                 poll_after_secs: poll_after,
             });
         }
-        let (accepted, duplicates, dropped) =
-            self.process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)?;
+        let (accepted, duplicates, dropped, intake_mirror_failed) = self
+            .process_items(&items, target, now_secs, max_raw_id_this_poll_before_update)
+            .await?;
         if let Some(max_id) = max_raw_id_this_poll {
             self.lock_store()
                 .map_err(|_| PollError::Failed)?
@@ -601,22 +672,25 @@ impl EventPoller {
             accepted,
             duplicates,
             dropped,
+            intake_mirror_failed,
             poll_after_secs: poll_after,
         })
     }
 
     /// Processes one endpoint's event items through dedup and the bounded
-    /// queue; returns (accepted, duplicates, dropped) counts.
-    fn process_items(
+    /// queue; returns (accepted, duplicates, dropped,
+    /// `intake_mirror_failed`) counts.
+    async fn process_items(
         &self,
         items: &[RestEventItem],
         target: &PollTarget,
         now_secs: u64,
         last_seen_raw_id: Option<u64>,
-    ) -> Result<(usize, usize, usize), PollError> {
+    ) -> Result<(usize, usize, usize, usize), PollError> {
         let mut accepted = 0_usize;
         let mut duplicates = 0_usize;
         let mut dropped = 0_usize;
+        let mut intake_mirror_failed = 0_usize;
         for item in items {
             // The full derivation (filter, shape, action) is shared with
             // the pagination boundary via `item_derived` — one copy, so
@@ -657,15 +731,45 @@ impl EventPoller {
                 event_type: derived.event_type,
                 head_sha: derived.head_sha,
                 number: derived.number,
+                author_login: derived.author_login,
+                author_is_bot: derived.author_is_bot,
                 accepted_at_secs: now_secs,
             };
+            // The §9.52(a) intake fan-out (leaf #664): mirror every
+            // accepted `issues-opened` event into the DURABLE intake
+            // store BEFORE the queue push. The queue push happens
+            // regardless, so the kick-off path is intact either way.
+            //
+            // A store-write failure (disk full, corrupt DB) is NOT
+            // recovered: the delivery key was already dedup-recorded
+            // above, so the event never re-enters the poller and is
+            // never mirrored — the external report stays un-attached
+            // until a later slice adds a completeness pass that can
+            // enumerate repository issues. The §9.43 reconcile poll is
+            // NOT such a pass (it reads the board snapshot only, so it
+            // cannot rediscover an un-boarded issue), and the
+            // completeness-authority sentence in §9.52(h) covers
+            // third-party PRs (slice 3), not this lane. The failure
+            // therefore carries its own `intake_mirror_failed` signal,
+            // never the queue-flood `dropped` count.
+            let intake_mirrored = if event.event_type == "issues-opened" {
+                match &self.intake_store {
+                    Some(intake) => intake.put(&event).await.is_ok(),
+                    None => true,
+                }
+            } else {
+                true
+            };
+            if !intake_mirrored {
+                intake_mirror_failed += 1;
+            }
             match self.queue.push(event, now_secs) {
                 PushOutcome::Accepted => accepted += 1,
                 PushOutcome::Duplicate => duplicates += 1, // unreachable via this path; kept for exhaustiveness
                 PushOutcome::Dropped => dropped += 1,
             }
         }
-        Ok((accepted, duplicates, dropped))
+        Ok((accepted, duplicates, dropped, intake_mirror_failed))
     }
 
     /// The rate-limit wait (§9.43 feedback, §9.50(b): the cadence never
@@ -728,6 +832,11 @@ struct DerivedItem {
     head_sha: Option<String>,
     /// The issue or PR number the event is about.
     number: u64,
+    /// The author login (§9.50(c) launch fact; `None` = the platform
+    /// supplied none and the intake attach fails closed).
+    author_login: Option<String>,
+    /// Whether the platform declared the author a bot.
+    author_is_bot: Option<bool>,
 }
 
 /// Derives [`DerivedItem`] (None when the item would be filtered or
@@ -769,6 +878,27 @@ fn item_derived(item: &RestEventItem, target: &PollTarget) -> Option<DerivedItem
             .as_ref()
             .and_then(|payload| payload.issue.as_ref().map(|issue| issue.number))
     }?;
+    // Author launch facts (§9.50(c), §9.52(a)): the payload's author
+    // (`user`) is authoritative when present; the event's `actor` is the
+    // fallback. The bot fact rides whichever identity won — reading the
+    // actor's bot flag for a payload author would mix two principals.
+    let (author_login, author_is_bot) = if is_pull {
+        author_facts(
+            item.payload
+                .as_ref()
+                .and_then(|payload| payload.pull_request.as_ref())
+                .and_then(|pr| pr.user.as_ref()),
+            item.actor.as_ref(),
+        )
+    } else {
+        author_facts(
+            item.payload
+                .as_ref()
+                .and_then(|payload| payload.issue.as_ref())
+                .and_then(|issue| issue.user.as_ref()),
+            item.actor.as_ref(),
+        )
+    };
     Some(DerivedItem {
         delivery_key: IngressStore::delivery_key(
             &delivery_id,
@@ -779,7 +909,37 @@ fn item_derived(item: &RestEventItem, target: &PollTarget) -> Option<DerivedItem
         event_type,
         head_sha,
         number,
+        author_login,
+        author_is_bot,
     })
+}
+
+/// Resolves the (`login`, `is_bot`) author launch facts: the payload
+/// author wins over the event actor; a `Bot` user type is the platform's
+/// bot declaration. `None` login = no usable launch fact (fail closed).
+fn author_facts(
+    payload_user: Option<&RestUser>,
+    actor: Option<&RestActor>,
+) -> (Option<String>, Option<bool>) {
+    if let Some(user) = payload_user {
+        let login = user.login.clone().filter(|login| !login.is_empty());
+        let is_bot = user
+            .user_type
+            .as_deref()
+            .map(|user_type| user_type == "Bot");
+        return (login, is_bot);
+    }
+    if let Some(actor) = actor {
+        let login = actor.login.clone().filter(|login| !login.is_empty());
+        if login.is_some() {
+            // The actor shape carries no user-type; the bot fact is
+            // unknown, not false — the attach classifies conservatively
+            // (bot) AFTER the service-identity check, and the report
+            // still attaches.
+            return (login, None);
+        }
+    }
+    (None, None)
 }
 
 /// Extracts the delivery identifier from the REST item's `id` field

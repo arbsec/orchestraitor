@@ -861,3 +861,89 @@ fn ingress_kickoff_warnings_cover_both_mismatch_directions() {
     assert_eq!(reverse.len(), 1);
     assert!(reverse[0].contains("can never fire"));
 }
+
+/// §9.22 layered config (leaf #664): the §9.52(a) intake settings resolve
+/// through the `[watch.intake]` block — the lane ships disabled, an
+/// explicit enable overrides, and the service-identity set inherits the
+/// documented default slug when the top-level key is absent.
+#[test]
+fn watch_intake_resolves_from_layers_with_built_in_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    // No configuration: the lane disabled with the default slug set.
+    let resolver = ConfigResolver::new();
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(
+        !config.intake.enabled,
+        "the intake lane ships disabled (§9.52: board mutations from external events are opt-in)"
+    );
+    assert_eq!(
+        config.intake.service_identities,
+        vec![String::from("arbsec-agent")],
+        "an absent service_identities key keeps the documented default slug"
+    );
+
+    // An explicit enable at the project layer overrides the default.
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::Project,
+            name: "test-project".to_string(),
+        },
+        "[watch.intake]\nenabled = true\n",
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(config.intake.enabled);
+
+    // The top-level service_identities key feeds the intake set.
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::Project,
+            name: "test-project".to_string(),
+        },
+        "service_identities = [\"loop-bot\", \"other-bot\"]\n[watch.intake]\nenabled = true\n",
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert_eq!(
+        config.intake.service_identities,
+        vec![String::from("loop-bot"), String::from("other-bot")],
+        "the intake lane reads the same §9.41 service-identity set the ready queue does"
+    );
+    Ok(())
+}
+
+/// §9.22.1 (leaf #664): the built-in defaults TOML carries the
+/// `[watch.intake]` block and agrees with the resolver fallback.
+#[test]
+fn the_built_in_defaults_carry_the_intake_block() -> Result<(), Box<dyn std::error::Error>> {
+    use orchestraitor_core::config::{ConfigLayer, ConfigResolver, ConfigSource};
+
+    let resolver = ConfigResolver::new().with_toml(
+        ConfigSource {
+            layer: ConfigLayer::BuiltInDefaults,
+            name: "built-in watch defaults".to_string(),
+        },
+        orchestraitor_daemon::WATCH_BUILT_IN_DEFAULTS_TOML,
+    )?;
+    let config = WatchConfig::from_layers(&resolver)?;
+    assert!(
+        !config.intake.enabled,
+        "the shipped TOML data keeps the lane disabled"
+    );
+    Ok(())
+}
+
+/// The intake/ingress mismatch warning (leaf #664): an enabled intake
+/// over a disabled ingress is dead configuration and is warned; the
+/// consistent pairs are silent.
+#[test]
+fn intake_ingress_mismatch_warns_and_consistent_pairs_are_silent() {
+    assert_eq!(
+        orchestraitor_daemon::intake_ingress_warnings(true, false).len(),
+        1,
+        "intake without ingress can never attach: the operator must see it"
+    );
+    assert!(orchestraitor_daemon::intake_ingress_warnings(true, true).is_empty());
+    assert!(orchestraitor_daemon::intake_ingress_warnings(false, false).is_empty());
+    assert!(orchestraitor_daemon::intake_ingress_warnings(false, true).is_empty());
+}
