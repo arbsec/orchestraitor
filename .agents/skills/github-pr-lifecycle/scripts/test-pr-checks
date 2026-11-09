@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Regression tests for `pr-checks` check classification (arbsec/orchestraitor#706).
+# Synthetic `gh pr checks` responses; no network or provider calls.
+#
+# Covers:
+#   (a) every real check SUCCESS + CodeRabbit SKIPPED with the observed
+#       (empty) description -> all_passed true, CodeRabbit not-applicable,
+#       skip_reason "bot-author"
+#   (a2) the same when gh populates the real check-run reason in `description`
+#   (b) any OTHER check skipped for an unexplained reason -> all_passed false
+#   (c) CodeRabbit skipped with a non-bot reason -> all_passed false
+#   (d) a known-disabled job that actually ran and FAILED -> all_passed false
+#   (e) known-disabled and CodeRabbit checks that pass/fail/pend are classified
+#       from their state, never not-applicable (state-blindness guard)
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/repo/scripts" "$TMP/bin"
+git -C "$TMP/repo" init -q
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-checks" "$TMP/repo/scripts/"
+chmod +x "$TMP/repo/scripts/"*
+
+# gh stub: only `pr checks` is exercised; the fixture is a JSON array in the
+# shape `gh pr checks --json name,state,bucket,...,description` returns.
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/checks) cat "$PR_CHECKS_FIXTURE" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+
+# orc stub: service-identity config resolves; gh-env re-execs the gh stub.
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub-config ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+PASS=0; FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
+}
+run() {
+  OUT="$(cd "$TMP/repo" && "scripts/$@" 2>"$TMP/stderr")"; RC=$?
+}
+# One check object; missing fields are irrelevant to classification.
+check() { # name bucket state description
+  jq -cn --arg name "$1" --arg bucket "$2" --arg state "$3" --arg description "${4:-}" \
+    '{name:$name,state:$state,bucket:$bucket,description:$description,workflow:"CI",link:"https://example.test/check/"+$name}'
+}
+fixture() { # fixture <file> <check-object-process-substitutions...>
+  local file="$1"; shift
+  jq -s '.' "$@" > "$file"
+}
+classification() { jq -r --arg n "$1" '.checks[] | select(.name == $n) | .classification' <<<"$OUT"; }
+skip_reason() { jq -r --arg n "$1" '.checks[] | select(.name == $n) | .skip_reason' <<<"$OUT"; }
+
+# (a) all real checks green + CodeRabbit SKIPPED with the observed empty
+# description. This is the #706 defect shape.
+fixture "$TMP/a.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check "Check & Lint" pass SUCCESS) \
+  <(check CodeRabbit skipping SKIPPED "") \
+  <(check "qlty check" pass SUCCESS "No blocking issues")
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'a: exits 0' 0 "$RC"
+assert 'a: all_passed true' true "$(jq -r .all_passed <<<"$OUT")"
+assert 'a: any_failing false' false "$(jq -r .any_failing <<<"$OUT")"
+assert 'a: CodeRabbit not-applicable' not-applicable "$(classification CodeRabbit)"
+assert 'a: CodeRabbit skip_reason bot-author' bot-author "$(skip_reason CodeRabbit)"
+assert 'a: passing check has null skip_reason' null "$(skip_reason CodeQL)"
+assert 'a: aggregate keys preserved' true \
+  "$(jq -r 'has("checks") and has("all_passed") and has("any_failing") and has("any_pending")' <<<"$OUT")"
+
+# (a2) the exact reason observed in the CodeRabbit check-run output, if gh
+# ever surfaces it in `description`, is still recognised.
+fixture "$TMP/a2.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check CodeRabbit skipping SKIPPED "Review skipped: bot user not eligible for review")
+export PR_CHECKS_FIXTURE="$TMP/a2.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'a2: bot-author description exempts' not-applicable "$(classification CodeRabbit)"
+assert 'a2: bot-author description records reason' bot-author "$(skip_reason CodeRabbit)"
+assert 'a2: all_passed true' true "$(jq -r .all_passed <<<"$OUT")"
+
+# (b) anti-bypass: a different check skipped with no explanation still blocks.
+fixture "$TMP/b.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check CodeRabbit skipping SKIPPED "") \
+  <(check "Advisory Check" skipping SKIPPED "")
+export PR_CHECKS_FIXTURE="$TMP/b.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'b: unexplained skip blocks' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'b: unexplained skip stays skip' skip "$(classification "Advisory Check")"
+assert 'b: unexplained skip has null reason' null "$(skip_reason "Advisory Check")"
+
+# (c) anti-bypass: CodeRabbit skipped for a NON-bot reason still blocks.
+fixture "$TMP/c.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check CodeRabbit skipping SKIPPED "Review skipped: rate limit exceeded")
+export PR_CHECKS_FIXTURE="$TMP/c.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'c: non-bot CodeRabbit skip blocks' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'c: non-bot CodeRabbit stays skip' skip "$(classification CodeRabbit)"
+assert 'c: non-bot CodeRabbit has null reason' null "$(skip_reason CodeRabbit)"
+
+# (d) state-blindness regression pin: a known-disabled job that actually ran
+# and FAILED is a failure, never not-applicable.
+fixture "$TMP/d.json" \
+  <(check Documentation fail FAILURE) \
+  <(check CodeRabbit skipping SKIPPED "") \
+  <(check CodeQL pass SUCCESS)
+export PR_CHECKS_FIXTURE="$TMP/d.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'd: failed known-disabled job blocks' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'd: failed known-disabled job is fail' fail "$(classification Documentation)"
+assert 'd: failed known-disabled job has null reason' null "$(skip_reason Documentation)"
+assert 'd: any_failing true' true "$(jq -r .any_failing <<<"$OUT")"
+
+# (e) state-blindness both ways: exempt names that ran are classified by state.
+fixture "$TMP/e.json" \
+  <(check Documentation pass SUCCESS) \
+  <(check CodeRabbit fail FAILURE) \
+  <(check "Docs Consistency" pending PENDING)
+export PR_CHECKS_FIXTURE="$TMP/e.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'e: passing known-disabled job is pass' pass "$(classification Documentation)"
+assert 'e: failing CodeRabbit is fail' fail "$(classification CodeRabbit)"
+assert 'e: pending known-disabled job is pending' pending "$(classification "Docs Consistency")"
+assert 'e: gate still fails' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'e: pending reported' true "$(jq -r .any_pending <<<"$OUT")"
+
+# (f) a known-disabled job in the skipping bucket is exempt and visible.
+fixture "$TMP/f.json" \
+  <(check Documentation skipping SKIPPED "") \
+  <(check CodeRabbit skipping SKIPPED "") \
+  <(check CodeQL pass SUCCESS)
+export PR_CHECKS_FIXTURE="$TMP/f.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'f: known-disabled skip all_passed' true "$(jq -r .all_passed <<<"$OUT")"
+assert 'f: known-disabled skip reason' known-disabled-job "$(skip_reason Documentation)"
+assert 'f: known-disabled skip classification' not-applicable "$(classification Documentation)"
+
+# usage errors
+run pr-checks
+assert 'missing argument exits 2' 2 "$RC"
+run pr-checks --help
+assert 'help exits 0' 0 "$RC"
+
+printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

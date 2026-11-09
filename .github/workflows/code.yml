@@ -42,6 +42,7 @@ jobs:
         run: |
           bash .agents/skills/github-project-workflow/scripts/tests/ready-queue-filter.bash
           bash .agents/skills/github-project-workflow/scripts/tests/gh-env-wrapper.bash
+          bash .agents/skills/github-pr-lifecycle/scripts/test-pr-checks
 
   test:
     name: Test (${{ matrix.os }})
