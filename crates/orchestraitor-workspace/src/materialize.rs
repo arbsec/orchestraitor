@@ -122,7 +122,12 @@ fn link_name(path: &Path) -> String {
     )
 }
 
+/// Cap for the diagnostic-only link target echoed in an error message.
+const LINK_TARGET_DIAGNOSTIC_LIMIT: usize = 4096;
+
 fn link_target(entry: &gix::object::tree::EntryRef<'_, '_>, rel_path: &Path) -> Result<String> {
+    // The read is bounded by the link blob's own size and the value is
+    // diagnostic-only, so truncate it instead of growing the error unboundedly.
     let mut blob = entry
         .object()
         .map_err(|source| WorkspaceError::LoadObject {
@@ -134,7 +139,25 @@ fn link_target(entry: &gix::object::tree::EntryRef<'_, '_>, rel_path: &Path) -> 
             object: rel_path.display().to_string(),
             source: Box::new(source),
         })?;
-    Ok(String::from_utf8_lossy(&blob.take_data()).into_owned())
+    let data = blob.take_data();
+    let text = String::from_utf8_lossy(&data);
+    Ok(truncate_on_char_boundary(
+        &text,
+        LINK_TARGET_DIAGNOSTIC_LIMIT,
+    ))
+}
+
+fn truncate_on_char_boundary(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let mut truncated = text[..end].to_owned();
+    truncated.push_str("… (truncated)");
+    truncated
 }
 
 fn write_plan(

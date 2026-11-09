@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{WorkspaceController, WorkspaceError};
+use crate::{SnapshotOptions, WorkspaceController, WorkspaceError};
 
 #[test]
 fn snapshot_has_no_dot_git() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -63,6 +63,46 @@ fn link_entry_fails_closed_without_writing_snapshot()
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn nested_link_entry_fails_closed_without_writing_snapshot()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a link nested one level down, after a sibling blob in tree order.
+    let repo = TestRepo::new()?;
+    repo.write("a-file.txt", "must not be materialized\n")?;
+    repo.write("m-dir/b-file.txt", "must not be materialized\n")?;
+    repo.symlink("m-dir/z-link", "b-file.txt")?;
+    repo.git(&["add", "."])?;
+    repo.git(&["commit", "-m", "nested link entry"])?;
+    let dest = repo.temp.path().join("snapshot");
+
+    // When: creating a snapshot.
+    let result = WorkspaceController::new(repo.path()).create_snapshot("HEAD", &dest);
+
+    // Then: the recursive arm refuses the plan and names the entry vs link name.
+    let Err(error) = result else {
+        return Err("expected the snapshot to fail closed on a nested link entry".into());
+    };
+    match error {
+        WorkspaceError::ProjectionCapabilityUnavailable { path, link, target } => {
+            assert_eq!(path, "m-dir/z-link");
+            assert_eq!(link, "z-link");
+            assert_eq!(target, "b-file.txt");
+        }
+        other => return Err(format!("unexpected error: {other:?}").into()),
+    }
+
+    // And: no partial tree exists, not even the refused link's parent directory.
+    let created = directory_entries(&dest)?;
+    assert!(
+        created.is_empty(),
+        "refused plan left a partial snapshot: {created:?}"
+    );
+    assert!(!dest.join("m-dir").exists());
+    assert!(fs::symlink_metadata(dest.join("m-dir")).is_err());
+    Ok(())
+}
+
 #[test]
 fn regular_tree_entries_still_materialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Given: a repository with a directory, a regular file, and an executable.
@@ -99,6 +139,66 @@ fn regular_tree_entries_still_materialize() -> std::result::Result<(), Box<dyn s
             .mode();
         assert_eq!(mode & 0o777, 0o755);
     }
+    Ok(())
+}
+
+#[test]
+fn submodule_placeholder_is_written_through_the_plan()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a repository with a gitlink entry.
+    let repo = TestRepo::new()?;
+    repo.write("file.txt", "base\n")?;
+    repo.git(&["add", "."])?;
+    repo.git(&["commit", "-m", "base"])?;
+    let submodule_commit = repo.git_output(&["rev-parse", "HEAD"])?;
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{submodule_commit},vendor/sub"),
+    ])?;
+    repo.git(&["commit", "-m", "add gitlink"])?;
+    let dest = repo.temp.path().join("snapshot");
+
+    // When: creating a snapshot.
+    let snapshot = WorkspaceController::new(repo.path()).create_snapshot("HEAD", &dest)?;
+
+    // Then: the gitlink becomes the exact submodule placeholder in file and manifest.
+    let expected = format!("submodule {submodule_commit}\n");
+    assert_eq!(
+        fs::read_to_string(snapshot.workspace_root.join("vendor/sub"))?,
+        expected
+    );
+    assert!(snapshot.manifest.contains_key(Path::new("vendor/sub")));
+    Ok(())
+}
+
+#[test]
+fn sparse_paths_materialize_only_the_selected_subtree()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a repository with two sibling directories.
+    let repo = TestRepo::new()?;
+    repo.write("keep/inner.txt", "kept\n")?;
+    repo.write("skip/other.txt", "filtered\n")?;
+    repo.git(&["add", "."])?;
+    repo.git(&["commit", "-m", "sparse fixture"])?;
+    let dest = repo.temp.path().join("snapshot");
+    let options = SnapshotOptions {
+        sparse_paths: vec![PathBuf::from("keep")],
+    };
+
+    // When: creating a snapshot with a sparse prefix.
+    let snapshot = WorkspaceController::new(repo.path())
+        .create_snapshot_with_options("HEAD", &dest, &options)?;
+
+    // Then: only the selected subtree materializes and is recorded.
+    assert_eq!(
+        fs::read_to_string(snapshot.workspace_root.join("keep/inner.txt"))?,
+        "kept\n"
+    );
+    assert!(!snapshot.workspace_root.join("skip").exists());
+    assert!(snapshot.manifest.contains_key(Path::new("keep/inner.txt")));
+    assert!(!snapshot.manifest.contains_key(Path::new("skip/other.txt")));
     Ok(())
 }
 
@@ -198,5 +298,18 @@ impl TestRepo {
             .status()?;
         assert!(status.success(), "git {args:?} failed with {status}");
         Ok(())
+    }
+
+    fn git_output(&self, args: &[&str]) -> std::io::Result<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo_path)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?} failed with {}",
+            output.status
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 }
