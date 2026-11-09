@@ -1,6 +1,6 @@
 //! `git` CLI plumbing for the delivery path.
 //!
-//! Linked-worktree creation and push are not covered by the `gix` 0.85 API
+//! Linked-worktree creation and push are not covered by the `gix` 0.90 API
 //! surface, so the trusted controller drives the `git` binary directly. Every
 //! invocation runs with a CLEARED environment rebuilt from
 //! [`scrubbed_git_env`] — system/global config redirected to the null device,

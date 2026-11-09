@@ -1,11 +1,10 @@
 //! Worktree path confinement for the file tools.
 //!
 //! Model-supplied paths are untrusted input (spec `40-arbitraitor-integration.md`
-//! §6.1). Confinement follows the `orchestraitor-workspace` symlink discipline
-//! (`symlink.rs`: lexical `..` accounting, no absolute targets) and tightens it
-//! for untrusted writes: any existing symlink component on the path — including
-//! the final component — fails closed, so no read, write, or search can escape
-//! the task worktree through a planted link.
+//! §6.1). Confinement uses lexical `..` accounting with no absolute targets and
+//! tightens it for untrusted writes: any existing symlink component on the path
+//! — including the final component — fails closed, so no read, write, or search
+//! can escape the task worktree through a planted link.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
