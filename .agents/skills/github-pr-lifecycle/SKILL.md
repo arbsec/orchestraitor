@@ -157,7 +157,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   Required AND non-optional checks must ALL pass. A missing/skipped
                   check is a failure, not a pass — except workflow jobs deliberately
                   disabled repo-side (the `KNOWN_DISABLED_JOBS` allowlist in
-                  `pr-checks`), which are not-applicable and excluded from the gate.
+                  `pr-checks`), which are not-applicable and excluded from the gate —
+                  and CodeRabbit when it skips on a bot-authored PR
+                  (skip_reason: "bot-author").
 
 3. REVIEW         Select reviewers by changed area (spec `10-orchestrator.md` §9.33.4):
                     general, security, backend, frontend, data, devops, testing,

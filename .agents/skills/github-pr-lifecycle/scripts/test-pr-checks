@@ -4,14 +4,19 @@
 #
 # Covers:
 #   (a) every real check SUCCESS + CodeRabbit SKIPPED with the observed
-#       (empty) description -> all_passed true, CodeRabbit not-applicable,
-#       skip_reason "bot-author"
+#       (empty) description on a bot-authored PR -> all_passed true,
+#       CodeRabbit not-applicable, skip_reason "bot-author"
 #   (a2) the same when gh populates the real check-run reason in `description`
+#   (a3) a classic `<slug>[bot]` author login is also a bot author
 #   (b) any OTHER check skipped for an unexplained reason -> all_passed false
 #   (c) CodeRabbit skipped with a non-bot reason -> all_passed false
 #   (d) a known-disabled job that actually ran and FAILED -> all_passed false
 #   (e) known-disabled and CodeRabbit checks that pass/fail/pend are classified
 #       from their state, never not-applicable (state-blindness guard)
+#   (g) CodeRabbit SKIPPED on a HUMAN-authored PR -> all_passed false,
+#       skip_reason null (the tightening from the #707 review)
+#   (h) empty/unknown author -> fails closed
+#   (i) a failed author read -> fails closed
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -21,13 +26,20 @@ git -C "$TMP/repo" init -q
 cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-checks" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"*
 
-# gh stub: only `pr checks` is exercised; the fixture is a JSON array in the
-# shape `gh pr checks --json name,state,bucket,...,description` returns.
+# gh stub: serves the check fixture and the PR author. The author drives the
+# bot/App predicate; `PR_AUTHOR_FAIL=true` simulates a failed read.
 cat > "$TMP/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1/${2:-}" in
   auth/status) exit 0 ;;
   pr/checks) cat "$PR_CHECKS_FIXTURE" ;;
+  pr/view)
+    [ "${PR_AUTHOR_FAIL:-false}" = true ] && exit 1
+    out="{\"author\":{\"login\":$(jq -cn --arg a "${PR_AUTHOR_LOGIN-app/arbsec-agent}" '$a')}}"
+    j=""; prev=""
+    for a in "$@"; do [ "$prev" = "--jq" ] && j="$a"; prev="$a"; done
+    if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
+    printf '%s\n' "$out" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 STUB
@@ -48,6 +60,9 @@ chmod +x "$TMP/bin/orc"
 export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export ORC_GITHUB_APP_ENFORCEMENT=required
+# Default author for the existing #706 cases: the App service identity this
+# repo's agent PRs carry.
+export PR_AUTHOR_LOGIN=app/arbsec-agent
 PASS=0; FAIL=0
 assert() {
   if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
@@ -96,6 +111,14 @@ run pr-checks 7 --repo test-org/repo --json
 assert 'a2: bot-author description exempts' not-applicable "$(classification CodeRabbit)"
 assert 'a2: bot-author description records reason' bot-author "$(skip_reason CodeRabbit)"
 assert 'a2: all_passed true' true "$(jq -r .all_passed <<<"$OUT")"
+
+# (a3) a classic `<slug>[bot]` login is a bot author too.
+export PR_AUTHOR_LOGIN='arbsec-agent[bot]'
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'a3: [bot] author exempts CodeRabbit' not-applicable "$(classification CodeRabbit)"
+assert 'a3: [bot] author records bot-author' bot-author "$(skip_reason CodeRabbit)"
+export PR_AUTHOR_LOGIN=app/arbsec-agent
 
 # (b) anti-bypass: a different check skipped with no explanation still blocks.
 fixture "$TMP/b.json" \
@@ -154,6 +177,31 @@ run pr-checks 7 --repo test-org/repo --json
 assert 'f: known-disabled skip all_passed' true "$(jq -r .all_passed <<<"$OUT")"
 assert 'f: known-disabled skip reason' known-disabled-job "$(skip_reason Documentation)"
 assert 'f: known-disabled skip classification' not-applicable "$(classification Documentation)"
+
+# (g) a human-authored PR is never exempted, even with the same empty
+# description: the author predicate carries the discrimination, not the reason.
+export PR_AUTHOR_LOGIN=mekwall
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'g: human author blocks CodeRabbit skip' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'g: human author CodeRabbit stays skip' skip "$(classification CodeRabbit)"
+assert 'g: human author has null reason' null "$(skip_reason CodeRabbit)"
+
+# (h) empty/unknown author fails closed.
+export PR_AUTHOR_LOGIN=""
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'h: empty author blocks CodeRabbit skip' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'h: empty author has null reason' null "$(skip_reason CodeRabbit)"
+
+# (i) a failed author read fails closed.
+export PR_AUTHOR_FAIL=true
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'i: failed author read blocks CodeRabbit skip' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'i: failed author read has null reason' null "$(skip_reason CodeRabbit)"
+unset PR_AUTHOR_FAIL
+export PR_AUTHOR_LOGIN=app/arbsec-agent
 
 # usage errors
 run pr-checks

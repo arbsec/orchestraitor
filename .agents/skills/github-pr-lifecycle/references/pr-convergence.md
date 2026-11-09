@@ -102,7 +102,7 @@ A **structural skip** is a `SKIPPED` check that can never run for this PR shape,
 
 The exemption never overrides state. Only the `skipping` bucket can become `not-applicable`; a known-disabled job or `CodeRabbit` that actually ran and reported `pass`, `fail`, or `pending` is classified from that state, so a failed job is never laundered into a pass.
 
-Every other unexplained skip still blocks. `skip_reason` is `null` when a check is merely `skip`, and `all_passed` requires every entry to be `pass` or `not-applicable`. `CodeRabbit` is exempted by name because `gh pr checks --json description` returns `""` for these runs — the reason lives only in the check-run output, which `gh pr checks` does not surface. A non-empty `description` that does not match the bot-author reason (rate limit, config error, out of credits) is not exempted. Revisit the exemption if `gh` ever exposes the check-run reason.
+Every other unexplained skip still blocks. `skip_reason` is `null` when a check is merely `skip`, and `all_passed` requires every entry to be `pass` or `not-applicable`. The `CodeRabbit` exemption requires all three of: the `CodeRabbit` name, the skipped bucket, and a bot/App PR author (`app/...` or `<slug>[bot]`); an unknown author fails closed. `gh pr checks --json description` is empty for these runs today, so the author check carries the discrimination — the description match is only a narrowing that will apply if gh ever populates the field (a rate-limit, config-error, or out-of-credits reason would then not be exempted).
 
 ## How `convergence-status` computes the verdict
 

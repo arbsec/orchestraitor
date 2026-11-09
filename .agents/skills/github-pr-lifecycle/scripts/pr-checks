@@ -22,6 +22,11 @@ fi
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
+# PR author, used only to decide whether a CodeRabbit skip is the structural
+# bot-author no-op (see below). A failed read yields "" and the exemption fails
+# closed: an unknown author is never treated as a bot.
+PR_AUTHOR="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json author --jq '.author.login // ""' 2>/dev/null || true)"
+
 CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt,description)
 
 if [ "$OPT_DRY_RUN" = true ]; then
@@ -51,23 +56,23 @@ fi
 KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
 
 # Structural bot-author skip (arbsec/orchestraitor#706): CodeRabbit reports
-# SKIPPED on every PR authored by a GitHub App bot user. Its check-run output
+# SKIPPED on every PR authored by a GitHub App/bot user. Its check-run output
 # title is "Review skipped: bot user not eligible for review"; the GitHub-side
-# check therefore can never run on this repo's bot-authored PRs. That is also
-# consistent with the owner directive that the LOCAL CodeRabbit CLI is the
-# review mechanism (references/pr-convergence.md), so the GitHub check is a
-# no-op here regardless. Exempt it as "not-applicable" with
+# check therefore can never run on bot-authored PRs. That is also consistent
+# with the owner directive that the LOCAL CodeRabbit CLI is the review
+# mechanism (references/pr-convergence.md), so the GitHub check is a no-op
+# there regardless. Exempt it as "not-applicable" with
 # `skip_reason: "bot-author"` so the widening is explicit, never silent.
 #
-# `gh pr checks --json description` accepts the field but returns "" for these
-# runs — the reason lives only in the check-run output, which `gh pr checks`
-# does not surface. The exemption is therefore anchored to the `CodeRabbit`
-# name, and deliberately narrow:
-#   - any other skipped check still fails the gate;
-#   - a CodeRabbit skip carrying a DIFFERENT non-empty description (rate
-#     limit, config error, out of credits) is NOT exempted;
-#   - only the skipping bucket can ever be exempted (see below).
-# Revisit if gh ever exposes the check-run reason.
+# The exemption requires ALL of: the `CodeRabbit` name, the skipping bucket,
+# and a bot/App PR author login (`app/...` or `<slug>[bot]`). An empty or
+# unknown author fails closed. `gh pr checks --json description` accepts the
+# field but returns "" for these runs — the real reason lives only in the
+# check-run output, which `gh pr checks` does not surface — so the AUTHOR is
+# the discriminator, not the reason. A non-empty description that does not
+# match the bot-author reason (rate limit, config error, out of credits) is a
+# narrowing on top and is NOT exempted; it is the only usable reason signal if
+# gh ever populates the field.
 #
 # Classify checks. An exemption requires BOTH the exempting name/reason AND the
 # skipped bucket: a known-disabled job or CodeRabbit that actually ran and
@@ -77,11 +82,12 @@ KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
 # The aggregate flags are computed in a separate `|` stage over the classified
 # array — an older jq/jaq grammar (CI) rejects `key: (a) and (b)` inside an
 # object construction, but accepts the same expression applied to a stream.
-echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
+echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" --arg pr_author "$PR_AUTHOR" '
   def disabled($name): ($known_disabled | index($name)) != null;
+  def bot_author_pr: ($pr_author | test("(\\[bot\\]$|^app/)"));
   def bot_author_description: ((.description // "") | test("(?i)^review skipped.*bot user"));
   def bot_author_skip:
-    (.name == "CodeRabbit") and (.bucket == "skipping")
+    (.name == "CodeRabbit") and (.bucket == "skipping") and bot_author_pr
     and (((.description // "") == "") or bot_author_description);
   def skip_reason:
     if disabled(.name) and .bucket == "skipping" then "known-disabled-job"
