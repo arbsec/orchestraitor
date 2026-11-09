@@ -5,11 +5,32 @@ only when GitHub itself can attest to it. An unsigned locally-created commit car
 bot identity in author/committer name+email is **always** unverified — attribution metadata
 is not a signature. Verified commits come from exactly two sources:
 
-1. **API-created commits.** Commits created via GraphQL `createCommitOnBranch` by the App
-   installation are signed by GitHub (`web-flow` committer) and verify as `reason=valid`.
-   The REST `git/commits` endpoint does **not** sign, even with an installation token —
-   verified empirically on 2026-10-01 by creating one commit through each API and
-   comparing the resulting `verification` payload.
+1. **API-created commits.** Commits created by the App installation are signed by GitHub
+   and verify as `reason=valid`. Both transports do this:
+
+   - **GraphQL `createCommitOnBranch`** — signs unconditionally (`web-flow` committer).
+     This is the default for everyday landings (`orc github push-branch`).
+   - **REST `git/commits`** — signs too, but ONLY when the request body omits `author`,
+     `committer` AND `signature`. Supplying `author`+`committer` makes GitHub store them
+     verbatim and return `reason=unsigned` with no signature: signing is suppressed by
+     the identity fields, not by the endpoint.
+
+   Probed 2026-11-09 against `arbsec/orchestraitor` with an App installation token
+   (throwaway refs, since deleted), POSTing the same tree, message and parent:
+
+   | Request body | Commit | `verification` |
+   | --- | --- | --- |
+   | `message` + `tree` + `parents` only | `e1723feec88e42e24312f7998e8bad1f8b591f65` | `verified = true`, `reason = valid`, PGP signature present |
+   | plus explicit `author[…]` and `committer[…]` | `343c4b9534b5a21b3e22b9d828c198f4122eb7ff` | `verified = false`, `reason = unsigned`, no signature |
+
+   In the signed case GitHub rewrote the committer to `GitHub <noreply@github.com>` and
+   auto-attributed the author to `arbsec-agent[bot]`. **Scope of the observation:** this
+   repository, this App installation, and the `author`+`committer` pair only. A PARTIAL
+   identity (author only, or committer only) was not probed — treat any identity field as
+   verification-dropping until it is. Supplying `signature` was likewise not exercised:
+   both probe bodies omitted it, and GitHub documents the field as verify-as-supplied (a
+   supplied signature is not replaced by GitHub's own), so the documented rule stays "omit
+   all three" — that is a scope limit, not a measured behaviour.
 2. **Real GPG/SSH signatures** from a key registered to the committing identity.
 
 ## Replay procedure (documented here; no script yet)
@@ -57,3 +78,29 @@ headers), so the token cannot leak through a proxied request.
   same tree object ID and record tree identity on the PR (see
   [pr-convergence.md](pr-convergence.md) for why a tree-identical swing preserves
   review convergence).
+- **Executable-bit repairs (#556):** `createCommitOnBranch` cannot express `100755` —
+  use the REST tree + commit transport below.
+
+## REST tree + commit (the file-mode transport)
+
+`createCommitOnBranch` `FileAddition` carries no file-mode field, so an executable-bit
+repair (#556) is unrepresentable there: an added blob always lands `100644`, which the
+tree-equality gate then refuses (`docs/cli/orc-github.md` documents the same limitation
+for `orc github push-branch`). The REST tree + commit path CAN express it and still land
+a verified commit:
+
+1. `POST /git/trees` accepts an entry with `mode: "100755"` (a string, not a number) and
+   returns it as `{"path": …, "mode": "100755", "type": "blob"}` (probed 2026-11-09, same
+   repository and installation token as the table above).
+2. `POST /git/commits` with `message`, `tree` and `parents` and **no** `author`,
+   `committer` or `signature` returns the GitHub-signed commit from that table
+   (`verified = true`, `reason = valid`).
+3. Move the ref with GraphQL `updateRef` carrying `expectedHeadOid` — the exact-head
+   precondition the replay procedure uses; REST `PATCH /git/refs/{ref}` with `force: false`
+   guards only against a non-fast-forward, so it cannot express that precondition (a
+   concurrent rewind of the branch would slip through).
+
+The constraint is the whole trick: identity fields MUST be omitted. Adding `author` and
+`committer` for a nicer attribution silently drops verification (`reason = unsigned`) —
+the commit is created successfully, so the failure only surfaces later as a
+`required_signatures` block. Never add them "just to attribute the bot".
