@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-checks" "Read PR CI checks and classify each as pass/fail/pending/skip. Use --required to filter."
+  orc_lib_print_help "pr-checks" "Read PR CI checks and classify each as pass/fail/pending/skip. Structurally unavailable jobs (disabled, bot-authored CodeRabbit) become not-applicable with a skip_reason."
   exit "$ORC_OK"
 fi
 
@@ -22,7 +22,12 @@ fi
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
-CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt)
+# PR author, used only to decide whether a CodeRabbit skip is the structural
+# bot-author no-op (see below). A failed read yields "" and the exemption fails
+# closed: an unknown author is never treated as a bot.
+PR_AUTHOR="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json author --jq '.author.login // ""' 2>/dev/null || true)"
+
+CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt,description)
 
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh ${CHECK_ARGS[*]}" >&2
@@ -50,23 +55,53 @@ fi
 # See arbsec/orchestraitor#404.
 KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
 
-# Classify checks. The not-applicable exemption requires BOTH the known-disabled
-# name AND the skipped state: a known-disabled job that actually ran and failed
-# is a failure, never a pass (state-blind exemption would launder real failures).
+# Structural bot-author skip (arbsec/orchestraitor#706): CodeRabbit reports
+# SKIPPED on every PR authored by a GitHub App/bot user. Its check-run output
+# title is "Review skipped: bot user not eligible for review"; the GitHub-side
+# check therefore can never run on bot-authored PRs. That is also consistent
+# with the owner directive that the LOCAL CodeRabbit CLI is the review
+# mechanism (references/pr-convergence.md), so the GitHub check is a no-op
+# there regardless. Exempt it as "not-applicable" with
+# `skip_reason: "bot-author"` so the widening is explicit, never silent.
+#
+# The exemption requires ALL of: the `CodeRabbit` name, the skipping bucket,
+# and a bot/App PR author login (`app/...` or `<slug>[bot]`). An empty or
+# unknown author fails closed. `gh pr checks --json description` accepts the
+# field but returns "" for these runs — the real reason lives only in the
+# check-run output, which `gh pr checks` does not surface — so the AUTHOR is
+# the discriminator, not the reason. A non-empty description that does not
+# match the bot-author reason (rate limit, config error, out of credits) is a
+# narrowing on top and is NOT exempted; it is the only usable reason signal if
+# gh ever populates the field.
+#
+# Classify checks. An exemption requires BOTH the exempting name/reason AND the
+# skipped bucket: a known-disabled job or CodeRabbit that actually ran and
+# failed/passed/pended is classified from its state, never "not-applicable"
+# (state-blind exemption would launder real failures). `skip_reason` is null
+# for every non-exempt entry, so an unexplained skip fails closed.
 # The aggregate flags are computed in a separate `|` stage over the classified
 # array — an older jq/jaq grammar (CI) rejects `key: (a) and (b)` inside an
 # object construction, but accepts the same expression applied to a stream.
-echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
+echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" --arg pr_author "$PR_AUTHOR" '
   def disabled($name): ($known_disabled | index($name)) != null;
-  def exempt: disabled(.name) and .bucket == "skipping";
-  map({
+  def bot_author_pr: ($pr_author | test("(\\[bot\\]$|^app/)"));
+  def bot_author_description: ((.description // "") | test("(?i)^review skipped.*bot user"));
+  def bot_author_skip:
+    (.name == "CodeRabbit") and (.bucket == "skipping") and bot_author_pr
+    and (((.description // "") == "") or bot_author_description);
+  def skip_reason:
+    if disabled(.name) and .bucket == "skipping" then "known-disabled-job"
+    elif bot_author_skip then "bot-author"
+    else null
+    end;
+  map(skip_reason as $reason | {
     name: .name,
     state: .state,
     bucket: .bucket,
     workflow: .workflow,
     link: .link,
     classification: (
-      if exempt then "not-applicable"
+      if $reason != null then "not-applicable"
       elif .bucket == "pass" then "pass"
       elif .bucket == "fail" then "fail"
       elif .bucket == "pending" then "pending"
@@ -74,7 +109,8 @@ echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
       elif .bucket == "cancel" then "fail"
       else "unknown"
       end
-    )
+    ),
+    skip_reason: $reason
   })
   | {
   checks: .,

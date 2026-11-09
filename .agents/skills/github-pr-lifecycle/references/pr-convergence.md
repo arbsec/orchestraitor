@@ -93,6 +93,17 @@ The PR stays open, unmerged, in `blocked` state until a human resolves the remai
 - An admin using `--admin` to bypass a red check (spec `50-contracts-data.md` §21.10 — forbidden).
 - A local `pr-review-local` run clean at a PRIOR HEAD, or not recorded in the PR description — evidence must be a local CLI generation with zero actionable findings at the FINAL HEAD (command + SHA + findings=0).
 
+## Structural skips (not-applicable)
+
+A **structural skip** is a `SKIPPED` check that can never run for this PR shape, not one that was expected to run and did not. `pr-checks` classifies two kinds as `not-applicable`, excludes them from the `all_passed` gate, and records why in each check's `skip_reason`:
+
+- `known-disabled-job` — a workflow job deliberately disabled or event-gated repo-side (`Docs Consistency`, `Documentation`; see arbsec/orchestraitor#404).
+- `bot-author` — `CodeRabbit` on a PR authored by a GitHub App bot user. CodeRabbit reports `SKIPPED` with the check-run reason "Review skipped: bot user not eligible for review", and every PR this repo's agents open has that author. The GitHub-side check is a no-op regardless: the review mechanism is the LOCAL `pr-review-local` CLI (owner directive 2026-10-09, above), never the GitHub-side bot.
+
+The exemption never overrides state. Only the `skipping` bucket can become `not-applicable`; a known-disabled job or `CodeRabbit` that actually ran and reported `pass`, `fail`, or `pending` is classified from that state, so a failed job is never laundered into a pass.
+
+Every other unexplained skip still blocks. `skip_reason` is `null` when a check is merely `skip`, and `all_passed` requires every entry to be `pass` or `not-applicable`. The `CodeRabbit` exemption requires all three of: the `CodeRabbit` name, the skipped bucket, and a bot/App PR author (`app/...` or `<slug>[bot]`); an unknown author fails closed. `gh pr checks --json description` is empty for these runs today, so the author check carries the discrimination — the description match is only a narrowing that will apply if gh ever populates the field (a rate-limit, config-error, or out-of-credits reason would then not be exempted).
+
 ## How `convergence-status` computes the verdict
 
 The script combines:
