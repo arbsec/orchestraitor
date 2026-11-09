@@ -77,10 +77,12 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
   `unknown_key`, `expired_key`).
 - **Why it happens**: the commit was created outside the App API — a plain
   `git push` (unsigned; locally-attributed bot commits can never verify), or
-  a REST `git/commits` creation (REST does not sign even with an installation
-  token — verified empirically 2026-10-01), or signed with a key GitHub does
-  not recognize (`unknown_key`: e.g. a committer key not registered to the
-  author identity, as seen on PR #486's renovate-authored commit).
+  a REST `git/commits` creation that names the identity (REST DOES sign — but
+  ONLY when the body omits `author`, `committer` AND `signature`; supplying
+  them stores them verbatim and yields `reason=unsigned`, verified 2026-11-09,
+  see [verified-commit-path.md](verified-commit-path.md)), or signed with a key
+  GitHub does not recognize (`unknown_key`: e.g. a committer key not registered
+  to the author identity, as seen on PR #486's renovate-authored commit).
 - **Remediation**: there is NO local way to make such a commit verify —
   unsigned commits cannot be signed after the fact, and a local GPG/SSH
   signature under the bot identity is not a registered path. Recreate the
