@@ -3717,7 +3717,8 @@ fn github_push_branch_dry_run_announces_rest_mode_transport() -> miette::Result<
         commit.args(["-C", &repo, "commit", "-qm", "chmod"]);
         assert!(commit.status().into_diagnostic()?.success());
     }
-    // mode 100755 on feature.txt: the warning must fire even in dry-run.
+    // mode 100755 on feature.txt: the dry-run must announce the REST routing
+    // (the old "commit it as 100644" warning is gone).
     let rules = vec![
         (
             "ref(qualifiedName".to_string(),

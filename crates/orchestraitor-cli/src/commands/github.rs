@@ -217,6 +217,40 @@ fn required<'a, T>(value: Option<&'a T>, key: &str) -> Result<&'a T> {
     })
 }
 
+/// The REST base URL for the git-data endpoints (`POST /git/blobs`,
+/// `/git/trees`, `/git/commits`).
+///
+/// REST and GraphQL do NOT share one base: GitHub.com serves REST at
+/// `https://api.github.com` and GraphQL at `https://api.github.com/graphql`,
+/// GitHub Enterprise serves REST at `<host>/api/v3` and GraphQL at
+/// `<host>/api/graphql`. The REST base therefore comes from
+/// `github_api_endpoint` — the same resolution the other REST calls use
+/// (`orc github api`, `orc github commit-author`, and the token mint) — and
+/// NEVER from the GraphQL endpoint: inheriting it would send the REST
+/// requests to `<graphql-base>/repos/…`.
+///
+/// A configured value ending in `/graphql` is a GraphQL URL, not a REST
+/// base; the suffix is stripped so the REST path can never become
+/// `<host>/graphql/repos/…`. GitHub Enterprise operators must point
+/// `github_api_endpoint` at the REST root (`<host>/api/v3`).
+///
+/// Pure: the derivation is unit-testable without a transport.
+fn rest_base_from(endpoints: &ConfigPaths) -> String {
+    endpoints
+        .github_api_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(|endpoint| endpoint.trim_end_matches('/'))
+        .map(|endpoint| endpoint.strip_suffix("/graphql").unwrap_or(endpoint))
+        .map(|endpoint| endpoint.trim_end_matches('/'))
+        .filter(|endpoint| !endpoint.is_empty())
+        .map_or_else(
+            || DEFAULT_GITHUB_API_BASE_URL.to_string(),
+            ToString::to_string,
+        )
+}
+
 /// `orc github api`: one authenticated GitHub REST call as the App
 /// installation. Prints the response body verbatim; the exit code maps to
 /// the HTTP status class. The error path never echoes Authorization headers.
@@ -1000,8 +1034,13 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     //    Authorization header and never enters a diagnostic.
     let (_, token) = mint_installation_token(paths)?;
     let transport = ApiTransport::new(paths.github_graphql_endpoint.clone())?;
+    // The REST git-data endpoints (blob/tree/commit upload) are NOT on the
+    // GraphQL base: on GitHub Enterprise, REST is `<host>/api/v3` and
+    // GraphQL is `<host>/api/graphql`, so one base cannot serve both.
+    let rest_transport = ApiTransport::new(Some(rest_base_from(paths)))?;
     let graphql = GraphqlSession {
         transport: &transport,
+        rest_transport: &rest_transport,
         bearer: token.token().expose_secret(),
         owner: owner.clone(),
         repo: repo.clone(),
@@ -1522,7 +1561,7 @@ fn read_body_file(file: &str) -> Result<String> {
 /// every commit can still block the PR. This tool cannot mint verified
 /// replacements for historical commits (the App API cannot re-sign existing
 /// objects); a range-level repair needs the manual temp-branch replay from
-/// `references/verified-commit-path.md`.
+/// `.agents/skills/github-pr-lifecycle/references/verified-commit-path.md`.
 ///
 /// Flow mirrors the ordinary landing: the empty commit lands on a TEMP
 /// branch (gate before the real ref moves), then the real ref CAS-moves.
@@ -1702,22 +1741,27 @@ fn land_via_rest(
     // 1. Validate every A/M entry and upload its committed blob. The source is
     //    the branch's committed object (`git cat-file`), never the working
     //    tree. Types are validated for the WHOLE set before any upload so a
-    //    symlink/submodule refuses the landing before a single object is sent.
+    //    submodule refuses the landing before a single object is sent.
+    //
+    //    Only SUBMODULES are refused: `git cat-file -t` answers `commit` for
+    //    a gitlink. A SYMLINK answers `blob` (git stores it as a blob), and
+    //    the REST tree transport carries the LOCAL mode verbatim, so a
+    //    symlink lands as the symlink it is (mode `120000`).
     for (status, path) in changes {
         if status != "A" && status != "M" {
             continue;
         }
         let spec = format!("{local_branch}:{}", path.display());
         // The GraphQL builder refuses non-blob entries too; keep the same
-        // typed refusal here instead of uploading a symlink/submodule as a
-        // regular file blob.
+        // typed refusal here instead of uploading a submodule as a regular
+        // file blob.
         let object_type = git(dir, &["cat-file", "-t", &spec]).map_err(|error| {
             miette!("cannot read `{spec}` for the REST landing: {error}; {rest_context}")
         })?;
         if object_type != "blob" {
             bail!(
                 "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
-                 symlinks and submodules are not supported by the landing transports; \
+                 submodules (gitlinks) are not supported by the REST tree transport; \
                  {rest_context}"
             );
         }
@@ -1804,18 +1848,41 @@ fn land_via_rest(
 /// (`verification.verified == true` AND `verification.reason == "valid"`).
 /// Anything else — including a verified flag with an unexpected reason —
 /// fails closed, so a commit GitHub would not vouch for never moves the ref.
+///
+/// Two response shapes are accepted, and only these two: the git-database
+/// commit resource carries `verification` and `tree` at the TOP level
+/// (probed against the live API on the landed commit `d7edb15f`,
+/// 2026-11-10), while the repository-commits resource nests them under
+/// `commit`. A missing verification is NOT a verified commit, so the gate
+/// still fails closed on an unknown shape.
 fn rest_landed_commit_gate_view(commit: &Value) -> Value {
-    let verified = commit
-        .pointer("/verification/verified")
+    let verification = commit
+        .pointer("/verification")
+        .filter(|value| value.is_object())
+        .or_else(|| commit.pointer("/commit/verification"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let verified = verification
+        .get("verified")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let reason = commit
-        .pointer("/verification/reason")
+    let reason = verification
+        .get("reason")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let tree_sha = commit
+        .pointer("/tree/sha")
+        .filter(|value| value.is_string())
+        .or_else(|| {
+            commit
+                .pointer("/commit/tree/sha")
+                .filter(|value| value.is_string())
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
     serde_json::json!({
         "oid": commit.get("sha").cloned().unwrap_or(Value::Null),
-        "tree": {"oid": commit.pointer("/tree/sha").cloned().unwrap_or(Value::Null)},
+        "tree": {"oid": tree_sha},
         "signature": {"isValid": verified && reason.eq_ignore_ascii_case("valid")},
     })
 }
@@ -1975,15 +2042,17 @@ fn build_file_changes(
         match status.as_str() {
             "A" | "M" => {
                 let spec = format!("{branch}:{}", path.display());
-                // Reject non-regular-file entries: symlinks (120000) and
-                // submodules (160000) cannot be carried by the FileAddition
-                // contents payload — landing would silently materialize them
-                // as regular files or fail opaquely.
+                // Reject non-regular-file entries: a SUBMODULE (gitlink —
+                // `git cat-file -t` answers `commit`) cannot be carried by
+                // the FileAddition contents payload — landing would
+                // silently materialize it as a regular file or fail
+                // opaquely. A SYMLINK answers `blob` (git stores it as a
+                // blob), so it is not refused here.
                 let object_type = git(dir, &["cat-file", "-t", &spec])?;
                 if object_type != "blob" {
                     bail!(
                         "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
-                         symlinks and submodules are not supported by the GraphQL fileChanges \
+                         submodules (gitlinks) are not supported by the GraphQL fileChanges \
                          payload"
                     );
                 }
@@ -2119,7 +2188,8 @@ fn mode_requiring_rest_paths(
 /// base tree.
 ///
 /// `mode` and `sha: null` are sent as GitHub expects them: mode is a STRING
-/// (probed 2026-11-09 — see `references/verified-commit-path.md`). The payload
+/// (probed 2026-11-09 — see
+/// `.agents/skills/github-pr-lifecycle/references/verified-commit-path.md`). The payload
 /// is pure so the wire shape is unit-testable; a missing uploaded blob is a
 /// typed error naming the path (nothing is landed on a partial tree).
 fn build_rest_tree_payload(
@@ -2391,8 +2461,17 @@ fn parse_diff_tree_z(raw: &[u8]) -> Vec<(String, std::path::PathBuf)> {
 /// One GraphQL session over the shared [`ApiTransport`]: installation-token
 /// bearer, POST to the configured endpoint, every response validated. The
 /// bearer is held for the session lifetime and never enters a diagnostic.
+///
+/// The REST git-data endpoints (`POST /git/blobs`, `/git/trees`,
+/// `/git/commits`) ride a SECOND transport: REST and GraphQL have DIFFERENT
+/// bases on GitHub Enterprise (`<host>/api/v3` vs `<host>/api/graphql`), so
+/// the REST base is resolved from `github_api_endpoint` and never from the
+/// GraphQL endpoint (see [`rest_base_from`]).
 struct GraphqlSession<'a> {
     transport: &'a ApiTransport,
+    /// Transport for the REST git-data endpoints — the REST base, never the
+    /// GraphQL one.
+    rest_transport: &'a ApiTransport,
     bearer: &'a str,
     /// Target repository coordinates for post-move ref verification.
     owner: String,
@@ -2543,7 +2622,8 @@ impl GraphqlSession<'_> {
     /// `signature`: any identity field silently suppresses GitHub's signing
     /// and yields `verification.reason = unsigned`, which only surfaces later
     /// as a `required_signatures` block
-    /// (`references/verified-commit-path.md`, probed 2026-11-09). Do not add
+    /// (`.agents/skills/github-pr-lifecycle/references/verified-commit-path.md`,
+    /// probed 2026-11-09). Do not add
     /// them "just to attribute the bot".
     fn create_rest_commit(&self, owner: &str, repo: &str, payload: &Value) -> Result<Value> {
         self.rest_post(
@@ -2556,10 +2636,17 @@ impl GraphqlSession<'_> {
     /// POSTs one REST payload and decodes the JSON object. Errors carry only
     /// the HTTP status and the operation name — never response bodies,
     /// headers, or credential material.
+    ///
+    /// The request rides the REST transport, NOT the GraphQL one: the REST
+    /// base (`github_api_endpoint`) is a different host path on GitHub
+    /// Enterprise than the GraphQL base.
     fn rest_post(&self, path: &str, payload: &Value, operation: &str) -> Result<Value> {
-        let (status, body) =
-            self.transport
-                .request_bearer("POST", path, self.bearer, Some(payload.to_string()))?;
+        let (status, body) = self.rest_transport.request_bearer(
+            "POST",
+            path,
+            self.bearer,
+            Some(payload.to_string()),
+        )?;
         if !status.is_success() {
             bail!("github api request returned HTTP {status} ({operation})");
         }
@@ -3838,8 +3925,13 @@ mod tests {
             client: reqwest::blocking::Client::new(),
             base_url: stub.base_url.clone(),
         };
+        let rest_transport = ApiTransport {
+            client: reqwest::blocking::Client::new(),
+            base_url: stub.base_url.clone(),
+        };
         let graphql = GraphqlSession {
             transport: &transport,
+            rest_transport: &rest_transport,
             bearer: "test-bearer",
             owner: "o".to_string(),
             repo: "r".to_string(),
@@ -3886,6 +3978,493 @@ mod tests {
             "a ref move was attempted after the tree failure: {seen:?}"
         );
         Ok(())
+    }
+
+    // --- push-branch: the REST landing success path (#556) --------------------
+
+    /// Builds a fixture repo whose branch adds ONE executable file, so the
+    /// REST landing makes exactly three requests (one blob upload, one tree,
+    /// one commit). Every git child is anchored at the fixture repo and
+    /// scrubbed of inherited repository-location variables, like
+    /// [`fixture_repo_with_mode_change`].
+    #[cfg(unix)]
+    fn fixture_repo_with_added_executable() -> miette::Result<(tempfile::TempDir, String, String)> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).into_diagnostic()?;
+        let run = |args: &[&str]| -> miette::Result<()> {
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&repo).args(args);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let status = command
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .into_diagnostic()?;
+            assert!(status.success(), "git {args:?} failed");
+            Ok(())
+        };
+        run(&["init", "-q", "-b", "main"])?;
+        std::fs::write(repo.join("plain.txt"), "plain\n").into_diagnostic()?;
+        run(&["add", "-A"])?;
+        run(&["commit", "-qm", "base"])?;
+        run(&["checkout", "-qb", "feature"])?;
+        std::fs::write(repo.join("tool.sh"), "#!/bin/sh\necho tool\n").into_diagnostic()?;
+        let mut permissions = std::fs::metadata(repo.join("tool.sh"))
+            .into_diagnostic()?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(repo.join("tool.sh"), permissions).into_diagnostic()?;
+        run(&["add", "-A"])?;
+        run(&["commit", "-qm", "exec bits"])?;
+        let tree = |spec: &str| -> miette::Result<String> {
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let output = command.output().into_diagnostic()?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        Ok((temp, tree("main")?, tree("feature")?))
+    }
+
+    /// The outcome of one REST landing driven against a [`RecordingStub`].
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct RestLandingOutcome {
+        /// Every request the stub recorded, in order.
+        requests: Vec<String>,
+        /// The oid `land_via_rest` returned.
+        landed_oid: String,
+        /// The changed paths whose blob was uploaded, in upload order.
+        uploaded_paths: Vec<String>,
+    }
+
+    /// Drives `land_via_rest` against a [`RecordingStub`] that answers every
+    /// upload with `201` and returns the signed-commit response verbatim.
+    ///
+    /// The stub answers in request order: one `201` per uploaded blob (the
+    /// sha in `blob_shas`), then the tree, then the commit. `commit_body` is
+    /// the raw `POST /git/commits` response the stub returns.
+    #[cfg(unix)]
+    fn run_rest_landing_against_stub(
+        repo: &std::path::Path,
+        base_tree: &str,
+        feature_tree: &str,
+        blob_shas: &[&str],
+        commit_body: &str,
+    ) -> miette::Result<RestLandingOutcome> {
+        use std::sync::atomic::Ordering;
+
+        let changes = diff_tree_changes(Some(repo), base_tree, feature_tree)?;
+        let local_modes = local_tree_modes(Some(repo), feature_tree)?;
+        let base_modes = base_tree_modes(Some(repo), base_tree);
+        let rest_paths = mode_requiring_rest_paths(&changes, &local_modes, &base_modes);
+        let uploaded_paths: Vec<String> = changes
+            .iter()
+            .filter(|(status, _)| status == "A" || status == "M")
+            .map(|(_, path)| path.display().to_string())
+            .collect();
+
+        let mut responses: Vec<(u16, String)> = blob_shas
+            .iter()
+            .map(|sha| (201, format!(r#"{{"sha":"{sha}"}}"#)))
+            .collect();
+        responses.push((
+            201,
+            r#"{"sha":"stub-tree-sha","truncated":false}"#.to_string(),
+        ));
+        responses.push((201, commit_body.to_string()));
+
+        let stub = spawn_recording_stub(responses)?;
+        let transport = ApiTransport {
+            client: reqwest::blocking::Client::new(),
+            base_url: stub.base_url.clone(),
+        };
+        let rest_transport = ApiTransport {
+            client: reqwest::blocking::Client::new(),
+            base_url: stub.base_url.clone(),
+        };
+        let graphql = GraphqlSession {
+            transport: &transport,
+            rest_transport: &rest_transport,
+            bearer: "test-bearer",
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
+        let landed = land_via_rest(
+            Some(repo),
+            &graphql,
+            base_tree,
+            "parent-oid",
+            "feature",
+            feature_tree,
+            &changes,
+            &rest_paths,
+            &local_modes,
+            "land the executable bits",
+            "",
+        );
+        stub.shutdown.store(true, Ordering::SeqCst);
+        join_server(stub.handle);
+        let requests = stub.requests.lock().unwrap().clone();
+        Ok(RestLandingOutcome {
+            requests,
+            landed_oid: landed?,
+            uploaded_paths,
+        })
+    }
+
+    /// The request body of a recorded raw HTTP request (everything after the
+    /// header block).
+    #[cfg(unix)]
+    fn recorded_request_body(request: &str) -> String {
+        request
+            .split_once("\r\n\r\n")
+            .map_or_else(String::new, |(_headers, body)| body.to_string())
+    }
+
+    /// The request line's path of a recorded raw HTTP request.
+    #[cfg(unix)]
+    fn recorded_request_path(request: &str) -> String {
+        request
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Asserts that a recorded blob upload carries the COMMITTED bytes of
+    /// `path` (base64), never a local object id.
+    #[cfg(unix)]
+    fn assert_blob_upload_carries_committed_bytes(
+        request: &str,
+        repo: &std::path::Path,
+        path: &str,
+    ) -> miette::Result<()> {
+        let blob_body: Value =
+            serde_json::from_str(&recorded_request_body(request)).into_diagnostic()?;
+        let content = blob_body
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| miette!("the blob upload must carry content: {blob_body}"))?;
+        assert_eq!(
+            blob_body.get("encoding").and_then(Value::as_str),
+            Some("base64")
+        );
+        let spec = format!("feature:{path}");
+        let expected = git_raw(Some(repo), &["cat-file", "blob", spec.as_str()])?;
+        assert_eq!(
+            BASE64_ENGINE.decode(content).into_diagnostic()?,
+            expected,
+            "the uploaded blob must decode to the committed bytes"
+        );
+        Ok(())
+    }
+
+    /// Asserts that a recorded tree payload carries the diff base, the LOCAL
+    /// modes as JSON strings, and the UPLOADED blob shas — never the local
+    /// object ids.
+    #[cfg(unix)]
+    fn assert_tree_payload_carries_string_modes_and_uploaded_shas(
+        request: &str,
+        repo: &std::path::Path,
+        base_tree: &str,
+        expected: &[(&str, &str)],
+    ) -> miette::Result<()> {
+        let tree_body: Value =
+            serde_json::from_str(&recorded_request_body(request)).into_diagnostic()?;
+        assert_eq!(
+            tree_body.get("base_tree").and_then(Value::as_str),
+            Some(base_tree),
+            "the tree must be based on the diff base: {tree_body}"
+        );
+        let entries = tree_body
+            .get("tree")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette!("the tree payload must carry entries: {tree_body}"))?;
+        assert_eq!(entries.len(), expected.len(), "{tree_body}");
+        for (entry, (path, uploaded_sha)) in entries.iter().zip(expected) {
+            assert_eq!(
+                entry.get("path").and_then(Value::as_str),
+                Some(*path),
+                "{tree_body}"
+            );
+            assert!(
+                entry.get("mode").is_some_and(Value::is_string),
+                "the mode must be a STRING, never a number: {tree_body}"
+            );
+            assert_eq!(
+                entry.get("sha").and_then(Value::as_str),
+                Some(*uploaded_sha),
+                "the entry must reference the UPLOADED blob sha: {tree_body}"
+            );
+            let spec = format!("feature:{path}");
+            let local_oid = git(Some(repo), &["rev-parse", spec.as_str()])?;
+            assert_ne!(
+                entry.get("sha").and_then(Value::as_str),
+                Some(local_oid.as_str()),
+                "the entry must never reference the local object id"
+            );
+        }
+        Ok(())
+    }
+
+    /// Asserts THE security-critical invariant of the REST landing: the
+    /// commit payload carries EXACTLY `message`, `tree` and `parents`.
+    ///
+    /// An `author`, a `committer` or a `signature` silently suppresses
+    /// GitHub's signing (`reason = unsigned`), which surfaces only later as a
+    /// `required_signatures` block. An exact key-set comparison — a
+    /// `contains` check would not catch a NEW identity field.
+    #[cfg(unix)]
+    fn assert_commit_payload_carries_exactly_message_tree_parents(
+        request: &str,
+    ) -> miette::Result<()> {
+        let commit_payload: Value =
+            serde_json::from_str(&recorded_request_body(request)).into_diagnostic()?;
+        let commit_object = commit_payload
+            .as_object()
+            .ok_or_else(|| miette!("the commit payload must be a JSON object: {commit_payload}"))?;
+        let mut commit_keys: Vec<&str> = commit_object.keys().map(String::as_str).collect();
+        commit_keys.sort_unstable();
+        assert_eq!(
+            commit_keys,
+            vec!["message", "parents", "tree"],
+            "the commit payload must carry exactly message/tree/parents: {commit_payload}"
+        );
+        assert_eq!(
+            commit_object.get("tree").and_then(Value::as_str),
+            Some("stub-tree-sha"),
+            "the commit must reference the created tree: {commit_payload}"
+        );
+        assert_eq!(
+            commit_object.get("parents").and_then(Value::as_array),
+            Some(&vec![Value::String("parent-oid".to_string())]),
+            "the commit must carry the landing parent: {commit_payload}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_happy_path_lands_a_signed_commit_and_pins_the_payload() -> miette::Result<()> {
+        // The success path of the REST landing (issue #556). The whole path
+        // was untested: the only test driving `land_via_rest` failed on the
+        // tree call, so `create_rest_commit` never ran and the "no identity
+        // fields" invariant was protected by a comment alone. A later
+        // refactor adding `author`/`committer` would pass every gate and
+        // only fail against real GitHub as `verified=false` -> the gate
+        // refuses EVERY mode landing (a silent always-refuse).
+        let (temp, base_tree, feature_tree) = fixture_repo_with_added_executable()?;
+        let repo = temp.path().join("repo");
+        let commit_sha = "1111111111111111111111111111111111111111";
+        // The live `POST /git/commits` response carries `verification` and
+        // `tree` at the TOP level (probed on the landed commit `d7edb15f`,
+        // 2026-11-10).
+        let commit_body = format!(
+            r#"{{"sha":"{commit_sha}","tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}"#
+        );
+        let outcome = run_rest_landing_against_stub(
+            &repo,
+            &base_tree,
+            &feature_tree,
+            &["uploaded-tool-sha"],
+            &commit_body,
+        )?;
+
+        // Exactly three requests: the blob upload, the tree, the commit. A
+        // fourth request would be a ref move — the REST transport creates
+        // objects only; the ref swing happens in the caller.
+        assert_eq!(
+            outcome.requests.len(),
+            3,
+            "the landing must make exactly three requests: {outcome:?}"
+        );
+        let paths: Vec<String> = outcome
+            .requests
+            .iter()
+            .map(|request| recorded_request_path(request))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/repos/o/r/git/blobs".to_string(),
+                "/repos/o/r/git/trees".to_string(),
+                "/repos/o/r/git/commits".to_string(),
+            ],
+            "the request sequence must be blob -> tree -> commit"
+        );
+        assert!(
+            outcome.requests.iter().all(|request| {
+                !request.starts_with("PATCH ")
+                    && !request.contains("/git/refs")
+                    && !request.contains("updateRefs")
+                    && !request.contains("graphql")
+            }),
+            "the landing must not move the ref: {outcome:?}"
+        );
+
+        // The blob upload carries the COMMITTED bytes (base64), never the
+        // local object id.
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[0], &repo, "tool.sh")?;
+        // The tree is built on the diff base with the LOCAL modes (as
+        // strings) and the UPLOADED blob shas — never the local object ids.
+        assert_tree_payload_carries_string_modes_and_uploaded_shas(
+            &outcome.requests[1],
+            &repo,
+            &base_tree,
+            &[("tool.sh", "uploaded-tool-sha")],
+        )?;
+        // The commit payload carries exactly message/tree/parents.
+        assert_commit_payload_carries_exactly_message_tree_parents(&outcome.requests[2])?;
+        // The landed oid is the commit sha the stub returned.
+        assert_eq!(
+            outcome.landed_oid, commit_sha,
+            "the landing must return the commit sha the API returned"
+        );
+        assert_eq!(
+            outcome.uploaded_paths,
+            vec!["tool.sh".to_string()],
+            "the uploaded blob is the added executable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_happy_path_accepts_the_nested_commit_verification_shape() -> miette::Result<()>
+    {
+        // The repository-commits resource nests `verification` and `tree`
+        // under `commit`; the gate honours that shape too (and only that
+        // one plus the flat git-database shape). Without it, a GHES-shaped
+        // response would fail the verification gate and refuse EVERY
+        // landing.
+        let (temp, base_tree, feature_tree) = fixture_repo_with_added_executable()?;
+        let repo = temp.path().join("repo");
+        let commit_sha = "2222222222222222222222222222222222222222";
+        let commit_body = format!(
+            r#"{{"sha":"{commit_sha}","commit":{{"tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}}}"#
+        );
+        let outcome = run_rest_landing_against_stub(
+            &repo,
+            &base_tree,
+            &feature_tree,
+            &["uploaded-tool-sha"],
+            &commit_body,
+        )?;
+        assert_eq!(outcome.requests.len(), 3, "{outcome:?}");
+        assert_eq!(outcome.landed_oid, commit_sha, "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_uploads_every_changed_blob_with_its_own_sha() -> miette::Result<()> {
+        // The two-path change set (a mode-only repair + an added
+        // executable): two blob uploads with DISTINCT shas, and the tree
+        // references each uploaded sha for its own path — never the local
+        // object id.
+        let (temp, base_tree, feature_tree) = fixture_repo_with_mode_change()?;
+        let repo = temp.path().join("repo");
+        let commit_sha = "3333333333333333333333333333333333333333";
+        let commit_body = format!(
+            r#"{{"sha":"{commit_sha}","tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}"#
+        );
+        let outcome = run_rest_landing_against_stub(
+            &repo,
+            &base_tree,
+            &feature_tree,
+            &["uploaded-run-sha", "uploaded-tool-sha"],
+            &commit_body,
+        )?;
+        // Two blob uploads + tree + commit.
+        assert_eq!(outcome.requests.len(), 4, "{outcome:?}");
+        assert_eq!(
+            outcome.uploaded_paths,
+            vec!["run.sh".to_string(), "tool.sh".to_string()],
+            "both changed paths are uploaded, in change order"
+        );
+        // Each entry references its OWN uploaded sha (never the local object
+        // id) and carries the local mode as a string.
+        assert_tree_payload_carries_string_modes_and_uploaded_shas(
+            &outcome.requests[2],
+            &repo,
+            &base_tree,
+            &[
+                ("run.sh", "uploaded-run-sha"),
+                ("tool.sh", "uploaded-tool-sha"),
+            ],
+        )?;
+        let tree_body: Value =
+            serde_json::from_str(&recorded_request_body(&outcome.requests[2])).into_diagnostic()?;
+        let entries = tree_body
+            .get("tree")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette!("the tree payload must carry entries: {tree_body}"))?;
+        let modes: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry.get("mode").and_then(Value::as_str))
+            .collect();
+        assert_eq!(modes, vec!["100755", "100755"], "{tree_body}");
+        assert_eq!(outcome.landed_oid, commit_sha, "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rest_base_uses_the_rest_endpoint_and_never_the_graphql_one() {
+        let paths = |api: Option<&str>, graphql: Option<&str>| ConfigPaths {
+            config_dir: std::path::PathBuf::from(".orchestraitor"),
+            project_dir: std::path::PathBuf::from("."),
+            models_dev_endpoint: None,
+            github_api_endpoint: api.map(ToString::to_string),
+            github_graphql_endpoint: graphql.map(ToString::to_string),
+            board_cache_path: None,
+        };
+        // The github.com default.
+        assert_eq!(
+            rest_base_from(&paths(None, None)),
+            "https://api.github.com",
+            "the default REST base must stay the github.com one"
+        );
+        // An overridden REST endpoint wins (GitHub Enterprise: <host>/api/v3).
+        assert_eq!(
+            rest_base_from(&paths(Some("https://ghe.example/api/v3"), None)),
+            "https://ghe.example/api/v3"
+        );
+        // A trailing slash is trimmed.
+        assert_eq!(
+            rest_base_from(&paths(Some("https://ghe.example/api/v3/"), None)),
+            "https://ghe.example/api/v3"
+        );
+        // A `/graphql`-suffixed value never leaks into the REST path.
+        assert_eq!(
+            rest_base_from(&paths(Some("https://ghe.example/api/graphql"), None)),
+            "https://ghe.example/api"
+        );
+        // The GraphQL endpoint is NEVER the REST base: inheriting it would
+        // send the REST requests to `<graphql-base>/repos/…`.
+        assert_eq!(
+            rest_base_from(&paths(None, Some("https://ghe.example/api/graphql"))),
+            "https://api.github.com"
+        );
+        assert_eq!(
+            rest_base_from(&paths(
+                Some("https://ghe.example/api/v3"),
+                Some("https://ghe.example/api/graphql")
+            )),
+            "https://ghe.example/api/v3"
+        );
     }
 
     // --- push-branch: expect-tree repo-identity gate (#529) -----------------
