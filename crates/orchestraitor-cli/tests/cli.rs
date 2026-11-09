@@ -3674,14 +3674,15 @@ fn fixture_main_tree(repo: &str) -> miette::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-// --- `orc github push-branch`: mode warning and dry-run ----------------------
+// --- `orc github push-branch`: mode routing and dry-run ---------------------
 
 #[test]
-fn github_push_branch_warns_when_adding_a_locally_executable_file() -> miette::Result<()> {
+fn github_push_branch_dry_run_announces_rest_mode_transport() -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    // createCommitOnBranch FileAddition always lands 100644: adding a file
-    // that is 100755 locally must print a WARNING on stderr before any
-    // mutation, and the landing itself proceeds (the tree gate decides).
+    // createCommitOnBranch FileAddition always lands 100644, so adding a file
+    // that is 100755 locally is routed to the REST tree+commit transport
+    // (#556). --dry-run must announce that routing before any mutation and
+    // exit 0, without the stale "commit it as 100644" advice.
     let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo(&[])?;
     {
         use std::process::Command;
@@ -3761,8 +3762,13 @@ fn github_push_branch_warns_when_adding_a_locally_executable_file() -> miette::R
     );
     let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
     assert!(
-        stderr.contains("WARNING") && stderr.contains("100755") && stderr.contains("100644"),
-        "the 100644 mode limitation must be warned on stderr: {stderr}"
+        stderr.contains("[dry-run] 1 path(s) require the REST tree+commit transport")
+            && stderr.contains("feature.txt"),
+        "dry-run must announce the REST mode transport and name the path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("WARNING") && !stderr.contains("chmod locally afterwards"),
+        "the stale 100644-limitation advice must be gone: {stderr}"
     );
     assert!(
         stderr.contains("dry-run"),

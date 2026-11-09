@@ -781,6 +781,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **`orc github push-branch` can now land executable-bit changes** (issue 556):
+  `createCommitOnBranch` has no file-mode field, so a landing that added a
+  100755 file or changed a mode in either direction was refused by the tree
+  gate. Those change sets now automatically use the REST tree + commit
+  transport (a GitHub-signed, verified commit carrying the exact local modes);
+  content-only landings keep the GraphQL default path. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
 - **Re-plans now carry the prior attempt's receipt summary** (reduces the
   "re-explore the same worktree" failure mode where every attempt re-read
   the same files, issue 657): a re-plan prompt still opens with the static
