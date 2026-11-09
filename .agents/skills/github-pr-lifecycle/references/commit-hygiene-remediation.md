@@ -122,11 +122,14 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
 - **Detection**: `git diff --summary <base>..<head>` shows mode changes not
   present in the intended diff (`mode change 100755 => 100644`), or a
   script/hook silently stops being executable after a replay.
-- **Remediation**: re-land the affected file via `orc github push-branch`
-  (which derives the tree from the local branch and is not subject to the
-  constraint the way a hand-built FileAddition payload is), or push a
-  follow-up App-API commit whose tree restores `100755` — verify the mode in
-  the final tree, not in the working directory. Design replay payloads so
+- **Remediation**: an **added** `100755` file cannot be landed by
+  `orc github push-branch` either — it derives its `FileAddition` payload from
+  the local branch, so the blob still lands `100644` and its tree-equality gate
+  refuses the landing (seen on PR #555's repair attempt; `docs/cli/orc-github.md`
+  documents the same limitation). Use the REST tree + commit transport in
+  [verified-commit-path.md](verified-commit-path.md), which expresses the mode
+  and still lands a verified commit — then verify the mode in the final tree,
+  not in the working directory. Design replay payloads so
   executability survives: if the tree is built from the real base tree
   object (not per-file FileAdditions), modes are preserved.
 

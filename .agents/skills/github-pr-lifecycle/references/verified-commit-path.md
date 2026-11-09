@@ -27,7 +27,10 @@ is not a signature. Verified commits come from exactly two sources:
    auto-attributed the author to `arbsec-agent[bot]`. **Scope of the observation:** this
    repository, this App installation, and the `author`+`committer` pair only. A PARTIAL
    identity (author only, or committer only) was not probed — treat any identity field as
-   verification-dropping until it is.
+   verification-dropping until it is. Supplying `signature` was likewise not exercised:
+   both probe bodies omitted it, and GitHub documents the field as verify-as-supplied (a
+   supplied signature is not replaced by GitHub's own), so the documented rule stays "omit
+   all three" — that is a scope limit, not a measured behaviour.
 2. **Real GPG/SSH signatures** from a key registered to the committing identity.
 
 ## Replay procedure (documented here; no script yet)
@@ -86,13 +89,16 @@ tree-equality gate then refuses (`docs/cli/orc-github.md` documents the same lim
 for `orc github push-branch`). The REST tree + commit path CAN express it and still land
 a verified commit:
 
-1. `POST /git/trees` accepts an entry with `mode: 100755` and returns it as
-   `{"path": …, "mode": "100755", "type": "blob"}` (probed 2026-11-09, same repository and
-   installation token as the table above).
+1. `POST /git/trees` accepts an entry with `mode: "100755"` (a string, not a number) and
+   returns it as `{"path": …, "mode": "100755", "type": "blob"}` (probed 2026-11-09, same
+   repository and installation token as the table above).
 2. `POST /git/commits` with `message`, `tree` and `parents` and **no** `author`,
    `committer` or `signature` returns the GitHub-signed commit from that table
    (`verified = true`, `reason = valid`).
-3. Move the ref with the same exact-head precondition the replay procedure uses.
+3. Move the ref with GraphQL `updateRef` carrying `expectedHeadOid` — the exact-head
+   precondition the replay procedure uses; REST `PATCH /git/refs/{ref}` with `force: false`
+   guards only against a non-fast-forward, so it cannot express that precondition (a
+   concurrent rewind of the branch would slip through).
 
 The constraint is the whole trick: identity fields MUST be omitted. Adding `author` and
 `committer` for a nicer attribution silently drops verification (`reason = unsigned`) —
