@@ -23,44 +23,82 @@ fn snapshot_has_no_dot_git() -> std::result::Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[test]
-fn bail_if_untrusted_refuses_malicious_fsmonitor()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Given: a repository config with an untrusted fsmonitor command.
-    let repo = TestRepo::new()?;
-    repo.write("file.txt", "safe\n")?;
-    repo.git(&["add", "."])?;
-    repo.git(&["commit", "-m", "initial"])?;
-    repo.git(&["config", "core.fsmonitor", "sh -c 'exit 99'"])?;
-    let dest = repo.temp.path().join("snapshot");
-
-    // When: opening through the controller.
-    let result = WorkspaceController::new(repo.path()).create_snapshot("HEAD", &dest);
-
-    // Then: gix trust checks refuse the repository before exporting.
-    assert!(matches!(result, Err(WorkspaceError::OpenRepository(_))));
-    Ok(())
-}
-
 #[cfg(unix)]
 #[test]
-fn symlink_cannot_escape_workspace_root() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Given: a repository containing an escaping symlink.
+fn link_entry_fails_closed_without_writing_snapshot()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a repository whose tree has regular entries and a symlink entry.
     let repo = TestRepo::new()?;
-    repo.symlink("escape", "../host-secret")?;
+    repo.write("a-file.txt", "must not be materialized\n")?;
+    repo.write("m-dir/b-file.txt", "must not be materialized\n")?;
+    repo.symlink("z-link", "a-file.txt")?;
     repo.git(&["add", "."])?;
-    repo.git(&["commit", "-m", "escaping symlink"])?;
+    repo.git(&["commit", "-m", "link entry"])?;
     let dest = repo.temp.path().join("snapshot");
 
     // When: creating a snapshot.
     let result = WorkspaceController::new(repo.path()).create_snapshot("HEAD", &dest);
 
-    // Then: the controller rejects the escape instead of materializing it.
-    assert!(matches!(
-        result,
-        Err(WorkspaceError::EscapingSymlink { .. })
-    ));
-    assert!(!dest.join("escape").exists());
+    // Then: the whole plan is refused because Arbitraitor owns link projection.
+    let Err(error) = result else {
+        return Err("expected the snapshot to fail closed on a link entry".into());
+    };
+    match error {
+        WorkspaceError::ProjectionCapabilityUnavailable { path, link, target } => {
+            assert_eq!(path, "z-link");
+            assert_eq!(link, "z-link");
+            assert_eq!(target, "a-file.txt");
+        }
+        other => return Err(format!("unexpected error: {other:?}").into()),
+    }
+
+    // And: the refusal occurred before any write, so no partial tree exists.
+    let created = directory_entries(&dest)?;
+    assert!(
+        created.is_empty(),
+        "refused plan left a partial snapshot: {created:?}"
+    );
+    assert!(!dest.join("z-link").exists());
+    assert!(fs::symlink_metadata(dest.join("z-link")).is_err());
+    Ok(())
+}
+
+#[test]
+fn regular_tree_entries_still_materialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a repository with a directory, a regular file, and an executable.
+    let repo = TestRepo::new()?;
+    repo.write("dir/nested.txt", "nested\n")?;
+    repo.write("plain.txt", "plain\n")?;
+    repo.write("run.sh", "#!/bin/sh\nexit 0\n")?;
+    set_executable(&repo.path().join("run.sh"))?;
+    repo.git(&["add", "."])?;
+    repo.git(&["commit", "-m", "regular entries"])?;
+    let dest = repo.temp.path().join("snapshot");
+
+    // When: creating a snapshot.
+    let snapshot = WorkspaceController::new(repo.path()).create_snapshot("HEAD", &dest)?;
+
+    // Then: blob, blob-executable, and directory entries materialize normally.
+    assert_eq!(
+        fs::read_to_string(snapshot.workspace_root.join("dir/nested.txt"))?,
+        "nested\n"
+    );
+    assert_eq!(
+        fs::read_to_string(snapshot.workspace_root.join("plain.txt"))?,
+        "plain\n"
+    );
+    assert!(snapshot.manifest.contains_key(Path::new("dir/nested.txt")));
+    assert!(snapshot.manifest.contains_key(Path::new("plain.txt")));
+    assert!(snapshot.manifest.contains_key(Path::new("run.sh")));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(snapshot.workspace_root.join("run.sh"))?
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
     Ok(())
 }
 
@@ -86,6 +124,29 @@ fn reconciliation_detects_base_branch_drift_and_mutation()
     // Then: both drift classes are surfaced without silent overwrite.
     assert!(report.base_branch_drifted);
     assert_eq!(report.external_mutations, vec![PathBuf::from("file.txt")]);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn directory_entries(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut entries = fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

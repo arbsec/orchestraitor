@@ -8,7 +8,6 @@ use cap_std::fs::Dir;
 use gix::object::tree::EntryKind;
 
 use crate::history::safe_entry_name;
-use crate::symlink::materialize_symlink;
 use crate::types::{FileDigest, Result, SnapshotOptions, WorkspaceError, digest_bytes};
 
 pub(crate) fn prepare_destination(dest_dir: &Path) -> Result<()> {
@@ -42,63 +41,146 @@ pub(crate) fn materialize_tree(
     prefix: &Path,
     context: &MaterializeContext<'_>,
 ) -> Result<()> {
+    // Validate the complete plan before writing anything, so a refused entry
+    // (such as a link) never leaves a partially materialized snapshot behind.
+    let mut plan = Vec::new();
+    plan_tree(repo, tree, prefix, context.options, &mut plan)?;
+    write_plan(repo, dest, &plan, context)
+}
+
+/// One validated tree entry scheduled for materialization.
+enum PlanEntry {
+    /// Directory that must exist before its children are written.
+    Dir { path: PathBuf },
+    /// Regular file content stored as a Git blob.
+    Blob {
+        path: PathBuf,
+        object_id: gix::ObjectId,
+        kind: EntryKind,
+    },
+    /// Submodule placeholder file.
+    Submodule { path: PathBuf, marker: String },
+}
+
+fn plan_tree(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    prefix: &Path,
+    options: &SnapshotOptions,
+    plan: &mut Vec<PlanEntry>,
+) -> Result<()> {
     for entry in tree.iter() {
         let entry = entry.map_err(|source| WorkspaceError::LoadObject {
             object: prefix.display().to_string(),
             source: Box::new(source),
         })?;
         let rel_path = prefix.join(safe_entry_name(entry.filename())?);
-        if !is_sparse_visible(&rel_path, context.options) {
+        if !is_sparse_visible(&rel_path, options) {
             continue;
         }
         match entry.mode().kind() {
             EntryKind::Tree => {
-                dest.create_dir_all(&rel_path)
-                    .map_err(|source| WorkspaceError::Filesystem {
-                        path: context.root.join(&rel_path),
-                        source,
-                    })?;
+                plan.push(PlanEntry::Dir {
+                    path: rel_path.clone(),
+                });
                 let child = repo.find_tree(entry.object_id()).map_err(|source| {
                     WorkspaceError::LoadObject {
                         object: rel_path.display().to_string(),
                         source: Box::new(source),
                     }
                 })?;
-                materialize_tree(repo, &child, dest, &rel_path, context)?;
+                plan_tree(repo, &child, &rel_path, options, plan)?;
             }
-            EntryKind::Blob | EntryKind::BlobExecutable => {
-                let mut blob = entry
-                    .object()
+            EntryKind::Blob | EntryKind::BlobExecutable => plan.push(PlanEntry::Blob {
+                path: rel_path,
+                object_id: entry.object_id(),
+                kind: entry.mode().kind(),
+            }),
+            EntryKind::Link => {
+                // Arbitraitor owns the symlink-projection decision (spec §2.2,
+                // §9.4.2). Its projection capability does not exist yet
+                // (arbsec/arbitraitor#872), so the plan is refused as a whole.
+                return Err(WorkspaceError::ProjectionCapabilityUnavailable {
+                    path: rel_path.display().to_string(),
+                    link: link_name(&rel_path),
+                    target: link_target(&entry, &rel_path)?,
+                });
+            }
+            EntryKind::Commit => plan.push(PlanEntry::Submodule {
+                path: rel_path,
+                marker: format!("submodule {}\n", entry.object_id().to_hex()),
+            }),
+        }
+    }
+    Ok(())
+}
+
+fn link_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+fn link_target(entry: &gix::object::tree::EntryRef<'_, '_>, rel_path: &Path) -> Result<String> {
+    let mut blob = entry
+        .object()
+        .map_err(|source| WorkspaceError::LoadObject {
+            object: rel_path.display().to_string(),
+            source: Box::new(source),
+        })?
+        .try_into_blob()
+        .map_err(|source| WorkspaceError::LoadObject {
+            object: rel_path.display().to_string(),
+            source: Box::new(source),
+        })?;
+    Ok(String::from_utf8_lossy(&blob.take_data()).into_owned())
+}
+
+fn write_plan(
+    repo: &gix::Repository,
+    dest: &Dir,
+    plan: &[PlanEntry],
+    context: &MaterializeContext<'_>,
+) -> Result<()> {
+    for entry in plan {
+        match entry {
+            PlanEntry::Dir { path } => {
+                dest.create_dir_all(path)
+                    .map_err(|source| WorkspaceError::Filesystem {
+                        path: context.root.join(path),
+                        source,
+                    })?;
+            }
+            PlanEntry::Blob {
+                path,
+                object_id,
+                kind,
+            } => {
+                let mut blob = repo
+                    .find_object(*object_id)
                     .map_err(|source| WorkspaceError::LoadObject {
-                        object: rel_path.display().to_string(),
+                        object: path.display().to_string(),
                         source: Box::new(source),
                     })?
                     .try_into_blob()
                     .map_err(|source| WorkspaceError::LoadObject {
-                        object: rel_path.display().to_string(),
+                        object: path.display().to_string(),
                         source: Box::new(source),
                     })?;
                 let data = blob.take_data();
-                write_file(dest, context.root, &rel_path, &data, entry.mode().kind())?;
+                write_file(dest, context.root, path, &data, *kind)?;
                 context
                     .manifest
                     .borrow_mut()
-                    .insert(rel_path, digest_bytes(&data));
+                    .insert(path.clone(), digest_bytes(&data));
             }
-            EntryKind::Link => materialize_symlink(&entry, &rel_path, context)?,
-            EntryKind::Commit => {
-                let marker = format!("submodule {}\n", entry.object_id().to_hex());
-                write_file(
-                    dest,
-                    context.root,
-                    &rel_path,
-                    marker.as_bytes(),
-                    EntryKind::Blob,
-                )?;
+            PlanEntry::Submodule { path, marker } => {
+                write_file(dest, context.root, path, marker.as_bytes(), EntryKind::Blob)?;
                 context
                     .manifest
                     .borrow_mut()
-                    .insert(rel_path, digest_bytes(marker.as_bytes()));
+                    .insert(path.clone(), digest_bytes(marker.as_bytes()));
             }
         }
     }
