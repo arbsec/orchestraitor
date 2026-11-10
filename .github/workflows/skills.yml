@@ -43,12 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # `persist-credentials: false`: the job reads the repo and then executes
-      # PR-authored bash, which is this workflow's entire purpose — the
-      # checkout-scoped token has no legitimate consumer here, so it must not sit
-      # in the working tree's git config while that code runs (zizmor
-      # `artipacked`). Nothing in this job pushes; the repo is private and the
-      # `contents: read` token would be a genuine, if read-only, capability leak.
+      # `persist-credentials: false`: the token's only grant is read access to a
+      # public repo, so its marginal value is near zero — but it still has no
+      # legitimate consumer in a job that executes PR-authored bash, so it must
+      # not sit in the working tree's git config while that code runs (zizmor
+      # `artipacked`).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
