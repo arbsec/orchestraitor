@@ -33,7 +33,7 @@
 | Layered config | figment 0.10.19 (maintenance mode; serde+toml escape hatch planned) | MIT OR Apache-2.0 | crates.io |
 | Receipt canonicalization | serde_json_canonicalizer 0.3.2 (RFC 8785 JCS) | MIT | crates.io |
 | CLI | clap 4.6.4 + clap_derive | MIT OR Apache-2.0 | crates.io |
-| Git (controller-owned) | gix 0.89.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
+| Git (controller-owned) | gix 0.90.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
 | Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
 | MCP server + client | rmcp 3.5.1 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
 | Agent Client Protocol | agent-client-protocol 3.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
@@ -319,7 +319,7 @@ No external `models-dev` Rust crate is used. The published `models-dev 0.1.1` (v
 
 ### 6.1 Library choice
 
-`gix` 0.85.0 (gitoxide), MIT OR Apache-2.0. Pure Rust with no C toolchain and no vendored libgit2. The `gix::open_opts()` API combined with `bail_if_untrusted(true)` refuses to execute user-level `core.fsmonitor`, hooks, or other untrusted filesystem side effects. This is the safer choice for controller-owned Git metadata isolation.
+`gix` 0.90.0 (gitoxide), MIT OR Apache-2.0. Pure Rust with no C toolchain and no vendored libgit2. `gix::open_opts()` combined with `bail_if_untrusted(true)` is an ownership/trust gate: gitoxide refuses to use configuration from untrusted sources, and it has no `core.fsmonitor`, hook, or other user-config execution path during controller-owned reads. It is not a repository-trust verdict — what counts as a trusted repository is an Arbitraitor decision (arbsec/arbitraitor#874). This is the safer choice for controller-owned Git metadata isolation.
 
 `git2` (libgit2) is rejected because of the C dependency surface and the patched OpenSSL path it pulls in on Linux.
 

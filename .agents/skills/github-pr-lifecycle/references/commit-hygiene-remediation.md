@@ -77,10 +77,12 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
   `unknown_key`, `expired_key`).
 - **Why it happens**: the commit was created outside the App API — a plain
   `git push` (unsigned; locally-attributed bot commits can never verify), or
-  a REST `git/commits` creation (REST does not sign even with an installation
-  token — verified empirically 2026-10-01), or signed with a key GitHub does
-  not recognize (`unknown_key`: e.g. a committer key not registered to the
-  author identity, as seen on PR #486's renovate-authored commit).
+  a REST `git/commits` creation that names the identity (REST DOES sign — but
+  ONLY when the body omits `author`, `committer` AND `signature`; supplying
+  them stores them verbatim and yields `reason=unsigned`, verified 2026-11-09,
+  see [verified-commit-path.md](verified-commit-path.md)), or signed with a key
+  GitHub does not recognize (`unknown_key`: e.g. a committer key not registered
+  to the author identity, as seen on PR #486's renovate-authored commit).
 - **Remediation**: there is NO local way to make such a commit verify —
   unsigned commits cannot be signed after the fact, and a local GPG/SSH
   signature under the bot identity is not a registered path. Recreate the
@@ -120,11 +122,20 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
 - **Detection**: `git diff --summary <base>..<head>` shows mode changes not
   present in the intended diff (`mode change 100755 => 100644`), or a
   script/hook silently stops being executable after a replay.
-- **Remediation**: re-land the affected file via `orc github push-branch`
-  (which derives the tree from the local branch and is not subject to the
-  constraint the way a hand-built FileAddition payload is), or push a
-  follow-up App-API commit whose tree restores `100755` — verify the mode in
-  the final tree, not in the working directory. Design replay payloads so
+- **Remediation**: the RAW `createCommitOnBranch` payload cannot express an
+  added `100755` file either — `FileAddition` has no `mode` field, so a
+  hand-built payload still lands the blob as `100644` and its tree-equality
+  gate refuses the landing (seen on PR #555's repair attempt;
+  `docs/cli/orc-github.md` documents the same limitation of the raw
+  mutation). `orc github push-branch` does NOT have that limitation
+  anymore: since #556 it routes every mode-requiring change set through
+  the REST tree + commit transport automatically, so an added `100755` file
+  (or a mode change in either direction) lands with the exact local mode
+  and a GitHub-signed commit — just run `orc github push-branch`. For a
+  HAND-BUILT payload, use the REST tree + commit transport in
+  [verified-commit-path.md](verified-commit-path.md), which expresses the mode
+  and still lands a verified commit — then verify the mode in the final tree,
+  not in the working directory. Design replay payloads so
   executability survives: if the tree is built from the real base tree
   object (not per-file FileAdditions), modes are preserved.
 

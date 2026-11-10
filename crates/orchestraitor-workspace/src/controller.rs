@@ -35,7 +35,9 @@ impl WorkspaceController {
     /// # Errors
     ///
     /// Returns [`WorkspaceError`] when the repository is untrusted, the revision
-    /// cannot be resolved, or a tree entry would escape the snapshot root.
+    /// cannot be resolved, or a tree entry needs projection Arbitraitor does not
+    /// provide yet (links fail closed with
+    /// [`WorkspaceError::ProjectionCapabilityUnavailable`]).
     pub fn create_snapshot(&self, base_commit: &str, dest_dir: &Path) -> Result<Snapshot> {
         self.create_snapshot_with_options(base_commit, dest_dir, &SnapshotOptions::default())
     }
@@ -245,13 +247,14 @@ impl WorkspaceController {
     }
 
     fn open_repo(&self) -> Result<gix::Repository> {
-        let repo = gix::open_opts(
+        // Repository-trust decisions belong to Arbitraitor
+        // (arbsec/arbitraitor#874); `bail_if_untrusted` is gix's ownership
+        // check, not a trust verdict.
+        gix::open_opts(
             &self.repo_path,
             gix::open::Options::default().bail_if_untrusted(true),
         )
-        .map_err(|source| WorkspaceError::OpenRepository(Box::new(source)))?;
-        reject_fsmonitor_config(&self.repo_path)?;
-        Ok(repo)
+        .map_err(|source| WorkspaceError::OpenRepository(Box::new(source)))
     }
 
     fn current_head(&self) -> Result<String> {
@@ -264,27 +267,4 @@ impl WorkspaceController {
                 })?;
         Ok(head.to_hex().to_string())
     }
-}
-
-fn reject_fsmonitor_config(repo_path: &Path) -> Result<()> {
-    let config_path = repo_path.join(".git").join("config");
-    let config = match std::fs::read_to_string(&config_path) {
-        Ok(config) => config,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(WorkspaceError::OpenRepository(Box::new(source)));
-        }
-    };
-    if config.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("fsmonitor") || trimmed.starts_with("core.fsmonitor")
-    }) {
-        return Err(WorkspaceError::OpenRepository(Box::new(
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "core.fsmonitor is not allowed for trusted controller snapshots",
-            ),
-        )));
-    }
-    Ok(())
 }

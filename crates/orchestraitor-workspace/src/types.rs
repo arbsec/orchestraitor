@@ -40,13 +40,24 @@ pub enum WorkspaceError {
         /// Rejected path text.
         path: String,
     },
-    /// A symlink target would escape the materialized workspace root.
-    #[error("symlink {link} escapes workspace root via target {target}")]
-    EscapingSymlink {
-        /// Workspace-relative link path.
-        link: PathBuf,
-        /// Link target stored in Git.
-        target: PathBuf,
+    /// A tree entry needs workspace projection that Arbitraitor does not offer yet.
+    ///
+    /// Symlink projection is an Arbitraitor-owned decision (spec §2.2, §9.4.2).
+    /// The projection capability does not exist yet (arbsec/arbitraitor#872), so
+    /// the controller fails closed and materializes nothing for a plan that
+    /// contains a link.
+    #[error(
+        "workspace projection capability unavailable for path {path}: link {link} \
+         targets {target}; refusing to materialize until Arbitraitor provides a \
+         projection decision"
+    )]
+    ProjectionCapabilityUnavailable {
+        /// Workspace-relative path of the tree entry.
+        path: String,
+        /// Link name recorded in the materialization plan.
+        link: String,
+        /// Link target recorded in the materialization plan.
+        target: String,
     },
     /// The destination would expose Git metadata to the worker.
     #[error("snapshot destination contains forbidden .git entry")]

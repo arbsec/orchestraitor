@@ -9,7 +9,6 @@ mod controller;
 mod delivery;
 mod history;
 mod materialize;
-mod symlink;
 mod types;
 
 pub use controller::WorkspaceController;
