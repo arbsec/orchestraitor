@@ -37,6 +37,14 @@
 #   (f) HEAD shares no history with the base ref -> typed refusal, exit 6
 #   (g) a stale CACHED `origin/main` is refreshed: the fetch, not the cached
 #       remote-tracking ref, decides
+#   (h) `--skip-review-gate` still works when the base resolves
+#   (i) the docs-only auto-skip still diffs from the fork point
+#   (j) `--skip-review-gate` is evaluated BEFORE base resolution: with no
+#       `origin` it still reaches creation (exit 0), while the same fixture
+#       without the flag stays fail-closed (exit 6) (#735 review)
+#   (k) `--base` ref normalisation: `origin/`, `refs/heads/` and
+#       `refs/remotes/origin/` resolve to the same remote tip; a doubled prefix
+#       fails closed instead of resolving somewhere unexpected
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -253,7 +261,10 @@ G_CACHED="$(git -C "$TMP/g-work" rev-parse refs/remotes/origin/main)"
 G_HEAD="$(feature_commit "$TMP/g-work" feature)"
 advance_seed "$TMP/g-seed" 2                              # remote main moves on
 G_TIP="$(git -C "$TMP/g-seed" rev-parse HEAD)"
-git -C "$TMP/g-work" branch -f main "$G_CACHED"           # stale local maingit -C "$TMP/g-work" update-ref refs/remotes/origin/main "$G_CACHED"   # stale cache
+# The cached ref is stale by construction: this repo fetched the FIRST advance
+# only, and the remote has moved once more since. No rewind is needed — the
+# fetch under test, not the cached ref, must supply the base.
+git -C "$TMP/g-work" branch -f main "$G_CACHED"           # stale local main
 write_record "$TMP/g-work" "$G_HEAD" "$G_TIP"
 [ "$G_CACHED" != "$G_TIP" ] || { echo "fixture error: cache is not stale" >&2; exit 1; }
 gate "$TMP/g-work" --base main
@@ -289,6 +300,52 @@ advance_seed "$TMP/i-seed" 1          # non-.md change on the base after the for
 gate "$TMP/i-work" --base main
 assert 'docs-only: gate skipped for a *.md-only diff' 0 "$RC"
 assert 'docs-only: skip message printed' 1 "$(count "$TMP/err" 'docs-only diff')"
+
+# --- (j) an explicit skip is evaluated BEFORE base resolution ------------------
+# #735 review finding: the fail-closed fetch must not veto the operator's
+# explicit decision. Same fixture, both directions.
+echo "--- (j) --skip-review-gate bypasses base resolution (no origin) ---"
+git init -q --bare -b main "$TMP/j-remote.git"
+make_seed "$TMP/j-seed" "$TMP/j-remote.git"
+clone_work "$TMP/j-remote.git" "$TMP/j-work"
+feature_commit "$TMP/j-work" feature >/dev/null
+git -C "$TMP/j-work" remote remove origin
+gate "$TMP/j-work" --base main --skip-review-gate
+assert 'no origin + explicit skip: still reaches creation (exit 0)' 0 "$RC"
+assert 'no origin + explicit skip: no base-resolution refusal' 0 \
+  "$(count "$TMP/err" 'cannot resolve the base branch')"
+assert 'no origin + explicit skip: notice names the skip' 1 \
+  "$(count "$TMP/err" 'pre-PR local review gate SKIPPED via --skip-review-gate')"
+assert 'no origin + explicit skip: dry-run reached gh pr create' 1 \
+  "$(count "$TMP/err" '[dry-run] gh pr create')"
+gate "$TMP/j-work" --base main
+assert 'same fixture WITHOUT the flag: fail-closed exit 6' 6 "$RC"
+assert 'same fixture WITHOUT the flag: names the ref it tried' 1 \
+  "$(count "$TMP/err" "from 'refs/remotes/origin/main'")"
+
+# --- (k) --base ref normalisation ---------------------------------------------
+# `refs/remotes/origin/`, `refs/heads/` and `origin/` prefixes are stripped
+# once, and the result is re-anchored under `refs/remotes/origin/`.
+echo "--- (k) --base ref normalisation ---"
+git init -q --bare -b main "$TMP/k-remote.git"
+make_seed "$TMP/k-seed" "$TMP/k-remote.git"
+advance_seed "$TMP/k-seed" 1
+K_TIP="$(git -C "$TMP/k-seed" rev-parse HEAD)"
+clone_work "$TMP/k-remote.git" "$TMP/k-work"
+K_HEAD="$(feature_commit "$TMP/k-work" feature)"
+write_record "$TMP/k-work" "$K_HEAD" "$K_TIP"
+gate "$TMP/k-work" --base origin/main
+assert 'normalisation: origin/-prefixed base resolves (exit 0)' 0 "$RC"
+assert 'normalisation: origin/-prefixed base is the remote tip' 1 \
+  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
+gate "$TMP/k-work" --base refs/heads/main
+assert 'normalisation: refs/heads/-prefixed base resolves (exit 0)' 0 "$RC"
+assert 'normalisation: refs/heads/-prefixed base is the remote tip' 1 \
+  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
+gate "$TMP/k-work" --base origin/origin/main
+assert 'normalisation: double prefix fails closed (exit 6)' 6 "$RC"
+assert 'normalisation: double prefix names the doubled ref' 1 \
+  "$(count "$TMP/err" "from 'refs/remotes/origin/origin/main'")"
 
 printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -70,12 +70,17 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   branch, unreachable `origin`, unrelated history) is a
                   distinct fail-closed refusal (exit 6) that names the ref it
                   tried and the remediation — it never falls back to a local
-                  branch. Escapes: a diff vs base
-                  containing ONLY `*.md` files skips the gate
-                  automatically; `--skip-review-gate` overrides it
-                  explicitly — ONLY for docs-only PRs where CodeRabbit is
-                  not applicable, or an explicit owner directive (it
-                  prints a loud notice and the PR still gets reviewed).
+                  branch. Escapes: an explicit `--skip-review-gate`
+                  overrides the gate — ONLY for docs-only PRs where
+                  CodeRabbit is not applicable, or an explicit owner
+                  directive — and it is evaluated BEFORE base resolution,
+                  so it skips base resolution and the review-record check
+                  together: an unreachable `origin` cannot veto an explicit
+                  operator decision (it still prints a loud notice and the
+                  PR still gets reviewed). The docs-only auto-skip (a diff
+                  vs base containing ONLY `*.md` files) is the other way
+                  round: it is INFERRED from the diff, so it still requires
+                  a resolvable base and can be refused with exit 6.
                   Create the PR as DRAFT linked to the leaf issue
                   (`Closes #N` for full-scope landings, bare `Refs #N` for
                   partial landings) and spec

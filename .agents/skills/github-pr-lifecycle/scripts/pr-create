@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --). A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --). A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
   exit "$ORC_OK"
 fi
 
@@ -48,17 +48,23 @@ done
 # Escapes:
 #   --skip-review-gate  explicit override (docs-only PRs where CodeRabbit is
 #                       not applicable, or an explicit owner directive) —
-#                       prints a loud notice and proceeds.
+#                       prints a loud notice and proceeds. It is evaluated
+#                       BEFORE base resolution and skips it along with the
+#                       record check: an explicit decision must not be vetoed
+#                       by an unreachable origin. Never silently proceeds —
+#                       the notice says the PR is unreviewed.
 #   docs-only diff      automatic skip when `git diff --name-only
-#                       <merge-base>..HEAD` contains only *.md files.
+#                       <merge-base>..HEAD` contains only *.md files. This one
+#                       still NEEDS a resolvable base: it is inferred from the
+#                       diff, not decided by the operator.
 #
 # A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
 # class) with a typed message naming the exact remediation command. A base that
 # cannot be resolved from the remote ref is a distinct refusal: exit 6
 # (PR_CREATE_EXIT_BASE_UNRESOLVED) — never a local-branch fallback and never a
-# silent empty merge-base (#733). The gate
-# has NO env-var bypass: the SKILL_CASE harness contract below is scoped to
-# the gh-env-wrapper test suite only.
+# silent empty merge-base (#733). The gate has NO env-var bypass: the
+# SKILL_CASE harness contract below is scoped to the gh-env-wrapper test suite
+# only.
 # SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate
 # ENTIRELY — including base resolution — before any git probing: the harness
 # drives pr-create from a SHALLOW checkout (no origin/HEAD symref, no
@@ -72,6 +78,19 @@ if [ -z "$PR_CREATE_REPO_ROOT" ]; then
   exit "$ORC_ERR_CONFIG"
 fi
 PR_CREATE_HEAD_SHA="$(git rev-parse HEAD)"
+# Explicit operator override, evaluated BEFORE any base resolution: the
+# operator has already made the decision, so an unreachable or unresolvable
+# base must not veto it (#735 review — the fail-closed fetch had made
+# `--skip-review-gate` itself fail in exactly the environment where the escape
+# hatch is needed). Base resolution, the docs-only inference and the
+# review-record check are all skipped together with it.
+# The docs-only auto-skip below is deliberately NOT hoisted: it is INFERRED
+# from the diff, and inferring it requires a resolvable base.
+if [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
+  echo "NOTICE: pre-PR local review gate SKIPPED via --skip-review-gate (per owner directive or docs-only policy)" >&2
+  echo "        base resolution and the review-record check are skipped with it" >&2
+  echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
+else
 PR_CREATE_TARGET_BASE="${PR_CREATE_BASE_BRANCH:-}"
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
   # Resolve the effective `gh pr create` base from the pass-through args:
@@ -127,8 +146,12 @@ esac
 # yielded a plausible-but-wrong base OID. Refuse rather than guess.
 PR_CREATE_EXIT_BASE_UNRESOLVED=6   # distinct from ORC_ERR_CONFIG (review record missing)
 PR_CREATE_BASE_REF="refs/remotes/origin/$PR_CREATE_TARGET_BASE"
+# Bound the fetch: against a blackholed remote it would otherwise hang until
+# the OS TCP timeout. Portable per-transport config (no `timeout`, which is
+# GNU coreutils and absent on a stock macOS); ignored by non-HTTP transports.
 set +e
-PR_CREATE_FETCH_ERR="$(git fetch --quiet --no-tags origin "+refs/heads/$PR_CREATE_TARGET_BASE:$PR_CREATE_BASE_REF" 2>&1)"
+PR_CREATE_FETCH_ERR="$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 \
+  fetch --quiet --no-tags origin "+refs/heads/$PR_CREATE_TARGET_BASE:$PR_CREATE_BASE_REF" 2>&1)"
 PR_CREATE_FETCH_RC=$?
 set -e
 PR_CREATE_BASE_OID=""
@@ -173,10 +196,9 @@ if [ "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | wc -l)" -gt 0 ] 
   SKIP_REVIEW_GATE=1
 fi
 
-if [ "${SKIP_REVIEW_GATE:-0}" != "1" ] && [ -z "${SKILL_CASE:-}" ]; then
-  # SKILL_CASE=1 is set by the gh-env-wrapper harness (see the comment block
-  # above): the harness asserts the labeling-chain service route itself, with
-  # no review-record fixture, so the gate must not refuse there.
+if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
+  # Only the docs-only inference can set SKIP_REVIEW_GATE here: the explicit
+  # --skip-review-gate flag was hoisted above base resolution.
   PR_CREATE_GATE_RECORD=""
   for PR_CREATE_CANDIDATE in "$PR_CREATE_REPO_ROOT"/.orchestraitor/reviews/*-"$(git rev-parse --short=7 HEAD)".md; do
     [ -f "$PR_CREATE_CANDIDATE" ] || continue
@@ -197,10 +219,8 @@ if [ "${SKIP_REVIEW_GATE:-0}" != "1" ] && [ -z "${SKILL_CASE:-}" ]; then
     exit "$ORC_ERR_CONFIG"
   fi
   echo "pre-review-gate: clean local review generation found at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_BASE_OID = $PR_CREATE_BASE_REF)" >&2
-elif [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
-  echo "NOTICE: pre-PR local review gate SKIPPED via --skip-review-gate (per owner directive or docs-only policy)" >&2
-  echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
 fi
+fi # explicit --skip-review-gate (hoisted above base resolution)
 fi # SKILL_CASE gate wrapper
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
