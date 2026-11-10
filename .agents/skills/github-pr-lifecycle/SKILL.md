@@ -55,13 +55,22 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 1. DRAFT          PRE-REVIEW GATE: before `pr-create` creates a PR, it
                   verifies a recorded CLEAN local review generation exists
                   for the exact (head, base) pair being proposed (a
-                  `.orchestraitor/reviews` record whose head SHA matches
-                  the current HEAD and whose base OID matches the
-                  merge-base with the target base branch). Absent, stale,
-                  or non-clean evidence fails the create (typed exit 2:
+                  `.orchestraitor/reviews` record whose head SHA matches the
+                  current HEAD and whose base OID matches the CURRENT TIP of
+                  `refs/remotes/origin/<base>`, fetched by the gate — the same
+                  OID `pr-review-agent` records as `- base OID:` and
+                  `convergence-status`/`merge-gate` compare to the PR's
+                  `baseRefOid`; never `git merge-base`, and never a local
+                  branch of the same name). Absent, stale, or non-clean
+                  evidence fails the create (typed exit 2:
                   `pre-review-gate: ... run pr-review-local first`) — run
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local`
-                  first, then re-run `pr-create`. Escapes: a diff vs base
+                  first, then re-run `pr-create`. A base that cannot be
+                  resolved from that fully-qualified remote ref (missing
+                  branch, unreachable `origin`, unrelated history) is a
+                  distinct fail-closed refusal (exit 6) that names the ref it
+                  tried and the remediation — it never falls back to a local
+                  branch. Escapes: a diff vs base
                   containing ONLY `*.md` files skips the gate
                   automatically; `--skip-review-gate` overrides it
                   explicitly — ONLY for docs-only PRs where CodeRabbit is

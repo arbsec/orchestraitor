@@ -22,15 +22,19 @@ cp -L -- "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"* 2>/dev/null || true
 
 # pr-create runs a pre-PR local review gate before creating a PR (#622): it
-# resolves the target base branch, computes a merge-base with HEAD and requires
-# a CLEAN review generation at that exact (head, base) pair. Give the fixture a
-# real base branch, one change on top of it and the matching CLEAN record, so
-# the chain below exercises the gate's normal passing path instead of a
-# skip/bypass. The gate reads only local git state, so this stays hermetic.
+# resolves the target base branch, fetches `refs/remotes/origin/<base>` and
+# requires a CLEAN review generation whose `- base OID:` is that remote tip
+# (#733 — never a local branch of the same name). Give the fixture a real
+# remote: a local bare repo reached over a file path (no network), carrying
+# `main` at the same base commit the CLEAN record names, so the chain below
+# exercises the gate's normal passing path instead of a skip/bypass.
 GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
 git -C "$TMP/repo" add -A
 git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base"
 PR_CREATE_BASE_OID="$(git -C "$TMP/repo" rev-parse HEAD)"
+git init -q --bare -b main "$TMP/origin.git"
+git -C "$TMP/repo" remote add origin "$TMP/origin.git"
+git -C "$TMP/repo" push -q origin main
 git -C "$TMP/repo" switch -q -c skills-test
 printf 'changed\n' > "$TMP/repo/CHANGES.txt"
 git -C "$TMP/repo" add -A
