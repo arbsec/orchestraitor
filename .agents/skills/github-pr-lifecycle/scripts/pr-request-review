@@ -64,9 +64,11 @@ fi
 # Gate 2: ALL automatic checks pass (no fail, no pending; known-disabled
 # skips excluded inside pr-checks itself).
 CHECKS_JSON="$(mktemp)"
-# `bash`-invoke (not direct exec): the callee's executable bit is not
-# guaranteed in every checkout — the App-signed landing path
-# (createCommitOnBranch) cannot represent 100755 (issue #556).
+# `bash`-invoke (not direct exec): the skill scripts are landed at mode
+# 100644 — a kept choice (#709), because the executable bit is not guaranteed
+# in every checkout. The RAW `createCommitOnBranch` payload cannot express
+# 100755 (#556; `orc github push-branch` lands a 100755 file through the REST
+# tree + commit transport, but the scripts stay 100644).
 if ! bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>/dev/null; then
   REASONS+=("pr-checks could not classify checks")
 fi

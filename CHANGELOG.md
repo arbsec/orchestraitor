@@ -430,12 +430,8 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `updateRefs` false-negative is fixed: when the ref-swing mutation reports a
   GraphQL error or a missing `clientMutationId` but a re-read proves the
   branch moved to the new head, the landing is reported as a success with a
-  WARNING on stderr instead of a spurious typed error. Added files that are
-  executable (100755) locally trigger a stderr WARNING that
-  `createCommitOnBranch` `FileAddition` always lands 100644 (the limitation
-  is documented; the tree gate still refuses a mode-mismatched landing).
-  Multiple local commits continue to squash-land as ONE App-signed commit
-  (documented).
+  WARNING on stderr instead of a spurious typed error. Multiple local
+  commits continue to squash-land as ONE App-signed commit (documented).
 - Per-agent cost tracking for loop-run workers: `orc loop` now opens a durable cost ledger at
   `.orchestraitor/cost.db` and records one cost entry per worker model call,
   attributed to the board task (agent), the routed orchestration role, and
@@ -833,10 +829,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   [docs/cli/orc-github.md](docs/cli/orc-github.md).
 - `github-pr-lifecycle` skill scripts must be invoked as
   `bash .agents/skills/github-pr-lifecycle/scripts/<name>`, never exec'd
-  directly: the App-signed landing path (`createCommitOnBranch`
-  `fileChanges`) cannot materialize mode `100755`, so the scripts land as
-  mode `100644` on the default branch — a direct `./scripts/...` call
-  fails with exit 126 (`Permission denied`) and the
+  directly: the scripts are KEPT at mode `100644` on the default branch — a
+  choice, not a platform limit. The RAW `createCommitOnBranch` `fileChanges`
+  payload cannot materialize mode `100755`, but since #556
+  `orc github push-branch` lands a `100755` file through the REST tree + commit
+  transport; the scripts stay non-executable so the invocation contract does
+  not depend on a checkout preserving the executable bit. A direct
+  `./scripts/...` call fails with exit 126 (`Permission denied`) and the
   `merge-gate` → `convergence-status` chain can never render a verdict.
   The sibling-script invocations inside `merge-gate` and
   `convergence-status` already route through `bash "$SCRIPT_DIR/<name>"`
