@@ -769,6 +769,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- SQLite access now builds against rusqlite 0.41.1 (previously 0.40.2), which
+  moves the bundled `libsqlite3-sys` to 0.39.1 and its embedded SQLite to
+  3.54.1. That clears `RUSTSEC-2026-0459` (medium, 6.8), a bundling
+  vulnerability in every `libsqlite3-sys` release before 0.39.0, so builds of
+  `orc`, `orcd`, and every crate that opens a SQLite store no longer ship the
+  affected SQLite. No public API, schema, or on-disk format changes; the only
+  source change required was already landed in #711 (the authorizer hook is
+  installed through a `&mut Connection` accessor).
+
 - The MCP gateway (`orchestraitor-mcp`) now builds against rmcp 3.5.1
   (previously 2.2.0), the official MCP Rust SDK release for the
   MCP 2026-07-28 specification. The gateway's tool surface, wire shapes
