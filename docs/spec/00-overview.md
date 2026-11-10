@@ -404,7 +404,7 @@ Its current product is still primarily a project-local container environment. It
 
 ACP already solves much of the IDE-agent protocol problem. JetBrains and Zed support it, and Gemini CLI and other agents expose ACP modes. The protocol has SDKs including Rust.
 
-The Rust SDK is maintained at **`agentclientprotocol/rust-sdk`** (organization moved away from the previous `zed-industries/...` home; that path now redirects). The published crates are `agent-client-protocol` and `agent-client-protocol-schema`, both Apache-2.0, with companion crates `agent-client-protocol-rmcp` (rmcp bridge), `agent-client-protocol-tokio`, `agent-client-protocol-http`, and `agent-client-protocol-conductor`. The v1 wire stability contract holds since v1.0; see [`tech-stack.md`](tech-stack.md) for the pinned release.
+The Rust SDK is maintained at **`agentclientprotocol/rust-sdk`** (organization moved away from the previous `zed-industries/...` home; that path now redirects). The published crates are `agent-client-protocol` and `agent-client-protocol-schema`, both Apache-2.0, with companion crates `agent-client-protocol-rmcp` (rmcp bridge), `agent-client-protocol-tokio`, `agent-client-protocol-http`, and `agent-client-protocol-conductor`. The v1 wire stability contract holds since v1.0. ACP is out of MVP scope (milestone M4; spec `20-harness-worker.md` §11 IDE integration), so no ACP crate is a workspace dependency yet: the ACP integration PR pins the release it actually exercises — see [`tech-stack.md`](tech-stack.md) §4.2.
 
 The project should implement ACP rather than inventing a new IDE-agent protocol. Native plugins are still needed for capabilities that ACP does not expose or where the IDE does not provide a complete ACP client.
 
