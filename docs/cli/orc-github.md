@@ -291,7 +291,9 @@ Arguments and defaults:
 - `--re-land` — see the re-land section below.
 - `--dry-run` — resolve everything (owner/repo, branches, diff base, change
   set) and print the plan (paths and statuses only — never blob contents)
-  without creating or moving anything on the remote.
+  without creating or moving anything on the remote. When the change set needs
+  a file-mode change, it also prints which paths will use the REST tree +
+  commit transport (see the mode bullet below).
 
 Mechanics:
 
@@ -318,11 +320,14 @@ Mechanics:
   the real ref moves — `createCommitOnBranch` advances whatever branch it
   lands on, so landing directly would move the real branch even when a gate
   later fails. The temp ref is deleted on every path, and only the ref id
-  this invocation created is ever touched.
+  this invocation created is ever touched. The REST mode transport needs no
+  temp branch: `POST /git/commits` creates an object and never advances a
+  branch, so its tree/verification gates also run before the real ref moves.
 - **Gates (fail-closed, typed errors, no plain-`git push` fallback):** the
   landed commit's tree MUST equal the local branch tree, and its
   `signature.isValid` MUST be `true` (GitHub web-flow signing). A failed gate
-  deletes the temp ref and leaves the real remote branch untouched.
+  deletes the temp ref and leaves the real remote branch untouched (the REST
+  route creates no temp ref, and still leaves the branch untouched).
   Diagnostics never contain the token.
 - **Ref move with an exact-head precondition AND a false-negative guard:**
   the verified landing commit was created ON TOP of the observed remote head;
@@ -340,15 +345,24 @@ Mechanics:
   the API before failing: a ref that provably points at the new head
   degrades the failure to a WARNING on stderr and reports success — a
   mutation that moved the ref is never reported as an error.
-- **Executable-file mode limitation:** `createCommitOnBranch` `FileAddition`
-  always lands files as 100644 — it cannot set the executable bit. When a
-  file being ADDED is 100755 in the local tree (and was not already 100755 in
-  the diff base), the subcommand prints a WARNING on stderr before landing:
-  the remote tree will carry 100644 and the tree gate will then refuse the
-  landing. Fix by committing the file as 100644 locally, or land it first
-  with mode 100644 and chmod locally afterwards. Files that already exist in
-  the diff base with 100755 are unaffected (modifications keep GitHub's
-  stored mode).
+- **Executable-file modes (REST tree + commit transport):** GraphQL is still
+  the default landing transport, but `createCommitOnBranch` carries no mode
+  field: `FileAddition` always lands 100644 and `FileChange` keeps GitHub's
+  stored mode, so neither direction of an executable-bit change is
+  expressible. When a change set requires a mode change — an `A`/`M` path
+  whose local mode differs from the diff-base (remote head) mode, i.e. an
+  ADDED 100755 file, `100644 -> 100755` (a mode-only repair), or the reverse
+  `100755 -> 100644` — `push-branch` automatically lands through the REST
+  tree + commit transport instead. It prints a one-line `note:` naming the
+  paths, uploads the branch's committed blobs (`POST /git/blobs`), builds a
+  tree with the exact local modes (`POST /git/trees`, `mode` as a string), and
+  creates the commit with only `message`/`tree`/`parents` (`POST /git/commits`,
+  so GitHub signs it and it verifies on `required_signatures`). The same
+  tree-equality and verification gates run before the ref moves, and the ref
+  swing uses the same exact-head precondition. A rejected upload, a rejected
+  or truncated tree, or an unverified commit fails closed with a typed error
+  naming the paths — the remote branch is unchanged. Content-only landings
+  (including modifications that keep the mode) never use the REST transport.
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 

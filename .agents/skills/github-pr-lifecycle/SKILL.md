@@ -34,13 +34,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
   - [`references/review-thread-reply.md`](references/review-thread-reply.md) — the thread-reply contract: answers to inline review comments are posted as REPLIES on that comment's thread (REST replies endpoint / `addPullRequestReviewThreadReply`), never as new main-thread comments (owner directive 2026-10-07).
   - [`references/commit-hygiene-remediation.md`](references/commit-hygiene-remediation.md) — failure-class → detection → remediation map for commit-hygiene violations (identity, verification, message format, mode/permission and ghost-commit anomalies); what `audit-pr-commits` flags and how to fix it.
 - **Scripts** (deterministic operations, in `scripts/`): each has `--help`, stable exit codes, `--json` output; mutating scripts support `--dry-run`.
-  - `scripts/pr-review-local` — per-commit LOCAL CodeRabbit feedback (`coderabbit review --agent --base <PR base branch>`; read-only, never posts to GitHub). Exit codes: `0` review completed (findings or clean), `1` GitHub lookup/read failure, `2` config/state error (no PR for branch, jq missing for `--json`), `3` coderabbit CLI failure (missing binary included), `4` local HEAD or worktree mismatch, `5` mergeable-gate refusal (PR conflicts with base). Invoke as `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local ...` — skill scripts are intentionally non-executable (mode `100644`) because the App-signed landing path (`createCommitOnBranch` fileChanges) cannot create mode `100755`.
+  - `scripts/pr-review-local` — per-commit LOCAL CodeRabbit feedback (`coderabbit review --agent --base <PR base branch>`; read-only, never posts to GitHub). Exit codes: `0` review completed (findings or clean), `1` GitHub lookup/read failure, `2` config/state error (no PR for branch, jq missing for `--json`), `3` coderabbit CLI failure (missing binary included), `4` local HEAD or worktree mismatch, `5` mergeable-gate refusal (PR conflicts with base). Invoke as `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local ...` — skill scripts are intentionally non-executable (mode `100644`): the RAW `createCommitOnBranch` payload has no mode field and cannot create mode `100755` (`orc github push-branch` routes mode-requiring change sets through the REST tree + commit transport automatically since #556, so a script CAN be made executable through it).
 
 ## Core procedure
 
 > **Skill scripts are invoked as `bash <path>`, never exec'd directly.** Scripts
-> land as mode `100644` (the App-signed `createCommitOnBranch` path cannot
-> create mode `100755`; issue #556), so direct execution fails with exit 126
+> land as mode `100644` (the RAW `createCommitOnBranch` payload cannot create
+> mode `100755`; since #556 `orc github push-branch` routes mode-requiring
+> change sets through the REST tree + commit transport automatically), so direct
+> execution fails with exit 126
 > (`Permission denied`). Every `scripts/<name>` call below is bash-prefixed for
 > that reason; sibling-script invocations inside each script use the same
 > `bash "$SCRIPT_DIR/<name>"` form. Run
@@ -346,5 +348,5 @@ This skill describes **how** to drive a PR generically. **Whether** the Orchestr
 
 - Re-verify `gh` flags against [`references/gh-capabilities.md`](references/gh-capabilities.md) on `gh` bumps. The `reviewThreads` GraphQL connection and `gh pr checks --json` field shapes have shifted before.
 - Update [`references/graphql.md`](references/graphql.md) if GitHub renames review-thread mutations (`resolveReviewThread` etc.).
-- Skill scripts may land as mode 100644 (the App-signed commit path cannot create 100755), so sibling scripts must be invoked as `bash "$SCRIPT_DIR/<script>"`, never exec'd directly. Run `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations` to guard against reintroduction.
+- Skill scripts may land as mode 100644 (the RAW `createCommitOnBranch` payload cannot create 100755; `orc github push-branch` routes mode-requiring change sets through the REST tree + commit transport automatically since #556), so sibling scripts must be invoked as `bash "$SCRIPT_DIR/<script>"`, never exec'd directly. Run `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations` to guard against reintroduction.
 - Keep this file **under 500 lines** (Agent Skills spec). Move new detail to a reference, not here.
