@@ -11,6 +11,16 @@ on:
       - ".github/workflows/security.yml"
   pull_request:
     paths: *security_paths
+  # Advisory-database drift alone never touches a path in `security_paths`, so
+  # without a schedule the default branch is re-audited only when a dependency
+  # file changes and a new advisory can sit unnoticed indefinitely. Weekly is
+  # the floor: advisories are published continuously. Cron is UTC, and the run
+  # is offset from :00 because GitHub delays schedules queued at the top of the
+  # hour; Monday 06:17 UTC sweeps publications from the weekend before the
+  # week's dependency PRs run. `schedule` fires only on the default branch and
+  # is not gated by `paths`, so main's audit state stays visible.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:
