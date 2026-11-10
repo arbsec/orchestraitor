@@ -71,7 +71,9 @@ assert() {
 }
 run() {
   : > "$GH_LOG"; : > "$SERVICE_LOG"
-  OUT="$(cd "$TMP/repo" && "scripts/$@" 2>"$TMP/stderr")"; RC=$?
+  # `"scripts/$@"` mixes a string with an array (shellcheck SC2145); the first
+  # argument names the script, the rest are its arguments.
+  OUT="$(cd "$TMP/repo" && "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
 }
 mutations() {
   jq -s '[.[] | select(.[0] == "api" or (.[0] == "pr" and (.[1] == "comment" or .[1] == "review" or .[1] == "merge")))] | length' "$GH_LOG"
