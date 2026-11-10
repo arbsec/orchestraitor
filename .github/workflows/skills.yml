@@ -1,0 +1,95 @@
+name: Skills
+
+# The Rust parity gate (code.yml) is path-filtered to Rust inputs, so an
+# `.agents`-only change ran no skill-script verification at all (#710). These
+# scripts are the agent lifecycle and board tooling: a broken one silently
+# breaks issue triage, PR creation, and the review loop.
+#
+# Deliberately a separate workflow instead of widening code.yml's `paths`
+# filter: adding `.agents/skills/**` there would schedule the whole Rust matrix
+# (Check & Lint, two Test legs, Invariant Property Tests, Coverage) for a
+# one-line comment change. code.yml's `Skill script self-tests` step stays as it
+# is, so a PR touching both Rust and `.agents` still runs both suites.
+
+on:
+  push:
+    branches: [main]
+    paths: &skill_paths
+      - ".agents/skills/**"
+      - "scripts/**"
+      - ".github/workflows/skills.yml"
+  pull_request:
+    paths: *skill_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self-tests:
+    name: Skill Script Self-Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Bash syntax check
+        run: |
+          # The skill scripts are extensionless, so they are selected by their
+          # interpreter shebang rather than by a *.sh glob.
+          mapfile -t scripts < <(git grep -l '^#!/usr/bin/env bash' -- \
+            '.agents/skills/*/scripts/*' '.agents/skills/*/scripts/tests/*')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "error: no bash skill scripts discovered — the globs are stale" >&2
+            exit 1
+          fi
+          printf 'bash -n: %d scripts\n' "${#scripts[@]}"
+          bash -n "${scripts[@]}"
+      - name: ShellCheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "error: shellcheck is not installed in the runner image" >&2
+            exit 1
+          fi
+          shellcheck --version | sed -n '2p'
+          mapfile -t scripts < <(git grep -l '^#!/usr/bin/env bash' -- \
+            '.agents/skills/*/scripts/*' '.agents/skills/*/scripts/tests/*')
+          # Error severity only. The scripts still carry ~200 pre-existing
+          # info/warning findings (SC2030/SC2031 subshell semantics dominate);
+          # clearing those is a separate, reviewable change. Errors (e.g.
+          # SC2145 "argument mixes string and array") are gated here.
+          shellcheck --severity=error "${scripts[@]}"
+      - name: Skill script self-tests
+        run: |
+          # Every self-test in the skill script trees is discovered rather than
+          # listed: the six suites #710 found unregistered (test-pr-checks,
+          # test-pr-review-agent, test-pr-labels-from-issue,
+          # test-check-bash-subinvocations, test-bash-invocation-survival,
+          # body-args.bash) rotted precisely because registering a new test
+          # needed a workflow edit nobody made.
+          #
+          # A test wired in here MUST be hermetic: no network, no `gh` auth, no
+          # secrets. They stub `gh`/`orc` on their own PATH, so the runner's
+          # real `gh` is never reached. A test that needs real credentials does
+          # not belong in this workflow.
+          mapfile -t tests < <(find .agents/skills -type f \
+            \( -name 'test-*' -o \( -path '*/scripts/tests/*' -name '*.bash' \) \) | sort)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "error: no skill self-tests discovered — the globs are stale" >&2
+            exit 1
+          fi
+          failed=0
+          printf 'running %d self-tests\n' "${#tests[@]}"
+          for test_script in "${tests[@]}"; do
+            printf '\n=== %s\n' "$test_script"
+            if bash "$test_script"; then
+              printf -- '--- PASS %s\n' "$test_script"
+            else
+              failed=$((failed + 1))
+              printf -- '--- FAIL %s\n' "$test_script"
+            fi
+          done
+          printf '\n%d of %d self-tests failed\n' "$failed" "${#tests[@]}"
+          [ "$failed" -eq 0 ]

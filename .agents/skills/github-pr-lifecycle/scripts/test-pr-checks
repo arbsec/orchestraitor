@@ -69,7 +69,9 @@ assert() {
   else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
 }
 run() {
-  OUT="$(cd "$TMP/repo" && "scripts/$@" 2>"$TMP/stderr")"; RC=$?
+  # `"scripts/$@"` mixes a string with an array (shellcheck SC2145); the first
+  # argument names the script, the rest are its arguments.
+  OUT="$(cd "$TMP/repo" && "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
 }
 # One check object; missing fields are irrelevant to classification.
 check() { # name bucket state description
