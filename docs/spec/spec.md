@@ -186,8 +186,16 @@ file and anchor. New references should cite the target document directly, for ex
 | §9.33.7 | `10-orchestrator.md#9337-security-boundary` |
 | §9.33.8 | `10-orchestrator.md#9338-design-principles` |
 | §9.34 | `10-orchestrator.md#934-structured-error-taxonomy` |
+| §9.35 | `10-orchestrator.md#935-campaign-orchestration-session-per-decision` |
+| §9.36 | `10-orchestrator.md#936-watch-daemon` |
+| §9.38 | `10-orchestrator.md#938-mcp-early-tool-strategy-and-the-built-in-mcp-proxy` |
+| §9.39 | `10-orchestrator.md#939-coordinator-decision-tools` |
 | §9.40 | `10-orchestrator.md#940-blocked-dependency-semantics` |
+| §9.41 | `10-orchestrator.md#941-epic-focus-scheduling-policy` |
+| §9.42 | `10-orchestrator.md#942-multi-org-workspaces-and-cross-project-epics` |
 | §9.43 | `10-orchestrator.md#943-kanban-board-abstraction` |
+| §9.45 | `30-model-routing.md#945-role-based-model-routing` |
+| §9.50 | `10-orchestrator.md#950-github-event-ingress-and-agent-authored-pr-attribution` |
 | §9.51 | `10-orchestrator.md#951-interactive-coordinator-mode` |
 | §9.51.1 | `10-orchestrator.md#9511-relationship-to-the-campaign-session-model` |
 | §9.51.2 | `10-orchestrator.md#9512-the-interactive-authority-profile` |
