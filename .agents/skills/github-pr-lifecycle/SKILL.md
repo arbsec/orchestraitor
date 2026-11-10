@@ -39,10 +39,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 ## Core procedure
 
 > **Skill scripts are invoked as `bash <path>`, never exec'd directly.** Scripts
-> land as mode `100644` (the RAW `createCommitOnBranch` payload cannot create
-> mode `100755`; since #556 `orc github push-branch` routes mode-requiring
-> change sets through the REST tree + commit transport automatically), so direct
-> execution fails with exit 126
+> are kept at mode `100644`: the RAW `createCommitOnBranch` payload cannot create
+> mode `100755`, and since #556 `orc github push-branch` routes mode-requiring
+> change sets through the REST tree + commit transport automatically, so the mode
+> is a choice (#709) — kept non-executable so the contract does not depend on the
+> checkout preserving the executable bit. Direct execution therefore fails with
+> exit 126
 > (`Permission denied`). Every `scripts/<name>` call below is bash-prefixed for
 > that reason; sibling-script invocations inside each script use the same
 > `bash "$SCRIPT_DIR/<name>"` form. Run
@@ -348,5 +350,5 @@ This skill describes **how** to drive a PR generically. **Whether** the Orchestr
 
 - Re-verify `gh` flags against [`references/gh-capabilities.md`](references/gh-capabilities.md) on `gh` bumps. The `reviewThreads` GraphQL connection and `gh pr checks --json` field shapes have shifted before.
 - Update [`references/graphql.md`](references/graphql.md) if GitHub renames review-thread mutations (`resolveReviewThread` etc.).
-- Skill scripts may land as mode 100644 (the RAW `createCommitOnBranch` payload cannot create 100755; `orc github push-branch` routes mode-requiring change sets through the REST tree + commit transport automatically since #556), so sibling scripts must be invoked as `bash "$SCRIPT_DIR/<script>"`, never exec'd directly. Run `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations` to guard against reintroduction.
+- Skill scripts are KEPT at mode 100644 (the RAW `createCommitOnBranch` payload cannot create 100755; `orc github push-branch` routes mode-requiring change sets through the REST tree + commit transport automatically since #556, so 100755 is landable — non-executable is a choice that keeps the invocation contract independent of the checkout's executable bit, #709), so sibling scripts must be invoked as `bash "$SCRIPT_DIR/<script>"`, never exec'd directly. Run `bash .agents/skills/github-pr-lifecycle/scripts/check-bash-subinvocations` to guard against reintroduction.
 - Keep this file **under 500 lines** (Agent Skills spec). Move new detail to a reference, not here.

@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Regression guard for #588: skill scripts may land as mode 100644 (the
-# App-signed createCommitOnBranch path cannot create 100755), so any direct
-# exec of a sibling script fails with exit 126. All intra-skill script
-# invocations must go through `bash "$SCRIPT_DIR/<script>"`.
+# Regression guard for #588: skill scripts are KEPT at mode 100644 — a
+# deliberate choice, not a platform limit. The RAW `createCommitOnBranch`
+# `FileChanges` payload has no mode field and cannot create 100755, but since
+# #556 `orc github push-branch` routes mode-requiring change sets through the
+# REST tree + commit transport automatically, so 100755 IS landable. The
+# scripts stay 100644 so the invocation contract does not depend on the
+# checkout preserving the executable bit (#709 decided against re-landing
+# them as 100755; that separate change would retire this guard). Any direct
+# exec of a sibling script therefore fails with exit 126. All intra-skill
+# script invocations must go through `bash "$SCRIPT_DIR/<script>"`.
 #
 # Filtering is PER COMMAND SEGMENT, never per whole line: a line that
 # contains both an exempt command (`source`/`cp`/`echo`, or a `bash`-prefixed
