@@ -2080,11 +2080,16 @@ fn build_file_changes(
     Ok(serde_json::json!({"additions": additions, "deletions": deletions}))
 }
 
-/// Reads the local tree's entry modes (`git ls-tree -r -z <tree>`): path ->
-/// "100644"|"100755". Unreadable trees are a typed error (callers already
-/// validated the tree exists; only a concurrent object-store change fails).
-/// `dir` anchors the invocation at a fixture repo (tests); `None` resolves
-/// the repo from the process cwd (production).
+/// Reads the local tree's entry modes (`git ls-tree -r -z <tree>`): path -> the
+/// raw `ls-tree` mode, verbatim (`100644`, `100755`, and `120000` for a
+/// symlink; `-r` can also surface `160000` gitlinks). Unreadable trees are a
+/// typed error (callers already validated the tree exists; only a concurrent
+/// object-store change fails). The mode is deliberately not normalised to a
+/// regular file: a symlink's `120000` flowing through unchanged is what makes
+/// `mode_requiring_rest_paths` route a mode-requiring change set to the REST
+/// tree + commit transport, which preserves the mode on landing. `dir` anchors
+/// the invocation at a fixture repo (tests); `None` resolves the repo from the
+/// process cwd (production).
 fn local_tree_modes(
     dir: Option<&std::path::Path>,
     tree: &str,
