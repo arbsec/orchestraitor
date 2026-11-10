@@ -122,11 +122,17 @@ canonical `name=<slug>[bot]` line — never from ambient git config).
 - **Detection**: `git diff --summary <base>..<head>` shows mode changes not
   present in the intended diff (`mode change 100755 => 100644`), or a
   script/hook silently stops being executable after a replay.
-- **Remediation**: an **added** `100755` file cannot be landed by
-  `orc github push-branch` either — it derives its `FileAddition` payload from
-  the local branch, so the blob still lands `100644` and its tree-equality gate
-  refuses the landing (seen on PR #555's repair attempt; `docs/cli/orc-github.md`
-  documents the same limitation). Use the REST tree + commit transport in
+- **Remediation**: the RAW `createCommitOnBranch` payload cannot express an
+  added `100755` file either — `FileAddition` has no `mode` field, so a
+  hand-built payload still lands the blob as `100644` and its tree-equality
+  gate refuses the landing (seen on PR #555's repair attempt;
+  `docs/cli/orc-github.md` documents the same limitation of the raw
+  mutation). `orc github push-branch` does NOT have that limitation
+  anymore: since #556 it routes every mode-requiring change set through
+  the REST tree + commit transport automatically, so an added `100755` file
+  (or a mode change in either direction) lands with the exact local mode
+  and a GitHub-signed commit — just run `orc github push-branch`. For a
+  HAND-BUILT payload, use the REST tree + commit transport in
   [verified-commit-path.md](verified-commit-path.md), which expresses the mode
   and still lands a verified commit — then verify the mode in the final tree,
   not in the working directory. Design replay payloads so
