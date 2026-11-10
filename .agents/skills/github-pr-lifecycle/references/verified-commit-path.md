@@ -84,10 +84,13 @@ headers), so the token cannot leak through a proxied request.
 ## REST tree + commit (the file-mode transport)
 
 `createCommitOnBranch` `FileAddition` carries no file-mode field, so an executable-bit
-repair (#556) is unrepresentable there: an added blob always lands `100644`, which the
-tree-equality gate then refuses (`docs/cli/orc-github.md` documents the same limitation
-for `orc github push-branch`). The REST tree + commit path CAN express it and still land
-a verified commit:
+repair (#556) is unrepresentable in the RAW mutation: an added blob always lands
+`100644`, which the tree-equality gate then refuses (`docs/cli/orc-github.md` documents the
+same limitation of the raw mutation). Since #556 `orc github push-branch` routes every
+mode-requiring change set through the REST tree + commit transport below automatically,
+so it lands an added `100755` file (or a mode change in either direction) with the exact
+local mode. The procedure below stays the way to land a HAND-BUILT payload. The REST tree
++ commit path CAN express the mode and still land a verified commit:
 
 1. `POST /git/trees` accepts an entry with `mode: "100755"` (a string, not a number) and
    returns it as `{"path": …, "mode": "100755", "type": "blob"}` (probed 2026-11-09, same
