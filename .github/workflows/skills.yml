@@ -16,9 +16,18 @@ on:
     branches: [main]
     paths: &skill_paths
       - ".agents/skills/**"
+      # Reserved: no repo-root `scripts/` tree is tracked today, so this path
+      # matches nothing — it is kept so a future root scripts/ tree is covered
+      # without another workflow edit.
       - "scripts/**"
       - ".github/workflows/skills.yml"
   pull_request:
+    # `*skill_paths` is a YAML alias node where a sequence is expected, which
+    # qlty's actionlint check reports cosmetically (the same pattern code.yml and
+    # markdown.yml already use with `&code_paths`). GitHub accepts it — this
+    # workflow runs — so the alias is kept deliberately: it is what keeps the two
+    # trigger lists from drifting apart. The standalone actionlint v1.7.12
+    # resolves the alias and reports nothing here.
     paths: *skill_paths
 
 permissions:
@@ -34,7 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # `persist-credentials: false`: the job reads the repo and then executes
+      # PR-authored bash, which is this workflow's entire purpose — the
+      # checkout-scoped token has no legitimate consumer here, so it must not sit
+      # in the working tree's git config while that code runs (zizmor
+      # `artipacked`). Nothing in this job pushes; the repo is private and the
+      # `contents: read` token would be a genuine, if read-only, capability leak.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Bash syntax check
         run: |
           # The skill scripts are extensionless, so they are selected by their
@@ -76,8 +93,17 @@ jobs:
           # not belong in this workflow.
           mapfile -t tests < <(find .agents/skills -type f \
             \( -name 'test-*' -o \( -path '*/scripts/tests/*' -name '*.bash' \) \) | sort)
-          if [ "${#tests[@]}" -eq 0 ]; then
-            echo "error: no skill self-tests discovered — the globs are stale" >&2
+          #
+          # Discovery alone solves *unregistered additions*; it does not notice a
+          # *removal*. A zero-floor check therefore stays green if a future PR
+          # deletes or renames a suite — the exact failure #710 exists to
+          # prevent, reached through the front door (#728 review, M-1).
+          # Floor the count so a removal fails the gate instead of silently
+          # narrowing it. Bump this number when you ADD a self-test; never lower
+          # it when removing one.
+          minimum_suites=8
+          if [ "${#tests[@]}" -lt "$minimum_suites" ]; then
+            echo "error: expected at least $minimum_suites skill self-test suites, found ${#tests[@]}" >&2
             exit 1
           fi
           failed=0
