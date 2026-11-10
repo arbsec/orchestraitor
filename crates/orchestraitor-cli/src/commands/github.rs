@@ -3840,13 +3840,83 @@ mod tests {
 
     /// Serves a fixed response sequence on a loopback port and records every
     /// request it receives, so a test can assert which mutations were (not)
-    /// attempted. Runs until `shutdown` is set.
+    /// attempted. Accepts connections until `shutdown` is signalled, then
+    /// drains whatever the client had already sent.
     #[cfg(unix)]
     struct RecordingStub {
         base_url: String,
         requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
         handle: std::thread::JoinHandle<()>,
+    }
+
+    #[cfg(unix)]
+    impl RecordingStub {
+        /// Signals shutdown, waits for the server thread to drain, and returns
+        /// every recorded request in order.
+        fn finish(self) -> Vec<String> {
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            join_server(self.handle);
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    /// How long the stub keeps polling for a connection after `shutdown` is
+    /// signalled, so one the OS had not surfaced through `accept` yet is still
+    /// served instead of being dropped after the client already sent it.
+    #[cfg(unix)]
+    const STUB_DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// Upper bound on a stub thread's lifetime, so a stuck fixture fails its
+    /// test instead of hanging CI.
+    #[cfg(unix)]
+    const STUB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Reads ONE complete request off an accepted connection: the header block,
+    /// then exactly `Content-Length` body bytes.
+    ///
+    /// A single fixed-size `read` is not enough. It truncates any body larger
+    /// than the buffer, and on macOS/BSD the accepted socket inherits the
+    /// listener's `O_NONBLOCK`, so that same `read` can return `EWOULDBLOCK`
+    /// before the client has sent a byte — one request was then answered (and
+    /// recorded) out of an empty buffer, or never recorded at all.
+    #[cfg(unix)]
+    fn read_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+        use std::io::BufRead as _;
+
+        // macOS/BSD accepted sockets inherit the listener's O_NONBLOCK, which
+        // turns a blocking read into a spurious EWOULDBLOCK: clear it
+        // explicitly (same reason as the `orchestraitor-board` fixture server).
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
+        let mut raw = Vec::new();
+        let mut content_length = 0_usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                // The peer closed without sending a request.
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            let trimmed = line.trim_end();
+            if let Some(value) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value.trim().parse::<usize>().unwrap_or(0);
+            }
+            raw.extend_from_slice(line.as_bytes());
+            if trimmed.is_empty() {
+                break;
+            }
+        }
+        let mut body = vec![0_u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body)?;
+        }
+        raw.extend_from_slice(&body);
+        Ok(String::from_utf8_lossy(&raw).to_string())
     }
 
     #[cfg(unix)]
@@ -3863,28 +3933,44 @@ mod tests {
         let stop = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
             let mut next = 0_usize;
-            while !stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut buffer = [0_u8; 8192];
-                        let read = stream.read(&mut buffer).unwrap_or(0);
-                        seen.lock()
-                            .unwrap()
-                            .push(String::from_utf8_lossy(&buffer[..read]).to_string());
-                        let (status, body) = responses
-                            .get(next)
-                            .cloned()
-                            .unwrap_or_else(|| (404, "{}".to_string()));
-                        next += 1;
-                        let reason = if status == 201 { "Created" } else { "Error" };
-                        let response = format!(
-                            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\n\
-                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let deadline = std::time::Instant::now() + STUB_DEADLINE;
+            // Set the first time `shutdown` is observed: from then on the stub
+            // keeps accepting for STUB_DRAIN, so a request already on its way is
+            // recorded rather than lost between the client returning and the
+            // test reading the log.
+            let mut draining: Option<std::time::Instant> = None;
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    draining = None;
+                    let Ok(request) = read_request(&mut stream) else {
+                        // A connection that never sent a full request is not a
+                        // request: nothing to record, nobody to answer.
+                        continue;
+                    };
+                    seen.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request);
+                    let (status, body) = responses
+                        .get(next)
+                        .cloned()
+                        .unwrap_or_else(|| (404, "{}".to_string()));
+                    next += 1;
+                    let reason = if status == 201 { "Created" } else { "Error" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                } else {
+                    if stop.load(Ordering::SeqCst) {
+                        match draining {
+                            Some(started) if started.elapsed() >= STUB_DRAIN => break,
+                            Some(_) => {}
+                            None => draining = Some(std::time::Instant::now()),
+                        }
                     }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
         });
@@ -3898,9 +3984,67 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn rest_landing_tree_failure_never_moves_the_ref() -> miette::Result<()> {
-        use std::sync::atomic::Ordering;
+    fn recording_stub_records_the_whole_body_of_a_split_request() -> miette::Result<()> {
+        use std::io::Write as _;
 
+        // The stub used to read ONE fixed-size buffer per connection. A body
+        // larger than that buffer was recorded truncated, and on macOS/BSD the
+        // accepted socket inherits the listener's O_NONBLOCK, so the same read
+        // could return EWOULDBLOCK before the client had sent anything — the
+        // request then never got recorded at all, which is what made the exact
+        // request-count assertions flake. The body here is larger than the old
+        // buffer and split across two writes, so the stub can only record it
+        // whole by reading headers + `Content-Length` bytes.
+        let stub = spawn_recording_stub(vec![(201, r#"{"sha":"body-sha"}"#.to_string())])?;
+        let address = stub.base_url.trim_start_matches("http://");
+        let padding = "x".repeat(9_000);
+        let body = format!(r#"{{"content":"{padding}"}}"#);
+        let head = format!(
+            "POST /repos/o/r/git/blobs HTTP/1.1\r\nhost: {address}\r\n\
+             content-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        );
+
+        let mut stream = std::net::TcpStream::connect(address).into_diagnostic()?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .into_diagnostic()?;
+        stream.write_all(head.as_bytes()).into_diagnostic()?;
+        stream
+            .write_all(&body.as_bytes()[..1_000])
+            .into_diagnostic()?;
+        stream.flush().into_diagnostic()?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stream
+            .write_all(&body.as_bytes()[1_000..])
+            .into_diagnostic()?;
+        stream.flush().into_diagnostic()?;
+        // Reads until the stub answers and closes (`connection: close`).
+        let mut response = String::new();
+        stream.read_to_string(&mut response).into_diagnostic()?;
+        drop(stream);
+
+        let seen = stub.finish();
+        assert_eq!(
+            seen.len(),
+            1,
+            "exactly one request must be recorded: {seen:?}"
+        );
+        assert_eq!(
+            recorded_request_body(&seen[0]),
+            body,
+            "the stub must record the FULL body, not one read's worth"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 201"),
+            "the stub must answer only after the request is complete: {response}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_tree_failure_never_moves_the_ref() -> miette::Result<()> {
         let (temp, base_tree, feature_tree) = fixture_repo_with_mode_change()?;
         let repo = temp.path().join("repo");
         let changes = diff_tree_changes(Some(&repo), &base_tree, &feature_tree)?;
@@ -3950,8 +4094,6 @@ mod tests {
             "",
         )
         .expect_err("a rejected tree must fail the landing");
-        stub.shutdown.store(true, Ordering::SeqCst);
-        join_server(stub.handle);
 
         let rendered = format!("{error}");
         assert!(rendered.contains("run.sh"), "{rendered}");
@@ -3961,8 +4103,10 @@ mod tests {
         );
         // THE forbidden effect: a failed tree must never be followed by a ref
         // move. A REST ref update is `PATCH /git/refs`, a GraphQL swing is a
-        // POST to `/graphql` carrying `updateRefs`.
-        let seen = stub.requests.lock().unwrap();
+        // POST to `/graphql` carrying `updateRefs`. The stub is drained to a
+        // stop before the log is read, so the count is the COMPLETE set of
+        // requests — never a snapshot taken mid-flight.
+        let seen = stub.finish();
         assert_eq!(
             seen.len(),
             3,
@@ -4064,8 +4208,6 @@ mod tests {
         blob_shas: &[&str],
         commit_body: &str,
     ) -> miette::Result<RestLandingOutcome> {
-        use std::sync::atomic::Ordering;
-
         let changes = diff_tree_changes(Some(repo), base_tree, feature_tree)?;
         let local_modes = local_tree_modes(Some(repo), feature_tree)?;
         let base_modes = base_tree_modes(Some(repo), base_tree);
@@ -4115,9 +4257,9 @@ mod tests {
             "land the executable bits",
             "",
         );
-        stub.shutdown.store(true, Ordering::SeqCst);
-        join_server(stub.handle);
-        let requests = stub.requests.lock().unwrap().clone();
+        // `finish` drains the stub to a stop, so the request log is complete
+        // and in order before any assertion reads it.
+        let requests = stub.finish();
         Ok(RestLandingOutcome {
             requests,
             landed_oid: landed?,
