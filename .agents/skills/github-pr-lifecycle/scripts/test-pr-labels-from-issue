@@ -15,11 +15,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/scripts" "$TMP/bin" "$TMP/files"
-git -C "$TMP/repo" init -q
+git -C "$TMP/repo" init -q -b main
 cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" "$SCRIPT_DIR/pr-labels" \
   "$TMP/repo/scripts/"
 cp -L -- "$SCRIPT_DIR/pr-labels-from-issue" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"* 2>/dev/null || true
+
+# pr-create runs a pre-PR local review gate before creating a PR (#622): it
+# resolves the target base branch, computes a merge-base with HEAD and requires
+# a CLEAN review generation at that exact (head, base) pair. Give the fixture a
+# real base branch, one change on top of it and the matching CLEAN record, so
+# the chain below exercises the gate's normal passing path instead of a
+# skip/bypass. The gate reads only local git state, so this stays hermetic.
+GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base"
+PR_CREATE_BASE_OID="$(git -C "$TMP/repo" rev-parse HEAD)"
+git -C "$TMP/repo" switch -q -c skills-test
+printf 'changed\n' > "$TMP/repo/CHANGES.txt"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "change"
+PR_CREATE_HEAD_SHA="$(git -C "$TMP/repo" rev-parse HEAD)"
+mkdir -p "$TMP/repo/.orchestraitor/reviews"
+printf -- '- verdict: CLEAN\n- head SHA: %s\n- base OID: %s\n' \
+  "$PR_CREATE_HEAD_SHA" "$PR_CREATE_BASE_OID" \
+  > "$TMP/repo/.orchestraitor/reviews/77-$(git -C "$TMP/repo" rev-parse --short=7 HEAD).md"
 
 # gh stub: records argv, serves PR body / PR labels / issue labels from env.
 cat > "$TMP/bin/gh" <<'STUB'
@@ -74,12 +94,22 @@ printf '%s\n' "$out"
 STUB
 chmod +x "$TMP/bin/gh"
 
-# orc stub: service-identity route; gh-env re-execs the gh stub in-process.
+# orc stub: gh-env re-execs the gh stub in-process. The github_app config is
+# deliberately PARTIAL (see `config/get` below), so the mutating calls take the
+# labelled personal fallback instead of the App service route: with a COMPLETE
+# config and `required` enforcement, pr-create delegates PR creation AND both
+# labeling steps to orc's own `github gh-env-pr-create-chain` (#577) and the
+# shell-side chain this suite asserts never runs. That chain-subcommand route is
+# covered by `github-project-workflow/scripts/tests/gh-env-wrapper.bash` case 12.
 cat > "$TMP/bin/orc" <<'STUB'
 #!/usr/bin/env bash
 case "$1/${2:-}" in
   config/validate) exit 0 ;;
-  config/get) echo stub-config ;;
+  config/get)
+    case "${3:-}" in
+      github_app.installation_id|github_app.private_key_uri) exit 1 ;;
+    esac
+    echo stub-config ;;
   github/gh-env) shift 3; exec "$@" ;;
   *) exit 1 ;;
 esac
@@ -89,7 +119,9 @@ chmod +x "$TMP/bin/orc"
 export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export GH_LOG="$TMP/gh.jsonl" TMPDIR="$TMP/files"
-export ORC_GITHUB_APP_ENFORCEMENT=required
+# `recommended` + the partial config above is the deployment shape in which
+# pr-create's shell-side labeling chain still runs (see the stub comment).
+export ORC_GITHUB_APP_ENFORCEMENT=recommended
 PASS=0; FAIL=0
 assert() {
   if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
@@ -97,7 +129,9 @@ assert() {
 }
 run() {
   : > "$GH_LOG"
-  OUT="$(cd "$TMP/repo" && "scripts/$@" 2>"$TMP/stderr")"; RC=$?
+  # `"scripts/$@"` mixes a string with an array (shellcheck SC2145); the first
+  # argument names the script, the rest are its arguments.
+  OUT="$(cd "$TMP/repo" && "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
 }
 pr_edit_adds() {
   # All --add-label values of every `pr edit` call in the log, in order.
@@ -206,7 +240,7 @@ echo "--- pr-create labeling chain ---"
 # (e) pr-create chains pr-labels then pr-labels-from-issue after creation.
 export PR_BODY="Closes #101" PR_LABELS="" ISSUE_101_LABELS="MVP,bug"
 : > "$GH_LOG"
-OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo 2>"$TMP/stderr")"; RC=$?
+OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
 assert 'pr-create exits 0' 0 "$RC"
 assert 'pr-create prints the PR URL' 'https://github.com/test-org/repo/pull/77' "$OUT"
 # pr-labels derives its labels from launch facts: with a service-identity
@@ -267,7 +301,7 @@ if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
 printf '%s\n' "$out"
 STUB
 chmod +x "$TMP/bin/gh"
-OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo 2>"$TMP/stderr")"; RC=$?
+OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
 assert 'labeling failure does not fail pr-create' 0 "$RC"
 assert 'PR URL still emitted on labeling failure' 'https://github.com/test-org/repo/pull/77' "$OUT"
 assert 'failure warnings name the PR' 2 "$(grep -cF 'PR #77' "$TMP/stderr")"

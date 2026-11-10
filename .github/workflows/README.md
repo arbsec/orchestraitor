@@ -29,6 +29,9 @@ Supporting workflows, outside the gate:
 - [docs.yml](docs.yml) — publishes the `book/` and `docs/` sites to GitHub Pages.
 - [markdown.yml](markdown.yml) — `rumdl check` over `**/*.md`.
 - [release.yml](release.yml) — manual release pipeline (`workflow_dispatch` only).
+- [skills.yml](skills.yml) — `bash -n`, `shellcheck --severity=error`, and every
+  skill script self-test, over `.agents/skills/**` and `scripts/**` (the Rust
+  gate's path filter never matches agent skill tooling).
 
 ## When a `Cargo.toml` change requires workflow updates
 
