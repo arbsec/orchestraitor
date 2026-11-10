@@ -832,7 +832,7 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   directly: the scripts are KEPT at mode `100644` on the default branch — a
   choice, not a platform limit. The RAW `createCommitOnBranch` `fileChanges`
   payload cannot materialize mode `100755`, but since #556
-  `orc github push-branch` lands one through the REST tree + commit
+  `orc github push-branch` lands a `100755` file through the REST tree + commit
   transport; the scripts stay non-executable so the invocation contract does
   not depend on a checkout preserving the executable bit. A direct
   `./scripts/...` call fails with exit 126 (`Permission denied`) and the

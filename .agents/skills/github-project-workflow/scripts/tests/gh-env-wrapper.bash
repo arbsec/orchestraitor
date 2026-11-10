@@ -15,9 +15,12 @@ LIB="$HERE/../_lib.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# The wrapper scripts land non-executable through GitHub's createCommitOnBranch
-# App-commit path (FileAddition carries no mode), while the invocation sites
-# below exec them directly. Ensure the exec bit before any case runs
+# The wrapper scripts are landed at mode 100644 — a kept choice (#709), since
+# the exec bit is not guaranteed in every checkout: the RAW createCommitOnBranch
+# App-commit path carries no FileAddition mode (issue #556; `orc github
+# push-branch` lands a 100755 file through the REST tree + commit transport,
+# but the scripts stay 100644). The invocation sites
+# below exec them directly, so ensure the exec bit before any case runs
 # (best-effort: a read-only checkout cannot grant it).
 for _wrap in pr-create pr-comment pr-review-post pr-mutate; do
   _p="$HERE/../../../github-pr-lifecycle/scripts/$_wrap"

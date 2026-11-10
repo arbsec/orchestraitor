@@ -119,9 +119,11 @@ if [ "$ACTION" = "edit" ] && printf '%s\n' "${REST[@]}" | grep -qx -- "--add-rev
   done
   CHECKS_JSON="$(mktemp)"
   PR_CHECKS_ERR="$(mktemp)"
-  # `bash`-invoke (not direct exec): the callee's executable bit is not
-  # guaranteed in every checkout — the App-signed landing path
-  # (createCommitOnBranch) cannot represent 100755 (issue #556), so a
+  # `bash`-invoke (not direct exec): the skill scripts are landed at mode
+  # 100644 — a kept choice (#709), because the executable bit is not
+  # guaranteed in every checkout. The RAW `createCommitOnBranch` payload cannot
+  # express 100755 (#556; `orc github push-branch` lands a 100755 file through
+  # the REST tree + commit transport, but the scripts stay 100644), so a
   # flattened checkout must still work. Read-only script, safe to run via bash.
   if ! bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json > "$CHECKS_JSON" 2>"$PR_CHECKS_ERR"; then
     # Surface WHY classification failed (e.g. CI-only stub/gh differences):

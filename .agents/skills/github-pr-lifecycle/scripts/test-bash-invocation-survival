@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Regression test for #607 (and the original repro behind #588): the skill
-# scripts land as mode 100644 because the App-signed `createCommitOnBranch`
-# path cannot create 100755 (issue #556). The fix lives in two places:
+# scripts are KEPT at mode 100644 — a deliberate choice, not a platform limit.
+# The RAW `createCommitOnBranch` `FileChanges` payload has no mode field and
+# cannot create 100755 (#556), but since #556 `orc github push-branch` routes
+# mode-requiring change sets through the REST tree + commit transport
+# automatically, so 100755 IS landable; the scripts stay 100644 so the
+# invocation contract does not depend on a checkout preserving the executable
+# bit (#709 decided against re-landing them as 100755). The fix lives in two
+# places:
 #
 #   1. Sibling-script invocations inside merge-gate / convergence-status use
 #      `bash "$SCRIPT_DIR/<script>"` (the PR #600 callsite fix), so the chain
@@ -116,11 +122,15 @@ assert 'merge-gate (bash-invoked, mode 644) does not exit 126' 0 "$RC"
 assert 'merge-gate (mode 644) never emits Permission denied' 0 "$(grep -cF 'Permission denied' "$TMP/mstderr")"
 
 # --- Adversarial: direct exec on a mode-644 script MUST still 126 ---
-# This is the documented production reality (scripts cannot land as
-# 100755; issue #556). Operators must invoke via `bash <path>`; the test
-# also confirms that no caller has inadvertently landed the scripts as
-# 100755 and silently masked the failure. Bash emits the failure message
-# to stderr with exit 126 (EACCES) — the chain works through `bash <path>`
+# This is the documented production reality: the skill scripts are landed at
+# mode 100644 by choice (#709 — the RAW `createCommitOnBranch` payload cannot
+# express 100755 per #556, but `orc github push-branch` lands a 100755 file
+# through the REST tree + commit transport; the scripts stay 100644 so the
+# contract never depends on a checkout preserving the bit). Operators must
+# invoke via `bash <path>`; the test also confirms that no caller has
+# inadvertently landed the scripts as 100755 and silently masked the failure.
+# Bash emits the failure message to stderr with exit 126 (EACCES) — the chain
+# works through `bash <path>`
 # and ONLY through `bash <path>`; nothing else satisfies the contract.
 DIRECT_OUT="$(cd "$TMP/repo" && ./scripts/convergence-status 7 --repo test-org/repo --json 2>"$TMP/dstderr")"; DIRECT_RC=$?
 DIRECT_COMBINED="$DIRECT_OUT$(cat "$TMP/dstderr")"
