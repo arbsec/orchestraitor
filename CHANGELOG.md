@@ -786,6 +786,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
+  the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
+  plain `skip`, so `checks_all_passed` was `false` on a PR whose every real
+  check was green — `merge-gate` and `convergence-status` then refused work
+  they should accept. The engine now consumes `pr-checks`' already-shipped
+  bot-author rule (#707) verbatim: a `CodeRabbit` skip on a bot/App-authored
+  PR is `not-applicable` with `skip_reason: "bot-author"`, while a
+  human/unknown-author skip, a known-disabled job that actually failed, and
+  any check the engine cannot classify stay non-passing (fail closed). Typed
+  check items gain the optional `skip_reason` field (`known-disabled-job` /
+  `bot-author`). Documented in [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`orc github push-branch` can now land executable-bit changes** (issue 556):
   `createCommitOnBranch` has no file-mode field, so a landing that added a
   100755 file or changed a mode in either direction was refused by the tree
