@@ -109,9 +109,6 @@ secrecy = "0.10.3"
 zeroize = { version = "1.9.0", features = ["derive"] }
 keyring = "4.1.5"
 
-# Provenance (tech-stack.md §1, §8 — opt-in feature)
-sigstore = "0.14.0"
-
 # HTTP and networking (tech-stack.md §1, §5)
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "blocking"] }
 url = "2.5"
@@ -150,11 +147,9 @@ tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tree-sitter-bash = "0.25"
 
-# MCP + ACP (tech-stack.md §1, §4)
+# MCP (tech-stack.md §1, §4). ACP crates (agent-client-protocol*) are added by the
+# feature that first consumes them — M4 IDE integration — not declared here (#726).
 rmcp = { version = "3.5.1", features = ["server", "client", "macros", "schemars", "auth", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "reqwest"] }
-agent-client-protocol = "3.0.0"
-agent-client-protocol-schema = "1.3.0"
-agent-client-protocol-rmcp = "4.0.0"
 
 # PTY (tech-stack.md §1)
 portable-pty = "0.9.0"

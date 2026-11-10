@@ -36,8 +36,8 @@
 | Git (controller-owned) | gix 0.90.0 with `bail_if_untrusted()` | MIT OR Apache-2.0 | crates.io |
 | Tree-sitter baseline indexer | tree-sitter 0.27.0 + per-language grammar crates (all MIT) | MIT | crates.io |
 | MCP server + client | rmcp 3.5.1 (official MCP Rust SDK) | Apache-2.0 | crates.io, modelcontextprotocol/rust-sdk |
-| Agent Client Protocol | agent-client-protocol 3.3.0 + agent-client-protocol-schema | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
-| ACP ↔ MCP bridge | agent-client-protocol-rmcp 4.0.3 | Apache-2.0 | crates.io |
+| Agent Client Protocol (M4; not yet a dependency) | agent-client-protocol + agent-client-protocol-schema; release pinned by the ACP integration PR (§4.2) | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
+| ACP ↔ MCP bridge (M4; not yet a dependency) | agent-client-protocol-rmcp; release pinned with ACP (§4.2) | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
 | PTY | portable-pty 0.9.0 | MIT | crates.io |
 | Errors (lib) | thiserror 2 | MIT OR Apache-2.0 | crates.io |
@@ -47,7 +47,7 @@
 | Storage (blobs) | Filesystem CAS by SHA-256 (same layout as Arbitraitor `store/`) | — | — |
 | Sandbox (Linux) | landlock 0.4.5 + rustix 1.1.4 + nix 0.31.3 | MIT OR Apache-2.0; Apache-2.0 WITH LLVM-exception; MIT | crates.io |
 | Receipt signing | ed25519-dalek 3.0.0; minisign-compat where Arbitraitor calls for it | BSD-3-Clause | crates.io |
-| Provenance | sigstore 0.14.0 (cosign + Rekor; opt-in feature) | Apache-2.0 | crates.io |
+| Provenance | Arbitraitor-owned (spec `40-arbitraitor-integration.md` §2.2, §16.4); no Orchestraitor-side `sigstore` requirement is declared — ownership question open, see §8 | — | — |
 | Secrets | secrecy 0.10.3 + zeroize 1.9.0 + keyring 4.1.5 | Apache-2.0 OR MIT | crates.io |
 | Schemas | schemars 1.0 (matched to Arbitraitor's version), JSON Schema 2020-12 | MIT OR Apache-2.0 | crates.io |
 | Provider baseline (MVP) | genai 0.6.5 (feature-gated) behind project-owned `ProviderTransport` trait; raw reqwest escape hatch when native extensions are needed | MIT | crates.io |
@@ -246,9 +246,11 @@ The same TOML shape applies to other providers. For Z.ai the GLM Coding Plan exp
 
 ### 4.2 ACP
 
-`agent-client-protocol` 3.3.0, maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
+`agent-client-protocol`, maintained at `agentclientprotocol/rust-sdk` (org moved away from `zed-industries`; that path redirects), Apache-2.0. Companion crates `agent-client-protocol-schema`, `-http`, `-rmcp` (MCP bridge), `-tokio`, `-derive`, `-conductor`. Wire-stable since v1.0 (Jun 29, 2026).
 
-> Verify the pinned release before implementation. The plan calls for a release pin and a CI gate (cargo-deny + a custom smoke check that issues an ACP `initialize` against the bundled conductor stub).
+**Status: planned, NOT declared.** ACP is out of MVP scope and lands with the M4 IDE integrations (`60-milestones.md` M4; `20-harness-worker.md` §11.1, §11.4). No `agent-client-protocol*` requirement appears in `[workspace.dependencies]` and none resolves into `Cargo.lock`; the previous `3.0.0` / `1.3.0` / `4.0.0` declarations named no build graph, so `cargo deny`/`cargo audit` never saw them and a Renovate bump for them could not be verified (issue #726). Note also that no coherent `agent-client-protocol` + `agent-client-protocol-rmcp` + `rmcp` version family exists at the current `rmcp` pin (issue #463), which is a second reason not to pre-pin strings.
+
+> The ACP integration PR adds the requirement at the then-current release, together with the code that exercises it, and adds the CI gate the plan calls for (cargo-deny plus a custom smoke check that issues an ACP `initialize` against the bundled conductor stub). Verify that release against crates.io at that point rather than tracking a version here.
 
 ### 4.3 models.dev metadata client (in-house, live-first with cache + bundled fallback)
 
@@ -386,7 +388,7 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 
 - `arbitraitor_receipt::ReceiptBuilder` builds receipts. `canonical_bytes()` produces RFC 8785 JCS bytes via `serde_json_canonicalizer` 0.3.2.
 - `sign_receipt()` uses minisign-ed25519-blake2b-prehashed (Arbitraitor's algorithm). Where Orchestraitor needs to verify receipts independently, `ed25519-dalek` 3.0.0 is used with `verify_strict` to reject weak keys.
-- `sigstore` 0.14.0 is an opt-in feature for cosign/Rekor provenance; it is NOT a hard dependency in the MVP build.
+- No `sigstore` requirement is declared in the workspace: the previous `sigstore` entry resolved into no build graph and no `Cargo.lock` entry, so it was never advisory- or licence-checked (issue #726). cosign/Rekor provenance is listed as an Arbitraitor-owned capability area (spec `40-arbitraitor-integration.md` §2.2, §16.4); whether Orchestraitor needs a direct sigstore crate at all is an open spec question, not a settled dependency.
 - in-toto Statement export (`to_intoto_statement()`) is the supported interchange format for downstream audit systems.
 
 ---
