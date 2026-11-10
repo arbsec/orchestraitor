@@ -202,9 +202,12 @@ orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
   ambiguous, and in `required` enforcement mode an ambiguous argv is refused
   BEFORE any token is minted (an unparseable argv must not become a way past
   the PR-labeling chain). That refusal is distinct from the proven
-  `gh pr create` one: it quotes the token that made the shape unprovable
-  (e.g. `` `--color` is not a `gh` flag it recognizes ``), so a caller is
-  never told that `gh pr create` ran when the argv never mentioned `pr`.
+  `gh pr create` one: it quotes the offending flag (or the `--` separator)
+  rather than the whole argv token — e.g. `` `--color` is not a `gh` flag it
+  recognizes ``, or `` `-H` `` for the single-token `-H<value>` form — so a
+  caller is never told that `gh pr create` ran when the argv never mentioned
+  `pr`, and credential-shaped flag values never reach the diagnostic (errors
+  never contain secrets, headers, or tokens).
 - **`--version` / `--help` / `-h` / `-V` pass through without minting.** A
   bare `<gh> <flag>` help/version query needs no API request: it cannot write
   and needs no credential, so `gh-env` executes it directly instead of
@@ -213,7 +216,10 @@ orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
   verbatim — if the installed `gh` does not implement one (`-V` is not a
   `gh` flag today), gh's own error is returned. Any extra token — `gh
   --version pr create`, `gh -h pr create` — is NOT covered by this
-  passthrough and goes back through the ambiguity rule.
+  passthrough and goes back through the ambiguity rule. The passthrough child
+  also runs with `GH_TOKEN` and `GITHUB_TOKEN` REMOVED from its environment:
+  a credential-free query must not inherit the calling session's personal
+  token.
 - The child's stdout/stderr pass through unchanged, stdin passes through to
   the child (so `gh` flags like `--body-file -` and `-F -` read the caller's
   piped input — including on the `gh-env-pr-create-chain` capture route,

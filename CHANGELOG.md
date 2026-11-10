@@ -471,11 +471,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 - **`orc github gh-env` no longer misreports an unprovable child argv as
   `gh pr create`** (issue #703): the ambiguity refusal is now distinct from
-  the proven `gh pr create` refusal and quotes the token that made the shape
-  unprovable. A read-only `gh --version` / `gh --help` (also `-h` / `-V`) is
-  passed through to the real binary without minting — it cannot write and
-  needs no credential — so proving which `gh` build the wrapper runs works
-  even when the App config cannot mint. Documented in
+  the proven `gh pr create` refusal and quotes the offending flag — never the
+  whole argv token, so a credential-shaped argument (`-HAuthorization: token
+  …`) cannot leak into the error. A read-only `gh --version` / `gh --help`
+  (also `-h` / `-V`) is passed through to the real binary without minting — it
+  cannot write and needs no credential — so proving which `gh` build the
+  wrapper runs works even when the App config cannot mint; that child runs
+  with `GH_TOKEN`/`GITHUB_TOKEN` removed rather than inheriting the calling
+  session's token. Documented in
   [docs/cli/orc-github.md](docs/cli/orc-github.md).
 
 ### Changed

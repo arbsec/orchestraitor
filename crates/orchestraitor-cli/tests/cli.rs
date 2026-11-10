@@ -1326,7 +1326,8 @@ fn github_gh_env_passes_through_read_only_help_and_version_flags() -> miette::Re
     fs::write(
         &child,
         "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$LOG_DIR/argv.log\"\n\
-         printf '%s\\n' \"${GH_TOKEN:-<unset>}\" >> \"$LOG_DIR/token.log\"\n",
+         printf '%s %s\\n' \"${GH_TOKEN:-<unset>}\" \"${GITHUB_TOKEN:-<unset>}\" \
+         >> \"$LOG_DIR/token.log\"\n",
     )
     .into_diagnostic()?;
     fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
@@ -1355,9 +1356,11 @@ fn github_gh_env_passes_through_read_only_help_and_version_flags() -> miette::Re
             ])
             .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
             .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
-            // An inherited token would mask a credential injection and make
-            // the assertion below environment-dependent.
-            .env_remove("GH_TOKEN")
+            // Ambient credentials the calling session may hold: the
+            // passthrough mints nothing, so the child must NOT inherit either
+            // one (the wrapper clears both when no token is minted).
+            .env("GH_TOKEN", "ambient-personal-marker")
+            .env("GITHUB_TOKEN", "ambient-personal-marker2")
             .env("PATH", &path)
             .env("LOG_DIR", &log_dir)
             .stdout(Stdio::piped())
@@ -1379,8 +1382,8 @@ fn github_gh_env_passes_through_read_only_help_and_version_flags() -> miette::Re
     let observed_tokens = fs::read_to_string(log_dir.join("token.log")).into_diagnostic()?;
     assert_eq!(
         observed_tokens.lines().collect::<Vec<_>>(),
-        vec!["<unset>"; 4],
-        "the read-only passthrough must not inject a credential"
+        vec!["<unset> <unset>"; 4],
+        "the read-only passthrough must neither inject nor inherit a credential"
     );
     Ok(())
 }
@@ -1423,6 +1426,62 @@ fn github_gh_env_refuses_unprovable_argv_with_an_accurate_diagnostic() -> miette
             "{argv:?}: an unprovable argv must not be reported as a proven `gh pr create`: {stderr}"
         );
     }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_ambiguity_refusal_never_echoes_a_credential() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+
+    // `-H<value>` is valid pflag single-token syntax and a realistic `gh api`
+    // habit, so the value can be a real credential. The refusal must quote the
+    // FLAG (actionable) and never the token (AGENTS.md: errors never contain
+    // secrets, headers, cookies, or tokens) — stderr lands in session
+    // transcripts and CI logs.
+    let output = github_cli_with_gh_stub(
+        &temp,
+        &stub_dir,
+        "http://127.0.0.1:1",
+        &[
+            "github",
+            "gh-env",
+            "--",
+            "gh",
+            "-HAuthorization: token ghp_FAKESECRET456",
+            "pr",
+            "create",
+        ],
+    )?;
+    assert!(!output.status.success());
+    // The forbidden effect (the child running) did NOT happen.
+    assert!(
+        !temp.path().join("child.out").exists(),
+        "the child must never run under the ambiguity guard"
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("`-H`"),
+        "the refusal must name the offending FLAG: {stderr}"
+    );
+    assert!(
+        flat.contains("cannotprovethechildargvisnot"),
+        "the refusal must stay the distinct ambiguity diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ghp_FAKESECRET456"),
+        "the refusal must never echo credential material: {stderr}"
+    );
+    assert!(
+        !stderr.contains("FAKESECRET"),
+        "the refusal must never echo any part of the credential value: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Authorization:"),
+        "the refusal must never echo the header the value belongs to: {stderr}"
+    );
     Ok(())
 }
 

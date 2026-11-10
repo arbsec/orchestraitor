@@ -367,7 +367,9 @@ fn build_request_query(fields: &[String]) -> Result<String> {
 /// `--version`/`--help` (or `-h`/`-V`) query is passed through without
 /// minting: it cannot write and needs no credential, and it must keep
 /// working when the App config is broken (it is how a caller proves which
-/// `gh` build the wrapper would run).
+/// `gh` build the wrapper would run). That child also has any ambient
+/// `GH_TOKEN`/`GITHUB_TOKEN` removed, so a credential-free query never
+/// carries the calling session's token.
 fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     if args.command.is_empty() {
         bail!(
@@ -669,7 +671,10 @@ fn gh_env_gates_and_mint(
 /// Spawns the gh-env child with the minted token (and the pinned git
 /// identity env when in required mode), passing the child's stdout/stderr
 /// through. `token` is `None` only for the read-only help/version passthrough,
-/// which neither mints nor needs a credential. When `capture_stdout` is set
+/// which neither mints nor needs a credential — that branch also REMOVES any
+/// ambient `GH_TOKEN`/`GITHUB_TOKEN` from the child environment, so the child
+/// of a credential-free query cannot inherit a personal token. When
+/// `capture_stdout` is set
 /// the child's stdout is captured and returned (the PR-URL contract for the
 /// labeling chain); otherwise it passes through verbatim. The child's exit
 /// code propagates (a missing exit code maps to 1) BEFORE any captured-stdout
@@ -688,6 +693,16 @@ fn gh_env_spawn_child(
     child.args(&command[1..]);
     if let Some(token) = token {
         child.env("GH_TOKEN", token.token().expose_secret());
+    } else {
+        // No token is injected on this path (the read-only help/version
+        // passthrough), and an ambient `GH_TOKEN`/`GITHUB_TOKEN` from the
+        // calling session would ride along into a child that never asked for
+        // one — the child would then hold a personal credential the
+        // service-identity route never minted. Clear both so the "no
+        // credential is present in the child environment" contract is
+        // ENFORCED here, not merely asserted.
+        child.env_remove("GH_TOKEN");
+        child.env_remove("GITHUB_TOKEN");
     }
     // Pin the git identity for the child: `git -c user.email=… commit` beats
     // repo config but NOT the GIT_AUTHOR_*/GIT_COMMITTER_* environment
@@ -842,8 +857,13 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
             } else if VALUE_LONG_FLAGS.contains(&bare) {
                 1
             } else {
-                // An unknown long flag makes the shape unprovable.
-                return PrCreateShape::Ambiguous(Some(arg.to_string()));
+                // An unknown long flag makes the shape unprovable. The
+                // payload is the FLAG NAME only, never the argv token: an
+                // `=`-attached value (`--header=Authorization: token …`) is
+                // credential-shaped material and must never reach the
+                // diagnostic (defense in depth — the `=` form is skipped
+                // above, so today this arm only ever sees a bare `--flag`).
+                return PrCreateShape::Ambiguous(Some(format!("--{bare}")));
             };
             continue;
         }
@@ -864,11 +884,14 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
                 }
                 if VALUE_SHORT_FLAGS.contains(&c) && c == rest.chars().next_back().unwrap_or(' ') {
                     value_flag = true;
-                } else if VALUE_SHORT_FLAGS.contains(&c) {
-                    // A value-taking flag inside a cluster is ambiguous.
-                    return PrCreateShape::Ambiguous(Some(arg.to_string()));
                 } else {
-                    return PrCreateShape::Ambiguous(Some(arg.to_string()));
+                    // Either a value-taking flag INSIDE a cluster or an
+                    // unknown short flag: the shape is unprovable. Echo the
+                    // FLAG only, never the token — `-HAuthorization: token …`
+                    // and `-Ranything` carry their value in the same token,
+                    // so quoting `arg` would print credential-shaped material
+                    // (AGENTS.md: errors never contain secrets or tokens).
+                    return PrCreateShape::Ambiguous(Some(format!("-{c}")));
                 }
             }
             depth = usize::from(value_flag);
@@ -3672,6 +3695,70 @@ mod tests {
             assert!(
                 !child_is_read_only_help_or_version(&argv(parts)),
                 "{parts:?} must not take the read-only passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguity_payload_never_echoes_credential_material() {
+        let argv = |parts: &[&str]| -> Vec<String> {
+            parts.iter().map(std::string::ToString::to_string).collect()
+        };
+        // The refusal quotes the token that made the shape unprovable, so a
+        // value-carrying SHORT flag (`-H<value>` is valid pflag single-token
+        // syntax and a realistic `gh api` habit) must contribute the FLAG
+        // only. Echoing the argv token would put a credential into stderr,
+        // which lands in session transcripts and CI logs (AGENTS.md: errors
+        // never contain secrets, headers, cookies, or tokens).
+        assert_eq!(
+            child_command_is_pr_create(&argv(&[
+                "gh",
+                "-HAuthorization: token ghp_FAKESECRET456",
+                "pr",
+                "create",
+            ])),
+            PrCreateShape::Ambiguous(Some("-H".to_string()))
+        );
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-Rghp_FAKESECRET456", "pr", "create"])),
+            PrCreateShape::Ambiguous(Some("-R".to_string()))
+        );
+        // A short-flag cluster is echoed as the ONE offending flag, never the
+        // rest of the token.
+        assert_eq!(
+            child_command_is_pr_create(&argv(&["gh", "-qghp_FAKESECRET456", "pr", "create"])),
+            PrCreateShape::Ambiguous(Some("-q".to_string()))
+        );
+        // No verdict for a credential-shaped argv renders the secret — the
+        // `=` form is skipped as a complete flag, and a long flag's VALUE is
+        // a separate argv element the walk never echoes.
+        for parts in [
+            &[
+                "gh",
+                "-HAuthorization: token ghp_FAKESECRET456",
+                "pr",
+                "create",
+            ][..],
+            &["gh", "-Rghp_FAKESECRET456", "pr", "create"][..],
+            &["gh", "-qghp_FAKESECRET456", "pr", "create"][..],
+            &[
+                "gh",
+                "--header=Authorization: token ghp_FAKESECRET456",
+                "pr",
+                "create",
+            ][..],
+            &[
+                "gh",
+                "--header",
+                "Authorization: token ghp_FAKESECRET456",
+                "pr",
+                "create",
+            ][..],
+        ] {
+            let rendered = format!("{:?}", child_command_is_pr_create(&argv(parts)));
+            assert!(
+                !rendered.contains("ghp_FAKESECRET456"),
+                "{parts:?} must not echo the credential: {rendered}"
             );
         }
     }
