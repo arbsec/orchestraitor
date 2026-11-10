@@ -769,6 +769,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- SQLite access now builds against rusqlite 0.41.1 (previously 0.40.2), which
+  moves the bundled `libsqlite3-sys` to 0.39.1 and its embedded SQLite to
+  3.54.1. That clears `RUSTSEC-2026-0459` (medium, 6.8), a bundling
+  vulnerability in every `libsqlite3-sys` release before 0.39.0, so builds of
+  `orc`, `orcd`, and every crate that opens a SQLite store no longer ship the
+  affected SQLite. No public API, schema, or on-disk format changes; the only
+  source change required was already landed in #711 (the authorizer hook is
+  installed through a `&mut Connection` accessor).
+
 - The MCP gateway (`orchestraitor-mcp`) now builds against rmcp 3.5.1
   (previously 2.2.0), the official MCP Rust SDK release for the
   MCP 2026-07-28 specification. The gateway's tool surface, wire shapes
@@ -781,6 +790,16 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **`orc github push-branch` can now land executable-bit changes** (issue 556):
+  `createCommitOnBranch` has no file-mode field, so a landing that added a
+  100755 file or changed a mode in either direction was refused by the tree
+  gate. Those change sets now automatically use the REST tree + commit
+  transport (a GitHub-signed, verified commit carrying the exact local modes);
+  content-only landings keep the GraphQL default path. The REST transport
+  resolves its base from `github_api_endpoint` (the GraphQL endpoint is a
+  different base on GitHub Enterprise), so the tree + commit upload works
+  against GitHub Enterprise. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
 - **Re-plans now carry the prior attempt's receipt summary** (reduces the
   "re-explore the same worktree" failure mode where every attempt re-read
   the same files, issue 657): a re-plan prompt still opens with the static
