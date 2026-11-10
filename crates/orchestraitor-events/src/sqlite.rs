@@ -80,6 +80,13 @@ impl SqliteAuditStore {
         &self.conn
     }
 
+    /// Mutable counterpart of [`Self::connection`], for rusqlite entry points
+    /// that take `&mut Connection` (e.g. `Connection::authorizer` since 0.41).
+    #[cfg(test)]
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     fn initialize(mut conn: Connection) -> Result<Self, EventError> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;

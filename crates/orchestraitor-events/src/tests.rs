@@ -390,7 +390,7 @@ fn concurrent_import_during_append_never_persists_broken_chain() -> Result<(), E
     };
 
     let mut store_a = SqliteAuditStore::open(&path)?;
-    store_a.connection().authorizer(Some(hook))?;
+    store_a.connection_mut().authorizer(Some(hook))?;
 
     // A appends a record linked to the pre-import head while the hook injects
     // B's competing import at A's insert-preparation point.
