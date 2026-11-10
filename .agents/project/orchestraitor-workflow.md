@@ -88,7 +88,10 @@ this repo, labelled or otherwise:
   rebase onto it before any GitHub write). A stale checkout that predates the
   service-identity wrappers silently bypasses them — verify the wrappers
   exist (`.agents/skills/*/scripts/_lib.sh` carries `orc_lib_gh_service`)
-  before performing GitHub operations.
+  before performing GitHub operations. Since #748 the PR gate enforces the
+  same rule for review policy: `pr-checks`/`convergence-status`/`merge-gate`
+  refuse (exit 6, `stale-review-policy`) when their own copy is not the blob at
+  the PR's `baseRefOid`, instead of reporting a verdict from a stale policy.
 - `orc` MUST be on the worker `PATH` (`ORC_BIN` overrides the binary name in
   the skill scripts). There is no distributed binary yet: build it from the
   repo checkout with `cargo build --release -p orchestraitor-cli` and put

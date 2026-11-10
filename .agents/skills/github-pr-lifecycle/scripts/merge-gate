@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "merge-gate" "Check if a PR is safe to squash-merge. Exits 0=mergeable. Never uses --admin."
+  orc_lib_print_help "merge-gate" "Check if a PR is safe to squash-merge. Exits 0=mergeable, 6=stale review policy (refused BEFORE any merge). Never uses --admin."
   exit "$ORC_OK"
 fi
 
@@ -23,12 +23,33 @@ fi
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
+# Review-policy provenance (arbsec/orchestraitor#748) — FIRST, before anything
+# that could merge. `merge-gate` performs the merge, so a stale copy must fail
+# closed here: the guard needs only the PR's baseRefOid (the trusted base
+# commit) and local git objects, and it runs before convergence-status and
+# before any `gh pr merge` invocation is even constructed.
+MG_BASE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json baseRefOid 2>/dev/null || true)"
+MG_BASE_SHA="$(echo "$MG_BASE_JSON" | jq -r '.baseRefOid // ""' 2>/dev/null || true)"
+orc_lib_require_policy_current text "$MG_BASE_SHA" "merge-gate" \
+  "$PR --repo $REPO --json" "$SCRIPT_DIR/pr-checks" "$SCRIPT_DIR/convergence-status" \
+  "$SCRIPT_DIR/merge-gate"
+
 # Run convergence-status first (once; stderr captured for diagnostics).
 # This includes the persisted CLEAN agent-review record at the current HEAD.
 CONV_ERR_FILE="$(mktemp)"
 CONVERGENCE=""
 CONV_EXIT=0
 CONVERGENCE="$(bash "$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>"$CONV_ERR_FILE")" || CONV_EXIT=$?
+if [ "$CONV_EXIT" -eq "$ORC_ERR_STALE_POLICY" ] ||
+   [ "$(echo "$CONVERGENCE" | jq -r '.error // empty' 2>/dev/null)" = "stale-review-policy" ]; then
+  # A stale-policy refusal is not a verdict: propagate the typed code and its
+  # message, never the "has not converged" (5) shape. Unreachable while this
+  # script's own guard covers the same files; kept so a narrower sibling guard
+  # can never be laundered into a blocked verdict here.
+  sed 's/^/  /' "$CONV_ERR_FILE" >&2
+  rm -f "$CONV_ERR_FILE"
+  exit "$ORC_ERR_STALE_POLICY"
+fi
 if ! echo "$CONVERGENCE" | jq -e . >/dev/null 2>&1; then
   # convergence-status hard-failed (no usable JSON) — surface the sub-check's
   # name and stderr instead of reporting an empty reason list.

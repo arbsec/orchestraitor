@@ -26,6 +26,17 @@ git -C "$TMP/repo" init -q
 cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-checks" "$TMP/repo/scripts/"
 chmod +x "$TMP/repo/scripts/"*
 
+# Review-policy provenance fixture (#748): the base commit holds the CURRENT
+# classifier. A clean tree therefore proves "current copy -> normal verdict, no
+# spurious refusal"; a branch that carries an older policy proves the typed
+# refusal. `pr-checks` compares itself against the PR's baseRefOid blob.
+GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base: current review policy"
+BASE_BRANCH="$(git -C "$TMP/repo" rev-parse --abbrev-ref HEAD)"
+PR_BASE_SHA="$(git -C "$TMP/repo" rev-parse HEAD)"
+export PR_BASE_SHA
+
 # gh stub: serves the check fixture and the PR author. The author drives the
 # bot/App predicate; `PR_AUTHOR_FAIL=true` simulates a failed read.
 cat > "$TMP/bin/gh" <<'STUB'
@@ -34,8 +45,15 @@ case "$1/${2:-}" in
   auth/status) exit 0 ;;
   pr/checks) cat "$PR_CHECKS_FIXTURE" ;;
   pr/view)
-    [ "${PR_AUTHOR_FAIL:-false}" = true ] && exit 1
-    out="{\"author\":{\"login\":$(jq -cn --arg a "${PR_AUTHOR_LOGIN-app/arbsec-agent}" '$a')}}"
+    json=""; prev=""
+    for a in "$@"; do [ "$prev" = "--json" ] && json="$a"; prev="$a"; done
+    if [ "$json" = baseRefOid ]; then
+      # The PR's trusted base commit (review-policy provenance, #748).
+      out="{\"baseRefOid\":$(jq -cn --arg b "$PR_BASE_SHA" '$b')}"
+    else
+      [ "${PR_AUTHOR_FAIL:-false}" = true ] && exit 1
+      out="{\"author\":{\"login\":$(jq -cn --arg a "${PR_AUTHOR_LOGIN-app/arbsec-agent}" '$a')}}"
+    fi
     j=""; prev=""
     for a in "$@"; do [ "$prev" = "--jq" ] && j="$a"; prev="$a"; done
     if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
@@ -204,6 +222,46 @@ assert 'i: failed author read blocks CodeRabbit skip' false "$(jq -r .all_passed
 assert 'i: failed author read has null reason' null "$(skip_reason CodeRabbit)"
 unset PR_AUTHOR_FAIL
 export PR_AUTHOR_LOGIN=app/arbsec-agent
+
+# (j) review-policy provenance (#748): a tree carrying an OLDER classifier than
+# the base branch's copy must refuse (exit 6) instead of emitting a confident
+# classification. Fixture: the base commit holds the current script; a branch
+# reverts the bot-author exemption — the pre-#707 policy shape that produced
+# today's false `checks_not_passing`.
+echo "--- (j) stale classifier is refused ---"
+git -C "$TMP/repo" switch -q -c stale-policy
+sed -i 's/and bot_author_pr/and false/' "$TMP/repo/scripts/pr-checks"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "fixture: pre-#707 classifier"
+STALE_HEAD="$(git -C "$TMP/repo" rev-parse HEAD)"
+export PR_CHECKS_FIXTURE="$TMP/a.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'j: stale copy refuses (exit 6)' 6 "$RC"
+assert 'j: refusal is typed, not a verdict' stale-review-policy "$(jq -r .error <<<"$OUT")"
+assert 'j: refusal carries no verdict keys' false \
+  "$(jq -r 'has("checks") or has("all_passed") or has("any_failing") or has("any_pending")' <<<"$OUT")"
+assert 'j: refusal names the stale file' 1 "$(grep -cF "$TMP/repo/scripts/pr-checks" "$TMP/stderr")"
+assert 'j: refusal names the running commit' 1 "$(grep -cF "$STALE_HEAD" "$TMP/stderr")"
+assert 'j: refusal names the trusted base oid' 1 \
+  "$(grep -cF "at $PR_BASE_SHA (the PR's baseRefOid)" "$TMP/stderr")"
+assert 'j: refusal gives the base-checkout command' 1 "$(grep -cF 'worktree add --detach' "$TMP/stderr")"
+assert 'j: no classification on stdout' "" "$(jq -r '.checks // empty' <<<"$OUT")"
+
+# (j2) an UNCOMMITTED edit to the running classifier is refused too: provenance
+# that cannot be tied to a commit is never assumed current.
+git -C "$TMP/repo" switch -q "$BASE_BRANCH"
+printf '\n# uncommitted policy edit\n' >> "$TMP/repo/scripts/pr-checks"
+run pr-checks 7 --repo test-org/repo --json
+assert 'j2: uncommitted copy refuses (exit 6)' 6 "$RC"
+assert 'j2: refusal names the working tree' 1 "$(grep -cF 'uncommitted content' "$TMP/stderr")"
+git -C "$TMP/repo" checkout -- scripts/pr-checks
+
+# (j3) the CURRENT copy still produces the normal verdict: the refusal must not
+# fire on a current tree, or the gate is useless in a different way.
+run pr-checks 7 --repo test-org/repo --json
+assert 'j3: current copy exits 0' 0 "$RC"
+assert 'j3: current copy still classifies' true "$(jq -r .all_passed <<<"$OUT")"
+assert 'j3: current copy emits no refusal' 0 "$(grep -cF 'stale review policy' "$TMP/stderr")"
 
 # usage errors
 run pr-checks

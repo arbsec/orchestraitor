@@ -342,9 +342,11 @@ creating a worktree in a checkout where hooks were never installed, run
 | `3` | Policy violation (would merge on red, would skip adversarial review, would use `--admin`) |
 | `4` | Concurrent edit detected (PR's `updatedAt`/head SHA changed since read — re-read and retry) |
 | `5` | Convergence not reached (review loop limit hit — produces `blocked`/`needs-human`, never silent approval) |
+| `6` | Untrusted review policy — `pr-create`'s base ref cannot be resolved, or the running `pr-checks`/`convergence-status`/`merge-gate` is not the trusted base's copy. **No verdict is emitted and nothing is merged**; the refusal prints the base-checkout command that yields a trustworthy verdict |
 
 ## Safety conditions (non-negotiable)
 
+- **Review policy comes from the trusted base, and the gate enforces it.** `pr-checks`, `convergence-status` and `merge-gate` compare their own git blob against the blob at the PR's `baseRefOid` (the exact base commit GitHub reports) before emitting a verdict — or, for `merge-gate`, before constructing any merge command. A copy that differs — stale, branch-modified, or uncommitted — is refused with the typed `stale-review-policy` refusal (exit `6`), never classified. This is the #740/#748 defect class: a pre-#707 `pr-checks` reported `checks_not_passing` for a PR GitHub reported `MERGEABLE`/`CLEAN`, because the verdict depended on which checkout's copy ran. A PR that changes the gate is therefore gated by the BASE policy; the refusal prints the one-line base-checkout command that yields a trustworthy verdict. The check is local git only (no network fetch per run).
 - **No merge on red.** `merge-gate` exits non-zero if any required or non-optional check is not passing. A skipped/missing check is a failure.
 - **No admin bypass.** This skill never passes `--admin` to `gh pr merge`. Reaching a limit is a `blocked` state, not a merge path.
 - **Fresh-context reviews only.** The skill tracks review *generations*; it does not let a reviewer approve their own implementation (spec `50-contracts-data.md` §21.1, `10-orchestrator.md` §9.33.3). Security-sensitive changes require human review before release.

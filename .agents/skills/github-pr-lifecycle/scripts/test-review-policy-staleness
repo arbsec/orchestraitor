@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# Regression tests for review-policy PROVENANCE (arbsec/orchestraitor#748).
+#
+# The gate scripts resolve $SCRIPT_DIR from their OWN location, so an agent that
+# runs them from a stale checkout silently applies that checkout's review policy
+# instead of the trusted base branch's. Observed damage (today, on #740/#749):
+#
+#   - false `checks_not_passing`: a pre-#707 `pr-checks` has no bot-author
+#     exemption, so a bot-authored `CodeRabbit: SKIPPED` is classified as a
+#     failing `skip` and a PR GitHub reports MERGEABLE/CLEAN is refused;
+#   - false `agent_review_not_clean_at_head`: the same divergence from another
+#     tree, i.e. a verdict that depends on WHICH copy ran.
+#
+# The failure direction seen so far is fail-closed, but a stale copy is
+# nondeterministic: it can equally hold an older, more permissive rule and
+# produce a false PASS. Therefore a copy that is not the trusted base's must
+# never produce a confident verdict.
+#
+# Mechanism (see `orc_lib_require_policy_current` in _lib.sh): the running
+# policy files are compared, by git blob, against the blobs at the PR's
+# `baseRefOid` — the exact base commit GitHub reports, i.e. the trusted base
+# branch and not the checkout under review. A mismatch is a typed refusal
+# (exit 6) whose JSON shape carries NO verdict keys, so no caller can mistake
+# it for `mergeable`/`reasons`/`all_passed`. The check is local git only (no
+# network, safe in tight loops). A VERSION constant cannot detect this: a whole
+# stale directory carries a stale constant too.
+#
+# Covers:
+#   (a) current tree -> convergence-status reports its normal verdict, exit 0
+#   (b) current tree -> merge-gate --dry-run passes and merges nothing
+#   (c) current tree -> merge-gate still reaches gh pr merge (no over-refusal)
+#   (d) stale pr-checks -> convergence-status refuses (exit 6), typed JSON with
+#       no verdict keys, naming file + running commit + base OID + remediation,
+#       and never classifies checks
+#   (e) stale pr-checks -> merge-gate refuses BEFORE any merge command
+#   (f) stale convergence-status (pr-checks current) -> merge-gate refuses on
+#       its own guard, BEFORE it invokes the stale sibling
+#   (g) an uncommitted policy edit refuses (provenance not tied to a commit)
+#   (h) a base commit absent locally refuses with the fetch remediation
+#   (i) text mode: the refusal is on stderr, stdout stays empty (never a verdict)
+#
+# Hermetic: local git fixtures, stubbed `gh`/`orc`, no network, no credentials.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/repo/scripts" "$TMP/bin"
+GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
+git -C "$TMP/repo" init -q
+
+# The real gate scripts under test. Only the leaf collectors are stubbed, so the
+# provenance guard, the classification, and the merge ordering are all real.
+for script in _lib.sh pr-checks convergence-status merge-gate; do
+  cp -L -- "$SCRIPT_DIR/$script" "$TMP/repo/scripts/"
+done
+for check in review-threads reconcile-checklist; do
+  cat > "$TMP/repo/scripts/$check" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"unresolved_actionable":0,"all_checked":true,"unchecked":[]}'
+STUB
+done
+
+# --- fixture: the trusted base holds the CURRENT policy -------------------------
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "fixture: gate scripts at the trusted base"
+DEFAULT_BRANCH="$(git -C "$TMP/repo" rev-parse --abbrev-ref HEAD)"
+PR_BASE="$(git -C "$TMP/repo" rev-parse HEAD)"
+REAL_BASE="$PR_BASE"
+
+# --- stubs ----------------------------------------------------------------------
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/checks) cat "$PR_CHECKS_FIXTURE" ;;
+  pr/view)
+    out="$(jq -n --arg head "$PR_HEAD" --arg base "$PR_BASE" \
+      '{state:"OPEN",headRefOid:$head,baseRefOid:$base,mergeStateStatus:"CLEAN",
+        reviewDecision:"APPROVED",isDraft:false,author:{login:"app/arbsec-agent"}}')"
+    j=""; prev=""
+    for a in "$@"; do [ "$prev" = "--jq" ] && j="$a"; prev="$a"; done
+    if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
+    printf '%s\n' "$out" ;;
+  pr/merge) echo '{}' ;;
+  *) echo "stub: unexpected gh invocation: $*" >&2; exit 99 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub-config ;;
+  github/gh-env) shift 2; shift; exec "$@" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+export GH_LOG="$TMP/gh.log"
+export PR_HEAD=abcdef1234567890abcdef1234567890abcdef12
+export PR_BASE
+: > "$GH_LOG"
+
+# A bot-authored PR with a CodeRabbit SKIPPED check: the current classifier
+# exempts it (skip_reason bot-author); a pre-#707 copy blocks on it.
+jq -cn '[{name:"CodeQL",state:"SUCCESS",bucket:"pass",description:"",workflow:"CI",link:"x"},
+        {name:"CodeRabbit",state:"SKIPPED",bucket:"skipping",description:"",workflow:"CI",link:"x"},
+        {name:"Docs Consistency",state:"SKIPPED",bucket:"skipping",description:"",workflow:"CI",link:"x"}]' > "$TMP/checks.json"
+export PR_CHECKS_FIXTURE="$TMP/checks.json"
+
+mkdir -p "$TMP/repo/.orchestraitor/reviews"
+cat > "$TMP/repo/.orchestraitor/reviews/7-abcdef1.md" <<EOF
+# Agent review record: PR #7 @ abcdef1
+
+- verdict: CLEAN
+- reviewer-agent: test
+- head SHA: $PR_HEAD
+- base OID: $PR_BASE
+- findings: 0
+
+EOF
+
+PASS=0; FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
+}
+count() { grep -cF -- "$2" "$1" 2>/dev/null || true; }
+# run <script> [args...] : from the fixture repo; sets RC/OUT/ERR
+run() {
+  : > "$GH_LOG"
+  OUT="$(cd "$TMP/repo" && bash "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
+  ERR="$(cat "$TMP/stderr")"
+}
+
+# --- (a) current copy: normal verdict, no spurious refusal ---------------------
+echo "--- (a) current copy still reports the normal verdict ---"
+run convergence-status 7 --repo test-org/repo --json
+assert 'current: convergence-status exits 0' 0 "$RC"
+assert 'current: verdict is mergeable' true "$(jq -r .mergeable <<<"$OUT")"
+assert 'current: no reasons' 0 "$(jq -r '.reasons | length' <<<"$OUT")"
+assert 'current: no stale-policy refusal' 0 "$(count "$TMP/stderr" 'stale review policy')"
+
+# --- (b) current copy: dry-run passes, merges nothing --------------------------
+echo "--- (b) current copy: merge-gate --dry-run ---"
+run merge-gate 7 --repo test-org/repo --dry-run
+assert 'current: merge-gate dry-run exits 0' 0 "$RC"
+assert 'current: dry-run performs no merge' 0 "$(count "$GH_LOG" 'pr merge')"
+
+# --- (c) current copy: the real merge path is still reachable ------------------
+# Without this, "always refusing" would look like a fix while making the gate
+# useless again, just in the other direction.
+echo "--- (c) current copy: merge-gate reaches the merge call ---"
+run merge-gate 7 --repo test-org/repo
+assert 'current: merge-gate exits 0' 0 "$RC"
+assert 'current: merge command was issued once' 1 "$(count "$GH_LOG" 'pr merge')"
+
+# --- fixture: branches carrying policy that is NOT the base's ------------------
+git -C "$TMP/repo" switch -q -c stale-classifier
+# The pre-#707 policy shape: no bot-author exemption -> CodeRabbit SKIPPED is a
+# failing `skip` and the PR is reported `checks_not_passing`.
+sed -i 's/and bot_author_pr/and false/' "$TMP/repo/scripts/pr-checks"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "fixture: pre-#707 classifier"
+STALE_CLASSIFIER="$(git -C "$TMP/repo" rev-parse HEAD)"
+
+git -C "$TMP/repo" switch -q "$DEFAULT_BRANCH"
+git -C "$TMP/repo" switch -q -c stale-verdict
+printf '\n# fixture: stale verdict policy\n' >> "$TMP/repo/scripts/convergence-status"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "fixture: stale convergence-status"
+STALE_VERDICT="$(git -C "$TMP/repo" rev-parse HEAD)"
+
+# --- (d) stale classifier refuses, and never classifies ------------------------
+echo "--- (d) stale pr-checks is refused, not classified ---"
+git -C "$TMP/repo" switch -q stale-classifier
+run convergence-status 7 --repo test-org/repo --json
+assert 'stale classifier: distinct exit 6' 6 "$RC"
+assert 'stale classifier: typed refusal' stale-review-policy "$(jq -r .error <<<"$OUT")"
+assert 'stale classifier: refusal carries no mergeable verdict' null "$(jq -r '.mergeable // "null"' <<<"$OUT")"
+assert 'stale classifier: refusal carries no reasons' null "$(jq -r '.reasons // "null"' <<<"$OUT")"
+assert 'stale classifier: names the offending file' 1 "$(count "$TMP/stderr" "$TMP/repo/scripts/pr-checks")"
+assert 'stale classifier: names the running commit' 1 "$(count "$TMP/stderr" "$STALE_CLASSIFIER")"
+assert 'stale classifier: names the trusted base oid' 1 \
+  "$(count "$TMP/stderr" "at $PR_BASE (the PR's baseRefOid)")"
+assert 'stale classifier: names the remediation command' 1 "$(count "$TMP/stderr" 'worktree add --detach')"
+assert 'stale classifier: checks were never read' 0 "$(count "$GH_LOG" 'pr checks')"
+assert 'stale classifier: baseline classification never emitted' 0 \
+  "$(printf '%s' "$OUT" | grep -cF 'checks_not_passing' || true)"
+
+# --- (e) stale classifier refuses inside merge-gate, before any merge ----------
+echo "--- (e) stale pr-checks: merge-gate refuses before merging ---"
+run merge-gate 7 --repo test-org/repo
+assert 'stale classifier: merge-gate exits 6' 6 "$RC"
+assert 'stale classifier: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
+assert 'stale classifier: merge-gate surfaces the typed refusal' 1 "$(count "$TMP/stderr" 'stale review policy')"
+
+# --- (f) a stale convergence-status is caught by merge-gate's OWN guard --------
+# The stale sibling has no working guard of its own (it predates the fix), so
+# only merge-gate's independent check can protect the merge here.
+echo "--- (f) stale convergence-status: merge-gate refuses on its own guard ---"
+git -C "$TMP/repo" switch -q stale-verdict
+run merge-gate 7 --repo test-org/repo
+assert 'stale verdict: merge-gate exits 6' 6 "$RC"
+assert 'stale verdict: names convergence-status' 1 "$(count "$TMP/stderr" "$TMP/repo/scripts/convergence-status")"
+assert 'stale verdict: names the running commit' 1 "$(count "$TMP/stderr" "$STALE_VERDICT")"
+assert 'stale verdict: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
+assert 'stale verdict: the stale sibling never ran (no PR-state review read)' 0 \
+  "$(count "$GH_LOG" 'reviewDecision')"
+
+# --- (g) an uncommitted policy edit has no commit provenance -------------------
+echo "--- (g) uncommitted policy edit is refused ---"
+git -C "$TMP/repo" switch -q "$DEFAULT_BRANCH"
+printf '\n# uncommitted review-policy edit\n' >> "$TMP/repo/scripts/pr-checks"
+run convergence-status 7 --repo test-org/repo --json
+assert 'uncommitted: exit 6' 6 "$RC"
+assert 'uncommitted: refusal says working tree' 1 "$(count "$TMP/stderr" 'uncommitted content')"
+git -C "$TMP/repo" checkout -- scripts/pr-checks
+
+# --- (h) an unfetched base commit refuses with the fetch remediation ----------
+echo "--- (h) a base commit missing locally refuses ---"
+export PR_BASE=1111111111111111111111111111111111111111
+run convergence-status 7 --repo test-org/repo --json
+assert 'missing base: exit 6' 6 "$RC"
+assert 'missing base: says the commit is not present' 1 \
+  "$(count "$TMP/stderr" 'not present in this repository')"
+assert 'missing base: names the fetch command' 1 "$(count "$TMP/stderr" 'git -C '"$TMP/repo"' fetch origin')"
+assert 'missing base: no verdict keys' null "$(jq -r '.mergeable // "null"' <<<"$OUT")"
+export PR_BASE="$REAL_BASE"
+
+# --- (i) text mode: refusal on stderr only ------------------------------------
+echo "--- (i) text mode never prints a verdict ---"
+git -C "$TMP/repo" switch -q stale-classifier
+run convergence-status 7 --repo test-org/repo
+assert 'text refusal: exit 6' 6 "$RC"
+assert 'text refusal: stdout is empty' "" "$OUT"
+assert 'text refusal: stderr is typed' 1 "$(count "$TMP/stderr" 'error: stale review policy:')"
+
+printf '\n=== review-policy staleness: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]
