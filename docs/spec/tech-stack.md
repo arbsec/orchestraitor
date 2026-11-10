@@ -24,7 +24,7 @@
 | Workspace resolver | Cargo resolver 3 | — | — |
 | Async runtime | Tokio (current_thread default for the daemon) | MIT | crates.io, 17M dl/wk |
 | TUI framework | Ratatui 0.30.2 + crossterm 0.29 | MIT | crates.io, ratatui-org |
-| Inline images (optional) | ratatui-image 11.0.6, feature-gated | MIT | crates.io |
+| Inline images (optional, post-MVP; not yet a dependency) | ratatui-image, feature-gated; release pinned by the PR that adds the image feature — no such feature exists yet (#736) | MIT | crates.io |
 | HTTP client | reqwest 0.13.4 (rustls default) | MIT OR Apache-2.0 | crates.io |
 | HTTP server / proxy | hyper 1.11 + hyper-util + tower 0.5 | MIT | crates.io |
 | TLS | rustls 0.23.42 + aws-lc-rs 1.17.3 provider | Apache-2.0 OR ISC OR MIT | crates.io |
@@ -39,24 +39,24 @@
 | Agent Client Protocol (M4; not yet a dependency) | agent-client-protocol + agent-client-protocol-schema; release pinned by the ACP integration PR (§4.2) | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
 | ACP ↔ MCP bridge (M4; not yet a dependency) | agent-client-protocol-rmcp; release pinned with ACP (§4.2) | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
-| PTY | portable-pty 0.9.0 | MIT | crates.io |
+| PTY (post-MVP; not yet a dependency) | portable-pty; release pinned by the wrapped-harness PTY adapter PR (`20-harness-worker.md` §10.1 priority 5) — no PTY code exists yet (#736) | MIT | crates.io |
 | Errors (lib) | thiserror 2 | MIT OR Apache-2.0 | crates.io |
 | Errors (CLI boundary) | miette (latest 7.x) | MIT | crates.io |
 | Logging / telemetry | tracing 0.1.44 + tracing-subscriber 0.3.23 (env-filter, json) | MIT | crates.io |
 | Storage (metadata) | SQLite via rusqlite 0.x with WAL mode | MIT | crates.io |
 | Storage (blobs) | Filesystem CAS by SHA-256 (same layout as Arbitraitor `store/`) | — | — |
-| Sandbox (Linux) | landlock 0.4.5 + rustix 1.1.4 + nix 0.31.3 | MIT OR Apache-2.0; Apache-2.0 WITH LLVM-exception; MIT | crates.io |
-| Receipt signing | ed25519-dalek 3.0.0; minisign-compat where Arbitraitor calls for it | BSD-3-Clause | crates.io |
+| Sandbox (Linux) | Arbitraitor-owned (`arbitraitor-sandbox`, §7.1); no Orchestraitor-side `landlock` requirement is declared — the Landlock backend is Arbitraitor's (spec `40-arbitraitor-integration.md` §2.2, §16.4). `rustix` 1.1.4 + `nix` 0.31.3 are the declared primitives (#736) | MIT OR Apache-2.0; Apache-2.0 WITH LLVM-exception; MIT | crates.io |
+| Receipt signing | Arbitraitor-owned (`arbitraitor-receipt`; minisign-compat where Arbitraitor calls for it, spec `40-arbitraitor-integration.md` §2.2, §16.4); no Orchestraitor-side `ed25519-dalek` requirement is declared — verification-ownership question open, see §8 and #737 (#736) | — | — |
 | Provenance | Arbitraitor-owned (spec `40-arbitraitor-integration.md` §2.2, §16.4); no Orchestraitor-side `sigstore` requirement is declared — ownership question open, see §8 | — | — |
 | Secrets | secrecy 0.10.3 + zeroize 1.9.0 + keyring 4.1.5 | Apache-2.0 OR MIT | crates.io |
 | Schemas | schemars 1.0 (matched to Arbitraitor's version), JSON Schema 2020-12 | MIT OR Apache-2.0 | crates.io |
-| Provider baseline (MVP) | genai 0.6.5 (feature-gated) behind project-owned `ProviderTransport` trait; raw reqwest escape hatch when native extensions are needed | MIT | crates.io |
-| LSP types (client of wrapped harness LSP) | lsp-types 0.97.0 | MIT | crates.io |
+| Provider baseline (planned; not yet a dependency) | genai behind the project-owned `ProviderTransport` trait; `reqwest` 0.13.4 is the wired transport today and no crate calls genai (ADR 0025). Release pinned by the PR that first adopts it (§4.4, #736, #691) | MIT | crates.io |
+| LSP types (client of wrapped-harness LSP; post-MVP, not yet a dependency) | lsp-types; release pinned by the wrapped-harness LSP client PR (§9.2) — no LSP client code exists yet (#736) | MIT | crates.io |
 | Optional GUI (later) | Tauri 2.x, behind a `gui` Cargo feature; default build is headless | Apache-2.0 OR MIT | crates.io |
 | Test runner | cargo-nextest | MIT OR Apache-2.0 | crates.io |
 | Feature matrix | cargo-hack | MIT OR Apache-2.0 | crates.io |
-| Property testing | proptest | MIT OR Apache-2.0 | crates.io |
-| Snapshot testing | insta | MIT | crates.io |
+| Property testing | proptest; not yet declared — the first property test adds it at the release it exercises (§21.2.2, #736) | MIT OR Apache-2.0 | crates.io |
+| Snapshot testing | insta; not yet declared — the first snapshot test adds it at the release it exercises (§21.2.5, #736) | MIT | crates.io |
 | Fuzzing | cargo-fuzz (libFuzzer) | MIT OR Apache-2.0 | crates.io |
 | Miri / unsafe boundary | cargo miri | MIT OR Apache-2.0 | rust-lang |
 | Mutation testing | cargo-mutants (scheduled CI) | MIT | crates.io |
@@ -281,7 +281,7 @@ No external `models-dev` Rust crate is used. The published `models-dev 0.1.1` (v
 
 | Crate | Version | License | Role |
 |---|---|---|---|
-| `genai` | 0.6.5 (max stable; 0.7.0-beta in flight, NOT pinned for MVP) | MIT OR Apache-2.0 | Primary multi-provider transport. Default rustls → reqwest 0.13.4 + rustls 0.23.42 + aws-lc-rs 1.17.3 (verified via `cargo tree -i aws-lc-rs` — `ring` absent). Covers 30+ providers incl. zai, bigmodel, moonshot, ollama_cloud, vertex, bedrock, open_router, github_copilot. Used behind the project-owned `ProviderTransport` trait. |
+| `genai` | 0.6.5 (max stable; 0.7.0-beta in flight, NOT pinned for MVP). **Status: planned, NOT declared** — no `genai` requirement exists in the workspace and no crate calls it (ADR 0025); the transport PR that first adopts it pins the release it exercises (#736, #691) | MIT OR Apache-2.0 | Primary multi-provider transport, once adopted. Default rustls → reqwest 0.13.4 + rustls 0.23.42 + aws-lc-rs 1.17.3 (verified via `cargo tree -i aws-lc-rs` — `ring` absent). Covers 30+ providers incl. zai, bigmodel, moonshot, ollama_cloud, vertex, bedrock, open_router, github_copilot. Used behind the project-owned `ProviderTransport` trait. |
 | `async-openai` | 0.41.1 | MIT | OpenAI-native escape hatch (responses / audio / realtime). Default rustls. `rustls-no-provider` feature for BYO crypto. Feature-gated `provider-openai-escape`. |
 | `claude-api` | 0.5.3 | MIT OR Apache-2.0 | Anthropic-native fallback when genai lacks an Anthropic feature. Brings its own reqwest 0.12.28 (a known divergence; isolated behind the `ProviderTransport` trait). Includes `claude-api-test` cassette infra. Feature-gated `provider-anthropic-escape`. |
 | `gemini-rust` | 2.0.0 (2026-07-10) | MIT | Gemini-native fallback for the new Gemini Interactions API + legacy generateContent. Feature-gated `provider-gemini-escape`. Post-MVP. |
@@ -344,7 +344,7 @@ For the default snapshot workspace mode (spec §9.4 mode 1), the controller uses
 The MVP runs on Linux. `arbitraitor-sandbox` is the authoritative implementation; Orchestraitor consumes its probes and reports. Concretely:
 
 - `arbitraitor_sandbox::compute_effective_controls(mode, platform)` returns the `EffectiveControls` matrix Orchestraitor must display and honor.
-- `arbitraitor_sandbox::configure_command(&mut Command, SandboxConfig)` and `apply_sandbox(&SandboxConfig)` are called by Orchestraitor when spawning workers. These call into `landlock` 0.4.5, `rustix::process` (1.1.4, `clone3`/`unshare`/`setns`), `libseccomp-rs`, and `nix` 0.31.3.
+- `arbitraitor_sandbox::configure_command(&mut Command, SandboxConfig)` and `apply_sandbox(&SandboxConfig)` are called by Orchestraitor when spawning workers. These call into `landlock`, `rustix::process` (1.1.4, `clone3`/`unshare`/`setns`), `libseccomp-rs`, and `nix`. `landlock` (previously pinned in this workspace at 0.4.5) and `libseccomp-rs` are Arbitraitor-internal requirements at the pinned Arbitraitor revision: Orchestraitor declares neither (#736) and consumes only `arbitraitor-sandbox` probes, reports, and enforcement entry points.
 - Workspace projection: OverlayFS (mount namespaces + upperdir/workdir for transactional change staging) OR Arbitraitor-managed userspace projection (FUSE). Backend selected via `select_workspace_projection_backend()` per spec §9.4.2 + §9.32.2.
 - Polkit-backed privileged operations brokered through Arbitraitor; Orchestraitor does NOT invoke polkit directly.
 
@@ -387,7 +387,7 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 ## 8. Receipts and provenance
 
 - `arbitraitor_receipt::ReceiptBuilder` builds receipts. `canonical_bytes()` produces RFC 8785 JCS bytes via `serde_json_canonicalizer` 0.3.2.
-- `sign_receipt()` uses minisign-ed25519-blake2b-prehashed (Arbitraitor's algorithm). Where Orchestraitor needs to verify receipts independently, `ed25519-dalek` 3.0.0 is used with `verify_strict` to reject weak keys.
+- `sign_receipt()` uses minisign-ed25519-blake2b-prehashed (Arbitraitor's algorithm). No Orchestraitor-side `ed25519-dalek` requirement is declared: the previous `ed25519-dalek` 3.0.0 entry resolved into no build graph and no `Cargo.lock` entry, so it was never advisory- or licence-checked (#736). Whether Orchestraitor may verify receipts independently with `ed25519-dalek` (`verify_strict`, rejecting weak keys) or must route verification through Arbitraitor is an **open ownership question, not a settled dependency** — signatures and trust roots are Arbitraitor-owned per spec `40-arbitraitor-integration.md` §2.2 and §16.4; tracked by #737.
 - No `sigstore` requirement is declared in the workspace: the previous `sigstore` entry resolved into no build graph and no `Cargo.lock` entry, so it was never advisory- or licence-checked (issue #726). cosign/Rekor provenance is listed as an Arbitraitor-owned capability area (spec `40-arbitraitor-integration.md` §2.2, §16.4); whether Orchestraitor needs a direct sigstore crate at all is an open spec question, not a settled dependency.
 - in-toto Statement export (`to_intoto_statement()`) is the supported interchange format for downstream audit systems.
 
@@ -402,8 +402,8 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 
 ### 9.2 LSP
 
-- `lsp-types` 0.97.0 for the wire types. Last release is 2024-06 (LSP 3.17 spec is stable). Monitor for an upstream fork or 0.100 bump.
-- `tower-lsp` is rejected for the MVP because Orchestraitor is a client of LSPs (when wrapping a harness that launches an LSP), not a server. The crate is added later if the harness needs to expose an LSP server surface.
+- `lsp-types` for the wire types (last release 2024-06; LSP 3.17 spec is stable; monitor for an upstream fork or 0.100 bump). **Status: planned, NOT declared** — no `lsp-types` requirement exists in the workspace and no LSP client code exists yet (#736); the wrapped-harness LSP client PR adds it at the release it exercises.
+- `tower-lsp` is rejected for the MVP because Orchestraitor is a client of LSPs (when wrapping a harness that launches an LSP), not a server; wrapped CLI harnesses are outside the MVP matrix (`60-milestones.md` §23.1), so LSP client support lands with that mode. The crate is added later if the harness needs to expose an LSP server surface.
 
 ---
 

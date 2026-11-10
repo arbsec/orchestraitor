@@ -880,7 +880,7 @@ Use compile-fail tests for APIs where invalid authority, capability combinations
 
 #### 21.2.5 Snapshot tests
 
-Use reviewed snapshots for structured CLI output, receipts, diagnostics, protocol events and compact patches. **Never auto-accept snapshot changes in CI** — a snapshot change in a PR MUST be reviewed and the diff acknowledged. Snapshots live in `tests/snapshots/` using `insta`.
+Use reviewed snapshots for structured CLI output, receipts, diagnostics, protocol events and compact patches. **Never auto-accept snapshot changes in CI** — a snapshot change in a PR MUST be reviewed and the diff acknowledged. Snapshots live in `tests/snapshots/` using `insta`. The `insta` requirement is not declared in the workspace yet: the first snapshot test adds it at the release it exercises (§1, #736).
 
 #### 21.2.6 Fuzzing
 
