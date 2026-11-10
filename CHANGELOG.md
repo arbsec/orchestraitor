@@ -467,6 +467,17 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   defaults active; an explicit `0` disables a guard deliberately, reported
   as a stderr warning — never silent).
 
+### Fixed
+
+- **`orc github gh-env` no longer misreports an unprovable child argv as
+  `gh pr create`** (issue #703): the ambiguity refusal is now distinct from
+  the proven `gh pr create` refusal and quotes the token that made the shape
+  unprovable. A read-only `gh --version` / `gh --help` (also `-h` / `-V`) is
+  passed through to the real binary without minting — it cannot write and
+  needs no credential — so proving which `gh` build the wrapper runs works
+  even when the App config cannot mint. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
+
 ### Changed
 
 - **Delivery is wired: completed tasks land as App-signed commits + PRs**

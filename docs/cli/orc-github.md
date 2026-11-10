@@ -197,6 +197,23 @@ orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
   environment variable or flag. In
   `recommended` enforcement mode the guard does not fire (the labelled
   personal fallback is a documented, warned path there).
+- **An unprovable child argv is refused, with its own diagnostic.** The
+  detector only skips `gh` flags it knows; any other flag makes the shape
+  ambiguous, and in `required` enforcement mode an ambiguous argv is refused
+  BEFORE any token is minted (an unparseable argv must not become a way past
+  the PR-labeling chain). That refusal is distinct from the proven
+  `gh pr create` one: it quotes the token that made the shape unprovable
+  (e.g. `` `--color` is not a `gh` flag it recognizes ``), so a caller is
+  never told that `gh pr create` ran when the argv never mentioned `pr`.
+- **`--version` / `--help` / `-h` / `-V` pass through without minting.** A
+  bare `<gh> <flag>` help/version query needs no API request: it cannot write
+  and needs no credential, so `gh-env` executes it directly instead of
+  refusing it as ambiguous (or failing when the App config cannot mint). Use
+  it to prove which `gh` build the wrapper would run. The flag is delegated
+  verbatim — if the installed `gh` does not implement one (`-V` is not a
+  `gh` flag today), gh's own error is returned. Any extra token — `gh
+  --version pr create`, `gh -h pr create` — is NOT covered by this
+  passthrough and goes back through the ambiguity rule.
 - The child's stdout/stderr pass through unchanged, stdin passes through to
   the child (so `gh` flags like `--body-file -` and `-F -` read the caller's
   piped input — including on the `gh-env-pr-create-chain` capture route,

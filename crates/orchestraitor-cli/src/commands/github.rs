@@ -363,7 +363,11 @@ fn build_request_query(fields: &[String]) -> Result<String> {
 
 /// `orc github gh-env`: execute one child command with `GH_TOKEN` set to a
 /// freshly minted installation token. The token never appears in orc's own
-/// output; it exists only in the child's environment.
+/// output; it exists only in the child's environment. A pure `gh`
+/// `--version`/`--help` (or `-h`/`-V`) query is passed through without
+/// minting: it cannot write and needs no credential, and it must keep
+/// working when the App config is broken (it is how a caller proves which
+/// `gh` build the wrapper would run).
 fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     if args.command.is_empty() {
         bail!(
@@ -376,6 +380,19 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     let which = which_executable(program);
     if which.is_none() {
         bail!("child command `{program}` not found on PATH");
+    }
+    // A pure help/version query is read-only by construction: `gh --version`
+    // and `gh --help` (or `-h`/`-V`) print and exit without an API request,
+    // so they perform no GitHub write and need no credential. Pass them
+    // through to the real binary WITHOUT minting — this is the argv a caller
+    // uses to prove which `gh` build the wrapper would run, so it must keep
+    // working precisely when the App config (and therefore minting) is
+    // broken. Exact-shape only (`child_is_read_only_help_or_version`): any
+    // extra token falls back to the classifier below and stays refused when
+    // ambiguity remains.
+    if child_is_read_only_help_or_version(&args.command) {
+        gh_env_spawn_child(&args.command, None, None, false)?;
+        return Ok(());
     }
     // Enforcement gate reads the effective enforcement mode before any token
     // minting: `required` refuses to delegate at all when the App config does
@@ -391,22 +408,45 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     // obligation ITSELF — a caller attestation (env var or flag) would be
     // trivially forgeable and is not accepted. AMBIGUOUS argv is refused
     // too (fail closed): an unparseable shape must never delegate with the
-    // minted token. In `recommended` mode the personal fallback is a
-    // documented, warned path and the guard does not fire.
-    if effective_required_mode(paths)?
-        && !matches!(child_command_is_pr_create(&args.command), PrCreateShape::No)
-    {
-        bail!(
-            "gh-env refuses to run `gh pr create`: in `required` enforcement mode PR \
-             creation MUST go through `orc github gh-env-pr-create-chain <owner/name> -- \
-             gh pr create …`, which executes the deterministic PR-labeling chain \
-             (`pr-labels`, `pr-labels-from-issue`) against the created PR — or use the \
-             `pr-create` lifecycle script, which calls it — or pass explicit `--label` \
-             flags to `pr-create`. See docs/cli/orc-github.md"
-        );
+    // minted token. Its refusal is DISTINCT from the proven-`gh pr create`
+    // one and quotes the token that made the shape unprovable — a diagnostic
+    // that claims `gh pr create` was invoked for an argv that never mentioned
+    // `pr` sends the caller after the wrong defect (#703). In `recommended`
+    // mode the personal fallback is a documented, warned path and the guard
+    // does not fire.
+    if effective_required_mode(paths)? {
+        match child_command_is_pr_create(&args.command) {
+            PrCreateShape::No => {}
+            PrCreateShape::Yes => bail!(
+                "gh-env refuses to run `gh pr create`: in `required` enforcement mode PR \
+                 creation MUST go through `orc github gh-env-pr-create-chain <owner/name> -- \
+                 gh pr create …`, which executes the deterministic PR-labeling chain \
+                 (`pr-labels`, `pr-labels-from-issue`) against the created PR — or use the \
+                 `pr-create` lifecycle script, which calls it — or pass explicit `--label` \
+                 flags to `pr-create`. See docs/cli/orc-github.md"
+            ),
+            PrCreateShape::Ambiguous(Some(token)) => bail!(
+                "gh-env cannot prove the child argv is not `gh pr create`: `{token}` is not \
+                 a `gh` flag it recognizes, so the shape is ambiguous. In `required` \
+                 enforcement mode an unprovable argv is refused BEFORE any token is minted \
+                 (the PR-labeling chain must not be bypassable through an unparseable \
+                 argv). Re-run with documented `gh` arguments, or use `orc github \
+                 gh-env-pr-create-chain <owner/name> -- gh pr create …` to create a PR. \
+                 See docs/cli/orc-github.md"
+            ),
+            PrCreateShape::Ambiguous(None) => bail!(
+                "gh-env cannot prove the child argv reaches a `gh` subcommand: the argv \
+                 ended before a subcommand token, so the shape is ambiguous. In `required` \
+                 enforcement mode an unprovable argv is refused BEFORE any token is minted \
+                 (the PR-labeling chain must not be bypassable through an unparseable \
+                 argv). Re-run with documented `gh` arguments, or use `orc github \
+                 gh-env-pr-create-chain <owner/name> -- gh pr create …` to create a PR. \
+                 See docs/cli/orc-github.md"
+            ),
+        }
     }
     let (bot_identity, token) = gh_env_gates_and_mint(paths, &args.command)?;
-    gh_env_spawn_child(&args.command, &token, bot_identity.as_ref(), false)?;
+    gh_env_spawn_child(&args.command, Some(&token), bot_identity.as_ref(), false)?;
     Ok(())
 }
 
@@ -492,7 +532,7 @@ fn gh_env_pr_create_chain(
         bail!("child command `{program}` not found on PATH");
     }
     let (bot_identity, token) = gh_env_gates_and_mint(paths, &args.command)?;
-    let pr_url = gh_env_spawn_child(&args.command, &token, bot_identity.as_ref(), true)?;
+    let pr_url = gh_env_spawn_child(&args.command, Some(&token), bot_identity.as_ref(), true)?;
     // The captured stdout IS the caller's business (the `pr-create` script
     // reads the PR URL through command substitution) — re-emit it verbatim
     // and flush BEFORE the labeling steps run.
@@ -628,14 +668,15 @@ fn gh_env_gates_and_mint(
 
 /// Spawns the gh-env child with the minted token (and the pinned git
 /// identity env when in required mode), passing the child's stdout/stderr
-/// through. When `capture_stdout` is set the child's stdout is captured and
-/// returned (the PR-URL contract for the labeling chain); otherwise it passes
-/// through verbatim. The child's exit code propagates (a missing exit code
-/// maps to 1) BEFORE any captured-stdout value is meaningful: a failed child
-/// never returns.
+/// through. `token` is `None` only for the read-only help/version passthrough,
+/// which neither mints nor needs a credential. When `capture_stdout` is set
+/// the child's stdout is captured and returned (the PR-URL contract for the
+/// labeling chain); otherwise it passes through verbatim. The child's exit
+/// code propagates (a missing exit code maps to 1) BEFORE any captured-stdout
+/// value is meaningful: a failed child never returns.
 fn gh_env_spawn_child(
     command: &[String],
-    token: &InstallationToken,
+    token: Option<&InstallationToken>,
     bot_identity: Option<&(String, String)>,
     capture_stdout: bool,
 ) -> Result<String> {
@@ -644,9 +685,10 @@ fn gh_env_spawn_child(
         bail!("child command `{program}` not found on PATH");
     };
     let mut child = Command::new(executable);
-    child
-        .args(&command[1..])
-        .env("GH_TOKEN", token.token().expose_secret());
+    child.args(&command[1..]);
+    if let Some(token) = token {
+        child.env("GH_TOKEN", token.token().expose_secret());
+    }
     // Pin the git identity for the child: `git -c user.email=… commit` beats
     // repo config but NOT the GIT_AUTHOR_*/GIT_COMMITTER_* environment
     // variables, so env-pinning guarantees bot attribution even for a child
@@ -707,14 +749,44 @@ fn git_repo_root() -> Result<std::path::PathBuf> {
 /// The detector's verdict for a gh-env child argv: proven `gh pr create`,
 /// proven NOT a `gh pr create`, or ambiguous (the shape cannot be proven
 /// either way from the argv — an unknown flag, a separator mid-shape). The
-/// caller's policy: `required` enforcement refuses BOTH `Yes` and
+/// `Ambiguous` payload names the argv token that made the shape unprovable
+/// (`None` when the argv ended before the subcommand could be proven), so the
+/// refusal quotes the culprit instead of claiming `gh pr create` was invoked.
+/// The caller's policy: `required` enforcement refuses BOTH `Yes` and
 /// `Ambiguous` (fail closed — the labeling chain must not be bypassable via
 /// an unparseable argv); the chain subcommand runs only a `Yes` child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PrCreateShape {
     Yes,
     No,
-    Ambiguous,
+    Ambiguous(Option<String>),
+}
+
+/// True when `arg` names the `gh` binary: the bare `gh`, or any path whose
+/// file name is `gh`/`gh.exe` (so `/usr/bin/gh` and `./target/bin/gh` count).
+fn is_gh_program(arg: &str) -> bool {
+    arg == "gh"
+        || std::path::Path::new(arg)
+            .file_name()
+            .is_some_and(|name| name == "gh" || name == "gh.exe")
+}
+
+/// True for the read-only help/version queries that must work even when
+/// minting cannot: EXACTLY `<gh> <flag>` with `flag` one of `--version`,
+/// `-V`, `--help`, `-h`. These cannot perform a GitHub write and need no
+/// credential, so passing them through leaves the App-identity guarantee
+/// (every credential-bearing call uses the minted installation token)
+/// untouched. The wrapper delegates the flag verbatim: if the installed `gh`
+/// does not implement one (`-V` is not a gh flag today), gh's own error is
+/// returned instead of an ambiguity refusal. Exact-shape only: any extra
+/// token (`gh --version pr create`) falls back to the pr-create classifier and
+/// stays refused when the shape cannot be proven.
+fn child_is_read_only_help_or_version(command: &[String]) -> bool {
+    matches!(
+        command,
+        [program, flag] if is_gh_program(program)
+            && matches!(flag.as_str(), "--version" | "-V" | "--help" | "-h")
+    )
 }
 
 /// Classifies the `gh pr create` shape in a gh-env child argv: getopt's
@@ -727,7 +799,10 @@ enum PrCreateShape {
 /// (`gh -R o/r pr create`, `gh pr -R o/r create` both reach `pr create`);
 /// a flag the walk does not recognize makes the shape AMBIGUOUS — it can
 /// neither be confirmed nor excluded, so the caller must refuse (never
-/// silently delegate under required enforcement).
+/// silently delegate under required enforcement). This classifier NEVER
+/// widens the allowlist: `--version`/`--help` are ambiguous HERE; `gh_env`
+/// passes those through by exact shape (`child_is_read_only_help_or_version`)
+/// before consulting this verdict.
 fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape {
     /// gh global flags consumed as `--flag value` (two argv tokens);
     /// `=`-attached values never consume a token.
@@ -753,7 +828,7 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
             // complete — tokens after `--` can never extend the shape).
             return match stage {
                 2 => PrCreateShape::Yes,
-                _ => PrCreateShape::Ambiguous,
+                _ => PrCreateShape::Ambiguous(Some(arg.to_string())),
             };
         }
         if let Some(name) = arg.strip_prefix("--") {
@@ -768,14 +843,14 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
                 1
             } else {
                 // An unknown long flag makes the shape unprovable.
-                return PrCreateShape::Ambiguous;
+                return PrCreateShape::Ambiguous(Some(arg.to_string()));
             };
             continue;
         }
         if arg == "-" {
             // gh treats a bare `-` as a positional operand; the shape
             // cannot continue through it.
-            return PrCreateShape::Ambiguous;
+            return PrCreateShape::Ambiguous(Some(arg.to_string()));
         }
         if let Some(rest) = arg.strip_prefix('-') {
             // Short-flag clusters: every char must be a KNOWN gh flag, and
@@ -791,20 +866,16 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
                     value_flag = true;
                 } else if VALUE_SHORT_FLAGS.contains(&c) {
                     // A value-taking flag inside a cluster is ambiguous.
-                    return PrCreateShape::Ambiguous;
+                    return PrCreateShape::Ambiguous(Some(arg.to_string()));
                 } else {
-                    return PrCreateShape::Ambiguous;
+                    return PrCreateShape::Ambiguous(Some(arg.to_string()));
                 }
             }
             depth = usize::from(value_flag);
             continue;
         }
         match stage {
-            0 if arg == "gh"
-                || std::path::Path::new(arg)
-                    .file_name()
-                    .is_some_and(|name| name == "gh" || name == "gh.exe") =>
-            {
+            0 if is_gh_program(arg) => {
                 stage = 1;
             }
             1 if arg == "pr" => stage = 2,
@@ -819,7 +890,7 @@ fn child_command_is_pr_create(command: &[std::string::String]) -> PrCreateShape 
             _ => return PrCreateShape::No,
         }
     }
-    PrCreateShape::Ambiguous
+    PrCreateShape::Ambiguous(None)
 }
 
 /// Resolves a program name to an executable path on `PATH`. A file without
@@ -3471,7 +3542,7 @@ mod tests {
         );
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "pr"])),
-            PrCreateShape::Ambiguous
+            PrCreateShape::Ambiguous(None)
         );
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "issue", "create"])),
@@ -3532,18 +3603,19 @@ mod tests {
             PrCreateShape::Yes
         );
         // AMBIGUOUS on unknown flags: the shape can neither be confirmed nor
-        // excluded — gh-env refuses these in required mode (fail closed).
+        // excluded — gh-env refuses these in required mode (fail closed). The
+        // payload names the offending token so the refusal can quote it.
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "pr", "--color", "always", "create",])),
-            PrCreateShape::Ambiguous
+            PrCreateShape::Ambiguous(Some("--color".to_string()))
         );
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "-q", "pr", "create",])),
-            PrCreateShape::Ambiguous
+            PrCreateShape::Ambiguous(Some("-q".to_string()))
         );
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "--"])),
-            PrCreateShape::Ambiguous
+            PrCreateShape::Ambiguous(Some("--".to_string()))
         );
         // Known boolean short flags stay tolerated (`-h`/`-v` are gh's
         // documented help/version flags — boolean, no value argument).
@@ -3558,8 +3630,50 @@ mod tests {
         // A bare `-` or `--` separator mid-shape is ambiguous.
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "-", "pr", "create"])),
-            PrCreateShape::Ambiguous
+            PrCreateShape::Ambiguous(Some("-".to_string()))
         );
+    }
+
+    #[test]
+    fn read_only_help_and_version_queries_are_exact_shape_only() {
+        let argv = |parts: &[&str]| -> Vec<String> {
+            parts.iter().map(std::string::ToString::to_string).collect()
+        };
+        for flag in ["--version", "-V", "--help", "-h"] {
+            // The passthrough covers the bare `gh` and any path form of it.
+            assert!(
+                child_is_read_only_help_or_version(&argv(&["gh", flag])),
+                "`gh {flag}` must be a read-only help/version query"
+            );
+            assert!(
+                child_is_read_only_help_or_version(&argv(&["/usr/bin/gh", flag])),
+                "a path-form `gh {flag}` must be a read-only help/version query"
+            );
+            // The CLASSIFIER still reports these as ambiguous: the passthrough
+            // is an exact-shape widening in `gh_env`, never a classifier
+            // rewrite (a mutating argv that merely LEADS with one of these
+            // stays refused — see the widening guards below).
+            assert!(matches!(
+                child_command_is_pr_create(&argv(&["gh", flag])),
+                PrCreateShape::Ambiguous(_)
+            ));
+        }
+        // Widening guards: one extra token, any other binary, any other flag
+        // shape, or an unrelated (mutating) argv must never take the
+        // read-only passthrough.
+        for parts in [
+            &["gh", "--version", "pr", "create"][..],
+            &["gh", "--help", "--json"][..],
+            &["gh", "-h", "pr", "create"][..],
+            &["hub", "--version"][..],
+            &["gh", "--version=1"][..],
+            &["gh", "api", "--method", "DELETE"][..],
+        ] {
+            assert!(
+                !child_is_read_only_help_or_version(&argv(parts)),
+                "{parts:?} must not take the read-only passthrough"
+            );
+        }
     }
 
     #[test]
