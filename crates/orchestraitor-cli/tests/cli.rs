@@ -1389,7 +1389,7 @@ fn github_gh_env_passes_through_read_only_help_and_version_flags() -> miette::Re
 }
 
 // Issue #703, control: an argv whose shape cannot be proven is STILL refused
-// in `required` mode, and the refusal quotes the offending token instead of
+// in `required` mode, and the refusal quotes the offending flag instead of
 // claiming `gh pr create` was invoked. `gh pr --color always create` IS a
 // real pr create the classifier cannot prove (`--color` is not in its
 // known-flag table); `gh --version pr create` proves the read-only
@@ -1400,7 +1400,7 @@ fn github_gh_env_refuses_unprovable_argv_with_an_accurate_diagnostic() -> miette
     let temp = tempfile::tempdir().into_diagnostic()?;
     let stub_dir = gh_env_pr_create_guard_child(&temp)?;
 
-    for (argv, token) in [
+    for (argv, flag) in [
         (vec!["gh", "pr", "--color", "always", "create"], "--color"),
         (vec!["gh", "--version", "pr", "create"], "--version"),
     ] {
@@ -1418,8 +1418,8 @@ fn github_gh_env_refuses_unprovable_argv_with_an_accurate_diagnostic() -> miette
         let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
         let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            flat.contains(&format!("`{token}`")),
-            "{argv:?}: the ambiguity refusal must quote the offending token: {stderr}"
+            flat.contains(&format!("`{flag}`")),
+            "{argv:?}: the ambiguity refusal must quote the offending flag: {stderr}"
         );
         assert!(
             !flat.contains("refusestorun`ghprcreate`"),

@@ -203,7 +203,8 @@ orc github gh-env -- gh api repos/arbsec/orchestraitor/pulls/446 --jq .state
   BEFORE any token is minted (an unparseable argv must not become a way past
   the PR-labeling chain). That refusal is distinct from the proven
   `gh pr create` one: it quotes the offending flag (or the `--` separator)
-  rather than the whole argv token — e.g. `` `--color` is not a `gh` flag it
+  rather than a value-carrying argv token — a bare `--flag` names no value,
+  so it may be echoed whole — e.g. `` `--color` is not a `gh` flag it
   recognizes ``, or `` `-H` `` for the single-token `-H<value>` form — so a
   caller is never told that `gh pr create` ran when the argv never mentioned
   `pr`, and credential-shaped flag values never reach the diagnostic (errors

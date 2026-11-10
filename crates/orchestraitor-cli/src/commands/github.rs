@@ -411,11 +411,14 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
     // trivially forgeable and is not accepted. AMBIGUOUS argv is refused
     // too (fail closed): an unparseable shape must never delegate with the
     // minted token. Its refusal is DISTINCT from the proven-`gh pr create`
-    // one and quotes the token that made the shape unprovable — a diagnostic
-    // that claims `gh pr create` was invoked for an argv that never mentioned
-    // `pr` sends the caller after the wrong defect (#703). In `recommended`
-    // mode the personal fallback is a documented, warned path and the guard
-    // does not fire.
+    // one and quotes the offending FLAG, never a value-carrying argv token:
+    // an argv element can embed a credential (`-H<value>` is valid
+    // single-token pflag syntax, so `-HAuthorization: token ghp_…` is a
+    // realistic shape) and AGENTS.md requires errors never contain secrets,
+    // headers, or tokens. A diagnostic that claims `gh pr create` was
+    // invoked for an argv that never mentioned `pr` sends the caller after
+    // the wrong defect (#703). In `recommended` mode the personal fallback
+    // is a documented, warned path and the guard does not fire.
     if effective_required_mode(paths)? {
         match child_command_is_pr_create(&args.command) {
             PrCreateShape::No => {}
@@ -427,8 +430,8 @@ fn gh_env(paths: &ConfigPaths, args: &crate::cli::GhEnvArgs) -> Result<()> {
                  `pr-create` lifecycle script, which calls it — or pass explicit `--label` \
                  flags to `pr-create`. See docs/cli/orc-github.md"
             ),
-            PrCreateShape::Ambiguous(Some(token)) => bail!(
-                "gh-env cannot prove the child argv is not `gh pr create`: `{token}` is not \
+            PrCreateShape::Ambiguous(Some(flag)) => bail!(
+                "gh-env cannot prove the child argv is not `gh pr create`: `{flag}` is not \
                  a `gh` flag it recognizes, so the shape is ambiguous. In `required` \
                  enforcement mode an unprovable argv is refused BEFORE any token is minted \
                  (the PR-labeling chain must not be bypassable through an unparseable \
@@ -764,9 +767,15 @@ fn git_repo_root() -> Result<std::path::PathBuf> {
 /// The detector's verdict for a gh-env child argv: proven `gh pr create`,
 /// proven NOT a `gh pr create`, or ambiguous (the shape cannot be proven
 /// either way from the argv — an unknown flag, a separator mid-shape). The
-/// `Ambiguous` payload names the argv token that made the shape unprovable
-/// (`None` when the argv ended before the subcommand could be proven), so the
-/// refusal quotes the culprit instead of claiming `gh pr create` was invoked.
+/// `Ambiguous` payload names the offending FLAG (`--header`, `-H`), never a
+/// value-carrying argv token; a bare long flag renders as `--{bare}`, which
+/// happens to equal the token but cannot carry a value (`None` when the argv
+/// ended before the subcommand could be proven), so the refusal quotes the
+/// culprit instead of claiming `gh pr create` was invoked. An argv element
+/// can embed a credential — `-H<value>` is valid single-token pflag syntax,
+/// so `-HAuthorization: token ghp_…` is a realistic shape — and AGENTS.md
+/// requires errors never contain secrets, headers, or tokens; echoing the
+/// raw token would reintroduce that leak, so the payload must stay a flag.
 /// The caller's policy: `required` enforcement refuses BOTH `Yes` and
 /// `Ambiguous` (fail closed — the labeling chain must not be bypassable via
 /// an unparseable argv); the chain subcommand runs only a `Yes` child.
@@ -3627,7 +3636,8 @@ mod tests {
         );
         // AMBIGUOUS on unknown flags: the shape can neither be confirmed nor
         // excluded — gh-env refuses these in required mode (fail closed). The
-        // payload names the offending token so the refusal can quote it.
+        // payload names the offending FLAG so the refusal can quote it
+        // without echoing a value-carrying argv token.
         assert_eq!(
             child_command_is_pr_create(&argv(&["gh", "pr", "--color", "always", "create",])),
             PrCreateShape::Ambiguous(Some("--color".to_string()))
@@ -3704,12 +3714,12 @@ mod tests {
         let argv = |parts: &[&str]| -> Vec<String> {
             parts.iter().map(std::string::ToString::to_string).collect()
         };
-        // The refusal quotes the token that made the shape unprovable, so a
-        // value-carrying SHORT flag (`-H<value>` is valid pflag single-token
-        // syntax and a realistic `gh api` habit) must contribute the FLAG
-        // only. Echoing the argv token would put a credential into stderr,
-        // which lands in session transcripts and CI logs (AGENTS.md: errors
-        // never contain secrets, headers, cookies, or tokens).
+        // The refusal quotes the offending FLAG, never a value-carrying argv
+        // token, so a value-carrying SHORT flag (`-H<value>` is valid pflag
+        // single-token syntax and a realistic `gh api` habit) must contribute
+        // the FLAG only. Echoing the argv token would put a credential into
+        // stderr, which lands in session transcripts and CI logs (AGENTS.md:
+        // errors never contain secrets, headers, cookies, or tokens).
         assert_eq!(
             child_command_is_pr_create(&argv(&[
                 "gh",
