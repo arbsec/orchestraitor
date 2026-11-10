@@ -55,18 +55,32 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 1. DRAFT          PRE-REVIEW GATE: before `pr-create` creates a PR, it
                   verifies a recorded CLEAN local review generation exists
                   for the exact (head, base) pair being proposed (a
-                  `.orchestraitor/reviews` record whose head SHA matches
-                  the current HEAD and whose base OID matches the
-                  merge-base with the target base branch). Absent, stale,
-                  or non-clean evidence fails the create (typed exit 2:
+                  `.orchestraitor/reviews` record whose head SHA matches the
+                  current HEAD and whose base OID matches the CURRENT TIP of
+                  `refs/remotes/origin/<base>`, fetched by the gate — the same
+                  OID `pr-review-agent` records as `- base OID:` and
+                  `convergence-status`/`merge-gate` compare to the PR's
+                  `baseRefOid`; never `git merge-base`, and never a local
+                  branch of the same name). Absent, stale, or non-clean
+                  evidence fails the create (typed exit 2:
                   `pre-review-gate: ... run pr-review-local first`) — run
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local`
-                  first, then re-run `pr-create`. Escapes: a diff vs base
-                  containing ONLY `*.md` files skips the gate
-                  automatically; `--skip-review-gate` overrides it
-                  explicitly — ONLY for docs-only PRs where CodeRabbit is
-                  not applicable, or an explicit owner directive (it
-                  prints a loud notice and the PR still gets reviewed).
+                  first, then re-run `pr-create`. A base that cannot be
+                  resolved from that fully-qualified remote ref (missing
+                  branch, unreachable `origin`, unrelated history) is a
+                  distinct fail-closed refusal (exit 6) that names the ref it
+                  tried and the remediation — it never falls back to a local
+                  branch. Escapes: an explicit `--skip-review-gate`
+                  overrides the gate — ONLY for docs-only PRs where
+                  CodeRabbit is not applicable, or an explicit owner
+                  directive — and it is evaluated BEFORE base resolution,
+                  so it skips base resolution and the review-record check
+                  together: an unreachable `origin` cannot veto an explicit
+                  operator decision (it still prints a loud notice and the
+                  PR still gets reviewed). The docs-only auto-skip (a diff
+                  vs base containing ONLY `*.md` files) is the other way
+                  round: it is INFERRED from the diff, so it still requires
+                  a resolvable base and can be refused with exit 6.
                   Create the PR as DRAFT linked to the leaf issue
                   (`Closes #N` for full-scope landings, bare `Refs #N` for
                   partial landings) and spec

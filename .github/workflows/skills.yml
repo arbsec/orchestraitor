@@ -99,8 +99,8 @@ jobs:
           # prevent, reached through the front door (#728 review, M-1).
           # Floor the count so a removal fails the gate instead of silently
           # narrowing it. Bump this number when you ADD a self-test; never lower
-          # it when removing one.
-          minimum_suites=8
+          # it when removing one. (9: test-pr-create-gate-base added with #733.)
+          minimum_suites=9
           if [ "${#tests[@]}" -lt "$minimum_suites" ]; then
             echo "error: expected at least $minimum_suites skill self-test suites, found ${#tests[@]}" >&2
             exit 1
