@@ -38,6 +38,8 @@
 #   (g) an uncommitted policy edit refuses (provenance not tied to a commit)
 #   (h) a base commit absent locally refuses with the fetch remediation
 #   (i) text mode: the refusal is on stderr, stdout stays empty (never a verdict)
+#   (j) in a `--depth 1` clone the fetch remediation is `--unshallow`, not a
+#       plain `fetch` (which leaves the clone shallow and the base still absent)
 #
 # Hermetic: local git fixtures, stubbed `gh`/`orc`, no network, no credentials.
 set -uo pipefail
@@ -240,6 +242,45 @@ run convergence-status 7 --repo test-org/repo
 assert 'text refusal: exit 6' 6 "$RC"
 assert 'text refusal: stdout is empty' "" "$OUT"
 assert 'text refusal: stderr is typed' 1 "$(count "$TMP/stderr" 'error: stale review policy:')"
+
+# --- (j) a shallow checkout is told to --unshallow, not to fetch again --------
+# A plain `git fetch` in a `--depth 1` clone keeps it shallow, so the base
+# commit is still absent and the identical refusal prints again — the
+# remediation would not remediate. Hermetic: a local fixture repo cloned over
+# file:// with a 1-commit depth, so the base commit is genuinely missing from
+# the object DB while `--is-shallow-repository` is genuinely true.
+echo "--- (j) a shallow clone gets --unshallow, not a bare fetch ---"
+mkdir -p "$TMP/origin/scripts"
+git -C "$TMP/origin" init -q
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-checks" "$TMP/origin/scripts/"
+git -C "$TMP/origin" add -A
+git -C "$TMP/origin" "${GIT_ID[@]}" commit -q -m "fixture: base commit carrying the policy"
+SHALLOW_BASE="$(git -C "$TMP/origin" rev-parse HEAD)"
+printf 'a descendant commit, so --depth 1 excludes the base\n' > "$TMP/origin/DESCENDANT"
+git -C "$TMP/origin" add -A
+git -C "$TMP/origin" "${GIT_ID[@]}" commit -q -m "fixture: a descendant of the base"
+git clone -q --depth 1 "file://$TMP/origin" "$TMP/shallow"
+# Guard against a vacuous test: the fixture must really be shallow and must
+# really not have the base commit.
+assert 'shallow fixture: really a shallow clone' true \
+  "$(git -C "$TMP/shallow" rev-parse --is-shallow-repository)"
+assert 'shallow fixture: the base commit is really absent' "" \
+  "$(git -C "$TMP/shallow" rev-parse --verify --quiet "$SHALLOW_BASE^{commit}")"
+# Drive the guard helper directly: sections (h)/(j) are about the refusal text,
+# and convergence-status would drag in gh + review-record fixtures.
+SHALLOW_RC=0
+bash -c '
+  source "$1/scripts/_lib.sh"
+  orc_lib_require_policy_current text "$2" convergence-status "$3" "$1/scripts/pr-checks"
+' _ "$TMP/shallow" "$SHALLOW_BASE" "7 --repo test-org/repo" \
+  2>"$TMP/shallow.err" >/dev/null || SHALLOW_RC=$?
+assert 'shallow base missing: exit 6' 6 "$SHALLOW_RC"
+assert 'shallow base missing: says the commit is not present' 1 \
+  "$(count "$TMP/shallow.err" 'not present in this repository')"
+assert 'shallow base missing: remediation is fetch --unshallow' 1 \
+  "$(count "$TMP/shallow.err" "git -C $TMP/shallow fetch --unshallow origin")"
+assert 'shallow base missing: remediation has no bare fetch' 0 \
+  "$(count "$TMP/shallow.err" 'fetch origin')"
 
 printf '\n=== review-policy staleness: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

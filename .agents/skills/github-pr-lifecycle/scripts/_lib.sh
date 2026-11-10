@@ -63,7 +63,10 @@ Exit codes:
   3  policy violation (would violate MVP-only scheduling, would merge on red, etc.)
   4  concurrent edit detected (resource updatedAt changed since read — retry)
   5  blocked (review loop limit hit — produces blocked/needs-human, never silent approval)
-  6  untrusted review policy (the running gate scripts are not the trusted base's copy, or the PR's base ref cannot be resolved — rerun from a checkout of the PR's base commit)
+  6  untrusted review policy — a gate script (pr-checks, convergence-status,
+     merge-gate) is not the trusted base's copy (rerun the printed base-worktree
+     command), or (pr-create) the PR's base ref cannot be resolved (fetch or
+     repair the base ref, then rerun)
 EOF
 }
 
@@ -592,7 +595,7 @@ orc_lib_policy_refuse() {
   local mode="$1" reason="$2" root="$3" file="$4" rel="$5" \
     running_blob="$6" origin="$7" base_sha="$8" base_blob="$9"
   local entry_rel="${10}" entry_args="${11}"
-  local detail remediation=""
+  local detail remediation="" fetch_cmd="fetch origin"
   case "$reason" in
     blob-differs)
       detail="the running file differs from the trusted base's policy (a stale or branch-modified copy)" ;;
@@ -610,7 +613,14 @@ orc_lib_policy_refuse() {
   if [ -n "$root" ] && [ -n "$entry_rel" ] && [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
     remediation="tmp=\"\$(mktemp -d)\" && git -C $root worktree add --detach \"\$tmp\" $base_sha && bash \"\$tmp/$entry_rel\" $entry_args"
     if [ "$reason" = "base-not-present" ]; then
-      remediation="git -C $root fetch origin && $remediation"
+      # A `--depth 1` checkout stays shallow across a plain `git fetch`, so the
+      # missing base commit is still absent afterwards and the same refusal is
+      # printed again — a remediation that does not remediate. `--unshallow` is
+      # the fetch that actually brings the base's history down.
+      if [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+        fetch_cmd="fetch --unshallow origin"
+      fi
+      remediation="git -C $root $fetch_cmd && $remediation"
     fi
   fi
 
