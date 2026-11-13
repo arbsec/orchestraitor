@@ -533,6 +533,9 @@ mod linux_exec {
     fn exec_reason(error: &ExecError) -> &'static str {
         match error {
             ExecError::RunningAsRoot => "running-as-root",
+            ExecError::MediatedContainmentUnavailable => "mediated-containment-unavailable",
+            ExecError::NetworkIsolationUnavailable { .. } => "network-isolation-unavailable",
+            ExecError::UnshareTargetExecFailed { .. } => "unshare-target-exec-failed",
             ExecError::ExecuteNotGranted => "execute-capability-not-granted",
             ExecError::NetworkNotGranted => "network-capability-not-granted",
             ExecError::CommandNotAbsolute { .. } => "command-not-absolute",
@@ -559,6 +562,39 @@ mod linux_exec {
             ExecError::WallClockKillFailed { .. } => "wall-clock-kill-failed",
             ExecError::Store { .. } => "store",
             ExecError::MissingContainmentProof { .. } => "missing-containment-proof",
+        }
+    }
+
+    /// Pins the reason codes for the isolation failures arbsec/arbitraitor adds
+    /// to `ExecError` in #827, #839, #842 (present from revision b352278 and
+    /// unchanged at the df66f2d4 pin). The embedded `reason` text is untrusted
+    /// (wrapper stderr), so each error must collapse to a static code, and "the
+    /// wrapper could not exec the target" must stay distinct from a policy
+    /// refusal.
+    #[cfg(test)]
+    mod tests {
+        use super::exec_reason;
+        use crate::exec::ExecError;
+
+        #[test]
+        fn exec_reason_names_isolation_failures_without_leaking_reason_text() {
+            assert_eq!(
+                exec_reason(&ExecError::MediatedContainmentUnavailable),
+                "mediated-containment-unavailable"
+            );
+            assert_eq!(
+                exec_reason(&ExecError::NetworkIsolationUnavailable {
+                    reason: "unshare: operation not permitted".to_owned(),
+                }),
+                "network-isolation-unavailable"
+            );
+            assert_eq!(
+                exec_reason(&ExecError::UnshareTargetExecFailed {
+                    reason: "unshare: cannot execute /bin/bash: No such file or directory"
+                        .to_owned(),
+                }),
+                "unshare-target-exec-failed"
+            );
         }
     }
 }
