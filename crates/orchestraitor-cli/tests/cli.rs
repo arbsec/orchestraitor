@@ -2883,6 +2883,245 @@ fn push_branch_cli(
         .into_diagnostic()
 }
 
+/// Builds a local repo whose `feature/signed` branch replaces the regular
+/// file `link` with a SYMLINK — git reports that change as `T`, not `M`
+/// (issue #729). The remote head is the repo's `main` commit (the same shape
+/// [`spawn_local_repo`] produces), so the diff base is `main`'s tree and the
+/// change set is exactly the type change.
+#[cfg(unix)]
+fn spawn_local_repo_with_typechange()
+-> miette::Result<(tempfile::TempDir, String, String, String, String)> {
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).into_diagnostic()?;
+    let run = |args: &[&str]| -> miette::Result<()> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo).args(args);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        let status = command
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .into_diagnostic()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    };
+    run(&["init", "-q", "-b", "main"])?;
+    // The App config lives at the temp root (the CLI's --project-dir), not
+    // inside the git repo.
+    write_github_app_project_config(&temp)?;
+    fs::write(repo.join("base.txt"), "base\n").into_diagnostic()?;
+    fs::write(repo.join("link"), "original contents\n").into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "base"])?;
+    run(&["checkout", "-qb", "feature/signed"])?;
+    fs::remove_file(repo.join("link")).into_diagnostic()?;
+    symlink("base.txt", repo.join("link")).into_diagnostic()?;
+    run(&["add", "."])?;
+    run(&["commit", "-qm", "type change"])?;
+    let tree_of = |spec: &str| -> miette::Result<String> {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        let output = command.output().into_diagnostic()?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    run(&["remote", "add", "origin", &repo.display().to_string()])?;
+    run(&["fetch", "--quiet", "origin"])?;
+    let head_output = {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo).args(["rev-parse", "main"]);
+        for variable in AMBIENT_GIT_LOCATION_VARS {
+            command.env_remove(variable);
+        }
+        command.output().into_diagnostic()?
+    };
+    let main_commit = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let base_tree = tree_of("main")?;
+    let feature_tree = tree_of("feature/signed")?;
+    Ok((
+        temp,
+        repo.display().to_string(),
+        base_tree,
+        feature_tree,
+        main_commit,
+    ))
+}
+
+/// A TYPE CHANGE (git status `T`) must not wedge the push: the change set
+/// is routed to the REST tree + commit transport, which carries the exact
+/// destination mode.
+///
+/// Before the fix the dry-run REFUSED the change set with "unexpected
+/// diff-tree status `T`" — the type change could not be landed at all.
+#[test]
+#[cfg(unix)]
+fn github_push_branch_dry_run_routes_a_type_change_to_the_rest_transport() -> miette::Result<()> {
+    let (temp, repo, _base_tree, _feature_tree, main_commit) = spawn_local_repo_with_typechange()?;
+    let rules = vec![(
+        "ref(qualifiedName".to_string(),
+        format!(
+            r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+        ),
+    )];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "feat: land the type change",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+            "--dry-run",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "a type change must not wedge the push — stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    assert!(
+        stderr.contains("[dry-run] 1 path(s) require the REST tree+commit transport")
+            && stderr.contains("link"),
+        "the dry-run must announce the REST transport and name the path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unexpected diff-tree status"),
+        "the type change must not be refused as an ambiguous status: {stderr}"
+    );
+    Ok(())
+}
+
+/// The full CLI landing of a TYPE CHANGE: the symlink lands as the symlink it
+/// is — mode `120000` and a blob carrying the LINK TARGET — never as a
+/// regular file holding the target path.
+#[test]
+#[cfg(unix)]
+fn github_push_branch_lands_a_type_change_through_the_rest_transport() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo_with_typechange()?;
+    let new_head = "6666666666666666666666666666666666666666";
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "/git/blobs".to_string(),
+            r#"{"sha":"uploaded-link-sha"}"#.to_string(),
+        ),
+        (
+            "/git/trees".to_string(),
+            format!(r#"{{"sha":"{feature_tree}","truncated":false}}"#),
+        ),
+        (
+            "/git/commits".to_string(),
+            format!(
+                r#"{{"sha":"{new_head}","tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}"#
+            ),
+        ),
+        ("updateRefs".to_string(), update_refs_stub()),
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{new_head}"}}}}}}}}}}"#
+            ),
+        ),
+    ];
+    let (endpoint, _auth_rx, bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "feat: land the type change",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "the type change must land — stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut requests: Vec<String> = Vec::new();
+    while let Ok(body) = bodies.try_recv() {
+        requests.push(body);
+    }
+    let blob_request = requests
+        .iter()
+        .find(|request| request.contains("/git/blobs"))
+        .ok_or_else(|| miette::miette!("the symlink's blob must be uploaded: {requests:?}"))?;
+    let tree_request = requests
+        .iter()
+        .find(|request| request.contains("/git/trees"))
+        .ok_or_else(|| miette::miette!("the tree must be created: {requests:?}"))?;
+    // THE forbidden effect, asserted as an ABSENCE: the symlink must NOT land
+    // as a regular file holding the target path.
+    assert!(
+        !blob_request.contains("b3JpZ2luYWwgY29udGVudHMK"),
+        "the symlink's blob must not carry the former file's content: {blob_request}"
+    );
+    assert!(
+        blob_request.contains("YmFzZS50eHQ="),
+        "the symlink's blob must carry the LINK TARGET bytes: {blob_request}"
+    );
+    // The tree entry carries the symlink mode, never the regular-file mode.
+    assert!(
+        tree_request.contains(r#""mode":"120000""#),
+        "the tree entry must carry the symlink mode: {tree_request}"
+    );
+    assert!(
+        !tree_request.contains(r#""mode":"100644""#),
+        "the symlink must never land with the regular-file mode: {tree_request}"
+    );
+    // The path IS committed — it is never silently omitted.
+    assert!(
+        tree_request.contains(r#""path":"link""#),
+        "the type-changed path must be committed: {tree_request}"
+    );
+    Ok(())
+}
+
 #[test]
 fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Result<()> {
     let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;

@@ -1221,9 +1221,14 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
     // DIFF-BASE mode when the path exists there, otherwise 100644, and
     // `createCommitOnBranch` cannot change it in either direction. Any A/M
     // path whose local mode differs therefore needs the REST tree + commit
-    // transport.
+    // transport, and so does every `T` (type change) path (#729).
     let local_modes = local_tree_modes(None, &local_tree)?;
     let base_modes = base_tree_modes(None, &diff_base_tree);
+    // A TYPE CHANGE (`T` — a regular file replaced by a symlink, or the
+    // reverse) is unambiguous only for a regular-file/symlink swap. Refuse
+    // every other shape BEFORE a transport is chosen, so nothing is landed
+    // on a change set the transport cannot express exactly.
+    validate_typechange_paths(&changes, &local_modes, &base_modes)?;
     let rest_paths = mode_requiring_rest_paths(&changes, &local_modes, &base_modes);
     let uses_rest = !rest_paths.is_empty();
 
@@ -1234,15 +1239,24 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         if uses_rest {
             writeln!(
                 std::io::stderr(),
-                "[dry-run] {} path(s) require the REST tree+commit transport (mode changes): {}",
+                "[dry-run] {} path(s) require the REST tree+commit transport (mode or type \
+                 changes): {}",
                 rest_paths.len(),
                 rest_paths.join(", "),
             )
             .into_diagnostic()?;
+            // The REST route's own pre-flight: every path it would upload
+            // must be a readable blob in the committed tree. The dry-run
+            // refuses exactly what the real landing would refuse.
+            validate_rest_landing_paths(None, &local_branch, &changes)?;
+        } else {
+            // Build the GraphQL payload for its validation side effects
+            // (read-only). The GraphQL payload CANNOT express a type change
+            // (`T`), and a type change always routes to REST — so this route
+            // never sees one.
+            build_file_changes(None, &changes, &local_branch)?;
         }
-        // Build the GraphQL payload for its validation side effects and its
-        // addition/deletion counts (read-only; the REST route does not use it).
-        let file_changes = build_file_changes(None, &changes, &local_branch)?;
+        let (additions, deletions) = count_file_changes(&changes);
         writeln!(
             std::io::stderr(),
             "dry-run: would land {owner}/{repo} {remote_branch} at tree {local_tree}\n\
@@ -1250,14 +1264,8 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
              message: {}\n\
              fileChanges: {} addition(s), {} deletion(s)",
             args.message,
-            file_changes
-                .get("additions")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len),
-            file_changes
-                .get("deletions")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len),
+            additions,
+            deletions,
         )
         .into_diagnostic()?;
         return Ok(());
@@ -1290,7 +1298,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
         // gates below still run before the real ref moves.
         writeln!(
             std::io::stderr(),
-            "note: {} path(s) need a file-mode change — landing through the REST tree+commit \
+            "note: {} path(s) need a file-mode or type change — landing through the REST tree+commit \
              transport: {}",
             rest_paths.len(),
             rest_paths.join(", "),
@@ -1307,6 +1315,7 @@ fn push_branch(paths: &ConfigPaths, args: &PushBranchArgs) -> Result<()> {
                 &changes,
                 &rest_paths,
                 &local_modes,
+                &base_modes,
                 &args.message,
                 &body,
             )?,
@@ -1708,9 +1717,10 @@ fn land_on_temp_branch(
 
 /// Lands the local tree through the REST tree + commit transport (issue
 /// #556). Used ONLY when the change set needs a file mode `createCommitOnBranch`
-/// cannot express (`mode_requiring_rest_paths` non-empty).
+/// cannot express (`mode_requiring_rest_paths` non-empty) — including a TYPE
+/// CHANGE (issue #729), which git reports as `T`.
 ///
-/// Sequence: upload every `A`/`M` blob (`POST /git/blobs`), build a tree with
+/// Sequence: upload every `A`/`M`/`T` blob (`POST /git/blobs`), build a tree with
 /// the LOCAL modes on top of the diff base tree (`POST /git/trees`, mode as a
 /// string), create the commit with only `message`/`tree`/`parents`
 /// (`POST /git/commits`, so GitHub signs it), then run the SAME
@@ -1731,14 +1741,20 @@ fn land_via_rest(
     changes: &[(String, std::path::PathBuf)],
     rest_paths: &[String],
     local_modes: &std::collections::HashMap<String, String>,
+    base_modes: &std::collections::HashMap<String, String>,
     headline: &str,
     body: &str,
 ) -> Result<String> {
     let rest_context = format!(
-        "REST tree+commit paths (mode changes): {} — the remote branch is unchanged",
+        "REST tree+commit paths (mode or type changes): {} — the remote branch is unchanged",
         rest_paths.join(", ")
     );
-    // 1. Validate every A/M entry and upload its committed blob. The source is
+    // A TYPE CHANGE is the one shape the GraphQL payload cannot express at
+    // all, so it is re-checked here — the transport must never be handed an
+    // ambiguous type change, whoever called it.
+    validate_typechange_paths(changes, local_modes, base_modes)
+        .map_err(|error| miette!("{error}; {rest_context}"))?;
+    // 1. Validate every A/M/T entry and upload its committed blob. The source is
     //    the branch's committed object (`git cat-file`), never the working
     //    tree. Types are validated for the WHOLE set before any upload so a
     //    submodule refuses the landing before a single object is sent.
@@ -1747,28 +1763,11 @@ fn land_via_rest(
     //    a gitlink. A SYMLINK answers `blob` (git stores it as a blob), and
     //    the REST tree transport carries the LOCAL mode verbatim, so a
     //    symlink lands as the symlink it is (mode `120000`).
-    for (status, path) in changes {
-        if status != "A" && status != "M" {
-            continue;
-        }
-        let spec = format!("{local_branch}:{}", path.display());
-        // The GraphQL builder refuses non-blob entries too; keep the same
-        // typed refusal here instead of uploading a submodule as a regular
-        // file blob.
-        let object_type = git(dir, &["cat-file", "-t", &spec]).map_err(|error| {
-            miette!("cannot read `{spec}` for the REST landing: {error}; {rest_context}")
-        })?;
-        if object_type != "blob" {
-            bail!(
-                "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
-                 submodules (gitlinks) are not supported by the REST tree transport; \
-                 {rest_context}"
-            );
-        }
-    }
+    validate_rest_landing_paths(dir, local_branch, changes)
+        .map_err(|error| miette!("{error}; {rest_context}"))?;
     let mut uploaded = std::collections::HashMap::new();
     for (status, path) in changes {
-        if status != "A" && status != "M" {
+        if status != "A" && status != "M" && status != "T" {
             continue;
         }
         let path_key = path.display().to_string();
@@ -2029,6 +2028,12 @@ fn remote_head_tree(
 /// of a file that exists in the diff base keeps GitHub's stored mode, which
 /// is why those are fine here.
 ///
+/// A TYPE CHANGE (`T`, issue #729) is refused here for the same reason and
+/// one more: `FileAddition` carries no mode field, so the GraphQL payload
+/// would land the path as a plain 100644 file — a symlink silently
+/// materialized as a regular file holding the link target. Such a change set
+/// is always routed to the REST transport, which carries the exact mode.
+///
 /// `dir` anchors every git invocation at a fixture repo (tests); `None`
 /// resolves the repo from the process cwd (production).
 fn build_file_changes(
@@ -2146,8 +2151,118 @@ fn tree_entry_mode(
 /// as 100644, and the REST tree transport defaults the same way.
 const DEFAULT_BLOB_MODE: &str = "100644";
 
-/// Returns the `A`/`M` paths whose local mode differs from the mode GitHub
-/// would produce for them, in change order (issue #556).
+/// The symlink mode: git stores a symlink as a blob whose content is the
+/// link target, under the tree mode `120000`.
+const SYMLINK_MODE: &str = "120000";
+
+/// True for the modes of a REGULAR file blob (`100644`, `100755`).
+fn is_regular_blob_mode(mode: &str) -> bool {
+    mode == "100644" || mode == "100755"
+}
+
+/// True for the mode of a SYMLINK (`120000`).
+fn is_symlink_mode(mode: &str) -> bool {
+    mode == SYMLINK_MODE
+}
+
+/// Validates every TYPE CHANGE (`T`) entry of a change set and returns the
+/// paths it covers.
+///
+/// Git reports a regular file replaced by a symlink — or a symlink replaced
+/// by a regular file — as `T`, not `M`. The REST tree transport expresses
+/// such a change exactly: the destination mode (`120000` for a symlink,
+/// `100644`/`100755` for a regular file) plus the blob the destination
+/// carries (the link-target bytes for a symlink, the file's bytes otherwise).
+///
+/// Only that shape is unambiguous. A type change involving a gitlink
+/// (`160000`), a tree, or a mode that cannot be read fails CLOSED with a
+/// typed error naming the path and both modes — an ambiguous change set is
+/// never landed, and never silently dropped.
+fn validate_typechange_paths(
+    changes: &[(String, std::path::PathBuf)],
+    local_modes: &std::collections::HashMap<String, String>,
+    base_modes: &std::collections::HashMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for (status, path) in changes {
+        if status != "T" {
+            continue;
+        }
+        let key = path.display().to_string();
+        let Some(local_mode) = local_modes.get(&key) else {
+            bail!(
+                "cannot land the type change of `{key}`: its mode in the landing tree is unknown — \
+                 refusing to land an ambiguous change set"
+            );
+        };
+        let Some(base_mode) = base_modes.get(&key) else {
+            bail!(
+                "cannot land the type change of `{key}`: its mode in the diff base is unknown — \
+                 refusing to land an ambiguous change set"
+            );
+        };
+        let regular_to_symlink = is_regular_blob_mode(base_mode) && is_symlink_mode(local_mode);
+        let symlink_to_regular = is_symlink_mode(base_mode) && is_regular_blob_mode(local_mode);
+        if !regular_to_symlink && !symlink_to_regular {
+            bail!(
+                "cannot land the type change of `{key}`: `{base_mode}` -> `{local_mode}` is not a \
+                 regular-file/symlink swap — refusing to land an ambiguous change set"
+            );
+        }
+        paths.push(key);
+    }
+    Ok(paths)
+}
+
+/// Counts the additions and deletions a change set carries, for the dry-run
+/// plan. A TYPE CHANGE (`T`) counts as an addition: the REST transport lands
+/// it as a tree entry carrying the destination mode.
+fn count_file_changes(changes: &[(String, std::path::PathBuf)]) -> (usize, usize) {
+    let additions = changes
+        .iter()
+        .filter(|(status, _)| matches!(status.as_str(), "A" | "M" | "T"))
+        .count();
+    let deletions = changes.iter().filter(|(status, _)| status == "D").count();
+    (additions, deletions)
+}
+
+/// Validates that every path the REST landing will carry is a readable blob
+/// in the branch's COMMITTED tree.
+///
+/// Only SUBMODULES are refused: `git cat-file -t` answers `commit` for a
+/// gitlink. A SYMLINK answers `blob` (git stores it as a blob), and the REST
+/// tree transport carries the LOCAL mode verbatim, so a symlink lands as the
+/// symlink it is (mode `120000`).
+///
+/// The WHOLE set is validated before any upload, so a submodule refuses the
+/// landing before a single object is sent.
+fn validate_rest_landing_paths(
+    dir: Option<&std::path::Path>,
+    branch: &str,
+    changes: &[(String, std::path::PathBuf)],
+) -> Result<()> {
+    for (status, path) in changes {
+        if status != "A" && status != "M" && status != "T" {
+            continue;
+        }
+        let spec = format!("{branch}:{}", path.display());
+        // The GraphQL builder refuses non-blob entries too; keep the same
+        // typed refusal here instead of uploading a submodule as a regular
+        // file blob.
+        let object_type = git(dir, &["cat-file", "-t", &spec])
+            .map_err(|error| miette!("cannot read `{spec}` for the REST landing: {error}"))?;
+        if object_type != "blob" {
+            bail!(
+                "cannot land `{spec}`: it is a {object_type}, not a regular file blob — \
+                 submodules (gitlinks) are not supported by the REST tree transport"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Returns the `A`/`M`/`T` paths whose local mode differs from the mode
+/// GitHub would produce for them, in change order (issue #556).
 ///
 /// GitHub's resulting mode for a landed path is the DIFF-BASE (remote head)
 /// mode when the path exists there, otherwise `100644`. `createCommitOnBranch`
@@ -2157,6 +2272,13 @@ const DEFAULT_BLOB_MODE: &str = "100644";
 /// `local_mode != base_mode.unwrap_or("100644")` — both an added 100755 file
 /// and a mode-only change in either direction. Deletions never need it; a path
 /// absent from the base is treated as 100644.
+///
+/// A TYPE CHANGE (`T`, issue #729) always needs the REST transport: the
+/// change replaces the entry's TYPE, and the type is part of the mode
+/// (`100644`/`100755` <-> `120000`), so `createCommitOnBranch` — which
+/// carries no mode field at all — cannot express it. Such a path is routed
+/// to REST unconditionally; `validate_typechange_paths` decides whether the
+/// shape is unambiguous enough to land at all.
 ///
 /// Total and non-panicking: absent mode entries fall back to
 /// [`DEFAULT_BLOB_MODE`], and only recognised statuses are considered.
@@ -2172,20 +2294,29 @@ fn mode_requiring_rest_paths(
     };
     changes
         .iter()
-        .filter(|(status, _)| status == "A" || status == "M")
-        .filter_map(|(_, path)| {
+        .filter(|(status, _)| status == "A" || status == "M" || status == "T")
+        .filter_map(|(status, path)| {
             let key = path.display().to_string();
+            if status == "T" {
+                return Some(key);
+            }
             (mode_of(local_modes, &key) != mode_of(base_modes, &key)).then_some(key)
         })
         .collect()
 }
 
 /// Builds the REST `POST /git/trees` payload for a landing: `base_tree` is
-/// the diff base's tree, and every `A`/`M` change carries the mode from the
+/// the diff base's tree, and every `A`/`M`/`T` change carries the mode from the
 /// LOCAL tree plus the sha of the blob already uploaded with `POST /git/blobs`
 /// (never the local git object id — the REST tree references GitHub objects).
 /// A `D` change is an entry with `sha: null`, which removes the path from the
 /// base tree.
+///
+/// A TYPE CHANGE (`T`, issue #729) is an ordinary entry whose mode comes from
+/// the LOCAL tree: `120000` for a symlink (whose uploaded blob carries the
+/// link-target bytes) or `100644`/`100755` for a regular file (whose uploaded
+/// blob carries the file's bytes). The entry replaces the base entry at that
+/// path, so the type change lands exactly as the local tree has it.
 ///
 /// `mode` and `sha: null` are sent as GitHub expects them: mode is a STRING
 /// (probed 2026-11-09 — see
@@ -2202,7 +2333,7 @@ fn build_rest_tree_payload(
     for (status, path) in changes {
         let path_key = path.display().to_string();
         match status.as_str() {
-            "A" | "M" => {
+            "A" | "M" | "T" => {
                 let sha = uploaded_blob_shas.get(&path_key).ok_or_else(|| {
                     miette!(
                         "no uploaded blob sha for `{path_key}` — refusing to build a partial \
@@ -4090,6 +4221,7 @@ mod tests {
             &changes,
             &rest_paths,
             &local_modes,
+            &base_modes,
             "land the executable bits",
             "",
         )
@@ -4182,6 +4314,83 @@ mod tests {
         Ok((temp, tree("main")?, tree("feature")?))
     }
 
+    /// Builds a fixture repo whose branch performs a TYPE CHANGE — git
+    /// reports a regular file replaced by a symlink (or the reverse) as `T`,
+    /// not `M` (issue #729).
+    ///
+    /// `main` holds `other.txt` (untouched by the branch), `plain.txt` and
+    /// the `link` path. `feature` replaces `link` with the opposite type,
+    /// modifies `plain.txt` (an ordinary change that must still land) and —
+    /// in the file -> symlink direction — adds `target.txt`.
+    ///
+    /// Every git child is anchored at the fixture repo and scrubbed of
+    /// inherited repository-location variables, like
+    /// [`fixture_repo_with_mode_change`].
+    #[cfg(unix)]
+    fn fixture_repo_with_typechange(
+        symlink_to_file: bool,
+    ) -> miette::Result<(tempfile::TempDir, String, String)> {
+        let temp = tempfile::tempdir().into_diagnostic()?;
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).into_diagnostic()?;
+        let run = |args: &[&str]| -> miette::Result<()> {
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&repo).args(args);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let status = command
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .into_diagnostic()?;
+            assert!(status.success(), "git {args:?} failed");
+            Ok(())
+        };
+        run(&["init", "-q", "-b", "main"])?;
+        std::fs::write(repo.join("other.txt"), "other\n").into_diagnostic()?;
+        std::fs::write(repo.join("plain.txt"), "plain\n").into_diagnostic()?;
+        if symlink_to_file {
+            // The base holds a SYMLINK; the branch replaces it with a file.
+            std::fs::write(repo.join("target.txt"), "target contents\n").into_diagnostic()?;
+            std::os::unix::fs::symlink("target.txt", repo.join("link")).into_diagnostic()?;
+            run(&["add", "-A"])?;
+            run(&["commit", "-qm", "base"])?;
+            run(&["checkout", "-qb", "feature"])?;
+            std::fs::remove_file(repo.join("link")).into_diagnostic()?;
+            std::fs::write(repo.join("link"), "now a regular file\n").into_diagnostic()?;
+            std::fs::write(repo.join("plain.txt"), "plain modified\n").into_diagnostic()?;
+        } else {
+            // The base holds a REGULAR FILE; the branch replaces it with a
+            // symlink.
+            std::fs::write(repo.join("link"), "original contents\n").into_diagnostic()?;
+            run(&["add", "-A"])?;
+            run(&["commit", "-qm", "base"])?;
+            run(&["checkout", "-qb", "feature"])?;
+            std::fs::remove_file(repo.join("link")).into_diagnostic()?;
+            std::os::unix::fs::symlink("target.txt", repo.join("link")).into_diagnostic()?;
+            std::fs::write(repo.join("target.txt"), "target contents\n").into_diagnostic()?;
+            std::fs::write(repo.join("plain.txt"), "plain modified\n").into_diagnostic()?;
+        }
+        run(&["add", "-A"])?;
+        run(&["commit", "-qm", "type change"])?;
+        let tree = |spec: &str| -> miette::Result<String> {
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", &format!("{spec}^{{tree}}")]);
+            for variable in AMBIENT_GIT_LOCATION_VARS {
+                command.env_remove(variable);
+            }
+            let output = command.output().into_diagnostic()?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        Ok((temp, tree("main")?, tree("feature")?))
+    }
+
     /// The outcome of one REST landing driven against a [`RecordingStub`].
     #[cfg(unix)]
     #[derive(Debug)]
@@ -4192,6 +4401,8 @@ mod tests {
         landed_oid: String,
         /// The changed paths whose blob was uploaded, in upload order.
         uploaded_paths: Vec<String>,
+        /// The paths `mode_requiring_rest_paths` routed to the REST transport.
+        rest_paths: Vec<String>,
     }
 
     /// Drives `land_via_rest` against a [`RecordingStub`] that answers every
@@ -4214,7 +4425,7 @@ mod tests {
         let rest_paths = mode_requiring_rest_paths(&changes, &local_modes, &base_modes);
         let uploaded_paths: Vec<String> = changes
             .iter()
-            .filter(|(status, _)| status == "A" || status == "M")
+            .filter(|(status, _)| status == "A" || status == "M" || status == "T")
             .map(|(_, path)| path.display().to_string())
             .collect();
 
@@ -4254,6 +4465,7 @@ mod tests {
             &changes,
             &rest_paths,
             &local_modes,
+            &base_modes,
             "land the executable bits",
             "",
         );
@@ -4264,6 +4476,7 @@ mod tests {
             requests,
             landed_oid: landed?,
             uploaded_paths,
+            rest_paths,
         })
     }
 
@@ -4394,6 +4607,474 @@ mod tests {
             commit_object.get("parents").and_then(Value::as_array),
             Some(&vec![Value::String("parent-oid".to_string())]),
             "the commit must carry the landing parent: {commit_payload}"
+        );
+        Ok(())
+    }
+
+    /// Asserts that a recorded tree payload carries EXACTLY the expected
+    /// `(path, mode, uploaded sha)` entries, in order.
+    ///
+    /// The comparison is exact on both ends: a MISSING entry (a path silently
+    /// dropped from the change set) and a SPURIOUS entry (an unchanged path
+    /// committed anyway) both fail. The mode must be the exact LOCAL mode as
+    /// a STRING, and the sha must be the UPLOADED blob sha — never the local
+    /// object id.
+    #[cfg(unix)]
+    fn assert_tree_payload_entries(
+        request: &str,
+        base_tree: &str,
+        expected: &[(&str, &str, &str)],
+    ) -> miette::Result<()> {
+        let tree_body: Value =
+            serde_json::from_str(&recorded_request_body(request)).into_diagnostic()?;
+        assert_eq!(
+            tree_body.get("base_tree").and_then(Value::as_str),
+            Some(base_tree),
+            "the tree must be based on the diff base: {tree_body}"
+        );
+        let entries = tree_body
+            .get("tree")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette!("the tree payload must carry entries: {tree_body}"))?;
+        assert_eq!(
+            entries.len(),
+            expected.len(),
+            "the tree payload must carry EXACTLY the changed paths — no dropped path, no \
+             spurious one: {tree_body}"
+        );
+        for (entry, (path, mode, uploaded_sha)) in entries.iter().zip(expected) {
+            assert_eq!(
+                entry.get("path").and_then(Value::as_str),
+                Some(*path),
+                "{tree_body}"
+            );
+            assert!(
+                entry.get("mode").is_some_and(Value::is_string),
+                "the mode must be a STRING, never a number: {tree_body}"
+            );
+            assert_eq!(
+                entry.get("mode").and_then(Value::as_str),
+                Some(*mode),
+                "the entry must carry the exact local mode: {tree_body}"
+            );
+            assert_eq!(
+                entry.get("type").and_then(Value::as_str),
+                Some("blob"),
+                "a symlink is stored as a blob under mode 120000: {tree_body}"
+            );
+            assert_eq!(
+                entry.get("sha").and_then(Value::as_str),
+                Some(*uploaded_sha),
+                "the entry must reference the UPLOADED blob sha: {tree_body}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The decoded bytes of a recorded blob upload.
+    #[cfg(unix)]
+    fn recorded_blob_upload_bytes(request: &str) -> miette::Result<Vec<u8>> {
+        let blob_body: Value =
+            serde_json::from_str(&recorded_request_body(request)).into_diagnostic()?;
+        let content = blob_body
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| miette!("the blob upload must carry content: {blob_body}"))?;
+        BASE64_ENGINE.decode(content).into_diagnostic()
+    }
+
+    // --- push-branch: type changes (#729) -----------------------------------
+
+    #[test]
+    fn mode_requiring_rest_paths_routes_type_changes_to_rest() {
+        let modes = |pairs: &[(&str, &str)]| -> std::collections::HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(path, mode)| ((*path).to_string(), (*mode).to_string()))
+                .collect()
+        };
+        let change =
+            |status: &str, path: &str| (status.to_string(), std::path::PathBuf::from(path));
+
+        // Git reports a regular file replaced by a symlink as `T`, NOT `M`.
+        // The GraphQL payload carries no mode field at all, so such a path
+        // must never stay on the GraphQL route.
+        let typechanged = [change("T", "link")];
+        assert_eq!(
+            mode_requiring_rest_paths(
+                &typechanged,
+                &modes(&[("link", "120000")]),
+                &modes(&[("link", "100644")])
+            ),
+            vec!["link".to_string()],
+            "a regular file -> symlink type change must route to the REST transport"
+        );
+        // The reverse direction, and an executable regular file as destination.
+        assert_eq!(
+            mode_requiring_rest_paths(
+                &typechanged,
+                &modes(&[("link", "100644")]),
+                &modes(&[("link", "120000")])
+            ),
+            vec!["link".to_string()],
+            "a symlink -> regular file type change must route to the REST transport"
+        );
+        assert_eq!(
+            mode_requiring_rest_paths(
+                &typechanged,
+                &modes(&[("link", "100755")]),
+                &modes(&[("link", "120000")])
+            ),
+            vec!["link".to_string()],
+            "a symlink -> executable regular file type change must route to REST"
+        );
+        // A type change routes to REST even when the diff base is unreadable
+        // (the modes would then be indistinguishable): the TYPE always
+        // changes, and the GraphQL payload cannot express it.
+        assert_eq!(
+            mode_requiring_rest_paths(&typechanged, &modes(&[("link", "120000")]), &modes(&[])),
+            vec!["link".to_string()],
+            "a type change must route to REST even without a known base mode"
+        );
+    }
+
+    #[test]
+    fn validate_typechange_paths_accepts_only_regular_file_symlink_swaps() {
+        let modes = |pairs: &[(&str, &str)]| -> std::collections::HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(path, mode)| ((*path).to_string(), (*mode).to_string()))
+                .collect()
+        };
+        let change =
+            |status: &str, path: &str| (status.to_string(), std::path::PathBuf::from(path));
+        let typechanged = [change("T", "link")];
+
+        // Regular file -> symlink and symlink -> regular file: unambiguous.
+        assert_eq!(
+            validate_typechange_paths(
+                &typechanged,
+                &modes(&[("link", "120000")]),
+                &modes(&[("link", "100644")])
+            )
+            .expect("a regular file -> symlink swap is unambiguous"),
+            vec!["link".to_string()]
+        );
+        assert_eq!(
+            validate_typechange_paths(
+                &typechanged,
+                &modes(&[("link", "100644")]),
+                &modes(&[("link", "120000")])
+            )
+            .expect("a symlink -> regular file swap is unambiguous"),
+            vec!["link".to_string()]
+        );
+        assert_eq!(
+            validate_typechange_paths(
+                &typechanged,
+                &modes(&[("link", "100755")]),
+                &modes(&[("link", "120000")])
+            )
+            .expect("a symlink -> executable regular file swap is unambiguous"),
+            vec!["link".to_string()]
+        );
+        // A path that is not a type change is not validated at all.
+        let untouched = [change("M", "plain.txt")];
+        assert!(
+            validate_typechange_paths(&untouched, &modes(&[]), &modes(&[]))
+                .expect("a plain modification is not a type change")
+                .is_empty()
+        );
+
+        // A GITLINK on either side is ambiguous: refuse, naming the path and
+        // both modes. A submodule replaced by a regular file must never be
+        // landed as a plain file (the submodule's commit object is not a
+        // blob).
+        let error = validate_typechange_paths(
+            &typechanged,
+            &modes(&[("link", "100644")]),
+            &modes(&[("link", "160000")]),
+        )
+        .expect_err("a gitlink -> regular file type change must be refused");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("link")
+                && rendered.contains("160000")
+                && rendered.contains("100644")
+                && rendered.contains("refusing"),
+            "the refusal must name the path and both modes: {rendered}"
+        );
+        let error = validate_typechange_paths(
+            &typechanged,
+            &modes(&[("link", "160000")]),
+            &modes(&[("link", "100644")]),
+        )
+        .expect_err("a regular file -> gitlink type change must be refused");
+        assert!(
+            format!("{error}").contains("160000"),
+            "the refusal must name the gitlink mode: {error}"
+        );
+        // An UNKNOWN mode on either side is refused too: the shape cannot be
+        // proven unambiguous.
+        assert!(
+            validate_typechange_paths(&typechanged, &modes(&[("link", "120000")]), &modes(&[]))
+                .expect_err("an unknown base mode must be refused")
+                .to_string()
+                .contains("link"),
+            "the refusal must name the path"
+        );
+        assert!(
+            validate_typechange_paths(&typechanged, &modes(&[]), &modes(&[("link", "120000")]))
+                .expect_err("an unknown landing-tree mode must be refused")
+                .to_string()
+                .contains("link"),
+            "the refusal must name the path"
+        );
+    }
+
+    #[test]
+    fn build_file_changes_refuses_a_type_change() {
+        // The GraphQL payload CANNOT express a type change: `FileAddition`
+        // carries no mode field, so it would land a symlink as a plain 100644
+        // file holding the link target. The GraphQL leg must refuse it even
+        // though the REST transport can carry it.
+        let changes = [("T".to_string(), std::path::PathBuf::from("link"))];
+        let error = build_file_changes(None, &changes, "feature")
+            .expect_err("the GraphQL payload must refuse a type change");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("link") && rendered.contains('T'),
+            "the refusal must name the path and the status: {rendered}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_lands_a_file_to_symlink_type_change_exactly() -> miette::Result<()> {
+        // A regular file replaced by a symlink must land as the SYMLINK it is:
+        // mode 120000 and a blob whose content is the LINK TARGET — never the
+        // former file's bytes (that would be a regular file holding the
+        // target path, the forbidden silent content change).
+        let (temp, base_tree, feature_tree) = fixture_repo_with_typechange(false)?;
+        let repo = temp.path().join("repo");
+        let commit_sha = "4444444444444444444444444444444444444444";
+        let commit_body = format!(
+            r#"{{"sha":"{commit_sha}","tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}"#
+        );
+        // Three uploads: the type change, the ordinary modification and the
+        // added symlink target.
+        let outcome = run_rest_landing_against_stub(
+            &repo,
+            &base_tree,
+            &feature_tree,
+            &[
+                "uploaded-link-sha",
+                "uploaded-plain-sha",
+                "uploaded-target-sha",
+            ],
+            &commit_body,
+        )?;
+
+        assert_eq!(
+            outcome.landed_oid, commit_sha,
+            "the type change must land: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.rest_paths,
+            vec!["link".to_string()],
+            "the type change must be ROUTED to the REST transport: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.uploaded_paths,
+            vec![
+                "link".to_string(),
+                "plain.txt".to_string(),
+                "target.txt".to_string()
+            ],
+            "the type-changed path is uploaded like any other changed path"
+        );
+
+        // The blob uploads carry the COMMITTED bytes of the destination.
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[0], &repo, "link")?;
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[1], &repo, "plain.txt")?;
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[2], &repo, "target.txt")?;
+
+        // THE forbidden effect, asserted as an ABSENCE: the symlink must NOT
+        // land as a regular file holding the target path. The uploaded blob
+        // is the link-target bytes, and the former file's bytes are gone.
+        let link_bytes = recorded_blob_upload_bytes(&outcome.requests[0])?;
+        assert_eq!(
+            link_bytes,
+            b"target.txt".to_vec(),
+            "the symlink's blob must carry the LINK TARGET bytes"
+        );
+        assert_ne!(
+            link_bytes,
+            b"original contents\n".to_vec(),
+            "the symlink must never be landed as a regular file holding the former content"
+        );
+
+        // The tree payload carries the exact destination mode for EVERY
+        // changed path, and the unchanged path is NOT committed.
+        assert_tree_payload_entries(
+            &outcome.requests[3],
+            &base_tree,
+            &[
+                ("link", "120000", "uploaded-link-sha"),
+                ("plain.txt", "100644", "uploaded-plain-sha"),
+                ("target.txt", "100644", "uploaded-target-sha"),
+            ],
+        )?;
+        let tree_body = recorded_request_body(&outcome.requests[3]);
+        assert!(
+            !tree_body.contains("other.txt"),
+            "an unchanged path must never be committed: {tree_body}"
+        );
+        // A symlink is NEVER a 100644 entry: the mode is what distinguishes it.
+        assert!(
+            !tree_body
+                .contains("\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"uploaded-link-sha\""),
+            "the symlink must not carry the regular-file mode: {tree_body}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_lands_a_symlink_to_file_type_change_exactly() -> miette::Result<()> {
+        // The reverse direction: a symlink replaced by a regular file must
+        // land as the FILE it is — mode 100644 and the file's own bytes —
+        // never a dangling symlink pointing at the old target.
+        let (temp, base_tree, feature_tree) = fixture_repo_with_typechange(true)?;
+        let repo = temp.path().join("repo");
+        let commit_sha = "5555555555555555555555555555555555555555";
+        let commit_body = format!(
+            r#"{{"sha":"{commit_sha}","tree":{{"sha":"{feature_tree}"}},"verification":{{"verified":true,"reason":"valid"}}}}"#
+        );
+        let outcome = run_rest_landing_against_stub(
+            &repo,
+            &base_tree,
+            &feature_tree,
+            &["uploaded-link-sha", "uploaded-plain-sha"],
+            &commit_body,
+        )?;
+
+        assert_eq!(
+            outcome.landed_oid, commit_sha,
+            "the type change must land: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.rest_paths,
+            vec!["link".to_string()],
+            "the type change must be ROUTED to the REST transport: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.uploaded_paths,
+            vec!["link".to_string(), "plain.txt".to_string()],
+            "the type-changed path is uploaded like any other changed path: {outcome:?}"
+        );
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[0], &repo, "link")?;
+        assert_blob_upload_carries_committed_bytes(&outcome.requests[1], &repo, "plain.txt")?;
+
+        // THE forbidden effect, asserted as an ABSENCE: the regular file must
+        // never be replaced by a DANGLING SYMLINK. The uploaded blob is the
+        // file's own bytes, and the old link target is gone.
+        let link_bytes = recorded_blob_upload_bytes(&outcome.requests[0])?;
+        assert_eq!(
+            link_bytes,
+            b"now a regular file\n".to_vec(),
+            "the regular file's blob must carry the FILE's bytes"
+        );
+        assert_ne!(
+            link_bytes,
+            b"target.txt".to_vec(),
+            "the regular file must never be landed as a symlink holding the old target"
+        );
+
+        // The tree payload carries mode 100644 for the path — never 120000.
+        assert_tree_payload_entries(
+            &outcome.requests[2],
+            &base_tree,
+            &[
+                ("link", "100644", "uploaded-link-sha"),
+                ("plain.txt", "100644", "uploaded-plain-sha"),
+            ],
+        )?;
+        let tree_body = recorded_request_body(&outcome.requests[2]);
+        assert!(
+            !tree_body.contains("other.txt"),
+            "an unchanged path must never be committed: {tree_body}"
+        );
+        assert!(
+            !tree_body.contains("\"mode\":\"120000\""),
+            "the regular file must never carry the symlink mode: {tree_body}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rest_landing_refuses_an_ambiguous_type_change_without_landing_anything() -> miette::Result<()>
+    {
+        // A type change that is NOT a regular-file/symlink swap is ambiguous
+        // and must fail CLOSED — before a single object is uploaded.
+        let (temp, base_tree, feature_tree) = fixture_repo_with_typechange(false)?;
+        let repo = temp.path().join("repo");
+        let changes = diff_tree_changes(Some(&repo), &base_tree, &feature_tree)?;
+        let local_modes = local_tree_modes(Some(&repo), &feature_tree)?;
+        // Pretend the diff base held a GITLINK for `link`: the shape is then
+        // ambiguous and must be refused.
+        let mut base_modes = base_tree_modes(Some(&repo), &base_tree);
+        base_modes.insert("link".to_string(), "160000".to_string());
+        let rest_paths = mode_requiring_rest_paths(&changes, &local_modes, &base_modes);
+        assert_eq!(
+            rest_paths,
+            vec!["link".to_string()],
+            "a type change always routes to the REST transport"
+        );
+
+        let stub = spawn_recording_stub(vec![])?;
+        let transport = ApiTransport {
+            client: reqwest::blocking::Client::new(),
+            base_url: stub.base_url.clone(),
+        };
+        let rest_transport = ApiTransport {
+            client: reqwest::blocking::Client::new(),
+            base_url: stub.base_url.clone(),
+        };
+        let graphql = GraphqlSession {
+            transport: &transport,
+            rest_transport: &rest_transport,
+            bearer: "test-bearer",
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
+        let error = land_via_rest(
+            Some(&repo),
+            &graphql,
+            &base_tree,
+            "parent-oid",
+            "feature",
+            &feature_tree,
+            &changes,
+            &rest_paths,
+            &local_modes,
+            &base_modes,
+            "land the type change",
+            "",
+        )
+        .expect_err("an ambiguous type change must fail the landing");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("link") && rendered.contains("160000"),
+            "the refusal must name the path and the gitlink mode: {rendered}"
+        );
+        // THE forbidden effect, asserted as an ABSENCE: nothing was uploaded
+        // and nothing was committed.
+        let seen = stub.finish();
+        assert!(
+            seen.is_empty(),
+            "an ambiguous type change must refuse BEFORE any upload: {seen:?}"
         );
         Ok(())
     }
