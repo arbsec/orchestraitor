@@ -14,10 +14,21 @@
 #       labels while never closing anything (#744): union + dedup, word
 #       boundaries, the fenced/inline-code guard, and a byte-identical
 #       `Closes #N` regression pin
-#   (h) the prose guard survives real-world Markdown shapes (#767 review):
+# (h) the prose guard survives real-world Markdown shapes (#767 review):
 #       CRLF bodies, a code span that crosses a line break, the
 #       paragraph-bounded fail-closed carry of an unmatched run, and the
 #       mid-line / unterminated HTML-comment rules
+#   (t) reviewer round 3 of #767, replayed against d1b545a: a lone CR is a
+#       line ending (keyword, number and comment terminator), and the open
+#       inline state decides what is special (a comment opener or a
+#       destination opener inside a code span is ordinary text)
+#   (u) shapes the differential harness (markdown_it, 6000 generated bodies,
+#       zero fail-opens) found after round 3: a barriered elision must take
+#       its separator from the RENDERED neighbours (a span that crosses a
+#       line break, or a span behind a tag, glues the words around it), a
+#       blockquote marker is not text, four spaces inside a paragraph are a
+#       lazy continuation rather than code, and "<!-->" is a complete
+#       (empty) comment
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -538,6 +549,122 @@ assert 'only the reference after the comment closes is fetched' 1 \
   "$(grep -c 'issues/742' "$GH_LOG")"
 assert 'no reference inside the comment is fetched' 0 \
   "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (i) reviewer round 3 + differential-harness findings (#767) -----------------
+
+echo "--- prose guard: reviewer round 3 (#767) ---"
+
+# (t1) A LONE CR is a line ending (CommonMark), and a keyword cannot span one:
+# "Part o<CR>f #741" is two rendered lines, so it is not a reference.
+export PR_BODY=$'Part o\rf #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a lone CR inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a lone CR inside the keyword reports nothing to copy' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (t2) The same CR inside the NUMBER: the reference is #74, and fusing the
+# digits (normalising every CR away instead of splitting on it) would
+# manufacture a reference to #741 that no reader sees.
+export PR_BODY=$'Part of #74\r1\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a lone CR inside the number does not fuse the digits' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[74]')"
+assert 'a lone CR inside the number never references #741' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (t3) A CR inside the comment terminator does not terminate the comment:
+# "--<CR>>" is two rendered lines, so the HTML block runs on to the "-->" on
+# the last line and the reference quoted inside it is never prose.
+export PR_BODY=$'<!-- hidden\n--\r>\nPart of #741\n-->'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a CR inside the comment terminator adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a CR inside the comment terminator reports nothing to copy' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (t4) Inside a code span "<!--" is ordinary text: the span closes at its own
+# backtick, the " -->" between the two spans is prose, and the reference in
+# the SECOND span is code. A pass that strips comments first would expose it.
+export PR_BODY='foo `<!-- x ` -->` Part of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a comment opener inside a code span adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the reference after the spanned comment opener is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (t5) The same precedence for "](": inside a span it is ordinary text, so
+# "](d" never opens a destination and the span that follows is code.
+export PR_BODY='foo `x ](d` y) `Part of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a destination opener inside a code span adds no labels' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference after the spanned destination opener is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+echo "--- prose guard: differential-harness findings (#767) ---"
+
+# (u1) A code span that CROSSES a line break swallows the break, so the text
+# on either side is CONCATENATED: "text" + "Part of #741" reads
+# "textPart of #741". The separator that replaces the span must therefore be
+# chosen from the RENDERED neighbours, across the joined line, and not from
+# the raw character next to the opening backtick.
+export PR_BODY=$'text`x\ny`Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a cross-line span glues the words around it (no labels)' '[]' \
+  "$(pr_edit_adds)"
+assert 'the glued reference is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u2) Two adjacent elisions: a raw HTML tag contributes no text, so the
+# character before it is still the rendered neighbour of the code span that
+# follows. Reading the neighbour off the raw line would see the ">" of the
+# tag and open a word boundary the reader never sees.
+export PR_BODY='text<br>``x``Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a span behind a tag glues the words around it (no labels)' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference behind the tag is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u3) A fence quoted inside a blockquote is still a fence: the ">" marker is
+# not text, and the info string of the fence it opens is not prose.
+export PR_BODY=$' >~~~Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence inside a blockquote adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the fenced reference inside the blockquote is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u4) The same at nesting depth two.
+export PR_BODY=$'>> ~~~Part of #741    >\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a nested blockquote fence adds no labels' '[]' "$(pr_edit_adds)"
+
+# (u5) The mirror: quoted prose IS prose — the marker is not text, its
+# content is, so a reference in a blockquote still propagates.
+export PR_BODY=$'> Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a reference in a blockquote still propagates' '["bug","documentation"]' \
+  "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the quoted reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (u6) Four spaces of indentation open an indented code block only where a
+# block may START: inside a paragraph the line is a lazy continuation and its
+# text is rendered, so the reference is prose (the blank-line form above is
+# still code, which the existing indented-code asserts pin).
+export PR_BODY=$'Summary.\n    Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an indented line inside a paragraph is prose (no swallow)' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the lazily continued reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (u7) "<!-->" is a COMPLETE (empty) comment, so it ends at its own ">": a
+# scan that looks for the next "-->" swallows the "Part of #741-->" the
+# renderer shows as text.
+export PR_BODY='a <!-->Part of #741--> b'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an empty comment ends at its own ">" (the rest is prose)' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the empty comment lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
 
 # usage errors
 run pr-labels-from-issue

@@ -22,14 +22,19 @@
      line. Use `Closes #N` only when the whole tracked scope lands in this
      PR — a closing keyword triggers auto-close on merge.
      Put the reference in PROSE. The related forms are read from the body's
-     Markdown prose only (a CRLF body parses like an LF one), so a `Part of
-     #N` quoted inside code (a fenced block, an indented block, an inline
-     code span — including a span that crosses a line break — or an
-     unmatched backtick run to the end of its paragraph), hidden in an HTML
-     comment, or buried in a link destination does NOT propagate labels; the
-     link TEXT is prose and does count. (The closing family is still read
-     from the raw body — the asymmetry is deliberate; #765 tracks aligning
-     the two.) -->
+     Markdown prose only — one left-to-right scan that emits what a renderer
+     SHOWS — so a `Part of #N` quoted inside code (a fenced block, an
+     indented block, an inline code span — including a span that crosses a
+     line break, which joins the lines it spans — or an unmatched backtick
+     run to the end of its paragraph), hidden in an HTML comment (an empty
+     `<!-->` ends at its own `>`), inside a blockquote fence or comment, or
+     buried in a link destination does NOT propagate labels; the link TEXT
+     is prose and does count, and four spaces inside a paragraph are a lazy
+     continuation rather than code. Line endings follow CommonMark: a CRLF
+     body parses like an LF one, and a LONE CR ends a line, so `Part
+     o<CR>f #N` is not a reference. (The closing family is still read from
+     the raw body — the asymmetry is deliberate; #765 tracks aligning the
+     two.) -->
 
 ## Specification references
 

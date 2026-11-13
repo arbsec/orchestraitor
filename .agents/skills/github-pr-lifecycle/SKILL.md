@@ -100,15 +100,21 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   while only a closing keyword auto-closes, and bare `#N`
                   mentions are invisible to both. A related reference counts
                   only where a reader would SEE it: it is read from the
-                  body's Markdown prose (a CRLF body parses like an LF one),
-                  so a reference quoted inside code (a fenced block, an
-                  indented block, an inline code span — including a span
-                  that crosses a line break — or an unmatched backtick run
-                  to the end of its paragraph), hidden in an HTML comment,
-                  or buried in a link destination is ignored — the link
-                  TEXT is prose and still counts, and the closing family is
-                  still read from the raw body (the asymmetry is
-                  deliberate; #765 tracks aligning it),
+                  body's Markdown prose — one left-to-right scan that emits
+                  what a renderer SHOWS — so a reference quoted inside code
+                  (a fenced block, an indented block, an inline code span —
+                  including a span that crosses a line break, which joins the
+                  lines it spans — or an unmatched backtick run to the end of
+                  its paragraph), hidden in an HTML comment (an empty
+                  `<!-->` ends at its own `>`), inside a blockquote's fence
+                  or comment, or buried in a link destination is ignored —
+                  the quoted TEXT is prose and still counts, four spaces
+                  inside a paragraph are a lazy continuation rather than
+                  code, and the closing family is still read from the raw
+                  body (the asymmetry is deliberate; #765 tracks aligning
+                  it; line endings follow CommonMark — CRLF parses like LF
+                  and a LONE CR ends a line, so `Part o<CR>f #741` is not a
+                  reference),
                   Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
