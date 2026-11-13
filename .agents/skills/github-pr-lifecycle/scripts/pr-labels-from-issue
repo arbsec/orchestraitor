@@ -7,6 +7,13 @@
 # triage produced — instead of relying on a worker to re-derive it (or forget
 # to). A related reference propagates labels but never closes anything.
 #
+# A related reference is recognised only where a reader would SEE it: the
+# related family is read from the body's Markdown PROSE, so a reference
+# quoted inside code (a fenced block, an indented block, an inline code
+# span), hidden inside an HTML comment, or buried in a link destination is
+# not a reference. The closing family is read from the RAW body (unchanged,
+# byte for byte) — see the note below.
+#
 # Only the process-classification allowlist is copied, and only when the
 # issue actually carries the label: non-process labels (attribution,
 # lifecycle noise) are never copied, and the script never removes any label.
@@ -27,7 +34,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N) and related (Part of/Refs #N, with optional ':') — related references propagate labels but never close an issue; bare #N mentions are ignored. Positional: <pr-number>. Flags: --repo <owner/name>."
+  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N, from the raw body) and related (Part of/Refs #N, with optional ':', from the body's Markdown prose) — related references propagate labels but never close an issue; bare #N mentions are ignored. A related reference counts only where a reader would see it: fenced code blocks, indented code blocks, inline code spans, HTML comments and link destinations are ignored (the link TEXT is prose). Positional: <pr-number>. Flags: --repo <owner/name>."
   exit "$ORC_OK"
 fi
 
@@ -120,27 +127,230 @@ refs_from() {
 CLOSING_NUMBERS=()
 mapfile -t CLOSING_NUMBERS < <(refs_from "$BODY_FILE" "$CLOSING_RE")
 
-# Related references are read from PROSE ONLY: a fenced block or inline code
-# span that QUOTES `Part of #N` as an example must not gain labels. Mirroring
-# the same guard onto the closing path would change closing label sets, so
-# that unification is deliberately a separate change rather than a silent
+# Related references are read from PROSE ONLY: a fenced block, an indented
+# block, an HTML comment, a link destination or an inline code span that
+# QUOTES `Part of #N` as an example must not gain labels. Mirroring the same
+# guard onto the closing path would change closing label sets, so that
+# unification is deliberately a separate change rather than a silent
 # behaviour shift here (the closing path's pre-existing gap is tracked in
 # arbsec/orchestraitor#765).
-# Documented limits: 4-space indented code blocks are not stripped, and an
-# inline span that itself contains a backtick run is not recognised.
+#
+# The extractor is Markdown-AWARE (awk only — no new dependency; the skill
+# scripts stay bash + awk + sed). It emits the text a Markdown renderer would
+# show and replaces every construct that is NOT rendered text with
+# WHITESPACE, never with the empty string, so two prose fragments can never
+# be concatenated into a reference the rendered body does not contain. The
+# rules, in the order they are applied (block first, then inline):
+#
+#   block   fenced code blocks — a run of three or more backticks or tildes
+#           opens a fence; only a run of the SAME character that is at
+#           least as long as the opener and that carries no info string
+#           closes it (a shorter run is content, and so is a fence of the
+#           other character). A backtick fence's info string may not
+#           contain a backtick, so a one-line "```Part of #1```" is an
+#           inline code span, not a fence, and the prose after it survives;
+#   block   indented code blocks — four columns of indentation, or a tab;
+#   block   HTML comments — "<!-- ... -->", including the multi-line block
+#           form that starts with "<!--" at the start of a line;
+#   block   link reference definitions — a "[label]: ..." line;
+#   inline  HTML comments that sit inside a prose line;
+#   inline  link destinations — the "(...)" of an inline link or image,
+#           including the "<...>" destination form inside it. The link TEXT
+#           stays prose: it is what the reader sees;
+#   inline  code spans — a backtick run is closed by the next run of the
+#           SAME length, and runs are maximal, so a single backtick inside
+#           a longer run is never a delimiter.
+#
+# Everything the extractor cannot resolve is DROPPED (fail closed): an
+# unterminated construct swallows the rest of its line, and a reference the
+# extractor cannot see is never recognised. Two narrow consequences are
+# accepted rather than guessed at: a four-column-indented line is treated as
+# code even where a renderer would read it as paragraph or list continuation,
+# and an elided construct that sits BETWEEN the two words of a keyword
+# ("Part`x` of #N") leaves whitespace behind, which the keyword grammar
+# still accepts.
 awk '
-  {
-    line = $0
-    sub(/^[[:space:]]+/, "", line)
-    if (fence == "") {
-      if (line ~ /^```/) { fence = "`"; next }
-      if (line ~ /^~~~/) { fence = "~"; next }
-      print; next
+  # Column width of the leading whitespace; a tab advances to the next
+  # multiple of four.
+  function indent_width(s,   i, c, w) {
+    w = 0
+    for (i = 1; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      if (c == " ") w++
+      else if (c == "\t") w = int(w / 4) * 4 + 4
+      else break
     }
-    if (fence == "`" && line ~ /^```/) { fence = ""; next }
-    if (fence == "~" && line ~ /^~~~/) { fence = ""; next }
+    return w
   }
-' "$BODY_FILE" | sed -E 's/`[^`]*`//g' > "$PROSE_FILE"
+
+  # TRUE when the line OPENS a fenced code block; sets FCHAR and FLEN.
+  # At most three spaces of indentation, then a run of three or more
+  # backticks or tildes; the rest of the line is the info string, which for
+  # a backtick fence may not contain a backtick.
+  function opens_fence(s,   i, c, run, rest) {
+    i = 1
+    while (i <= length(s) && substr(s, i, 1) == " ") i++
+    if (i - 1 > 3) return 0
+    c = substr(s, i, 1)
+    if (c != "`" && c != "~") return 0
+    run = 0
+    while (substr(s, i + run, 1) == c) run++
+    if (run < 3) return 0
+    rest = substr(s, i + run)
+    if (c == "`" && index(rest, "`") > 0) return 0
+    FCHAR = c
+    FLEN = run
+    return 1
+  }
+
+  # TRUE when the line CLOSES the open fence: the same character, a run at
+  # least as long as the opener, and nothing but whitespace after it (a
+  # closing fence carries no info string).
+  function closes_fence(s,   i, c, run, rest) {
+    i = 1
+    while (i <= length(s) && substr(s, i, 1) == " ") i++
+    if (i - 1 > 3) return 0
+    c = substr(s, i, 1)
+    if (c != FCHAR) return 0
+    run = 0
+    while (substr(s, i + run, 1) == c) run++
+    if (run < FLEN) return 0
+    rest = substr(s, i + run)
+    if (rest ~ /[^ \t]/) return 0
+    return 1
+  }
+
+  # TRUE when the line opens an HTML comment block: "<!--" at the start of
+  # the line (up to three spaces of indentation). The block runs to the
+  # line containing "-->".
+  function opens_html_block(s,   i) {
+    i = 1
+    while (i <= length(s) && substr(s, i, 1) == " ") i++
+    if (i - 1 > 3) return 0
+    return substr(s, i, 4) == "<!--"
+  }
+
+  # TRUE when the line is a link reference definition ("[label]: ..."); its
+  # destination is not rendered text.
+  function is_link_ref_def(s) {
+    return s ~ /^ {0,3}\[[^]]*\]:/
+  }
+
+  # Remove the inline HTML comments of a line. A "<!--" that is not closed
+  # on the same line swallows the rest of the line and sets IN_COMMENT, so
+  # the comment continues on the following lines (fail closed).
+  function strip_html_comments(s,   out, i, n, at, close_at) {
+    out = ""; i = 1; n = length(s)
+    while (i <= n) {
+      at = index(substr(s, i), "<!--")
+      if (at == 0) { out = out substr(s, i); break }
+      out = out substr(s, i, at - 1)
+      i = i + at - 1
+      close_at = index(substr(s, i + 4), "-->")
+      if (close_at == 0) {
+        IN_COMMENT = 1
+        return out " "
+      }
+      i = i + close_at + 6
+      out = out " "
+    }
+    return out
+  }
+
+  # Remove the inline link destinations of a line: the "(...)" that follows
+  # a "]" is the destination (plus an optional title) of an inline link or
+  # image and is not rendered text. The link TEXT is kept: it is prose. An
+  # unterminated destination swallows the rest of the line (fail closed).
+  function strip_link_destinations(s,   out, i, n, c, j, k, depth, inangle, end) {
+    out = ""; i = 1; n = length(s)
+    while (i <= n) {
+      c = substr(s, i, 1)
+      if (c == "]" && i < n && substr(s, i + 1, 1) == "(") {
+        j = i + 2
+        k = j
+        while (k <= n && substr(s, k, 1) ~ /[ \t]/) k++
+        depth = 1
+        inangle = (k <= n && substr(s, k, 1) == "<")
+        end = -1
+        while (j <= n) {
+          c = substr(s, j, 1)
+          if (c == "\\" && j < n) { j += 2; continue }
+          if (inangle) {
+            if (c == ">") inangle = 0
+          } else if (c == "(") {
+            depth++
+          } else if (c == ")") {
+            depth--
+            if (depth == 0) { end = j; break }
+          }
+          j++
+        }
+        if (end < 0) return out " "
+        out = out " "
+        i = end + 1
+        continue
+      }
+      out = out c
+      i++
+    }
+    return out
+  }
+
+  # Remove the inline code spans of a line: a run of N backticks is closed
+  # by the NEXT run of exactly N backticks, and the span (both runs
+  # included) becomes a space. A run with no such closer swallows the rest
+  # of the line (fail closed). Runs are maximal, so a single backtick
+  # inside a longer run is never a delimiter.
+  function strip_code_spans(s,   out, i, n, runlen, j, r, found) {
+    out = ""; i = 1; n = length(s)
+    while (i <= n) {
+      if (substr(s, i, 1) != "`") { out = out substr(s, i, 1); i++; continue }
+      runlen = 0
+      while (substr(s, i + runlen, 1) == "`") runlen++
+      j = i + runlen
+      found = 0
+      while (j <= n) {
+        if (substr(s, j, 1) != "`") { j++; continue }
+        r = 0
+        while (substr(s, j + r, 1) == "`") r++
+        if (r == runlen) { found = 1; break }
+        j = j + r
+      }
+      if (!found) return out " "
+      out = out " "
+      i = j + runlen
+    }
+    return out
+  }
+
+  BEGIN { FCHAR = ""; FLEN = 0; IN_COMMENT = 0 }
+
+  {
+    raw = $0
+    if (IN_COMMENT) {
+      if (index(raw, "-->") > 0) IN_COMMENT = 0
+      print ""
+      next
+    }
+    if (FCHAR != "") {
+      if (closes_fence(raw)) { FCHAR = ""; FLEN = 0 }
+      print ""
+      next
+    }
+    if (indent_width(raw) >= 4) { print ""; next }
+    if (opens_fence(raw)) { print ""; next }
+    if (opens_html_block(raw)) {
+      if (index(raw, "-->") == 0) IN_COMMENT = 1
+      print ""
+      next
+    }
+    if (is_link_ref_def(raw)) { print ""; next }
+    line = strip_html_comments(raw)
+    line = strip_link_destinations(line)
+    line = strip_code_spans(line)
+    print line
+  }
+' "$BODY_FILE" > "$PROSE_FILE"
 RELATED_NUMBERS=()
 mapfile -t RELATED_NUMBERS < <(refs_from "$PROSE_FILE" "$RELATED_RE")
 

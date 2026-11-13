@@ -98,7 +98,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   landings whose remaining scope stays tracked; both related
                   forms reach `pr-labels-from-issue` (the labels propagate)
                   while only a closing keyword auto-closes, and bare `#N`
-                  mentions are invisible to both,
+                  mentions are invisible to both. A related reference counts
+                  only where a reader would SEE it: it is read from the
+                  body's Markdown prose, so a reference quoted inside code (a
+                  fenced block, an indented block, an inline code span),
+                  hidden in an HTML comment, or buried in a link destination
+                  is ignored — the link TEXT is prose and still counts,
                   Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
@@ -131,7 +136,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   blocked:orchestraitor; `needs-human-review` is never
                   copied from issues, it is diff-derived — from the PR's
                   closing (`Closes`/`Fixes`/`Resolves`) and related
-                  (`Part of`/`Refs`) issue references, #469, #744)
+                  (`Part of`/`Refs`) issue references, #469, #744; the
+                  related family is read from the body's Markdown prose, so
+                  code, HTML comments and link destinations do not
+                  propagate labels)
                   immediately after the
                   PR exists; both steps are non-fatal and print the exact
                   manual command on failure.

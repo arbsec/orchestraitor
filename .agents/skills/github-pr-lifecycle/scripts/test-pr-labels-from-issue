@@ -358,6 +358,110 @@ run pr-labels-from-issue 77 --repo test-org/repo
 assert 'closing ref inside a fence keeps its pre-#744 behaviour (unchanged)' \
   '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
 
+# (r15) The prose extractor is MARKDOWN-AWARE (#767 review finding): a
+# related reference is recognised only in genuine prose. Every construct a
+# renderer does not show as text must be ignored, and every construct that
+# IS prose must still be recognised. The cases below are the reviewer's
+# reproductions plus the ones found while implementing them.
+#
+# A fence is closed only by a run of the SAME character that is at least as
+# long as the opener: a shorter run inside a four-backtick fence is content,
+# not a closer.
+export PR_BODY=$'````\n```\nPart of #741\n```\n````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'four-backtick fence is not closed by a shorter fence' '[]' "$(pr_edit_adds)"
+assert 'four-backtick fence yields no reference in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# A code span is delimited by MATCHING backtick runs of any length: a
+# double-backtick span is a code span too.
+export PR_BODY='Example: ``Part of #741``'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'double-backtick code span adds no labels' '[]' "$(pr_edit_adds)"
+
+# An HTML comment is invisible: a reference inside it is not prose.
+export PR_BODY='<!-- Part of #741 -->'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'single-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'<!--\nPart of #741\n-->\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'multi-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+
+# A one-line "```...```" is an inline code span, NOT a fence opener (a
+# backtick fence's info string may not contain a backtick) — so it must not
+# swallow the prose line that follows it.
+export PR_BODY=$'```Part of #101```\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline triple-backtick span does not swallow the next prose line' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the prose reference after an inline span lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+assert 'the inline span reference is never fetched' 0 \
+  "$(grep -c 'issues/101' "$GH_LOG")"
+
+# An elided span is replaced by WHITESPACE, so the words around it cannot be
+# concatenated into a reference.
+export PR_BODY='Par`x`t of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+
+# An indented code block (four columns, or a tab) is not prose.
+export PR_BODY=$'Summary.\n\n    Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'indented code block adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'Summary.\n\n\tPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tab-indented code block adds no labels' '[]' "$(pr_edit_adds)"
+
+# A link destination is not prose — in both forms: the bare "(...)" and the
+# angle-bracket "<...>" one.
+export PR_BODY='[x](<part of #741>)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'angle-bracket link destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='[x](part of #741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'bare link destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='![x](part of #741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'image destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='[part]: part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'link reference definition adds no labels' '[]' "$(pr_edit_adds)"
+
+# The link TEXT is prose: a reference that is what the reader sees still
+# propagates.
+export PR_BODY='[Part of #741](https://example.com/issues/741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a link TEXT carrying the reference still propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'a link TEXT carrying the reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# A longer fence run does not close a shorter fence, and a fence of the other
+# character never closes it.
+export PR_BODY=$'`````\n```\nPart of #741\n```\n`````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'five-backtick fence is not closed by a three-backtick fence' '[]' \
+  "$(pr_edit_adds)"
+export PR_BODY=$'~~~\n```\nPart of #741\n```\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a backtick fence does not close a tilde fence' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'~~~js\n```\nPart of #741\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a backtick fence inside a tilde fence adds no labels' '[]' \
+  "$(pr_edit_adds)"
+export PR_BODY=$'```\nPart of #741\n````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer closing fence run closes the block' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'```text\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence with an info string adds no labels' '[]' "$(pr_edit_adds)"
+
+# An unterminated code span cannot be resolved: the extractor fails CLOSED.
+export PR_BODY='Example: `Part of #741 and more text'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unterminated code span adds no labels' '[]' "$(pr_edit_adds)"
+
 # usage errors
 run pr-labels-from-issue
 assert 'missing argument exits 2' 2 "$RC"

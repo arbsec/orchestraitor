@@ -20,7 +20,13 @@
      auto-close and to pr-labels-from-issue. For partial landings, use a bare
      `Refs #N` (or `Part of #N`) line and put the scope note on the NEXT
      line. Use `Closes #N` only when the whole tracked scope lands in this
-     PR — a closing keyword triggers auto-close on merge. -->
+     PR — a closing keyword triggers auto-close on merge.
+     Put the reference in PROSE. The related forms are read from the body's
+     Markdown prose only, so a `Part of #N` quoted inside code (a fenced
+     block, an indented block, an inline code span), hidden in an HTML
+     comment, or buried in a link destination does NOT propagate labels; the
+     link TEXT is prose and does count. (The closing family is still read
+     from the raw body — #765 tracks aligning the two.) -->
 
 ## Specification references
 
