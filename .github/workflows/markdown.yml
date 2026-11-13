@@ -48,9 +48,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      # `rumdl` comes from `.mise.toml`, the repository's single source of
+      # truth for tool versions, where it is pinned to an exact version. A
+      # floating tag (`latest`) let the rule set change without a repository
+      # change: the local pre-PR gate and this job then ran different `rumdl`
+      # versions on the same tree and disagreed (arbsec/orchestraitor#761,
+      # #762). `install_args: rumdl` installs only the linter — the Rust
+      # toolchain this job does not need is left to the `docs-check` job.
+      # The version the job actually got is asserted against the pin before
+      # the lint runs, so a runner-image or registry change cannot silently
+      # shift the gate.
       - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b  # v5.2.7
+        with:
+          install_args: rumdl
       - name: Lint markdown
-        run: rumdl check .
+        run: |
+          pinned="$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)"
+          if [ -z "$pinned" ]; then
+            echo "error: no rumdl pin in .mise.toml — the markdown gate needs one" >&2
+            exit 1
+          fi
+          installed="$(rumdl --version | sed -n 's/^rumdl //p')"
+          if [ "$installed" != "$pinned" ]; then
+            echo "error: rumdl $installed is not the pinned $pinned (.mise.toml)" >&2
+            exit 1
+          fi
+          printf 'rumdl %s (pinned)\n' "$installed"
+          rumdl check .
 
   docs-check:
     name: Docs Consistency
