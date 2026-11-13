@@ -256,9 +256,10 @@ echo "Created PR: $PR_URL" >&2
 # --- Deterministic labeling chain (arbsec/orchestraitor#469) --------------------
 # A created PR MUST NOT depend on worker discretion for its labels: run
 # `pr-labels` (attribution: agent-created / needs-human-review) and then
-# `pr-labels-from-issue` (process labels copied from Closes/Fixes/Resolves
-# issues) right here. The PR already exists, so a labeling failure must
-# never orphan it — each step is non-fatal: on failure it prints a warning
+# `pr-labels-from-issue` (process labels copied from the PR's closing
+# (Closes/Fixes/Resolves) and related (Part of/Refs) issue references) right
+# here. The PR already exists, so a labeling failure must never orphan it —
+# each step is non-fatal: on failure it prints a warning
 # naming the PR and the exact manual command, and pr-create still succeeds.
 # SKIPPED when the chain route above ran: `gh-env-pr-create-chain` already
 # executed both steps (CHAINED=1) — rerunning would only double warnings.

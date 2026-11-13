@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # pr-labels-from-issue: copy process labels from a PR's linked issues
-# (arbsec/orchestraitor#469). A PR that closes `Closes #N` / `Fixes #N` /
-# `Resolves #N` references inherits the PROCESS labels its linked issues
-# already carry — the classification the issue triage produced — instead of
-# relying on a worker to re-derive it (or forget to).
+# (arbsec/orchestraitor#469). A PR that references issues with a closing
+# keyword (`Closes #N` / `Fixes #N` / `Resolves #N`) or a related keyword
+# (`Part of #N` / `Refs #N` — arbsec/orchestraitor#744) inherits the PROCESS
+# labels its linked issues already carry — the classification the issue
+# triage produced — instead of relying on a worker to re-derive it (or forget
+# to). A related reference propagates labels but never closes anything.
 #
 # Only the process-classification allowlist is copied, and only when the
 # issue actually carries the label: non-process labels (attribution,
@@ -25,7 +27,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues (Closes/Fixes/Resolves #N) onto the PR, idempotently. Positional: <pr-number>. Flags: --repo <owner/name>."
+  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N) and related (Part of/Refs #N, with optional ':') — related references propagate labels but never close an issue; bare #N mentions are ignored. Positional: <pr-number>. Flags: --repo <owner/name>."
   exit "$ORC_OK"
 fi
 
@@ -62,27 +64,103 @@ PROCESS_LABELS=(
 
 # --- Read the PR body ----------------------------------------------------------
 BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/pr-labels-from-issue-body.XXXXXX")"
-trap 'rm -f "$BODY_FILE"' EXIT
+PROSE_FILE="$(mktemp "${TMPDIR:-/tmp}/pr-labels-from-issue-prose.XXXXXX")"
+trap 'rm -f "$BODY_FILE" "$PROSE_FILE"' EXIT
 orc_lib_gh_service pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$BODY_FILE" ||
   { echo "error: cannot read PR #$PR body" >&2; exit "$ORC_ERR_UNRECOVERABLE"; }
 
-# Extract linked-issue numbers from the PR body: keyword references
-# (`Closes #N`, `Fixes #N`, `Resolves #N` — case-insensitive, plural forms
-# included), one per match, several allowed. Reference extraction is bounded
-# by the keyword grammar, never by free-form text: a bare `#N` without a
-# closing keyword is NOT a link and is ignored.
+# --- Reference grammar (arbsec/orchestraitor#744) ------------------------------
+# TWO families of reference, distinguished by what they MEAN:
+#
+#   closing  `Closes #N` / `Fixes #N` / `Resolves #N` — case-insensitive, with
+#            singular, plural and past-tense forms and an optional `:` between
+#            keyword and number. GitHub closes the issue when the PR merges:
+#            the reference is a completion claim.
+#   related  `Part of #N` / `Refs #N` — same case/colon tolerance, so
+#            `Part of: #N` and `Refs: #N` match too. The PR lands only part of
+#            the issue, or merely tracks it (#741/#764 is the canonical case;
+#            SKILL.md already tells authors to use a bare `Refs #N` for a
+#            partial landing): merging must NOT close the issue.
+#
+# Labels propagate from BOTH families — a partial landing needs the issue's
+# work classification exactly as much as a completing one — but a related
+# reference is never turned into a closing one: this script closes nothing (no
+# `gh issue close` anywhere), and auto-close is GitHub's own body parser acting
+# on the closing keywords in the body text, which this change does not touch.
+# The consumers that could hold a second, conflicting closing-keyword parser
+# were audited and hold none: `pr-checks` (checks/author only),
+# `reconcile-checklist` (only `<!-- orc:* -->` markers), `convergence-status`
+# (threads/records/checks), `merge-gate` (delegates to convergence-status and
+# matches head/base SHAs), `pr-create` (only chains this script), and orc's
+# `gh-env-pr-create-chain` (only invokes the two label scripts).
+#
+# Two bounds are kept from the original grammar:
+#   - a bare `#N` is still NOT a link: incidental mentions must not label the
+#     PR (SKILL.md documents that bare mentions are invisible);
+#   - `See #N` / `Related to #N` stay OUT: they are advisory prose rather than
+#     a tracked link, so accepting them would label PRs from a courtesy
+#     mention.
+# Word boundaries: the `(^|[^[:alnum:]_])` prefix is what keeps `Subpart of
+# #12` (and `Crossrefs #12`) from matching at all.
+CLOSING_RE='(^|[^[:alnum:]_])(closes?|closed|fixes?|fixed|resolves?|resolved)([[:space:]]*:[[:space:]]*|[[:space:]]+)#[0-9]+'
+RELATED_RE='(^|[^[:alnum:]_])(part[[:space:]]+of|refs?)([[:space:]]*:[[:space:]]*|[[:space:]]+)#[0-9]+'
+
+# Keyword matches -> unique issue numbers in body order (awk dedups without
+# reordering, so a repeated reference is fetched exactly once).
+refs_from() {
+  local file="$1" keyword_re="$2"
+  { grep -ioE "$keyword_re" "$file" || true; } |
+    { grep -ioE '#[0-9]+' || true; } |
+    tr -d '#' |
+    awk 'NF && !seen[$0]++'
+}
+
+# Closing references are read from the RAW body, which keeps the closing path
+# byte-identical to its pre-#744 behaviour (pinned by the suite).
+CLOSING_NUMBERS=()
+mapfile -t CLOSING_NUMBERS < <(refs_from "$BODY_FILE" "$CLOSING_RE")
+
+# Related references are read from PROSE ONLY: a fenced block or inline code
+# span that QUOTES `Part of #N` as an example must not gain labels. Mirroring
+# the same guard onto the closing path would change closing label sets, so
+# that unification is deliberately a separate change rather than a silent
+# behaviour shift here (the closing path's pre-existing gap is tracked in
+# arbsec/orchestraitor#765).
+# Documented limits: 4-space indented code blocks are not stripped, and an
+# inline span that itself contains a backtick run is not recognised.
+awk '
+  {
+    line = $0
+    sub(/^[[:space:]]+/, "", line)
+    if (fence == "") {
+      if (line ~ /^```/) { fence = "`"; next }
+      if (line ~ /^~~~/) { fence = "~"; next }
+      print; next
+    }
+    if (fence == "`" && line ~ /^```/) { fence = ""; next }
+    if (fence == "~" && line ~ /^~~~/) { fence = ""; next }
+  }
+' "$BODY_FILE" | sed -E 's/`[^`]*`//g' > "$PROSE_FILE"
+RELATED_NUMBERS=()
+mapfile -t RELATED_NUMBERS < <(refs_from "$PROSE_FILE" "$RELATED_RE")
+
+# One propagation list: closing refs first (their order is the pre-#744
+# receipt order), then related refs, deduplicated ACROSS families — a body
+# carrying both `Closes #A` and `Part of #A` fetches and copies A once. The
+# receipt keeps its single `issues` array: the propagation ACTION is identical
+# for both families, so the split lives in the grammar above, not in the
+# output contract.
 ISSUE_NUMBERS=()
-seen_numbers=""
-while IFS= read -r num; do
+declare -A SEEN_NUMBERS=()
+for num in "${CLOSING_NUMBERS[@]}" "${RELATED_NUMBERS[@]}"; do
   [ -z "$num" ] && continue
-  if printf '%s' "$seen_numbers" | grep -qxF "$num"; then continue; fi
-  seen_numbers="${seen_numbers}${num}"$'\n'
+  [ -n "${SEEN_NUMBERS[$num]+x}" ] && continue
+  SEEN_NUMBERS["$num"]=1
   ISSUE_NUMBERS+=("$num")
-done < <( { grep -ioE '(^|[^[:alnum:]_])(closes?|closed|fixes?|fixed|resolves?|resolved)([[:space:]]*:[[:space:]]*|[[:space:]]+)#[0-9]+' "$BODY_FILE" || true; } |
-  { grep -ioE '#[0-9]+' || true; } | tr -d '#')
+done
 
 if [ "${#ISSUE_NUMBERS[@]}" -eq 0 ]; then
-  echo "note: PR #$PR body has no Closes/Fixes/Resolves references; nothing to copy" >&2
+  echo "note: PR #$PR body has no closing (Closes/Fixes/Resolves #N) or related (Part of/Refs #N) references; nothing to copy" >&2
   echo '{"pr":'"$PR"',"issues":[],"labels_added":[]}'
   exit "$ORC_OK"
 fi

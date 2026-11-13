@@ -94,9 +94,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   The body follows `.github/PULL_REQUEST_TEMPLATE.md`
                   (Summary, exactly ONE primary closing reference on its own
                   line early in the body — `Closes #N` for full-scope
-                  landings, a bare `Refs #N` for partial landings whose
-                  remaining scope stays tracked; bare `#N` mentions are
-                  invisible to auto-close and `pr-labels-from-issue`,
+                  landings, a bare `Refs #N` — or `Part of #N` — for partial
+                  landings whose remaining scope stays tracked; both related
+                  forms reach `pr-labels-from-issue` (the labels propagate)
+                  while only a closing keyword auto-closes, and bare `#N`
+                  mentions are invisible to both,
                   Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
@@ -128,7 +130,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   dependencies, github-actions, spec, blocked:arbitraitor,
                   blocked:orchestraitor; `needs-human-review` is never
                   copied from issues, it is diff-derived — from the PR's
-                  Closes/Fixes/Resolves issues, #469) immediately after the
+                  closing (`Closes`/`Fixes`/`Resolves`) and related
+                  (`Part of`/`Refs`) issue references, #469, #744)
+                  immediately after the
                   PR exists; both steps are non-fatal and print the exact
                   manual command on failure.
                   `pr-labels <pr>` remains the manual fallback/reconcile

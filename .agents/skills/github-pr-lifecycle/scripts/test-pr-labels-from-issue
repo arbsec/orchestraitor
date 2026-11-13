@@ -10,6 +10,10 @@
 #   (d) non-fatal behavior when one issue fetch fails (others still apply)
 #   (e) pr-create chains pr-labels then pr-labels-from-issue after creation
 #   (f) the chain is non-fatal: a failing labeler still exits 0 from pr-create
+#   (g) related references (`Part of #N`, `Refs #N`, colon forms) propagate
+#       labels while never closing anything (#744): union + dedup, word
+#       boundaries, the fenced/inline-code guard, and a byte-identical
+#       `Closes #N` regression pin
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -230,6 +234,129 @@ export PR_BODY="__GH_FAIL__"
 run pr-labels-from-issue 77 --repo test-org/repo
 assert 'unreadable PR body exits 1' 1 "$RC"
 export PR_BODY="Closes #101"
+
+echo "--- related references: Part of / Refs (#744) ---"
+
+# A related reference ("Part of #N", "Refs #N") means "related, merging must
+# NOT close the issue" — the partial-landing form SKILL.md already prescribes.
+# It propagates the same allowlisted process labels a closing reference does;
+# nothing here closes an issue (auto-close is GitHub's own body parser).
+export ISSUE_741_LABELS="bug,agent-created,documentation"
+
+# (r1) plain `Part of #N` propagates labels.
+export PR_BODY="Part of #741" PR_LABELS="agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Part of ref exits 0' 0 "$RC"
+assert 'Part of ref propagates allowlisted labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'Part of ref lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+assert 'related ref never closes the issue (no issue-close call)' 0 \
+  "$(grep -cE '"issue","close"' "$GH_LOG")"
+
+# (r2) colon form `Part of: #N`.
+export PR_BODY="Part of: #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Part of: ref (colon form) exits 0' 0 "$RC"
+assert 'Part of: ref (colon form) propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r3) `Refs #N` — the form SKILL.md tells partial landings to use.
+export PR_BODY="Refs #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Refs ref exits 0' 0 "$RC"
+assert 'Refs ref propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r4) colon form `Refs: #N`.
+export PR_BODY="Refs: #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Refs: ref (colon form) exits 0' 0 "$RC"
+assert 'Refs: ref (colon form) propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r5) closing + related in one body: union of labels, deduplicated, each
+# issue fetched once, and the receipt keeps closing-first order.
+export ISSUE_101_LABELS="MVP,agent-created,bug" PR_LABELS="agent-created"
+export PR_BODY="Closes #101 and Part of #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'closing + related exits 0' 0 "$RC"
+assert 'closing + related labels are unioned and deduplicated' \
+  '["MVP","bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'closing + related fetch each issue once' 2 \
+  "$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+assert 'receipt lists closing then related references' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[101,741]')"
+
+# (r6) the SAME issue named by both families is fetched once.
+export PR_BODY="Closes #101, Part of #101"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'same issue in both families fetched once' 1 \
+  "$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+
+# (r7) a fenced block quoting `Part of #N` must not gain labels.
+export PR_BODY=$'Summary.\n\n```\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'fenced Part of ref exits 0' 0 "$RC"
+assert 'fenced Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+assert 'fenced-only body reports nothing to copy' 1 \
+  "$(grep -cF 'nothing to copy' "$TMP/stderr")"
+
+# (r8) tilde fences are honoured too (a tilde line inside a backtick fence
+# must not close it — that pairing is exercised by the mixed-fence case below).
+export PR_BODY=$'~~~text\nPart of #741\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tilde-fenced Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'```\n~~~\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tilde line inside a backtick fence does not close it' '[]' "$(pr_edit_adds)"
+
+# (r9) an inline code span quoting `Part of #N` must not gain labels.
+export PR_BODY='Example only: `Part of #741` is the partial-landing form.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'inline-code Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+
+# (r10) word boundaries: `Subpart of #N` / `Crossrefs #N` never match.
+export PR_BODY='Subpart of #741 and Crossrefs #741 are different words.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Subpart/Crossrefs prefixes do not match (word boundary)' '[]' "$(pr_edit_adds)"
+
+# (r11) an unreachable related issue is non-fatal; the others still apply.
+export ISSUE_FAIL=999 ISSUE_102_LABELS="spec"
+export PR_BODY="Part of #999 and Part of #102"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'unreachable related issue does not fail the run' 0 "$RC"
+assert 'warning names the unreachable related issue' 1 \
+  "$(grep -cF 'could not read labels of issue #999' "$TMP/stderr")"
+assert 'reachable related issue still contributes labels' \
+  '["spec"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+unset ISSUE_FAIL
+
+# (r12) grammar stays keyword-bounded: bare mentions and advisory forms
+# (`See #N`, `Related to #N`) are still not links.
+export PR_BODY='Incidental #741 mention; See #741; Related to #741.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'bare/advisory mentions do not propagate (See and Related to stay out)' \
+  '[]' "$(pr_edit_adds)"
+
+# (r13) REGRESSION PIN: a plain `Closes #N` body keeps its exact label set
+# AND its exact receipt, byte for byte, as before #744.
+export ISSUE_101_LABELS="MVP,agent-created,bug" PR_LABELS="agent-created"
+export PR_BODY="Closes #101"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'plain Closes label set unchanged (regression pin)' \
+  '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'plain Closes receipt byte-identical to pre-#744' \
+  '{"pr":77,"issues":[101],"labels_added":["MVP","bug"]}' "$OUT"
+
+# (r14) The prose guard is scoped to the RELATED family on purpose: the
+# closing path has never had one (it matched inside fences before #744 too),
+# so its historical behaviour is pinned rather than silently changed here;
+# unifying the two is arbsec/orchestraitor#765.
+export PR_BODY=$'```\nCloses #101\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'closing ref inside a fence keeps its pre-#744 behaviour (unchanged)' \
+  '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
 
 # usage errors
 run pr-labels-from-issue

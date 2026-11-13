@@ -14,9 +14,11 @@
 <!-- Exactly ONE primary closing keyword on its own line, early in the body:
      Closes #N. (Not Fixes/Resolves — single-`Closes` usage is project policy
      for a consistent primary reference; the `pr-labels-from-issue` extractor
-     itself also accepts `Fixes`/`Resolves` forms.) Bare #N mentions are
-     invisible to auto-close and to pr-labels-from-issue. For partial
-     landings, use a bare `Refs #N` line and put the scope note on the NEXT
+     itself also accepts `Fixes`/`Resolves`, plus the related forms
+     `Part of #N` / `Refs #N` — labels propagate from both families, but only
+     a closing keyword auto-closes.) Bare #N mentions are invisible to
+     auto-close and to pr-labels-from-issue. For partial landings, use a bare
+     `Refs #N` (or `Part of #N`) line and put the scope note on the NEXT
      line. Use `Closes #N` only when the whole tracked scope lands in this
      PR — a closing keyword triggers auto-close on merge. -->
 
