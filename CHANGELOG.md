@@ -807,6 +807,18 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   different base on GitHub Enterprise), so the tree + commit upload works
   against GitHub Enterprise. Documented in
   [docs/cli/orc-github.md](docs/cli/orc-github.md).
+- **`orc github push-branch` can now land a file-type change** (issue 729): git
+  reports a regular file replaced by a symlink — or a symlink replaced by a
+  regular file — as status `T`, not `M`, and `push-branch` could not land it at
+  all: the path never reached the mode-requiring routing set and the landing
+  refused with `unexpected diff-tree status 'T'`. Such a change set now routes
+  to the REST tree + commit transport, which carries the exact destination mode
+  (`120000` with the link target as the blob for a symlink, `100644`/`100755`
+  for a regular file), so a symlink is never materialized as a regular file and
+  a regular file is never replaced by a dangling symlink. A type change
+  involving a submodule/gitlink, a tree, or an unreadable mode still fails
+  closed with a typed refusal naming the path and both modes. Documented in
+  [docs/cli/orc-github.md](docs/cli/orc-github.md).
 - **Re-plans now carry the prior attempt's receipt summary** (reduces the
   "re-explore the same worktree" failure mode where every attempt re-read
   the same files, issue 657): a re-plan prompt still opens with the static

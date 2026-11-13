@@ -292,8 +292,8 @@ Arguments and defaults:
 - `--dry-run` — resolve everything (owner/repo, branches, diff base, change
   set) and print the plan (paths and statuses only — never blob contents)
   without creating or moving anything on the remote. When the change set needs
-  a file-mode change, it also prints which paths will use the REST tree +
-  commit transport (see the mode bullet below).
+  a file-mode or file-type change, it also prints which paths will use the REST
+  tree + commit transport (see the mode and type-change bullets below).
 
 Mechanics:
 
@@ -345,11 +345,11 @@ Mechanics:
   the API before failing: a ref that provably points at the new head
   degrades the failure to a WARNING on stderr and reports success — a
   mutation that moved the ref is never reported as an error.
-- **Executable-file modes (REST tree + commit transport):** GraphQL is still
-  the default landing transport, but `createCommitOnBranch` carries no mode
-  field: `FileAddition` always lands 100644 and `FileChange` keeps GitHub's
-  stored mode, so neither direction of an executable-bit change is
-  expressible. When a change set requires a mode change — an `A`/`M` path
+- **Executable-file modes and type changes (REST tree + commit transport):**
+  GraphQL is still the default landing transport, but `createCommitOnBranch`
+  carries no mode field: `FileAddition` always lands 100644 and `FileChange`
+  keeps GitHub's stored mode, so neither direction of an executable-bit change
+  is expressible. When a change set requires a mode change — an `A`/`M` path
   whose local mode differs from the diff-base (remote head) mode, i.e. an
   ADDED 100755 file, `100644 -> 100755` (a mode-only repair), or the reverse
   `100755 -> 100644` — `push-branch` automatically lands through the REST
@@ -363,6 +363,17 @@ Mechanics:
   or truncated tree, or an unverified commit fails closed with a typed error
   naming the paths — the remote branch is unchanged. Content-only landings
   (including modifications that keep the mode) never use the REST transport.
+- **Type changes (`T`):** git reports a regular file replaced by a symlink —
+  or a symlink replaced by a regular file — as status `T`, not `M`. A `T` path
+  always routes to the REST transport, which carries the destination mode
+  exactly: `120000` for a symlink, with the link target as the blob content,
+  or `100644`/`100755` for a regular file, with the file's own bytes. This is
+  the only shape a type change may take. A `T` involving a submodule/gitlink
+  (`160000`), a tree, or a mode that cannot be read is refused before anything
+  is uploaded, with a typed error naming the path and both modes — an
+  ambiguous change set is never landed, and never silently dropped. The whole
+  change set routes to REST together (never split across the two transports),
+  so an unrelated ordinary modification in the same push lands normally.
 - In `required` enforcement mode the complete-`github_app` gate applies before
   any network call.
 
