@@ -9,8 +9,28 @@ pre-commit:
       run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       glob: "*.rs"
       stage_fixed: false
+    # Local half of the rumdl pin assertion (arbsec/orchestraitor#774). The CI
+    # job (.github/workflows/markdown.yml) refuses to lint with an unpinned
+    # rumdl; without the same guard here a `rumdl` first on a developer's PATH
+    # (e.g. a cargo install shadowing the mise shim) hands the pre-commit hook a
+    # different rule set than CI. Measured on this repository: 0.2.20's stale
+    # slugger reported two MD051 false positives in a tree 0.3.2 calls clean.
+    # Fail closed — a hook that lints with rules CI will not reproduce is worse
+    # than a hook that stops and says how to fix it.
     markdown-lint:
-      run: rumdl check {staged_files}
+      run: |
+        pinned="$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)"
+        if [ -z "$pinned" ]; then
+          echo "error: no rumdl pin in .mise.toml — the markdown gate needs one" >&2
+          exit 1
+        fi
+        installed="$(rumdl --version 2>/dev/null | sed -n 's/^rumdl //p')"
+        if [ "$installed" != "$pinned" ]; then
+          echo "error: rumdl ${installed:-<not found>} is not the pinned $pinned (.mise.toml)" >&2
+          echo "  fix: make the pinned rumdl first on PATH ('mise install'); a cargo or distro rumdl shadows it" >&2
+          exit 1
+        fi
+        rumdl check {staged_files}
       glob: "*.{md,markdown}"
       stage_fixed: false
     # Pre-landing simplify pass (fail-open quality tooling; spec §9.5): a

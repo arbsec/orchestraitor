@@ -5,8 +5,9 @@ cocogitto = "7.0.0"
 # `rumdl` is pinned to an exact version: it is the markdown gate, and a
 # floating tag lets the rule set change without a repository change (the
 # local pre-PR gate then disagrees with CI, which installs the same config).
-# The CI job asserts this exact version before it lints (see
-# `.github/workflows/markdown.yml`).
+# Both gates assert this exact version before they lint: the CI job (see
+# `.github/workflows/markdown.yml`) and the local pre-commit markdown hook
+# (see `lefthook.yml`), so a `rumdl` first on `PATH` cannot shift either.
 rumdl = "0.3.2"
 
 [env]

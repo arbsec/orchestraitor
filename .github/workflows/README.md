@@ -31,7 +31,10 @@ Supporting workflows, outside the gate:
   version is pinned to an exact version in [`.mise.toml`](../../.mise.toml)
   (the repository's single source of truth for tool versions), and the job
   asserts that the installed version is the pinned one before it lints, so a
-  runner-image or registry change cannot silently shift the gate.
+  runner-image or registry change cannot silently shift the gate. The local
+  pre-commit `markdown-lint` hook in [`lefthook.yml`](../../lefthook.yml) makes
+  the same assertion, so a `rumdl` that is first on a developer's `PATH` but
+  is not the pin fails closed instead of linting with a different rule set.
 - [release.yml](release.yml) — manual release pipeline (`workflow_dispatch` only).
 - [skills.yml](skills.yml) — `bash -n`, `shellcheck --severity=error`, and every
   skill script self-test, over `.agents/skills/**` and `scripts/**` (the Rust
