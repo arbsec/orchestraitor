@@ -100,8 +100,9 @@ jobs:
           # Floor the count so a removal fails the gate instead of silently
           # narrowing it. Bump this number when you ADD a self-test; never lower
           # it when removing one. (9: test-pr-create-gate-base added with #733;
-          # 10: test-review-policy-staleness added with #748.)
-          minimum_suites=10
+          # 10: test-review-policy-staleness added with #748;
+          # 11: test-reconcile-checklist added with #788.)
+          minimum_suites=11
           if [ "${#tests[@]}" -lt "$minimum_suites" ]; then
             echo "error: expected at least $minimum_suites skill self-test suites, found ${#tests[@]}" >&2
             exit 1

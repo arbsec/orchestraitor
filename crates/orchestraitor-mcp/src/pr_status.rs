@@ -216,10 +216,21 @@ pub struct ThreadItem {
 pub struct Checklist {
     /// Items with their orc markers.
     pub items: Vec<ChecklistItem>,
-    /// Vacuously true when no markers exist.
+    /// Number of managed markers parsed from the body.
+    pub marker_count: u64,
+    /// Whether the body carried at least one managed marker.
+    pub markers_present: bool,
+    /// True only when at least one marker exists AND every marker is checked.
+    /// A marker-less body is MISSING evidence, never "all checked" (arbsec/orchestraitor#788).
     pub all_checked: bool,
     /// Count of unchecked items.
     pub unchecked_count: u64,
+    /// Whether the body's `<!-- orc:none --> <justification>` sentinel waived
+    /// the marker requirement (only when no marker exists).
+    pub waived: bool,
+    /// The waiver's one-line justification (present only when `waived`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
 }
 
 /// One managed checklist item.
@@ -852,10 +863,18 @@ fn assemble_verdict(
             threads.unresolved_actionable
         ));
     }
-    if let Some(checklist) = &checklist
-        && !checklist.all_checked
-    {
-        reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
+    if let Some(checklist) = &checklist {
+        // Two DISTINCT checklist failures (arbsec/orchestraitor#788): a body
+        // with no managed markers is missing evidence, not a vacuous pass, and
+        // a marker-bearing body with unticked boxes is the item-count reason.
+        // The `<!-- orc:none --> <justification>` waiver passes only the former.
+        if !checklist.markers_present {
+            if !checklist.waived {
+                reasons.push("checklist_markers_missing".to_string());
+            }
+        } else if !checklist.all_checked {
+            reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
+        }
     }
     apply_review_state_gates(
         initial,
@@ -1180,8 +1199,10 @@ fn gh_bucket(state: &str) -> String {
 /// Parses the PR body for `<!-- orc:MARKER -->` checklist lines
 /// (reconcile-checklist's grep pattern, verbatim):
 /// `- [ ] <!-- orc:XXX --> description` / `- [x] <!-- orc:XXX --> description`.
-/// A body with zero markers is a legitimate empty checklist (`all_checked`
-/// is vacuously true).
+/// A body with zero markers is an EMPTY checklist and, per
+/// arbsec/orchestraitor#788, MISSING evidence: `markers_present` is false and
+/// `all_checked` is false (an empty `all()` used to make it vacuously true and
+/// merge a PR with no checklist evidence at all).
 fn parse_checklist(body: &str) -> Checklist {
     let mut items = Vec::new();
     for line in body.lines() {
@@ -1219,14 +1240,51 @@ fn parse_checklist(body: &str) -> Checklist {
             description,
         });
     }
+    let marker_count = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    let markers_present = !items.is_empty();
     let unchecked_count =
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
-    let all_checked = items.iter().all(|item| item.checked);
+    let all_checked = markers_present && items.iter().all(|item| item.checked);
+    // The #788 opt-out is effective ONLY for a marker-less body: it can never
+    // mask a partially-checked checklist.
+    let waiver_reason = if markers_present {
+        None
+    } else {
+        parse_checklist_waiver(body)
+    };
     Checklist {
         items,
+        marker_count,
+        markers_present,
         all_checked,
         unchecked_count,
+        waived: waiver_reason.is_some(),
+        waiver_reason,
     }
+}
+
+/// Parses the recorded opt-out (arbsec/orchestraitor#788): a standalone
+/// `<!-- orc:none --> <one-line justification>` line. The justification is
+/// mandatory — a bare sentinel waives nothing — and the first qualifying line
+/// wins (reconcile-checklist's `grep -m1`).
+fn parse_checklist_waiver(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("<!--") else {
+            continue;
+        };
+        let Some((marker, after_marker)) = rest.split_once("-->") else {
+            continue;
+        };
+        if marker.trim() != "orc:none" {
+            continue;
+        }
+        let justification = after_marker.trim();
+        if !justification.is_empty() {
+            return Some(justification.to_string());
+        }
+    }
+    None
 }
 
 /// Reads the CLEAN-review record for this PR at the current head
@@ -1766,11 +1824,65 @@ mod tests {
     }
 
     #[test]
-    fn empty_body_is_a_vacuously_checked_empty_checklist() {
+    fn marker_less_body_is_missing_not_all_checked() {
+        // arbsec/orchestraitor#788: an empty `all()` used to report a
+        // marker-less body as fully checked, which reached merge-gate's
+        // `.mergeable` and merged a PR with no checklist evidence at all.
         let checklist = parse_checklist("Just a custom PR body with no markers.");
         assert!(checklist.items.is_empty());
-        assert!(checklist.all_checked);
+        assert_eq!(checklist.marker_count, 0);
+        assert!(!checklist.markers_present);
+        assert!(!checklist.all_checked);
         assert_eq!(checklist.unchecked_count, 0);
+        assert!(!checklist.waived);
+        assert_eq!(checklist.waiver_reason, None);
+    }
+
+    #[test]
+    fn marker_count_and_markers_present_track_the_parsed_items() {
+        let checklist = parse_checklist(
+            "- [x] <!-- orc:issue --> linked\n\
+             - [x] <!-- orc:tests --> tested\n",
+        );
+        assert_eq!(checklist.marker_count, 2);
+        assert!(checklist.markers_present);
+        assert!(checklist.all_checked);
+    }
+
+    #[test]
+    fn checklist_waiver_requires_a_justification() {
+        // A bare sentinel waives nothing: the justification is the record.
+        let bare = parse_checklist("A body.\n\n<!-- orc:none -->\n");
+        assert!(!bare.markers_present);
+        assert!(!bare.waived, "a bare sentinel must not waive");
+        assert_eq!(bare.waiver_reason, None);
+
+        let waived =
+            parse_checklist("A body.\n\n<!-- orc:none --> machine-authored delivery summary\n");
+        assert!(!waived.markers_present);
+        assert!(waived.waived);
+        assert_eq!(
+            waived.waiver_reason.as_deref(),
+            Some("machine-authored delivery summary")
+        );
+        // Waived is still not "all checked": the checklist was never substantiated.
+        assert!(!waived.all_checked);
+        assert_eq!(waived.marker_count, 0);
+    }
+
+    #[test]
+    fn checklist_waiver_never_masks_a_partially_checked_checklist() {
+        let checklist = parse_checklist(
+            "<!-- orc:none --> sneaky waiver\n\
+             - [x] <!-- orc:issue --> linked\n\
+             - [ ] <!-- orc:tests --> tested\n",
+        );
+        assert!(checklist.markers_present);
+        assert_eq!(checklist.marker_count, 2);
+        assert!(!checklist.waived, "a waiver is inert when markers exist");
+        assert_eq!(checklist.waiver_reason, None);
+        assert!(!checklist.all_checked);
+        assert_eq!(checklist.unchecked_count, 1);
     }
 
     #[test]

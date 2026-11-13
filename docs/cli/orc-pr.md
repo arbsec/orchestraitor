@@ -53,9 +53,15 @@ The `--json` output is the §9.48 schema: `number`, `repository`, `head_sha`,
 `skip_reason`, workflow, link) with the aggregate booleans `checks_all_passed`,
 `checks_any_failing`, `checks_any_pending`, `threads` (total, unresolved
 actionable, resolved, outdated, size-capped items), `checklist`
-(`<!-- orc:* -->` markers), `review_record` (the `.orchestraitor/reviews/`
+(`marker_count`, `markers_present`, `all_checked`, `unchecked_count`,
+`waived`, `waiver_reason`, and the `<!-- orc:* -->` items), `review_record`
+(the `.orchestraitor/reviews/`
 CLEAN-record state), `convergence` (`mergeable` + `reasons`), and
-`fetched_at`.
+`fetched_at`. `all_checked` is true only when at least one marker exists AND
+every marker is checked: a body with no managed markers is MISSING evidence
+(reason `checklist_markers_missing`), never a vacuous pass, and converges only
+under the recorded `<!-- orc:none --> <one-line justification>` waiver —
+reported as `waived`/`waiver_reason`, never silently.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

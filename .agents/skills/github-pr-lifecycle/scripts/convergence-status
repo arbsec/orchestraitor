@@ -58,13 +58,21 @@ THREADS_JSON="$(bash "$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>
 }
 UNRESOLVED_THREADS="$(echo "$THREADS_JSON" | jq -r '.unresolved_actionable')"
 
-# 3. Checklist: all orc:* markers must be checked.
+# 3. Checklist: the body must carry the managed orc:* markers AND all of them
+# must be checked. A body with ZERO markers is MISSING evidence, never a vacuous
+# pass: it blocks with the distinct reason `checklist_markers_missing` (#788 —
+# the defect was `all_checked: true` for an empty set, which reached
+# merge-gate's `.mergeable` and merged a PR with no checklist evidence at all).
 CHECKLIST_JSON="$(bash "$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
   echo "error: failed to reconcile checklist" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
 ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
 UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
+MARKERS_PRESENT="$(echo "$CHECKLIST_JSON" | jq -r '.markers_present')"
+MARKER_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.marker_count')"
+CHECKLIST_WAIVED="$(echo "$CHECKLIST_JSON" | jq -r '.waived')"
+WAIVER_REASON="$(echo "$CHECKLIST_JSON" | jq -r '.waiver_reason // ""')"
 
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
@@ -92,7 +100,16 @@ REASONS=""
 [ "$ALL_CHECKS_PASS" != "true" ] && REASONS="${REASONS}checks_not_passing, "
 [ "$CHECKS_PENDING" = "true" ] && REASONS="${REASONS}checks_pending, "
 [ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
-[ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
+# Two distinct checklist failures: a marker-less body is MISSING evidence
+# (`checklist_markers_missing`) and a marker-bearing body with unticked boxes is
+# `unchecked_items(N)` — never collapsed into one code (#788). The waiver is the
+# only pass without markers, and it is recorded (JSON `checklist_waived`, stderr
+# notice) rather than indistinguishable from a complete checklist.
+if [ "$MARKERS_PRESENT" = "true" ]; then
+  [ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
+elif [ "$CHECKLIST_WAIVED" != "true" ]; then
+  REASONS="${REASONS}checklist_markers_missing, "
+fi
 [ "$REVIEW_DECISION" = "REVIEW_REQUIRED" ] && REASONS="${REASONS}review_required, "
 [ "$IS_DRAFT" = "true" ] && REASONS="${REASONS}is_draft, "
 REASONS="${REASONS%, }"
@@ -100,23 +117,39 @@ REASONS="${REASONS%, }"
 MERGEABLE="true"
 [ -n "$REASONS" ] && MERGEABLE="false"
 
+if [ "$CHECKLIST_WAIVED" = "true" ]; then
+  echo "NOTE: checklist marker requirement WAIVED for PR #$PR by the body sentinel: $WAIVER_REASON" >&2
+fi
+
 if [ "$OPT_JSON" = true ]; then
   jq -n \
     --arg mergeable "$MERGEABLE" \
     --arg reasons "$REASONS" \
     --arg head_sha "$HEAD_SHA" \
     --arg base_oid "$BASE_SHA" \
+    --arg all_checks_pass "$ALL_CHECKS_PASS" \
+    --arg unresolved "$UNRESOLVED_THREADS" \
+    --arg unchecked "$UNCHECKED_COUNT" \
+    --arg marker_count "$MARKER_COUNT" \
+    --arg markers_present "$MARKERS_PRESENT" \
+    --arg checklist_waived "$CHECKLIST_WAIVED" \
+    --arg waiver_reason "$WAIVER_REASON" \
+    --arg review_decision "$REVIEW_DECISION" \
+    --arg is_draft "$IS_DRAFT" \
     '{
       mergeable: ($mergeable == "true"),
       reasons: ($reasons | split(", ") | map(select(length > 0))),
       head_sha: $head_sha,
       base_oid: $base_oid,
-      checks_all_passed: ($mergeable == "true" or true),
-      unresolved_actionable_threads: 0,
-      unchecked_checklist_items: 0,
-      review_decision: "",
-      is_draft: false
-    }'
+      checks_all_passed: ($all_checks_pass == "true"),
+      unresolved_actionable_threads: ($unresolved | tonumber? // 0),
+      unchecked_checklist_items: ($unchecked | tonumber? // 0),
+      checklist_marker_count: ($marker_count | tonumber? // 0),
+      checklist_markers_present: ($markers_present == "true"),
+      checklist_waived: ($checklist_waived == "true"),
+      review_decision: $review_decision,
+      is_draft: ($is_draft == "true")
+    } | if .checklist_waived then .checklist_waiver_reason = $waiver_reason else . end'
 else
   if [ "$MERGEABLE" = "true" ]; then
     echo "CONVERGED: PR #$PR is mergeable at HEAD $HEAD_SHA."

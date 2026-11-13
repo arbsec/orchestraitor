@@ -797,6 +797,25 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **A PR body with no managed checklist markers no longer passes the merge gate
+  vacuously** (issue 788): `reconcile-checklist` reported `all_checked: true`
+  for a body with zero `<!-- orc:* -->` markers (an empty set is vacuously
+  true), so a wholesale body rewrite (PR #767's) reached `mergeable: true` with
+  no checklist evidence at all. The checklist now keeps the two states apart:
+  the `checklist` object gains `marker_count`, `markers_present`, `waived`, and
+  `waiver_reason`; `all_checked` is true only when at least one marker exists
+  AND every marker is checked; a marker-less body blocks with the new reason
+  `checklist_markers_missing` (a marker-bearing body keeps
+  `unchecked_items(n)`); and the one-pager names the missing state instead of
+  rendering "0 unchecked item(s)". The one recorded opt-out is a standalone
+  `<!-- orc:none --> <one-line justification>` line in the body: it converges
+  and is reported (`waived` + `waiver_reason`) and announced on stderr rather
+  than silently indistinguishable from a complete checklist, and it can never
+  mask unticked boxes. The rule stays satisfiable at creation: `pr-create`
+  appends the nine `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a
+  supplied body that carries none, and the delivery lane appends them to its
+  model-authored PR summary. Documented in
+  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
   the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
   plain `skip`, so `checks_all_passed` was `false` on a PR whose every real

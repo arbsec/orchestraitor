@@ -114,6 +114,31 @@ pub const DELIVERY_ORC_BIN_MISSING: &str = "delivery-orc-bin-missing";
 /// gen-3 minor).
 const ORC_CHILD_TIMEOUT_SECS: u64 = 300;
 
+/// The managed PR checklist (`.github/PULL_REQUEST_TEMPLATE.md`'s nine
+/// `<!-- orc:* -->` markers, UNCHECKED) appended to every delivery PR body.
+///
+/// `convergence-status` FAILS CLOSED on a body with no managed marker
+/// (`checklist_markers_missing`, arbsec/orchestraitor#788), and a delivery body
+/// is the model-authored run summary — it never had the template applied, so
+/// without this the loop's own PRs would be unmergeable by construction (#683:
+/// a fail-closed rule no caller can satisfy is worse than the bug). The markers
+/// land UNCHECKED because a checked box is a verified fact: the reviewing agent
+/// ticks them with evidence. They are appended unconditionally, never "only
+/// when the summary carries none" — untrusted model output must not decide
+/// whether the gate applies to itself (spec `40-arbitraitor-integration.md`
+/// §6.1). The drift guard in `delivery_tests` asserts these lines match the
+/// template.
+const DELIVERY_PR_CHECKLIST: &str = "\n\n## Merge checklist\n\n\
+- [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n\
+- [ ] <!-- orc:service-identity --> All GitHub writes (PR creation, comments, review posts, merges, commits) attributed to arbsec-agent — no personal-account (@mekwall) writes (owner mandate; .agents/project/orchestraitor-workflow.md \"GitHub service identity\")\n\
+- [ ] <!-- orc:tests --> Tests are added or updated\n\
+- [ ] <!-- orc:security --> Security impact is reviewed\n\
+- [ ] <!-- orc:docs --> Human-facing documentation is updated, or not required with justification\n\
+- [ ] <!-- orc:rollback --> Rollback or recovery behavior is verified where applicable\n\
+- [ ] <!-- orc:checks --> All required and non-optional checks pass\n\
+- [ ] <!-- orc:review --> All noteworthy findings are resolved\n\
+- [ ] <!-- orc:threads --> All actionable review threads are resolved\n";
+
 /// Real delivery sink (issue #656): hands a completed run's committed
 /// worktree state to `orc github push-branch` (the App-signed landing
 /// primitive, #491) and then opens a PR through `orc github
@@ -252,6 +277,12 @@ impl PushBranchDeliverySink {
         request: &DeliveryRequest,
     ) -> Result<String, &'static str> {
         let title = format!("feat(loop): task {task}", task = request.task_id);
+        // The managed checklist rides the body: without it the PR is blocked at
+        // merge by `checklist_markers_missing` (see DELIVERY_PR_CHECKLIST).
+        let body = format!(
+            "{summary}{DELIVERY_PR_CHECKLIST}",
+            summary = request.summary
+        );
         let mut pr = tokio::process::Command::new(&self.orc_bin);
         pr.current_dir(worktree).args([
             "github",
@@ -270,7 +301,7 @@ impl PushBranchDeliverySink {
             "--title",
             &title,
             "--body",
-            &request.summary,
+            &body,
         ]);
         pr.kill_on_drop(true);
         let pr_output = tokio::time::timeout(

@@ -183,6 +183,73 @@ orc_lib_require_body_file() {
   fi
 }
 
+# --- Managed PR checklist (arbsec/orchestraitor#788) ---------------------------
+# `reconcile-checklist` reports a body with ZERO `<!-- orc:* -->` markers as
+# MISSING evidence, never as "all checked", and `convergence-status` blocks that
+# body with the distinct reason `checklist_markers_missing`. The gate is only
+# satisfiable if PR CREATION gives a wholesale body the managed checklist, so
+# `pr-create` appends these markers to a body that carries none (#683 class:
+# a fail-closed rule no caller can satisfy is worse than the bug).
+#
+# `.github/PULL_REQUEST_TEMPLATE.md` is the single source of truth; this
+# constant is the fallback for a checkout that does not carry it. The drift
+# guard in `test-reconcile-checklist` asserts the two agree verbatim.
+ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied
+- [ ] <!-- orc:service-identity --> All GitHub writes (PR creation, comments, review posts, merges, commits) attributed to arbsec-agent — no personal-account (@mekwall) writes (owner mandate; .agents/project/orchestraitor-workflow.md "GitHub service identity")
+- [ ] <!-- orc:tests --> Tests are added or updated
+- [ ] <!-- orc:security --> Security impact is reviewed
+- [ ] <!-- orc:docs --> Human-facing documentation is updated, or not required with justification
+- [ ] <!-- orc:rollback --> Rollback or recovery behavior is verified where applicable
+- [ ] <!-- orc:checks --> All required and non-optional checks pass
+- [ ] <!-- orc:review --> All noteworthy findings are resolved
+- [ ] <!-- orc:threads --> All actionable review threads are resolved'
+
+# True (exit 0) when the text is already CHECKLIST-BEARING: at least one
+# `- [ ] <!-- orc:NAME -->` item line, or the explicit waiver sentinel
+# `<!-- orc:none --> <justification>` (the recorded opt-out, #788). Such a body
+# is never rewritten: author content is evidence, not something a helper edits.
+orc_lib_has_checklist() {
+  local text="$1"
+  if printf '%s\n' "$text" \
+    | grep -qP '^\s*-\s*\[(.)\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->'; then
+    return 0
+  fi
+  printf '%s\n' "$text" | grep -qP '^\s*<!--\s*orc:none\s*-->\s*\S'
+}
+
+# Prints the managed checklist (nine UNCHECKED markers). Reads
+# `<root>/.github/PULL_REQUEST_TEMPLATE.md` when it exists, normalizing any
+# pre-ticked box back to unchecked — a template is a baseline, never evidence —
+# and falls back to ORC_LIB_CHECKLIST_FALLBACK.
+orc_lib_checklist_markers() {
+  local root="${1:-}" markers=""
+  if [ -n "$root" ] && [ -f "$root/.github/PULL_REQUEST_TEMPLATE.md" ]; then
+    markers="$(grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
+      "$root/.github/PULL_REQUEST_TEMPLATE.md" || true)"
+  fi
+  if [ -z "$markers" ]; then
+    markers="$ORC_LIB_CHECKLIST_FALLBACK"
+  fi
+  printf '%s\n' "$markers" | sed -E 's/^([[:space:]]*)-[[:space:]]*\[[xX]\]/\1- [ ]/'
+}
+
+# Prints the body, appending the managed checklist when it carries none (#788).
+# Usage: orc_lib_ensure_checklist_markers <body> [repo-root]
+orc_lib_ensure_checklist_markers() {
+  local body="$1" root="${2:-}"
+  if orc_lib_has_checklist "$body"; then
+    printf '%s' "$body"
+    return 0
+  fi
+  printf '%s' "$body"
+  if [ -n "$body" ]; then
+    printf '\n'
+  fi
+  printf '\n## Merge checklist\n\n'
+  printf '%s\n\n' '<!-- Added by pr-create: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788). -->'
+  orc_lib_checklist_markers "$root"
+}
+
 # --- Config loader -------------------------------------------------------------
 # Loads .agents/project/github-project.local.toml (preferred) or falls back to the
 # committed example ONLY for field/option NAME discovery (node IDs are never taken

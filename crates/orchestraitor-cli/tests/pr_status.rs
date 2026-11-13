@@ -162,6 +162,17 @@ fn body_all_checked() -> String {
     .to_string()
 }
 
+/// A body with NO managed marker at all — the #788 vacuous-pass shape
+/// (observed on the merged PR #767 body).
+fn body_no_markers() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "Summary of the change.\n\n| script | note |\n|---|---|\n| reconcile-checklist | parses markers |",
+        }}}
+    })
+    .to_string()
+}
+
 fn error_response(message: &str) -> String {
     serde_json::json!({
         "data": null,
@@ -561,6 +572,150 @@ fn pr_status_blocked_pr_is_a_successful_read_exit_zero() -> miette::Result<()> {
         "reason codes must match convergence-status's vocabulary in order: {rendered:?}"
     );
     let _ = rendered;
+    Ok(())
+}
+
+#[test]
+fn pr_status_marker_less_body_blocks_with_checklist_markers_missing() -> miette::Result<()> {
+    // #788: every other gate is green, and the body carries NO managed marker.
+    // This used to be `mergeable: true` (jq's `all()` over an empty array is
+    // true), which merge-gate accepted — the vacuous pass observed on PR #767.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_no_markers(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_markers_missing"]),
+        "a missing checklist must never be reported as unchecked_items(0)"
+    );
+    assert_eq!(verdict["checklist"]["marker_count"], 0);
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(verdict["checklist"]["all_checked"], false);
+    assert_eq!(verdict["checklist"]["waived"], false);
+    assert_eq!(verdict["checklist"]["unchecked_count"], 0);
+
+    // The one-pager names the state instead of rendering "0 unchecked item(s)".
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(
+        text.contains("no managed orc:* markers found (UNSUBSTANTIATED"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_waived_marker_less_body_passes_visibly() -> miette::Result<()> {
+    // The #788 opt-out: `<!-- orc:none --> <justification>` is the ONE recorded
+    // way a marker-less body converges — and it stays visible in the verdict.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "body": "Machine-authored summary.\n\n<!-- orc:none --> delivery summary only\n",
+            }}}
+        })
+        .to_string(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], true, "{verdict}");
+    assert_eq!(verdict["convergence"]["reasons"], serde_json::json!([]));
+    assert_eq!(verdict["checklist"]["waived"], true, "{verdict}");
+    assert_eq!(
+        verdict["checklist"]["waiver_reason"],
+        "delivery summary only"
+    );
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+
+    // The one-pager records WHY the requirement was waived — the opt-out is
+    // visible, never a silent pass.
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(
+        text.starts_with("MERGEABLE:"),
+        "a waived marker-less body still merges: {text}"
+    );
+    assert!(
+        text.contains("checklist: marker requirement WAIVED — delivery summary only"),
+        "{text}"
+    );
     Ok(())
 }
 

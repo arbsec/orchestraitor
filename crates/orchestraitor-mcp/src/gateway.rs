@@ -2020,8 +2020,13 @@ mod tests {
                 "pageInfo": {"hasNextPage": false}, "nodes": []
             }}}}
         });
+        // A marker-BEARING body: a body with no managed markers is missing
+        // evidence now (arbsec/orchestraitor#788) and would block the verdict
+        // this happy-path fixture asserts.
         let body = serde_json::json!({
-            "data": {"repository": {"pullRequest": {"body": "no markers"}}}
+            "data": {"repository": {"pullRequest": {
+                "body": "- [x] <!-- orc:issue --> linked\n- [x] <!-- orc:tests --> tested"
+            }}}
         });
         vec![
             view.to_string(),

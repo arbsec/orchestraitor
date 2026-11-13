@@ -327,6 +327,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `bash .agents/skills/github-pr-lifecycle/scripts/convergence-status`
                   to compute the verdict from checks + threads + checklist.
+                  A PR body with ZERO `<!-- orc:* -->` markers blocks with
+                  `checklist_markers_missing` — a marker-less body is MISSING
+                  evidence, never a satisfied checklist (#788). `pr-create`
+                  appends the nine template markers UNCHECKED to a supplied body
+                  that carries none, so tick them with evidence; the one
+                  recorded opt-out is a standalone
+                  `<!-- orc:none --> <one-line justification>` body line
+                  (visible in the verdict and on stderr — never silent, and
+                  inert when real markers exist).
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

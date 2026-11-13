@@ -643,7 +643,17 @@ pr.status <N> -> {
     items: [ { id, is_resolved, is_outdated, path, line, authors, last_comment_excerpt } ]
   },                                 # actionable = !isResolved && !isOutdated (review-threads rule);
                                      # excerpts are size-capped (see below), never full bodies
-  checklist: { items: [ { marker, checked, description } ], all_checked, unchecked_count },
+  checklist: { items: [ { marker, checked, description } ],
+               marker_count, markers_present, all_checked, unchecked_count,
+               waived, waiver_reason? },
+                                     # `all_checked` is true only when at least one marker exists AND
+                                     # every marker is checked: a marker-less body is MISSING evidence,
+                                     # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
+                                     # used to reach merge-gate as `mergeable: true`).
+                                     # `waived`/`waiver_reason` carry the ONE recorded opt-out: a
+                                     # standalone `<!-- orc:none --> <one-line justification>` body line,
+                                     # effective only when no marker exists, reported so a waived pass is
+                                     # never mistakable for a complete checklist.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly
@@ -651,7 +661,8 @@ pr.status <N> -> {
     mergeable: bool,
     reasons: [ string ]              # stable machine codes: agent_review_not_clean_at_head,
                                      # checks_not_passing, checks_pending, unresolved_threads(n),
-                                     # unchecked_items(n), review_required, is_draft — the same
+                                     # unchecked_items(n), checklist_markers_missing,
+                                     # review_required, is_draft — the same
                                      # code set convergence-status emits today, extended only
                                      # additively (merge_state is NOT a reason source; see the
                                      # schema note above)

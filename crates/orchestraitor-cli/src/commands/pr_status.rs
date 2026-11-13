@@ -484,24 +484,46 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
             }
         }
     }
-    if let Some(checklist) = &verdict.checklist
-        && !checklist.all_checked
-    {
-        writeln!(
-            writer,
-            "checklist: {} unchecked item(s)",
-            checklist.unchecked_count
-        )
-        .into_diagnostic()?;
-        for item in &checklist.items {
-            if !item.checked {
+    if let Some(checklist) = &verdict.checklist {
+        if !checklist.markers_present {
+            // A marker-less body is missing evidence, never a complete checklist
+            // (arbsec/orchestraitor#788) — name the state, not "0 unchecked".
+            if checklist.waived {
                 writeln!(
                     writer,
-                    "  [ ] {}: {}",
-                    sanitize_provider_text(&item.marker),
-                    sanitize_provider_text(&item.description)
+                    "checklist: marker requirement WAIVED — {}",
+                    sanitize_provider_text(
+                        checklist
+                            .waiver_reason
+                            .as_deref()
+                            .unwrap_or("(no justification)"),
+                    )
                 )
                 .into_diagnostic()?;
+            } else {
+                writeln!(
+                    writer,
+                    "checklist: no managed orc:* markers found (UNSUBSTANTIATED — checklist_markers_missing)"
+                )
+                .into_diagnostic()?;
+            }
+        } else if !checklist.all_checked {
+            writeln!(
+                writer,
+                "checklist: {} unchecked item(s)",
+                checklist.unchecked_count
+            )
+            .into_diagnostic()?;
+            for item in &checklist.items {
+                if !item.checked {
+                    writeln!(
+                        writer,
+                        "  [ ] {}: {}",
+                        sanitize_provider_text(&item.marker),
+                        sanitize_provider_text(&item.description)
+                    )
+                    .into_diagnostic()?;
+                }
             }
         }
     }

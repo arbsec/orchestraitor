@@ -58,7 +58,7 @@ done
 for check in review-threads reconcile-checklist; do
   cat > "$TMP/repo/scripts/$check" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' '{"unresolved_actionable":0,"all_checked":true,"unchecked":[]}'
+printf '%s\n' '{"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unchecked":[]}'
 STUB
 done
 

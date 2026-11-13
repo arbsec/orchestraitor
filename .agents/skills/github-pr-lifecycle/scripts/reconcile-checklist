@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist; the recorded opt-out is a standalone '<!-- orc:none --> <justification>' line."
   exit "$ORC_OK"
 fi
 
@@ -31,9 +31,12 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
 # Extract each checklist line with its orc marker.
 # Pattern: - [ ] <!-- orc:XXX --> description  OR  - [x] <!-- orc:XXX --> description
-# A body with zero markers is legitimate (custom PR bodies): grep matches nothing
-# and would abort under pipefail, so guard it — empty means an empty checklist
-# (all_checked is vacuously true).
+# A body with zero markers is legitimate to PARSE (custom PR bodies; #394 keeps
+# "an empty parse is an empty list"), so grep matching nothing is guarded under
+# pipefail — empty means an empty checklist. An empty checklist is NOT a
+# satisfied one (#788): the derived state below keeps "no markers" distinguishable
+# from "all markers checked", and `convergence-status` blocks the former with
+# `checklist_markers_missing` instead of reading it as a vacuous pass.
 RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
   CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
   MARKER="$(echo "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
@@ -41,8 +44,20 @@ RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:([A-Za-z0-9_-]
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
 done)"
 
+# The ONE recorded opt-out (#788): a standalone
+# `<!-- orc:none --> <one-line justification>` line. The justification is
+# mandatory (a bare sentinel waives nothing), and it waives ONLY a body with
+# zero markers — it can never mask a partially-checked checklist. The waiver is
+# surfaced in text mode, in the JSON (`waived` / `waiver_reason`) and by
+# `convergence-status` (stderr notice + `checklist_waived`).
+WAIVER=""
+WAIVER_LINE="$(echo "$BODY" | grep -m1 -oP '^\s*<!--\s*orc:none\s*-->\s*\S.*$' || true)"
+if [ -n "$WAIVER_LINE" ]; then
+  WAIVER="$(echo "$WAIVER_LINE" | sed -E 's/^\s*<!--\s*orc:none\s*-->\s*//')"
+fi
+
 if [ "$OPT_JSON" = true ]; then
-  echo "$RESULT" | jq -R -s '
+  echo "$RESULT" | jq -R -s --arg waiver "$WAIVER" '
     split("\n") | map(select(length > 0)) |
     map(split("\t")) | map({
       marker: .[0],
@@ -50,18 +65,29 @@ if [ "$OPT_JSON" = true ]; then
       description: .[2]
     }) | {
       items: .,
-      all_checked: all(.[]; .checked == true),
-      unchecked: map(select(.checked == false))
-    }
+      marker_count: length,
+      markers_present: (length > 0),
+      all_checked: ((length > 0) and all(.[]; .checked == true)),
+      unchecked: map(select(.checked == false)),
+      waived: ((length == 0) and ($waiver != ""))
+    } | if .waived then .waiver_reason = $waiver else . end
   '
 else
   echo "PR checklist reconciliation:"
-  echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
-    [ -z "$marker" ] && continue
-    if [ "$checked" = "x" ]; then
-      echo "  [x] $marker: $desc"
+  if [ -z "$RESULT" ]; then
+    if [ -n "$WAIVER" ]; then
+      echo "  (no managed orc:* checklist markers; marker requirement WAIVED — $WAIVER)"
     else
-      echo "  [ ] $marker: $desc"
+      echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"
     fi
-  done
+  else
+    echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
+      [ -z "$marker" ] && continue
+      if [ "$checked" = "x" ]; then
+        echo "  [x] $marker: $desc"
+      else
+        echo "  [ ] $marker: $desc"
+      fi
+    done
+  fi
 fi

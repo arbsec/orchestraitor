@@ -568,8 +568,15 @@ EOF
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub required
 OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
-grep -qx 'orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
+grep -q '^orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
   || fail "pr-create must take the labeling-chain service path: orc=[$(cat "$ORC_LOG")]"
+# A marker-less body is given the managed checklist UNCHECKED (#788), so the
+# single logged argv spans lines: assert the routing prefix above, the injected
+# marker below, and that the caller's trailing flag still rides after it.
+grep -q '^- \[ \] <!-- orc:issue -->' "$ORC_LOG" \
+  || fail "pr-create must append the managed checklist to a marker-less body (#788): orc=[$(cat "$ORC_LOG")]"
+grep -q ' --draft$' "$ORC_LOG" \
+  || fail "pr-create must still pass --draft through after the injected body: orc=[$(cat "$ORC_LOG")]"
 if [ "$(grep -c '^gh:' "$GH_LOG")" -gt 1 ]; then
   fail "pr-create reached gh more than the one gh-env child call: $(cat "$GH_LOG")"
 fi
@@ -652,7 +659,7 @@ fi
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub ""
 OUT="$(run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
-grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
+grep -q '^orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
   || fail "pr-create with resolved config must take the service path regardless of the pin: orc=[$(cat "$ORC_LOG")]"
 
 # --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.

@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# Regression tests for the managed-checklist contract (arbsec/orchestraitor#788):
+# a PR body with ZERO `<!-- orc:* -->` markers is MISSING evidence, never a
+# vacuous pass. Before this, `reconcile-checklist` reported `all_checked: true`
+# for an empty set (jq's `all()` over `[]` is true), `convergence-status` read
+# that as green, and `merge-gate` merged a PR with no checklist evidence at all
+# — reproduced with the exact merged #767 body.
+#
+# Also pins the other half of the fix: the gate must stay SATISFIABLE (#683), so
+# `pr-create` appends the nine managed markers to a wholesale body, and the
+# template/fallback copies cannot drift.
+#
+# Synthetic `gh` responses; no network or provider calls.
+#
+# Covers:
+#   (a) marker-less body -> marker_count 0, markers_present false,
+#       all_checked false, items [], no waiver (the vacuous-pass defect)
+#   (a2) text mode names the missing state instead of printing nothing
+#   (b) convergence-status BLOCKS a marker-less body, exit 5, with the DISTINCT
+#       reason `checklist_markers_missing` (never `unchecked_items(0)`)
+#   (c) markers present and all checked -> mergeable, exit 0
+#   (d) markers present with one unticked -> exit 5, `unchecked_items(1)`
+#   (e) the JSON telemetry is COMPUTED (the `or true` stub and the constants
+#       are gone): checks_all_passed, unresolved_actionable_threads,
+#       unchecked_checklist_items, checklist_marker_count, review_decision,
+#       is_draft
+#   (f) the recorded opt-out: `<!-- orc:none --> <justification>` converges and
+#       is visible (JSON + stderr); a BARE sentinel waives nothing; a sentinel
+#       beside real markers is inert
+#   (g) the `_lib.sh` fallback checklist equals the repository template
+#       verbatim (drift guard), and the nine lines are always landed UNCHECKED
+#   (h) pr-create injects the markers into a wholesale `--body` AND
+#       `--body-file` (both creation routes stay satisfiable), leaves a body
+#       that already carries markers or the waiver verbatim, and refuses
+#       `--body` + `--body-file` together
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/repo/scripts" "$TMP/repo/.github" "$TMP/bin" "$TMP/files"
+git -C "$TMP/repo" init -q
+for script in _lib.sh reconcile-checklist convergence-status pr-create; do
+  cp -L -- "$SCRIPT_DIR/$script" "$TMP/repo/scripts/"
+done
+cp -L -- "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$TMP/repo/.github/"
+chmod +x "$TMP/repo/scripts/"*
+
+# Only the checklist leg is under test here: convergence-status's other
+# sub-checks are stubbed, and their own suites cover them.
+cat > "$TMP/repo/scripts/pr-checks" <<'STUB'
+#!/usr/bin/env bash
+cat "$CHECKS_FIXTURE"
+STUB
+cat > "$TMP/repo/scripts/review-threads" <<'STUB'
+#!/usr/bin/env bash
+cat "$THREADS_FIXTURE"
+STUB
+chmod +x "$TMP/repo/scripts/pr-checks" "$TMP/repo/scripts/review-threads"
+printf '%s\n' '{"all_passed":true,"any_pending":false}' > "$TMP/checks-ok.json"
+printf '%s\n' '{"all_passed":false,"any_pending":false}' > "$TMP/checks-fail.json"
+printf '%s\n' '{"unresolved_actionable":0}' > "$TMP/threads-none.json"
+printf '%s\n' '{"unresolved_actionable":2}' > "$TMP/threads-two.json"
+export CHECKS_FIXTURE="$TMP/checks-ok.json" THREADS_FIXTURE="$TMP/threads-none.json"
+
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/view)
+    json=""; prev=""
+    for a in "$@"; do [ "$prev" = "--json" ] && json="$a"; prev="$a"; done
+    case "$json" in
+      body) jq -n --rawfile b "$BODY_FIXTURE" '{body:$b}' ;;
+      baseRefOid) jq -n --arg b "$TEST_BASE" '{baseRefOid:$b}' ;;
+      reviewDecision,baseRefOid,headRefOid,isDraft)
+        jq -n --arg h "$TEST_HEAD" --arg b "$TEST_BASE" \
+          '{reviewDecision:"APPROVED",baseRefOid:$b,headRefOid:$h,isDraft:false}' ;;
+      *) echo "unexpected gh pr view --json '$json'" >&2; exit 1 ;;
+    esac ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh"
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub-config ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+
+# Review-policy provenance fixture (#748): the trusted base commit — reported as
+# the PR's `baseRefOid` — holds exactly the copies the gate is about to run, so
+# no spurious stale-policy refusal fires.
+GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base: current review policy"
+TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
+TEST_BASE="$(git -C "$TMP/repo" rev-parse HEAD)"
+export TEST_HEAD TEST_BASE
+mkdir -p "$TMP/repo/.orchestraitor/reviews"
+# convergence-status record format: line 3 verdict, line 5 head, line 6 base.
+cat > "$TMP/repo/.orchestraitor/reviews/7-abcdef1.md" <<EOF
+# Agent review record: PR #7 @ abcdef1
+
+- verdict: CLEAN
+- reviewer-agent: test
+- head SHA: $TEST_HEAD
+- base OID: $TEST_BASE
+- findings: 0
+
+EOF
+
+# --- body fixtures -------------------------------------------------------------
+# (a) The #767 shape: prose that MENTIONS a marker, and zero checklist items.
+cat > "$TMP/files/no-markers.md" <<'EOF'
+## Summary
+
+The body was rewritten to replace a false quantitative claim with honest numbers.
+
+| script | note |
+|---|---|
+| reconcile-checklist | none (parses only <!-- orc:* --> markers) |
+EOF
+# (c) the nine managed markers, every box ticked.
+grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
+  "$TMP/repo/.github/PULL_REQUEST_TEMPLATE.md" \
+  | sed -E 's/^([[:space:]]*)-[[:space:]]*\[[ xX]\]/\1- [x]/' > "$TMP/files/all-checked.md"
+# (d) the same nine, the first one unticked.
+sed -E '1s/^- \[x\]/- [ ]/' "$TMP/files/all-checked.md" > "$TMP/files/one-unticked.md"
+# (f) the recorded opt-out, with and without a justification.
+{ cat "$TMP/files/no-markers.md"; printf '\n<!-- orc:none --> machine-authored release-notes body\n'; } \
+  > "$TMP/files/waived.md"
+{ cat "$TMP/files/no-markers.md"; printf '\n<!-- orc:none -->\n'; } > "$TMP/files/bare-waiver.md"
+# (f) a sentinel beside a partially-checked checklist is INERT.
+{ printf '<!-- orc:none --> sneaky waiver\n'; cat "$TMP/files/one-unticked.md"; } \
+  > "$TMP/files/waiver-plus-markers.md"
+# (h) a body that already carries its own marker: never rewritten.
+printf '%s\n' '- [x] <!-- orc:issue --> linked' > "$TMP/files/own-marker.md"
+
+PASS=0; FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual:   %s\n' "$1" "$2" "$3"; fi
+}
+run() {
+  OUT="$(cd "$TMP/repo" && bash "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
+}
+
+# --- (a) reconcile-checklist: the marker-less body ------------------------------
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'a: exits 0' 0 "$RC"
+assert 'a: marker_count is 0' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'a: markers_present false' false "$(jq -r .markers_present <<<"$OUT")"
+assert 'a: all_checked false (the vacuous pass)' false "$(jq -r .all_checked <<<"$OUT")"
+assert 'a: items stays the empty-parse contract' 0 "$(jq -r '.items | length' <<<"$OUT")"
+assert 'a: no unchecked items' 0 "$(jq -r '.unchecked | length' <<<"$OUT")"
+assert 'a: not waived' false "$(jq -r .waived <<<"$OUT")"
+assert 'a: waiver_reason absent (not null)' false "$(jq -r 'has("waiver_reason")' <<<"$OUT")"
+
+# --- (a2) text mode names the missing state ------------------------------------
+run reconcile-checklist 7 --repo test-org/repo
+assert 'a2: exits 0' 0 "$RC"
+assert 'a2: names the unsubstantiated checklist' 1 \
+  "$(grep -cF 'checklist UNSUBSTANTIATED' <<<"$OUT")"
+
+# --- (b) convergence-status blocks it ------------------------------------------
+run convergence-status 7 --repo test-org/repo --json
+assert 'b: blocks (exit 5)' 5 "$RC"
+assert 'b: mergeable false' false "$(jq -r .mergeable <<<"$OUT")"
+assert 'b: the DISTINCT reason' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'b: telemetry marker_count 0' 0 "$(jq -r .checklist_marker_count <<<"$OUT")"
+assert 'b: telemetry markers_present false' false "$(jq -r .checklist_markers_present <<<"$OUT")"
+assert 'b: telemetry not waived' false "$(jq -r .checklist_waived <<<"$OUT")"
+assert 'b: telemetry unchecked 0 (never a vacuous 0)' 0 \
+  "$(jq -r .unchecked_checklist_items <<<"$OUT")"
+
+# --- (c) all nine checked converges --------------------------------------------
+export BODY_FIXTURE="$TMP/files/all-checked.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'c: marker_count 9' 9 "$(jq -r .marker_count <<<"$OUT")"
+assert 'c: markers_present true' true "$(jq -r .markers_present <<<"$OUT")"
+assert 'c: all_checked true' true "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'c: converges (exit 0)' 0 "$RC"
+assert 'c: mergeable true' true "$(jq -r .mergeable <<<"$OUT")"
+assert 'c: no reasons' '[]' "$(jq -c .reasons <<<"$OUT")"
+assert 'c: telemetry marker_count 9' 9 "$(jq -r .checklist_marker_count <<<"$OUT")"
+assert 'c: telemetry unchecked 0' 0 "$(jq -r .unchecked_checklist_items <<<"$OUT")"
+
+# --- (d) one unticked keeps the ITEM-COUNT reason ------------------------------
+export BODY_FIXTURE="$TMP/files/one-unticked.md"
+run convergence-status 7 --repo test-org/repo --json
+assert 'd: blocks (exit 5)' 5 "$RC"
+assert 'd: unchecked_items(1), not markers_missing' '["unchecked_items(1)"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'd: telemetry unchecked 1' 1 "$(jq -r .unchecked_checklist_items <<<"$OUT")"
+
+# --- (e) the telemetry is COMPUTED, not stubbed --------------------------------
+# The pre-#788 shapes were `checks_all_passed: ($mergeable == "true" or true)`
+# (always true), `unresolved_actionable_threads: 0`, `unchecked_checklist_items:
+# 0`, `review_decision: ""`, `is_draft: false` — constants. A gate that reports a
+# false diagnostic invites a wrong decision later (#429 item 1).
+export BODY_FIXTURE="$TMP/files/all-checked.md"
+export CHECKS_FIXTURE="$TMP/checks-fail.json" THREADS_FIXTURE="$TMP/threads-two.json"
+run convergence-status 7 --repo test-org/repo --json
+assert 'e: blocks on checks and threads' 5 "$RC"
+assert 'e: both reasons reported in order' \
+  '["checks_not_passing","unresolved_threads(2)"]' "$(jq -c .reasons <<<"$OUT")"
+assert 'e: checks_all_passed is real' false "$(jq -r .checks_all_passed <<<"$OUT")"
+assert 'e: unresolved count is real' 2 "$(jq -r .unresolved_actionable_threads <<<"$OUT")"
+assert 'e: review_decision is real' APPROVED "$(jq -r .review_decision <<<"$OUT")"
+assert 'e: is_draft is real' false "$(jq -r .is_draft <<<"$OUT")"
+export CHECKS_FIXTURE="$TMP/checks-ok.json" THREADS_FIXTURE="$TMP/threads-none.json"
+
+# --- (f) the recorded opt-out --------------------------------------------------
+export BODY_FIXTURE="$TMP/files/waived.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f: waived true' true "$(jq -r .waived <<<"$OUT")"
+assert 'f: waiver reason recorded' 'machine-authored release-notes body' \
+  "$(jq -r .waiver_reason <<<"$OUT")"
+assert 'f: a waived body is still not "all checked"' false "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f: the waiver converges (exit 0)' 0 "$RC"
+assert 'f: no other reasons' '[]' "$(jq -c .reasons <<<"$OUT")"
+assert 'f: mergeable true' true "$(jq -r .mergeable <<<"$OUT")"
+assert 'f: the waiver is VISIBLE in the verdict' true "$(jq -r .checklist_waived <<<"$OUT")"
+assert 'f: the waiver reason rides the verdict' 'machine-authored release-notes body' \
+  "$(jq -r .checklist_waiver_reason <<<"$OUT")"
+assert 'f: the waiver is announced on stderr' 1 \
+  "$(grep -cF 'checklist marker requirement WAIVED' "$TMP/stderr")"
+
+export BODY_FIXTURE="$TMP/files/bare-waiver.md"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f: a bare sentinel waives nothing (exit 5)' 5 "$RC"
+assert 'f: a bare sentinel still reports markers_missing' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/waiver-plus-markers.md"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f: a sentinel never masks unticked boxes (exit 5)' 5 "$RC"
+assert 'f: the inert sentinel leaves the item reason' '["unchecked_items(1)"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'f: the inert sentinel is not waived' false "$(jq -r .checklist_waived <<<"$OUT")"
+
+# --- (g) the fallback cannot drift from the template ---------------------------
+TEMPLATE_MARKERS="$(grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
+  "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" \
+  | sed -E 's/^([[:space:]]*)-[[:space:]]*\[[ xX]\]/\1- [ ]/')"
+FALLBACK="$(bash -c 'source "$1"; printf "%s\n" "$ORC_LIB_CHECKLIST_FALLBACK"' _ \
+  "$SCRIPT_DIR/_lib.sh")"
+assert 'g: the template carries nine managed markers' 9 \
+  "$(printf '%s\n' "$TEMPLATE_MARKERS" | grep -c '<!-- orc:')"
+assert 'g: the _lib.sh fallback equals the template verbatim' \
+  "$TEMPLATE_MARKERS" "$FALLBACK"
+assert 'g: the fallback lands every box unchecked' 0 \
+  "$(printf '%s\n' "$FALLBACK" | grep -c '^- \[x\]')"
+
+ensure() { # ensure <body> -> prints the body with the managed checklist applied
+  bash -c 'source "$1"; orc_lib_ensure_checklist_markers "$2" "$3"' _ \
+    "$SCRIPT_DIR/_lib.sh" "$1" "$2"
+}
+ENSURED="$(ensure 'wholesale body' "$TMP/repo")"
+assert 'g: a wholesale body gains the nine markers' 9 \
+  "$(grep -c '<!-- orc:' <<<"$ENSURED")"
+assert 'g: injection lands them UNCHECKED' 0 "$(grep -c '^- \[x\]' <<<"$ENSURED")"
+assert 'g: injection keeps the author body first' 1 \
+  "$(head -1 <<<"$ENSURED" | grep -cF 'wholesale body')"
+assert 'g: a body with a marker is returned verbatim' 'own body
+- [x] <!-- orc:issue --> linked' "$(ensure 'own body
+- [x] <!-- orc:issue --> linked' "$TMP/repo")"
+assert 'g: a waived body is returned verbatim' 'waived
+<!-- orc:none --> custom body' "$(ensure 'waived
+<!-- orc:none --> custom body' "$TMP/repo")"
+
+# --- (h) creation stays satisfiable: pr-create injects -------------------------
+# SKILL_CASE=1 skips the pre-PR review gate (its own suite covers it); the
+# dry-run stops before any gh call, so only the constructed argv is asserted.
+dry_run() { # dry_run <pr-create args...> -> dry-run argv on stdout
+  ( cd "$TMP/repo" && SKILL_CASE=1 bash scripts/pr-create --repo test-org/repo --dry-run "$@" 2>&1 )
+}
+OUT="$(dry_run --title t --body 'wholesale body')"
+assert 'h: --body gains the nine markers' 9 "$(grep -c '<!-- orc:' <<<"$OUT")"
+assert 'h: injected markers are unchecked' 0 "$(grep -c -- '- \[x\]' <<<"$OUT")"
+assert 'h: the author body survives' 1 "$(grep -cF 'wholesale body' <<<"$OUT")"
+OUT="$(dry_run --title t --body "Some \`orc:\` prose, no marker")"
+assert 'h: a prose mention is not a checklist (injection still fires)' 9 \
+  "$(grep -c '<!-- orc:' <<<"$OUT")"
+
+OUT="$(dry_run --title t --body-file "$TMP/files/no-markers.md")"
+assert 'h: --body-file gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'h: --body-file content survives' 1 "$(grep -cF 'false quantitative claim' <<<"$OUT")"
+assert 'h: --body-file is resolved (no --body-file reaches gh)' 0 \
+  "$(grep -c -- '--body-file' <<<"$OUT")"
+
+OUT="$(dry_run --title t --body-file "$TMP/files/own-marker.md")"
+assert 'h: a body with its own marker is left verbatim' 1 "$(grep -c '<!-- orc:' <<<"$OUT")"
+assert 'h: verbatim means no injected section' 0 "$(grep -cF 'Added by pr-create' <<<"$OUT")"
+
+OUT="$(dry_run --title t --body "$(cat "$TMP/files/waived.md")")"
+assert 'h: a waived body gets no injected checklist' 0 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+
+dry_run --title t --body 'a' --body-file "$TMP/files/own-marker.md" >/dev/null
+RC=$?
+assert 'h: --body + --body-file is refused' 2 "$RC"
+
+printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

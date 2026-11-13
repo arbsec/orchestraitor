@@ -57,6 +57,38 @@ async fn non_git_worktree_is_a_typed_branch_state_failure() {
     assert_eq!(error.reason, DELIVERY_BRANCH_STATE_FAILED);
 }
 
+/// The delivery body carries the managed checklist UNCHECKED: a marker-less
+/// body is blocked at merge (`checklist_markers_missing`,
+/// arbsec/orchestraitor#788), and pre-ticking a box would assert an
+/// unsubstantiated fact.
+#[test]
+fn delivery_body_appends_the_managed_checklist_unchecked() {
+    let body = format!("{}{DELIVERY_PR_CHECKLIST}", request().summary);
+    assert!(body.starts_with("did the thing"));
+    assert_eq!(body.matches("<!-- orc:").count(), 9, "{body}");
+    assert!(!body.contains("- [x]"), "delivery never pre-ticks a box");
+}
+
+/// Drift guard: the checklist appended to delivery PRs is the repository's
+/// managed checklist, verbatim (the marker lines in
+/// `.github/PULL_REQUEST_TEMPLATE.md`).
+#[test]
+fn delivery_checklist_matches_the_pr_template() {
+    let template = include_str!("../../../.github/PULL_REQUEST_TEMPLATE.md");
+    let template_markers: Vec<&str> = template
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| line.starts_with("- [ ] <!-- orc:"))
+        .collect();
+    assert_eq!(template_markers.len(), 9, "template marker count moved");
+    for line in template_markers {
+        assert!(
+            DELIVERY_PR_CHECKLIST.contains(line),
+            "delivery checklist is missing the template line: {line}"
+        );
+    }
+}
+
 /// The reason codes are static strings (spec §9.23.4): no paths, task ids,
 /// or command lines leak into the codes themselves.
 #[test]

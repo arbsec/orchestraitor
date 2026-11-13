@@ -11,15 +11,19 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --). A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path>, or pass through any gh pr create flags after --). A supplied body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers or the <!-- orc:none --> <justification> waiver is left verbatim. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
   exit "$ORC_OK"
 fi
 
-# Extract --title/--body from extra args (body may span several words); the
-# remaining args are passed through to `gh pr create` verbatim (e.g. --draft,
-# --base, --head, --reviewer, --, --body-file).
+# Extract --title/--body/--body-file from extra args (body may span several
+# words); the remaining args are passed through to `gh pr create` verbatim
+# (e.g. --draft, --base, --head, --reviewer, --). `--body-file` is read here
+# rather than passed through so the managed-checklist injection below (which the
+# fail-closed gate depends on) applies to BOTH body routes; the file is resolved
+# through the same trusted-root guard as `--body @file` (never an arbitrary read).
 TITLE=""
 BODY=""
+BODY_FILE=""
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
@@ -31,10 +35,22 @@ while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
       [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
       BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --body=*)  BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --body-file)
+      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file=*)
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"
+      [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
 done
+
+if [ -n "$BODY" ] && [ -n "$BODY_FILE" ]; then
+  echo "error: --body and --body-file are mutually exclusive" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
 
 # --- Pre-PR local review gate ----------------------------------------------------
 # Before creating the PR, verify a recorded CLEAN local review generation exists
@@ -222,6 +238,23 @@ if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
 fi
 fi # explicit --skip-review-gate (hoisted above base resolution)
 fi # SKILL_CASE gate wrapper
+
+# --- Managed-checklist injection (arbsec/orchestraitor#788) ---------------------
+# `convergence-status` FAILS CLOSED on a PR body with zero `<!-- orc:* -->`
+# markers (`checklist_markers_missing`, exit 5), so creation is the one place the
+# requirement can be kept satisfiable for a wholesale body — `--body`,
+# `--body-file`, or an automation-authored summary that never had the template
+# applied (#683: a fail-closed rule no caller can satisfy is worse than the bug).
+# The nine managed markers are appended UNCHECKED: checkboxes are verified facts,
+# ticked later with evidence — never pre-ticked here. A body that already carries
+# any marker, or the `<!-- orc:none -->` waiver sentinel, is left VERBATIM.
+if [ -n "$BODY_FILE" ]; then
+  BODY="$(orc_lib_body_arg "--body-file" "@$BODY_FILE")"
+fi
+if [ -n "$BODY" ]; then
+  PR_CREATE_BODY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_BODY_ROOT=""
+  BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
+fi
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
 [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
