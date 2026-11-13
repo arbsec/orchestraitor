@@ -455,7 +455,8 @@ async fn dispatch_subagent(
     // subagent mechanisms, so the gate must be enforced HERE too, before
     // the tool lookup: `WorkerConfig.tools` and `subsession_depth` are
     // public, and a caller that sets both would otherwise get nested
-    // sub-sessions (spec §9.38: no config path raises the depth limit).
+    // sub-sessions (spec §9.5 — `20-harness-worker.md` "Declared tools", issue
+    // #535: no config path raises the depth limit).
     if config.subsession_depth > 0 {
         state
             .subsession_events
