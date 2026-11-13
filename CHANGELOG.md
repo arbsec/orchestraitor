@@ -780,21 +780,6 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   on legacy protocol sessions, and `disable_route` fail-closed behavior
   are unchanged; macro-generated handlers adapt automatically.
 
-- The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
-  tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
-  migration; the bump pulls in upstream's UTF-16 buffer over-read fix.
-
-- `Cargo.lock` resolves `quinn-udp` 0.5.16 (previously 0.5.15), which clears
-  `RUSTSEC-2026-0538` ("receive loop can spin after a truncated datagram"; the
-  fix first ships in 0.5.16). The crate is transitive under `reqwest`'s
-  optional HTTP/3 feature (`http3`), which no workspace crate enables, so no
-  compiled artifact changes and no version requirement moved: this is a
-  lockfile-only patch bump inside `quinn`'s existing `^0.5` window. (The same
-  update unifies five Windows-only transitive edges onto `windows-sys 0.59.0`,
-  already in the lock; no MVP-platform build input changes.) Builds from this
-  repository with `--locked`, and the lockfile-scanning `cargo audit` gate,
-  no longer carry the advisory.
-
 - The eight `arbsec/arbitraitor` crates are re-pinned from `982517f3` to
   `df66f2d4` (Arbitraitor `main`, 2026-11-13), the single audited consumer
   surface Arbitraitor ADR-0044 requires. The bump resolves `zip` 9.5.1
@@ -811,6 +796,21 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   pipeline (`BashChild`) keeps its early-close result shape. The reference
   line numbers in `docs/sandbox-mediation.md` are re-anchored to the new
   revision. No Orchestrator API, schema, or on-disk format changes.
+
+- The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
+  tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
+  migration; the bump pulls in upstream's UTF-16 buffer over-read fix.
+
+- `Cargo.lock` resolves `quinn-udp` 0.5.16 (previously 0.5.15), which clears
+  `RUSTSEC-2026-0538` ("receive loop can spin after a truncated datagram"; the
+  fix first ships in 0.5.16). The crate is transitive under `reqwest`'s
+  optional HTTP/3 feature (`http3`), which no workspace crate enables, so no
+  compiled artifact changes and no version requirement moved: this is a
+  lockfile-only patch bump inside `quinn`'s existing `^0.5` window. (The same
+  update unifies five Windows-only transitive edges onto `windows-sys 0.59.0`,
+  already in the lock; no MVP-platform build input changes.) Builds from this
+  repository with `--locked`, and the lockfile-scanning `cargo audit` gate,
+  no longer carry the advisory.
 
 ### Fixed
 
