@@ -27,7 +27,11 @@ Supporting workflows, outside the gate:
 - [codeql.yml](codeql.yml) — CodeQL security analysis; runs on all pushes to
   `main` and all PRs (no path filter).
 - [docs.yml](docs.yml) — publishes the `book/` and `docs/` sites to GitHub Pages.
-- [markdown.yml](markdown.yml) — `rumdl check` over `**/*.md`.
+- [markdown.yml](markdown.yml) — `rumdl check` over `**/*.md`. The `rumdl`
+  version is pinned to an exact version in [`.mise.toml`](../../.mise.toml)
+  (the repository's single source of truth for tool versions), and the job
+  asserts that the installed version is the pinned one before it lints, so a
+  runner-image or registry change cannot silently shift the gate.
 - [release.yml](release.yml) — manual release pipeline (`workflow_dispatch` only).
 - [skills.yml](skills.yml) — `bash -n`, `shellcheck --severity=error`, and every
   skill script self-test, over `.agents/skills/**` and `scripts/**` (the Rust
