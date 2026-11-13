@@ -793,9 +793,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `unshare-target-exec-failed`, and the `MediatedWorker::run_bash` path fails
   closed on a namespace-setup refusal or a target-exec failure instead of
   returning the wrapper's non-zero exit code as a result. The worker's bash
-  pipeline (`BashChild`) keeps its early-close result shape. The reference
-  line numbers in `docs/sandbox-mediation.md` are re-anchored to the new
-  revision. No Orchestrator API, schema, or on-disk format changes.
+  pipeline (`BashChild`) keeps its early-close result shape. The
+  re-resolution also moves arbitraitor's transitive set:
+  `wasmtime-internal-core` 45.0.3/49.0.1 → 50.0.1 with
+  `pulley-interpreter`/`pulley-macros` 50.0.1, `cranelift-bitset` 0.137.1,
+  `object` 0.40.0, and `wasm-encoder`/`wasmparser` 0.261.0; `zip` 9.5.1
+  replaces 8.6.0 and brings the one new Windows-only `windows-sys 0.61.2`
+  edge; `lzma-rust2` 0.25.0, `ppmd-rust` 1.5.2, `constant_time_eq` 0.6.1,
+  `syn` 3.0.10, and `typed-path` 0.13.0 replace their older copies, while
+  `nix` 0.31.3 joins 0.29.0; `zstd` 0.13.4, `zstd-safe` 7.4.0, and
+  `serde_json_canonicalizer` 0.3.2 leave the graph. The full add/remove list
+  is the `Cargo.lock` diff. The reference line numbers in
+  `docs/sandbox-mediation.md` are re-anchored to the new revision, and the
+  isolation documentation distinguishes the two exec paths' wrapper-failure
+  contracts. No Orchestrator API, schema, or on-disk format changes.
 
 - The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
   tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
