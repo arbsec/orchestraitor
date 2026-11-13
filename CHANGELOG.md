@@ -784,6 +784,15 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
   migration; the bump pulls in upstream's UTF-16 buffer over-read fix.
 
+- `Cargo.lock` resolves `quinn-udp` 0.5.16 (previously 0.5.15), which clears
+  `RUSTSEC-2026-0538` ("receive loop can spin after a truncated datagram"; the
+  fix first ships in 0.5.16). The crate is transitive under `reqwest`'s
+  optional HTTP/3 feature (`http3`), which no workspace crate enables, so no
+  compiled artifact changes and no version requirement moved: this is a
+  lockfile-only patch bump inside `quinn`'s existing `^0.5` window. Builds from
+  this repository with `--locked`, and the lockfile-scanning `cargo audit`
+  gate, no longer carry the advisory.
+
 ### Fixed
 
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
