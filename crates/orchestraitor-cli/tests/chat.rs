@@ -46,9 +46,9 @@ fn checks_all_pass() -> String {
                 {"__typename": "CheckRun", "name": "Check & Lint", "status": "COMPLETED",
                  "conclusion": "SUCCESS", "detailsUrl": "https://ci/lint",
                  "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
-                {"__typename": "CheckRun", "name": "Docs Consistency", "status": "COMPLETED",
+                {"__typename": "CheckRun", "name": "Documentation", "status": "COMPLETED",
                  "conclusion": "SKIPPED", "detailsUrl": "",
-                 "checkSuite": {"workflowRun": {"workflow": {"name": "docs.yml"}}}},
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
             ],
         }}}}}
     })

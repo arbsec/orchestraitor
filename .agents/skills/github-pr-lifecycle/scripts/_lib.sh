@@ -18,6 +18,10 @@ ORC_ERR_CONFIG=2
 ORC_ERR_POLICY=3
 ORC_ERR_CONCURRENT=4
 ORC_ERR_BLOCKED=5
+# 6: the running review-policy script is not the trusted base's copy (see
+# `orc_lib_require_policy_current`), or a base ref could not be resolved
+# (`pr-create` predates the shared constant and declares its own 6 inline).
+ORC_ERR_STALE_POLICY=6
 
 # --- Common flag parsing -------------------------------------------------------
 # Usage: orc_lib_parse_common "$@" then read OPT_HELP OPT_JSON OPT_DRY_RUN OPT_REPO
@@ -59,6 +63,10 @@ Exit codes:
   3  policy violation (would violate MVP-only scheduling, would merge on red, etc.)
   4  concurrent edit detected (resource updatedAt changed since read — retry)
   5  blocked (review loop limit hit — produces blocked/needs-human, never silent approval)
+  6  untrusted review policy — a gate script (pr-checks, convergence-status,
+     merge-gate) is not the trusted base's copy (rerun the printed base-worktree
+     command), or (pr-create) the PR's base ref cannot be resolved (fetch or
+     repair the base ref, then rerun)
 EOF
 }
 
@@ -489,6 +497,170 @@ orc_lib_resolve_repo() {
   if [ -n "$detected" ]; then echo "$detected"; return; fi
   echo "error: could not resolve repository. Pass --repo OWNER/REPO explicitly." >&2
   exit "$ORC_ERR_CONFIG"
+}
+
+# --- Review-policy provenance (arbsec/orchestraitor#748) -----------------------
+# The gate scripts resolve $SCRIPT_DIR from THEIR OWN location, so an agent that
+# runs them from a stale checkout silently applies that checkout's review policy
+# instead of the trusted base branch's (AGENTS.md: "Review policy comes from the
+# trusted base branch, not the PR being reviewed"). The observed damage is a
+# confident wrong verdict — e.g. a pre-#707 `pr-checks` classifies a bot-authored
+# CodeRabbit SKIPPED as a failing skip and convergence-status reports
+# `checks_not_passing` for a MERGEABLE/CLEAN PR. The failure direction seen so far
+# is false-blocking, but a stale copy can equally hold an older, more permissive
+# rule and produce a false PASS.
+#
+# Why not a policy VERSION constant: a constant travels WITH the file, so a whole
+# stale directory carries a stale constant too; any "minimum" declared next to the
+# consumer agrees with itself and proves nothing. The anchor must live outside the
+# running tree. The PR's `baseRefOid` is that anchor: GitHub reports the exact
+# commit the PR merges into, and the blob at `<baseRefOid>:<path>` is the trusted
+# policy. The check is local (`git cat-file`/`rev-parse`/`hash-object`), so it
+# costs no network call and is safe to run in tight loops.
+#
+# Policy changes are deliberately gated by the BASE policy: a branch copy that
+# differs from base (older OR newer) is refused, because a branch that edits the
+# gate never certifies itself. The refusal names the base-checkout command that
+# yields a trustworthy verdict.
+#
+# Usage (call sites read the PR's baseRefOid first, then guard BEFORE any verdict
+# is computed — for `merge-gate`, before any merge command):
+#   orc_lib_require_policy_current <json|text> <base-sha> <entry-name> \
+#     <entry-args> <file>...
+#     <base-sha>    the PR's baseRefOid (40-hex); empty/unknown refuses.
+#     <entry-name>  gate script to re-run from the base (e.g. convergence-status).
+#     <entry-args>  its arguments, for the printed remediation.
+#     <file>...     running policy files to verify (absolute paths, same dir).
+orc_lib_require_policy_current() {
+  local mode="$1" base_sha="$2" entry="$3" entry_args="$4"
+  shift 4
+  local file dir root prefix rel running_blob base_blob origin head_sha head_blob
+  local entry_rel=""
+  for file in "$@"; do
+    dir="$(dirname -- "$file")"
+    root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || root=""
+    if [ -z "$root" ]; then
+      orc_lib_policy_refuse "$mode" "not-in-checkout" "$dir" "$file" "" "" \
+        "" "$base_sha" "" "$entry" "$entry_args"
+      return "$ORC_ERR_STALE_POLICY"
+    fi
+    prefix="$(git -C "$dir" rev-parse --show-prefix 2>/dev/null)" || prefix=""
+    rel="${prefix}$(basename -- "$file")"
+    [ -n "$entry_rel" ] || entry_rel="${prefix}${entry}"
+
+    if ! [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      orc_lib_policy_refuse "$mode" "base-unreadable" "$root" "$file" "$rel" \
+        "" "" "$base_sha" "" "$entry_rel" "$entry_args"
+      return "$ORC_ERR_STALE_POLICY"
+    fi
+
+    running_blob="$(git -C "$root" hash-object -- "$file" 2>/dev/null)" || running_blob=""
+    head_sha="$(git -C "$root" rev-parse --verify --quiet HEAD 2>/dev/null)" || head_sha=""
+    head_blob="$(git -C "$root" rev-parse --verify --quiet "HEAD:$rel" 2>/dev/null)" || head_blob=""
+    if [ -n "$head_sha" ] && [ "$running_blob" = "$head_blob" ]; then
+      origin="this checkout's HEAD $head_sha"
+    else
+      origin="this checkout's working tree (uncommitted content)"
+    fi
+
+    if ! git -C "$root" cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+      orc_lib_policy_refuse "$mode" "base-not-present" "$root" "$file" "$rel" \
+        "$running_blob" "$origin" "$base_sha" "" "$entry_rel" "$entry_args"
+      return "$ORC_ERR_STALE_POLICY"
+    fi
+    base_blob="$(git -C "$root" rev-parse --verify --quiet "${base_sha}:${rel}" 2>/dev/null)" || base_blob=""
+    if [ -z "$base_blob" ]; then
+      orc_lib_policy_refuse "$mode" "path-not-in-base" "$root" "$file" "$rel" \
+        "$running_blob" "$origin" "$base_sha" "" "$entry_rel" "$entry_args"
+      return "$ORC_ERR_STALE_POLICY"
+    fi
+    if [ "$running_blob" != "$base_blob" ]; then
+      orc_lib_policy_refuse "$mode" "blob-differs" "$root" "$file" "$rel" \
+        "$running_blob" "$origin" "$base_sha" "$base_blob" "$entry_rel" "$entry_args"
+      return "$ORC_ERR_STALE_POLICY"
+    fi
+  done
+}
+
+# Emits the typed stale-review-policy refusal and exits ORC_ERR_STALE_POLICY.
+# The human message always goes to stderr; in `json` mode the same facts are
+# also written to stdout as an object whose top-level `error` is
+# "stale-review-policy" and which carries NO verdict keys (`mergeable`,
+# `reasons`, `all_passed`, ...), so no caller can mistake it for a gate result.
+#
+# Usage: orc_lib_policy_refuse <json|text> <reason> <root> <file> <rel> \
+#          <running-blob> <running-origin> <base-sha> <base-blob> \
+#          <entry-rel> <entry-args>
+orc_lib_policy_refuse() {
+  local mode="$1" reason="$2" root="$3" file="$4" rel="$5" \
+    running_blob="$6" origin="$7" base_sha="$8" base_blob="$9"
+  local entry_rel="${10}" entry_args="${11}"
+  local detail remediation="" fetch_cmd="fetch origin"
+  case "$reason" in
+    blob-differs)
+      detail="the running file differs from the trusted base's policy (a stale or branch-modified copy)" ;;
+    base-not-present)
+      detail="the trusted base commit is not present in this repository (fetch it, then rerun)" ;;
+    path-not-in-base)
+      detail="the trusted base commit does not track '$rel' (wrong repository or unfetched base)" ;;
+    not-in-checkout)
+      detail="the running file is not inside a git checkout, so its provenance cannot be established" ;;
+    base-unreadable)
+      detail="the PR's trusted base commit could not be read from GitHub (gh pr view --json baseRefOid returned no OID)" ;;
+    *)
+      detail="the running file's provenance could not be verified" ;;
+  esac
+  if [ -n "$root" ] && [ -n "$entry_rel" ] && [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    remediation="tmp=\"\$(mktemp -d)\" && git -C $root worktree add --detach \"\$tmp\" $base_sha && bash \"\$tmp/$entry_rel\" $entry_args"
+    if [ "$reason" = "base-not-present" ]; then
+      # A `--depth 1` checkout stays shallow across a plain `git fetch`, so the
+      # missing base commit is still absent afterwards and the same refusal is
+      # printed again — a remediation that does not remediate. `--unshallow` is
+      # the fetch that actually brings the base's history down.
+      if [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+        fetch_cmd="fetch --unshallow origin"
+      fi
+      remediation="git -C $root $fetch_cmd && $remediation"
+    fi
+  fi
+
+  {
+    echo "error: stale review policy: $file is not the copy at the PR's trusted base"
+    [ -n "$running_blob" ] &&
+      echo "  running:      blob $running_blob (from ${origin:-an unknown tree})"
+    echo "  trusted base: ${base_blob:+blob $base_blob at }${base_sha:-<unknown>} (the PR's baseRefOid)"
+    echo "  reason:       $detail"
+    echo "  review policy comes from the trusted base branch, never from the checkout under review (AGENTS.md)"
+    echo "  refusing instead of reporting a confident verdict from a stale policy"
+    if [ -n "$remediation" ]; then
+      echo "  trusted verdict: run this gate from a checkout of that base commit:"
+      echo "    $remediation"
+    fi
+  } >&2
+
+  if [ "$mode" = "json" ]; then
+    jq -n \
+      --arg reason "$reason" \
+      --arg file "$file" \
+      --arg running_blob "$running_blob" \
+      --arg running_origin "$origin" \
+      --arg base_ref_oid "$base_sha" \
+      --arg base_blob "$base_blob" \
+      --arg repository "$root" \
+      --arg remediation "$remediation" \
+      '{
+        error: "stale-review-policy",
+        reason: $reason,
+        file: $file,
+        running_blob: $running_blob,
+        running_origin: $running_origin,
+        base_ref_oid: $base_ref_oid,
+        base_blob: $base_blob,
+        repository: $repository,
+        remediation: $remediation
+      }'
+  fi
+  exit "$ORC_ERR_STALE_POLICY"
 }
 
 # --- Conflict gate (owner directive 2026-10-07) --------------------------------

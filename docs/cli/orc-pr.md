@@ -34,17 +34,23 @@ orc pr status 614 --repo arbsec/orchestraitor --json     # typed §9.48 JSON
 - **`merge_state` is informational only.** It is never a convergence input
   (`convergence-status` and `merge-gate` do not read it); a merge refusal
   surfaces from `gh` at merge time.
-- **Known-disabled jobs.** The `pr-checks` `KNOWN_DISABLED_JOBS` semantics
-  are consumed verbatim: a known-disabled job ("Docs Consistency",
-  "Documentation") exempts from the all-passed gate only while its bucket is
-  `skipping`; the same job actually failing is a failure, never a pass.
+- **Known-disabled and structural skips.** The `pr-checks` `KNOWN_DISABLED_JOBS`
+  semantics are consumed verbatim: a known-disabled job ("Documentation", the
+  push-gated docs build; `Docs Consistency` is a pull-request job and therefore
+  NOT in the set) exempts from the all-passed gate only while its bucket is
+  `skipping`; the same job actually failing is a failure, never a pass. A
+  `CodeRabbit` `skipping` check on a PR authored by a bot/App login
+  (`<slug>[bot]` or `app/<slug>`) is the structural bot-author no-op
+  (`skip_reason: "bot-author"`): it is `not-applicable` and never fails
+  `checks_all_passed`. A skip on a human/unknown-authored PR, or a check the
+  engine cannot classify, stays non-passing (fail closed).
 
 ### The verdict
 
 The `--json` output is the §9.48 schema: `number`, `repository`, `head_sha`,
 `base_oid` (the two convergence anchors), `is_draft`, `review_decision`,
 `merge_state`, classified `checks` (name, state, bucket, classification,
-workflow, link) with the aggregate booleans `checks_all_passed`,
+`skip_reason`, workflow, link) with the aggregate booleans `checks_all_passed`,
 `checks_any_failing`, `checks_any_pending`, `threads` (total, unresolved
 actionable, resolved, outdated, size-capped items), `checklist`
 (`<!-- orc:* -->` markers), `review_record` (the `.orchestraitor/reviews/`

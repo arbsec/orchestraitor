@@ -88,12 +88,19 @@ pub trait PrStatusTransport: Send + Sync {
 }
 
 /// Known-disabled workflow jobs (pr-checks' `KNOWN_DISABLED_JOBS`): deliberately
-/// disabled repo-side via `if: false`, so they report the skipped state and can
+/// disabled or event-gated repo-side, so they report the skipped state and can
 /// never pass. A known-disabled job exempts from the all-passed gate ONLY while
 /// its bucket is `skipping` — the same job actually failing is a failure, never
 /// a pass. Re-enabling a job on PRs means removing its name here AND in the
-/// script, in the same change (one vocabulary).
-const KNOWN_DISABLED_JOBS: [&str; 2] = ["Docs Consistency", "Documentation"];
+/// script, in the same change (one vocabulary): a re-enabled job that still
+/// reports `skipping` must never be silently exempted.
+///
+/// `Docs Consistency` was removed when `markdown.yml` re-enabled it
+/// (arbsec/orchestraitor#741): it now runs `xtask docs-check` on every
+/// markdown/Rust/YAML/TOML pull request, so a skip is no longer tolerated.
+/// `Documentation` stays — `code.yml` gates it on
+/// `github.event_name == 'push'`, so it never runs on a pull request.
+const KNOWN_DISABLED_JOBS: [&str; 1] = ["Documentation"];
 
 /// Size cap for the last-comment excerpt of a review thread (spec §9.48:
 /// excerpts are size-capped, never full bodies).
@@ -154,6 +161,11 @@ pub struct CheckItem {
     pub bucket: String,
     /// pr-checks classification: pass|fail|pending|skip|not-applicable|unknown.
     pub classification: String,
+    /// pr-checks' `skip_reason`: `known-disabled-job` or `bot-author` when the
+    /// check is structurally unavailable (classified `not-applicable`), absent
+    /// otherwise — a skip is never widened silently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// Workflow name (`CheckRun` only; empty for status contexts).
     pub workflow: String,
     /// Details/target URL.
@@ -311,7 +323,11 @@ impl Engine {
         let base_oid = oid_field(&initial, "baseRefOid", "base")?;
 
         // 2. The sub-reads, each failing closed into `unread(<sub-check>)`.
-        let checks = self.read_checks(owner, repo, &head_sha);
+        // The PR author discriminates the structural bot-author CodeRabbit
+        // skip (pr-checks' `bot_author_pr`); an unread/absent author is ""
+        // and never treated as a bot.
+        let pr_author = gh_author_login(&initial);
+        let checks = self.read_checks(owner, repo, &head_sha, &pr_author);
         let threads = self.read_threads(owner, repo, number);
         let checklist = self.read_body(owner, repo, number);
         let review_record = read_review_record(repo_root, number, &head_sha, &base_oid);
@@ -366,7 +382,9 @@ impl Engine {
     }
 
     /// The PR view: number, headRefOid, baseRefOid, isDraft, reviewDecision,
-    /// mergeStateStatus — the fields pr-state and convergence-status read.
+    /// mergeStateStatus — the fields pr-state and convergence-status read —
+    /// plus the author login (the discriminator for the structural
+    /// bot-author `CodeRabbit` skip).
     fn pr_view(
         &self,
         owner: &str,
@@ -375,7 +393,7 @@ impl Engine {
     ) -> Result<(Value, bool), PrStatusError> {
         let query = "query($owner:String!,$name:String!,$number:Int!){\
 repository(owner:$owner,name:$name){\
-pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDecision mergeStateStatus}}}\
+pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDecision mergeStateStatus author{__typename login}}}}\
 ";
         let (data, had_errors) = self.graphql(
             "pr view",
@@ -419,6 +437,7 @@ pullRequest(number:$number){number state headRefOid baseRefOid isDraft reviewDec
         owner: &str,
         repo: &str,
         head_oid: &str,
+        pr_author: &str,
     ) -> Result<ChecksAggregate, String> {
         // Two query shapes: the full one requests `WorkflowRun.event` (which
         // gh gates behind feature detection — some GHES versions reject the
@@ -428,14 +447,14 @@ repository(owner:$owner,name:$name){\
 object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
 __typename\
 ... on StatusContext{context state targetUrl createdAt}\
-... on CheckRun{name checkSuite{workflowRun{event workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
+... on CheckRun{name title checkSuite{workflowRun{event workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
 }}}}}}}";
         let query_without_event = "query($owner:String!,$name:String!,$oid:GitObjectID!){\
 repository(owner:$owner,name:$name){\
 object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{\
 __typename\
 ... on StatusContext{context state targetUrl createdAt}\
-... on CheckRun{name checkSuite{workflowRun{workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
+... on CheckRun{name title checkSuite{workflowRun{workflow{name}}} status conclusion startedAt completedAt detailsUrl}\
 }}}}}}}";
         // Try the event-including shape first; a query-level rejection
         // (unsupported field on older GHES) falls back to the event-less
@@ -504,7 +523,7 @@ __typename\
         let deduped = dedupe_check_nodes(&nodes);
         let mut items: Vec<CheckItem> = Vec::new();
         for node in deduped {
-            items.push(classify_check(node)?);
+            items.push(classify_check(node, pr_author)?);
         }
         Ok(aggregate_checks(items))
     }
@@ -994,7 +1013,9 @@ struct ChecksAggregate {
 
 /// Classifies one statusCheckRollup context node with gh's bucket derivation
 /// followed by pr-checks' classification — the two-stage semantics, verbatim.
-fn classify_check(node: &Value) -> Result<CheckItem, String> {
+/// `pr_author` is the PR author login, read only to decide whether a
+/// `CodeRabbit` skip is the structural bot-author no-op.
+fn classify_check(node: &Value, pr_author: &str) -> Result<CheckItem, String> {
     let type_name = node
         .get("__typename")
         .and_then(Value::as_str)
@@ -1045,11 +1066,19 @@ fn classify_check(node: &Value) -> Result<CheckItem, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    // pr-checks' classification: the not-applicable exemption requires BOTH
-    // the known-disabled name AND bucket == "skipping" — a state-blind
+    // gh's `pr checks --json description` is the check run's `title`; it is
+    // "" for the CodeRabbit bot-author no-op in practice, and the shell's
+    // narrowing only refuses a non-empty description that does NOT name the
+    // bot-user reason. Read it so the engine is never LOOSER than the script.
+    let description = node
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // pr-checks' classification: a structural exemption requires BOTH the
+    // exempting name/reason AND bucket == "skipping" — a state-blind
     // exemption would launder real failures. `cancel` classifies as fail.
-    let exempt = KNOWN_DISABLED_JOBS.contains(&name) && bucket == "skipping";
-    let classification = if exempt {
+    let skip_reason = skip_exemption(name, &bucket, pr_author, description);
+    let classification = if skip_reason.is_some() {
         "not-applicable"
     } else {
         match bucket.as_str() {
@@ -1065,9 +1094,71 @@ fn classify_check(node: &Value) -> Result<CheckItem, String> {
         state: raw_state.to_string(),
         bucket,
         classification: classification.to_string(),
+        skip_reason: skip_reason.map(str::to_string),
         workflow,
         link: link.to_string(),
     })
+}
+
+/// pr-checks' `skip_reason` derivation: the structural exemptions that widen a
+/// skipped bucket to `not-applicable`. `known-disabled-job` requires the name
+/// AND the skipping bucket; `bot-author` additionally requires the PR to be
+/// authored by a bot/App login and no contradicting check description. An
+/// unknown/empty author or an unexplained skip yields `None` — fail closed,
+/// the skip still blocks the gate.
+fn skip_exemption(
+    name: &str,
+    bucket: &str,
+    pr_author: &str,
+    description: &str,
+) -> Option<&'static str> {
+    if KNOWN_DISABLED_JOBS.contains(&name) && bucket == "skipping" {
+        return Some("known-disabled-job");
+    }
+    if name == "CodeRabbit"
+        && bucket == "skipping"
+        && is_bot_author_login(pr_author)
+        && (description.is_empty() || is_bot_user_skip_description(description))
+    {
+        return Some("bot-author");
+    }
+    None
+}
+
+/// The PR author login in the shape `gh pr view --json author` reports it.
+/// GitHub's GraphQL `Bot` actor is a GitHub App/bot identity: gh surfaces it
+/// as `app/<login>` when the actor has no user id, and as the raw
+/// `<slug>[bot]` login otherwise. Either shape satisfies
+/// [`is_bot_author_login`], so every `Bot` actor is normalised to a shape the
+/// script's predicate recognises. An absent/empty author is "" (fail closed).
+fn gh_author_login(initial: &Value) -> String {
+    let Some(author) = initial.get("author") else {
+        return String::new();
+    };
+    let login = author
+        .get("login")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let is_bot_actor = author.get("__typename").and_then(Value::as_str) == Some("Bot");
+    if is_bot_actor && !login.is_empty() && !is_bot_author_login(login) {
+        format!("app/{login}")
+    } else {
+        login.to_string()
+    }
+}
+
+/// pr-checks' `bot_author_pr` predicate: a bot/App login either ends with
+/// `[bot]` or starts with `app/`. An empty/unknown login is never a bot.
+fn is_bot_author_login(login: &str) -> bool {
+    login.ends_with("[bot]") || login.starts_with("app/")
+}
+
+/// pr-checks' `bot_author_description` narrowing, `(?i)^review skipped.*bot
+/// user`, implemented without a regex dependency. A non-matching non-empty
+/// description (rate limit, config error, out of credits) is NOT exempted.
+fn is_bot_user_skip_description(description: &str) -> bool {
+    let lowered = description.to_lowercase();
+    lowered.starts_with("review skipped") && lowered.contains("bot user")
 }
 
 /// gh's bucket mapping (cli/cli `aggregateChecks`), verbatim: SUCCESS -> pass;
@@ -1268,16 +1359,60 @@ mod tests {
     // --- pr-checks classification, including known-N/A SKIP semantics -------
 
     #[test]
+    fn known_disabled_jobs_holds_exactly_the_still_disabled_jobs() {
+        // The vocabulary must not keep a job that is now enabled on pull
+        // requests: the exemption matches on name AND `skipping` only, so a
+        // stale entry silently excuses a re-enabled job that reports SKIPPED
+        // (arbsec/orchestraitor#741 — the #750 review's re-enablement
+        // condition). Adding a name here means it is disabled again.
+        assert_eq!(KNOWN_DISABLED_JOBS, ["Documentation"]);
+        assert!(
+            !KNOWN_DISABLED_JOBS.contains(&"Docs Consistency"),
+            "Docs Consistency is enabled on PRs by markdown.yml"
+        );
+    }
+
+    #[test]
     fn known_disabled_skipping_job_is_not_applicable() {
-        let item = classify_check(&json!({
-            "__typename": "CheckRun",
-            "name": "Docs Consistency",
-            "status": "COMPLETED",
-            "conclusion": "SKIPPED",
-        }))
+        let item = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "Documentation",
+                "status": "COMPLETED",
+                "conclusion": "SKIPPED",
+            }),
+            "",
+        )
         .expect("well-formed CheckRun");
         assert_eq!(item.bucket, "skipping");
         assert_eq!(item.classification, "not-applicable");
+        assert_eq!(item.skip_reason.as_deref(), Some("known-disabled-job"));
+    }
+
+    #[test]
+    fn re_enabled_docs_consistency_skip_is_never_exempt() {
+        // `Docs Consistency` left the vocabulary when markdown.yml re-enabled
+        // it (arbsec/orchestraitor#741): its skip is now an UNEXPLAINED skip, so
+        // it fails closed instead of laundering to not-applicable.
+        let item = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "Docs Consistency",
+                "status": "COMPLETED",
+                "conclusion": "SKIPPED",
+            }),
+            "",
+        )
+        .expect("well-formed CheckRun");
+        assert_eq!(item.bucket, "skipping");
+        assert_eq!(item.classification, "skip");
+        assert_eq!(item.skip_reason, None);
+        let aggregate = aggregate_checks(vec![
+            classify_check(&passing_check("Test"), "").expect("passing check"),
+            item,
+        ]);
+        assert!(!aggregate.all_passed, "an unexplained skip must block");
+        assert!(!aggregate.any_failing, "a skip is not a failure");
     }
 
     #[test]
@@ -1286,12 +1421,15 @@ mod tests {
         // "the not-applicable exemption requires BOTH the known-disabled
         // name AND the skipped state").
         for conclusion in ["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"] {
-            let item = classify_check(&json!({
-                "__typename": "CheckRun",
-                "name": "Documentation",
-                "status": "COMPLETED",
-                "conclusion": conclusion,
-            }))
+            let item = classify_check(
+                &json!({
+                    "__typename": "CheckRun",
+                    "name": "Documentation",
+                    "status": "COMPLETED",
+                    "conclusion": conclusion,
+                }),
+                "",
+            )
             .expect("well-formed CheckRun");
             assert_eq!(item.bucket, "fail", "conclusion {conclusion}");
             assert_eq!(item.classification, "fail", "conclusion {conclusion}");
@@ -1301,11 +1439,14 @@ mod tests {
     #[test]
     fn pending_status_context_classifies_pending() {
         // StatusContext state PENDING → bucket pending (gh's default arm).
-        let item = classify_check(&json!({
-            "__typename": "StatusContext",
-            "context": "a status",
-            "state": "PENDING",
-        }))
+        let item = classify_check(
+            &json!({
+                "__typename": "StatusContext",
+                "context": "a status",
+                "state": "PENDING",
+            }),
+            "",
+        )
         .expect("well-formed StatusContext");
         assert_eq!(item.bucket, "pending");
         assert_eq!(item.classification, "pending");
@@ -1313,12 +1454,15 @@ mod tests {
 
     #[test]
     fn cancel_bucket_classifies_as_fail_like_the_script() {
-        let item = classify_check(&json!({
-            "__typename": "CheckRun",
-            "name": "cool tests",
-            "status": "COMPLETED",
-            "conclusion": "CANCELLED",
-        }))
+        let item = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "cool tests",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+            }),
+            "",
+        )
         .expect("well-formed CheckRun");
         assert_eq!(item.bucket, "cancel");
         assert_eq!(item.classification, "fail");
@@ -1326,12 +1470,15 @@ mod tests {
 
     #[test]
     fn status_context_uses_state_and_target_url() {
-        let item = classify_check(&json!({
-            "__typename": "StatusContext",
-            "context": "a status",
-            "state": "FAILURE",
-            "targetUrl": "sweet link",
-        }))
+        let item = classify_check(
+            &json!({
+                "__typename": "StatusContext",
+                "context": "a status",
+                "state": "FAILURE",
+                "targetUrl": "sweet link",
+            }),
+            "",
+        )
         .expect("well-formed StatusContext");
         assert_eq!(item.name, "a status");
         assert_eq!(item.state, "FAILURE");
@@ -1342,23 +1489,29 @@ mod tests {
 
     #[test]
     fn check_run_state_is_conclusion_when_completed_else_status() {
-        let completed = classify_check(&json!({
-            "__typename": "CheckRun",
-            "name": "cool tests",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "detailsUrl": "sweet link",
-            "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}},
-        }))
+        let completed = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "cool tests",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "sweet link",
+                "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}},
+            }),
+            "",
+        )
         .expect("completed run");
         assert_eq!(completed.state, "SUCCESS");
         assert_eq!(completed.workflow, "code.yml");
-        let in_progress = classify_check(&json!({
-            "__typename": "CheckRun",
-            "name": "slow tests",
-            "status": "IN_PROGRESS",
-            "conclusion": "",
-        }))
+        let in_progress = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "slow tests",
+                "status": "IN_PROGRESS",
+                "conclusion": "",
+            }),
+            "",
+        )
         .expect("in-progress run");
         assert_eq!(in_progress.state, "IN_PROGRESS");
         assert_eq!(in_progress.bucket, "pending");
@@ -1366,8 +1519,11 @@ mod tests {
 
     #[test]
     fn missing_check_name_is_a_typed_error() {
-        let error = classify_check(&json!({"__typename": "CheckRun", "status": "COMPLETED"}))
-            .expect_err("nameless check is an error");
+        let error = classify_check(
+            &json!({"__typename": "CheckRun", "status": "COMPLETED"}),
+            "",
+        )
+        .expect_err("nameless check is an error");
         assert!(error.contains("name/context"), "{error}");
     }
 
@@ -1381,6 +1537,7 @@ mod tests {
             state: "SUCCESS".to_string(),
             bucket: "pass".to_string(),
             classification: classification.to_string(),
+            skip_reason: None,
             workflow: String::new(),
             link: String::new(),
         };
@@ -1388,7 +1545,7 @@ mod tests {
         assert!(!aggregate_checks(Vec::new()).all_passed);
         let with_na = aggregate_checks(vec![
             passing("cool tests", "pass"),
-            passing("Docs Consistency", "not-applicable"),
+            passing("Documentation", "not-applicable"),
         ]);
         assert!(with_na.all_passed);
         assert!(!with_na.any_failing);
@@ -1397,6 +1554,194 @@ mod tests {
         let skipped = aggregate_checks(vec![passing("rad tests", "skip")]);
         assert!(!skipped.all_passed);
         assert!(!skipped.any_failing, "a skip is not a failure");
+    }
+
+    // --- the structural bot-author CodeRabbit skip (pr-checks #706/#707) ----
+
+    #[test]
+    fn graphql_bot_actor_normalises_to_the_gh_app_login() {
+        // GraphQL returns `__typename: "Bot"` with the bare slug; gh's
+        // `pr view --json author` surfaces it as `app/<slug>` — the shape
+        // pr-checks' predicate recognises.
+        assert_eq!(
+            gh_author_login(&json!({"author": {"__typename": "Bot", "login": "arbsec-agent"}})),
+            "app/arbsec-agent"
+        );
+        // A bot user's `[bot]` login is already bot-shaped.
+        assert_eq!(
+            gh_author_login(&json!({"author": {"__typename": "Bot", "login": "dependabot[bot]"}})),
+            "dependabot[bot]"
+        );
+        // Humans, and an absent/empty author, are never bots (fail closed).
+        assert_eq!(
+            gh_author_login(&json!({"author": {"__typename": "User", "login": "mekwall"}})),
+            "mekwall"
+        );
+        assert_eq!(gh_author_login(&json!({})), "");
+    }
+
+    /// A `CodeRabbit` SKIPPED check run authored by a bot/App PR login: the
+    /// pr-checks `bot_author_skip` case. `title` is the check run description
+    /// gh exposes as `--json description` ("" for these runs in practice).
+    fn code_rabbit_skip(title: &str) -> serde_json::Value {
+        json!({
+            "__typename": "CheckRun",
+            "name": "CodeRabbit",
+            "title": title,
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+        })
+    }
+
+    fn passing_check(name: &str) -> serde_json::Value {
+        json!({
+            "__typename": "CheckRun",
+            "name": name,
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        })
+    }
+
+    #[test]
+    fn bot_authored_code_rabbit_skip_is_not_applicable_and_does_not_block() {
+        // `<>[bot]` and `app/<>` are both bot/App logins (pr-checks'
+        // `bot_author_pr`). A green PR with this structural skip is MERGEABLE
+        // on checks: all_passed true, any_failing false.
+        for author in ["arbsec-agent[bot]", "app/arbsec-agent"] {
+            let rabbit = classify_check(&code_rabbit_skip(""), author)
+                .expect("well-formed CodeRabbit CheckRun");
+            assert_eq!(rabbit.bucket, "skipping", "author {author}");
+            assert_eq!(rabbit.classification, "not-applicable", "author {author}");
+            assert_eq!(
+                rabbit.skip_reason.as_deref(),
+                Some("bot-author"),
+                "author {author}"
+            );
+            let aggregate = aggregate_checks(vec![
+                classify_check(&passing_check("Check & Lint"), author).expect("passing check"),
+                classify_check(&passing_check("Test"), author).expect("passing check"),
+                rabbit,
+            ]);
+            assert!(aggregate.all_passed, "author {author}");
+            assert!(!aggregate.any_failing, "author {author}");
+            assert!(!aggregate.any_pending, "author {author}");
+        }
+    }
+
+    #[test]
+    fn human_authored_code_rabbit_skip_stays_a_skip_and_blocks() {
+        // A human-authored PR's CodeRabbit skip is NOT the structural no-op:
+        // it stays `skip` with no exemption, so all_passed is false (fail
+        // closed, exactly like pr-checks).
+        for author in ["mekwall", "some-human", ""] {
+            let rabbit = classify_check(&code_rabbit_skip(""), author)
+                .expect("well-formed CodeRabbit CheckRun");
+            assert_eq!(rabbit.classification, "skip", "author {author:?}");
+            assert_eq!(rabbit.skip_reason, None, "author {author:?}");
+            let aggregate = aggregate_checks(vec![
+                classify_check(&passing_check("Test"), author).expect("passing check"),
+                rabbit,
+            ]);
+            assert!(!aggregate.all_passed, "author {author:?}");
+            assert!(!aggregate.any_failing, "author {author:?}");
+        }
+    }
+
+    #[test]
+    fn bot_author_skip_with_a_non_bot_reason_description_stays_a_skip() {
+        // pr-checks narrows on a non-empty description that does not name the
+        // bot-user reason (rate limit, config error, out of credits): the
+        // engine must not be looser than the script.
+        let narrowed = classify_check(
+            &code_rabbit_skip("Review skipped: rate limited"),
+            "arbsec-agent[bot]",
+        )
+        .expect("well-formed CodeRabbit CheckRun");
+        assert_eq!(narrowed.classification, "skip");
+        assert_eq!(narrowed.skip_reason, None);
+        // The real bot-user reason IS exempted.
+        let exempted = classify_check(
+            &code_rabbit_skip("Review skipped: bot user not eligible for review"),
+            "arbsec-agent[bot]",
+        )
+        .expect("well-formed CodeRabbit CheckRun");
+        assert_eq!(exempted.classification, "not-applicable");
+        assert_eq!(exempted.skip_reason.as_deref(), Some("bot-author"));
+    }
+
+    #[test]
+    fn bot_authored_code_rabbit_that_actually_failed_stays_a_failure() {
+        // The exemption is state-blind when keyed on the author alone; a real
+        // failure must never be laundered into not-applicable.
+        let failed = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "CodeRabbit",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+            }),
+            "arbsec-agent[bot]",
+        )
+        .expect("well-formed CodeRabbit CheckRun");
+        assert_eq!(failed.bucket, "fail");
+        assert_eq!(failed.classification, "fail");
+        assert_eq!(failed.skip_reason, None);
+    }
+
+    #[test]
+    fn genuine_failure_still_blocks_a_green_pr_with_a_bot_skip() {
+        let aggregate = aggregate_checks(vec![
+            classify_check(&passing_check("Test"), "arbsec-agent[bot]").expect("passing check"),
+            classify_check(&code_rabbit_skip(""), "arbsec-agent[bot]").expect("bot skip"),
+            classify_check(
+                &json!({
+                    "__typename": "CheckRun",
+                    "name": "Check & Lint",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                }),
+                "arbsec-agent[bot]",
+            )
+            .expect("cancelled check"),
+        ]);
+        assert!(!aggregate.all_passed);
+        assert!(aggregate.any_failing);
+    }
+
+    #[test]
+    fn known_disabled_skip_keeps_a_green_pr_all_passed() {
+        let aggregate = aggregate_checks(vec![
+            classify_check(&passing_check("Test"), "").expect("passing check"),
+            classify_check(
+                &json!({
+                    "__typename": "CheckRun",
+                    "name": "Documentation",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                }),
+                "",
+            )
+            .expect("known-disabled skip"),
+        ]);
+        assert!(aggregate.all_passed);
+        assert!(!aggregate.any_failing);
+    }
+
+    #[test]
+    fn unclassifiable_check_is_never_a_pass() {
+        // Fail closed: a classification the engine cannot place is not pass
+        // and not not-applicable, so the gate stays closed.
+        let unknown = CheckItem {
+            name: "mystery".to_string(),
+            state: "SOMETHING_NEW".to_string(),
+            bucket: "pending".to_string(),
+            classification: "unknown".to_string(),
+            skip_reason: None,
+            workflow: String::new(),
+            link: String::new(),
+        };
+        let aggregate = aggregate_checks(vec![unknown]);
+        assert!(!aggregate.all_passed);
     }
 
     // --- checklist parsing (reconcile-checklist semantics) -------------------

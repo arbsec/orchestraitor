@@ -4,10 +4,28 @@ on:
   push:
     branches: [main]
     paths: &md_paths
+      # `xtask docs-check` scans EVERY `.md`, `.rs`, `.yml`/`.yaml` and `.toml`
+      # file in the tree for legacy section references, so the trigger covers the
+      # scanned file types, not only markdown: a markdown-only filter leaves
+      # Rust-comment and TOML drift unchecked in a PR that touches no `.md`
+      # (arbsec/orchestraitor#741). The recursive (`**/`) and the root-level
+      # (`*`) forms are both listed so a root-level file matches either way.
       - "**/*.md"
+      - "**/*.rs"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.toml"
+      - "*.md"
+      - "*.rs"
+      - "*.yml"
+      - "*.yaml"
+      - "*.toml"
+      # Dotfiles are named explicitly rather than relying on `*` matching a
+      # leading dot: `rumdl.toml` is the lint config, and `.mise.toml` pins the
+      # tool version, so a change to either must re-run the lint job.
+      - ".mise.toml"
       - "rumdl.toml"
       - "lefthook.yml"
-      - ".mise.toml"
       - ".github/workflows/markdown.yml"
   pull_request:
     paths: *md_paths
@@ -37,7 +55,20 @@ jobs:
   docs-check:
     name: Docs Consistency
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: false
+    # The job builds `xtask` (the toolchain comes from `.mise.toml` via
+    # mise-action, so a cold runner installs Rust first); 5 minutes was the
+    # stub-era value, when the job only echoed a string.
+    timeout-minutes: 15
     steps:
-      - run: echo "Disabled until xtask docs-check is implemented (#35)"
+      # `persist-credentials: false`: no step in this job pushes commits or calls an
+      # authenticated API, so the checkout token has no consumer (zizmor `artipacked`).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # Rust comes from `.mise.toml` (1.98.1, matching `rust-toolchain.toml`),
+      # the same setup code.yml uses for `cargo fmt`/`clippy`/`check`.
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b  # v5.2.7
+      # `--locked`: CI must never rewrite the committed lockfile. A non-zero
+      # exit fails the job — no `continue-on-error`, no `|| true`.
+      - name: Docs consistency check
+        run: cargo run --locked -p xtask -- docs-check

@@ -622,12 +622,21 @@ pr.status <N> -> {
                                      # (convergence-status and merge-gate do not read it; a DIRTY
                                      # state is a display hint for the operator, and a merge refusal
                                      # surfaces from gh at merge time, not here)
-  checks: [ { name, state, bucket, classification, workflow, link } ],
+  checks: [ { name, state, bucket, classification, skip_reason?, workflow, link } ],
                                      # classification: pass|fail|pending|skip|not-applicable|unknown,
-                                     # including the KNOWN_DISABLED_JOBS semantics ("Docs
-                                     # Consistency", "Documentation") copied from pr-checks — a
-                                     # known-disabled job exempts only while bucket == "skipping";
-                                     # the same job actually failing is a failure, never a pass
+                                     # including the KNOWN_DISABLED_JOBS semantics copied from
+                                     # pr-checks — the set holds only jobs disabled or event-gated
+                                     # repo-side ("Documentation": code.yml runs it on push only);
+                                     # a re-enabled job leaves the set in the same change, so
+                                     # "Docs Consistency" (a pull-request job since #741) is not a
+                                     # known-disabled job and its skip is an unexplained skip.
+                                     # A known-disabled job exempts only while bucket == "skipping";
+                                     # the same job actually failing is a failure, never a pass.
+                                     # skip_reason (known-disabled-job|bot-author) is present only on
+                                     # a not-applicable check: a bot/App-authored PR's CodeRabbit
+                                     # SKIPPED is the structural bot-author no-op (pr-checks
+                                     # #706/#707); a human/unknown author skip stays a plain skip
+                                     # and fails the gate (fail closed)
   checks_all_passed, checks_any_failing, checks_any_pending,
   threads: {
     total, unresolved_actionable, resolved, outdated,

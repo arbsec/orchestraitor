@@ -29,6 +29,20 @@ const HEAD: &str = "cb7cf776939f65981f9fb7c9e5263ba0b20b7c7c";
 const BASE: &str = "9cc67bf0db85a7248a9b9718974f4460d5fb3759";
 
 fn pr_view_json(head: &str, base: &str, review_decision: &str, is_draft: bool) -> String {
+    pr_view_json_authored(head, base, review_decision, is_draft, "", "")
+}
+
+/// `pr_view_json` with an explicit PR author — the discriminator for the
+/// structural bot-author `CodeRabbit` skip. `author_type` is the GraphQL
+/// `__typename` (`"Bot"` for a GitHub App/bot identity, `"User"` for a human).
+fn pr_view_json_authored(
+    head: &str,
+    base: &str,
+    review_decision: &str,
+    is_draft: bool,
+    author_login: &str,
+    author_type: &str,
+) -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
             "number": 614,
@@ -38,6 +52,7 @@ fn pr_view_json(head: &str, base: &str, review_decision: &str, is_draft: bool) -
             "isDraft": is_draft,
             "reviewDecision": review_decision,
             "mergeStateStatus": "CLEAN",
+            "author": {"__typename": author_type, "login": author_login},
         }}}
     })
     .to_string()
@@ -55,9 +70,31 @@ fn checks_all_pass() -> String {
                 {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED",
                  "conclusion": "SUCCESS", "detailsUrl": "https://ci/test",
                  "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
-                {"__typename": "CheckRun", "name": "Docs Consistency", "status": "COMPLETED",
+                {"__typename": "CheckRun", "name": "Documentation", "status": "COMPLETED",
                  "conclusion": "SKIPPED", "detailsUrl": "",
-                 "checkSuite": {"workflowRun": {"workflow": {"name": "docs.yml"}}}},
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
+            ],
+        }}}}}
+    })
+    .to_string()
+}
+
+/// Two passing `CheckRun`s plus `CodeRabbit`'s structural bot-author SKIPPED
+/// (the #707 exemption; the author discriminator lives in the PR view).
+fn checks_green_with_bot_code_rabbit_skip() -> String {
+    serde_json::json!({
+        "data": {"repository": {"object": {"statusCheckRollup": {"contexts": {
+            "pageInfo": {"hasNextPage": false},
+            "nodes": [
+                {"__typename": "CheckRun", "name": "Check & Lint", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "detailsUrl": "https://ci/lint",
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
+                {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "detailsUrl": "https://ci/test",
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
+                {"__typename": "CheckRun", "name": "CodeRabbit", "title": "",
+                 "status": "COMPLETED", "conclusion": "SKIPPED", "detailsUrl": "",
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "coderabbit.yml"}}}},
             ],
         }}}}}
     })
@@ -403,7 +440,7 @@ fn pr_status_mergeable_exits_zero_with_full_schema() -> miette::Result<()> {
     assert_eq!(checks.len(), 3);
     let docs = checks
         .iter()
-        .find(|check| check["name"] == "Docs Consistency")
+        .find(|check| check["name"] == "Documentation")
         .expect("docs check");
     assert_eq!(docs["bucket"], "skipping");
     assert_eq!(docs["classification"], "not-applicable");
@@ -413,6 +450,60 @@ fn pr_status_mergeable_exits_zero_with_full_schema() -> miette::Result<()> {
     assert_eq!(verdict["review_record"]["verdict"], "CLEAN");
     assert_eq!(verdict["review_record"]["head_sha_match"], true);
     assert_eq!(verdict["review_record"]["base_oid_match"], true);
+    let _ = repo; // repo outlives the server via temp
+    Ok(())
+}
+
+#[test]
+fn pr_status_bot_authored_code_rabbit_skip_is_not_a_gate_failure() -> miette::Result<()> {
+    // A green PR whose only non-pass check is CodeRabbit's structural
+    // bot-author SKIPPED: all_passed true, mergeable true — the pr-checks
+    // #707 rule consumed through the GraphQL author field (issue #740).
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let endpoint = spawn_pr_status_server(vec![
+        pr_view_json_authored(HEAD, BASE, "APPROVED", false, "arbsec-agent", "Bot"),
+        checks_green_with_bot_code_rabbit_skip(),
+        threads_none(),
+        body_all_checked(),
+        pr_view_json_authored(HEAD, BASE, "APPROVED", false, "arbsec-agent", "Bot"),
+    ])?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["checks_all_passed"], true);
+    assert_eq!(verdict["checks_any_failing"], false);
+    assert_eq!(verdict["checks_any_pending"], false);
+    assert_eq!(verdict["convergence"]["mergeable"], true);
+    assert_eq!(verdict["convergence"]["reasons"], serde_json::json!([]));
+    let rabbit = verdict["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|check| check["name"] == "CodeRabbit")
+        .expect("CodeRabbit check");
+    assert_eq!(rabbit["bucket"], "skipping");
+    assert_eq!(rabbit["classification"], "not-applicable");
+    assert_eq!(rabbit["skip_reason"], "bot-author");
     let _ = repo; // repo outlives the server via temp
     Ok(())
 }
