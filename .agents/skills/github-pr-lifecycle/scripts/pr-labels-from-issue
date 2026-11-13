@@ -15,7 +15,7 @@
 # end of its paragraph), hidden inside an HTML comment, or buried in a link
 # destination is not a reference.
 #
-# FOUR rules fix what the rendered text looks like:
+# FIVE rules fix what the rendered text looks like:
 #   spans    a code span renders SOMETHING (its content), so it is elided
 #            with its OWN separator — a word character. The phrase around
 #            it can never re-join: "see part `lexer` of #741" renders
@@ -28,13 +28,27 @@
 #            text, so a "> ```" line inside a top-level fence is CONTENT,
 #            not a closer, and a top-level "```" does not close a fence a
 #            blockquote opened. A fence in a blockquote ends with the
-#            blockquote (a fenced block is never continued lazily);
-#   rawtext  a raw-text block ("<script>", "<style>") that opens and
+#            blockquote (a fenced block is never continued lazily) — and
+#            also the moment the quoted depth DROPS below the depth the
+#            fence was opened at;
+#   rawtext  a raw-text block ("<script>", "<style>", "<pre>",
+#            "<textarea>" — CommonMark HTML block type 1) that opens and
 #            closes on ONE line is complete there — the document after it
 #            is prose again; an inline one swallows the text up to its
-#            closing tag;
+#            closing tag. After a comment that closes on its own line, the
+#            REST of that line is re-examined for such an opener, because
+#            a browser would treat it as raw text too;
+#   images   the alt text of an image ("![alt](url)") is an attribute the
+#            reader sees as an IMAGE, not as prose — it propagates
+#            nothing. Link TEXT ("[text](url)") IS prose and still
+#            propagates; and
 #   breaks   a line-break element ("<br>", "<hr>") ends the rendered line,
 #            so a phrase that spans it is not contiguous.
+#
+# A full-reference link's LABEL ("[text][label]") is the key of a link
+# reference definition, not rendered text: it is elided, and the elision
+# takes a WORD-CHARACTER separator so the text around it can never fuse —
+# "x[Part of #741][]1." must not read "Part of #7411".
 #
 # Line endings follow CommonMark: a CRLF body parses like an LF one, and a
 # LONE CR ends a line (it is not nothing, and it is not a space either). A
@@ -62,7 +76,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N, from the raw body) and related (Part of/Refs #N, with optional ':', from the body's Markdown prose) — related references propagate labels but never close an issue; bare #N mentions are ignored. A related reference counts only where a reader would see it: fenced code blocks, indented code blocks, inline code spans (including one that crosses a line break and joins the lines it spans), an unmatched backtick run to the end of its paragraph, HTML comments (an empty '<!-->' ends at its own '>') and link destinations are ignored (the link TEXT is prose). A code span renders SOMETHING, so it is elided with a word character and the phrase around it never re-joins ('see part [lexer] of #741' is no reference); a construct that renders NOTHING (a comment, a raw tag, a destination) leaves the text around it adjacent ('Refs<!-- c -->#741' is no reference). An open fence is closed only by a fence at the SAME blockquote depth it was opened at, so a '> fence' line inside a top-level fence is content, not a closer; a raw-text block ('<script>', '<style>') that opens and closes on one line is complete there, and a line-break element ('<br>', '<hr>') ends the rendered line. Line endings follow CommonMark: CRLF parses like LF, and a lone CR ends a line. A blockquote marker is not text; the text it quotes is. The closing family is still read from the raw body — the asymmetry is deliberate. Positional: <pr-number>. Flags: --repo <owner/name>."
+  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N, from the raw body) and related (Part of/Refs #N, with optional ':', from the body's Markdown prose) — related references propagate labels but never close an issue; bare #N mentions are ignored. A related reference counts only where a reader would see it: fenced code blocks, indented code blocks, inline code spans (including one that crosses a line break and joins the lines it spans), an unmatched backtick run to the end of its paragraph, HTML comments (an empty '<!-->' ends at its own '>') and link destinations are ignored (the link TEXT is prose). Image alt text is NOT prose: '![Part of #N](u)' propagates nothing, while '[Part of #N](u)' (link text) still does. The tags '<pre>' and '<textarea>' open raw-text blocks exactly like '<script>' and '<style>' (CommonMark HTML block type 1), and after a comment that closes on its own line the rest of that line is re-examined for such an opener. A full-reference-link label ('[text][label]') is elided with a word character, so nothing can fuse across it. A code span renders SOMETHING, so it is elided with a word character and the phrase around it never re-joins ('see part [lexer] of #741' is no reference); a construct that renders NOTHING (a comment, a raw tag, a destination) leaves the text around it adjacent ('Refs<!-- c -->#741' is no reference). An open fence is closed only by a fence at the SAME blockquote depth it was opened at, and ends the moment the quoted depth drops below it, so a '> fence' line inside a top-level fence is content, not a closer; a raw-text block ('<script>', '<style>', '<pre>', '<textarea>') that opens and closes on one line is complete there, and a line-break element ('<br>', '<hr>') ends the rendered line. Line endings follow CommonMark: CRLF parses like LF, and a lone CR ends a line. A blockquote marker is not text; the text it quotes is. The closing family is still read from the raw body — the asymmetry is deliberate. Positional: <pr-number>. Flags: --repo <owner/name>."
   exit "$ORC_OK"
 fi
 
@@ -371,9 +385,11 @@ awk '
     return substr(s, i, 4) == "<!--"
   }
 
-  # TRUE when the line opens a RAW-TEXT HTML block ("<script ...>" or
-  # "<style ...>"); sets RB_TAG. The content of such a block is raw text
-  # and is NOT rendered as prose, so it is dropped like a code block.
+  # TRUE when the line opens a RAW-TEXT HTML block ("<script ...>",
+  # "<style ...>", "<pre ...>" or "<textarea ...>"); sets RB_TAG. The
+  # content of such a block is raw text and is NOT rendered as prose, so it
+  # is dropped like a code block. CommonMark HTML block type 1 covers all
+  # four tags: their content is not Markdown.
   function opens_raw_block(s,   i, t, rest, c) {
     i = 1
     while (i <= length(s) && substr(s, i, 1) == " ") i++
@@ -381,6 +397,8 @@ awk '
     t = tolower(substr(s, i))
     if (substr(t, 1, 7) == "<script") { RB_TAG = "script"; rest = substr(s, i + 7) }
     else if (substr(t, 1, 6) == "<style") { RB_TAG = "style"; rest = substr(s, i + 6) }
+    else if (substr(t, 1, 4) == "<pre") { RB_TAG = "pre"; rest = substr(s, i + 4) }
+    else if (substr(t, 1, 9) == "<textarea") { RB_TAG = "textarea"; rest = substr(s, i + 9) }
     else return 0
     if (rest != "") {
       c = substr(rest, 1, 1)
@@ -429,9 +447,9 @@ awk '
     SPAN_RUN = 0
     IN_COMMENT = 0
     NBRACKET = 0
+    ALT_DEPTH = 0
     SUPPRESS = 0
     PARA = 0
-PARA = 0
   }
 
   # ---------------------------------------------------------------------
@@ -484,6 +502,62 @@ PARA = 0
         # longer or shorter run is literal text INSIDE the span.
         if (r == SPAN_RUN) { i = i + r; SPAN_RUN = 0; continue }
         i = i + r
+        continue
+      }
+
+      # --- an open image alt group: not rendered text ------------------
+      # An image renders its alt text as an attribute (a tooltip at best),
+      # never as prose, and the "!" AND the brackets render nothing. The
+      # whole alt group is therefore skipped; a code span inside it is
+      # still alt text, so it is skipped whole too (its exact closing run
+      # is honoured, so a "]" that sits inside it cannot close the alt
+      # early and expose text the renderer never shows).
+      if (ALT_DEPTH > 0) {
+        if (c == "\\" && i < n) { i += 2; continue }
+        if (c == "`") {
+          runlen = 0
+          while (substr(s, i + runlen, 1) == "`") runlen++
+          j = i + runlen
+          found = 0
+          while (j <= n) {
+            if (substr(s, j, 1) != "`") { j++; continue }
+            r = 0
+            while (substr(s, j + r, 1) == "`") r++
+            if (r == runlen) { found = 1; break }
+            j = j + r
+          }
+          if (!found) { elide_invisible(); CONT = 1; return }
+          i = j + runlen
+          continue
+        }
+        if (c == "[") { ALT_DEPTH++; i++; continue }
+        if (c == "]") {
+          ALT_DEPTH--
+          i++
+          if (ALT_DEPTH == 0) {
+            # The alt group closed: a destination or a reference label is
+            # not rendered text either.
+            if (substr(s, i, 1) == "(") {
+              if (scan_link_dest(s, i)) i = DEST_END
+              else i = DEST_FAIL
+              continue
+            }
+            if (substr(s, i, 1) == "[") {
+              e = index(substr(s, i + 1), "]")
+              if (e == 0) {
+                # An unterminated label: fail closed for the rest of the
+                # paragraph, because the label may swallow the text after it.
+                SUPPRESS = 1
+                CONT = 1
+                return
+              }
+              i = i + e + 1
+              continue
+            }
+          }
+          continue
+        }
+        i++
         continue
       }
 
@@ -551,7 +625,8 @@ PARA = 0
           # A raw-text element ("<script>", "<style>") swallows the text
           # that follows it up to its closing tag: a browser shows none of
           # it, so none of it is prose.
-          if (TAGNAME == "script" || TAGNAME == "style") RAW_INLINE = TAGNAME
+          if (TAGNAME == "script" || TAGNAME == "style" ||
+              TAGNAME == "pre" || TAGNAME == "textarea") RAW_INLINE = TAGNAME
           # A line-break element ends the rendered line: the text after it
           # is on the NEXT line, so a phrase that spans it is not
           # contiguous and is never a reference.
@@ -572,6 +647,16 @@ PARA = 0
         continue
       }
 
+      # --- an image opener: "![" is alt text, not prose ----------------
+      # the alt text of an image is an attribute, which a reader sees as
+      # an IMAGE, not as prose. Both are consumed silently; a bracket NOT
+      # preceded by a "!" is link text, which IS prose.
+      if (c == "!" && substr(s, i + 1, 1) == "[") {
+        ALT_DEPTH = 1
+        i += 2
+        continue
+      }
+
       # --- a link text closes: "]" may open a destination --------------
       if (c == "]" && NBRACKET > 0) {
         NBRACKET--
@@ -580,8 +665,14 @@ PARA = 0
           # link reference definition, not rendered text: when the
           # definition exists the renderer shows the link TEXT only. The
           # label is therefore elided (fail closed): a reference the reader
-          # never sees must never label the PR.
-          elide_invisible()
+          # never sees must never label the PR. The elision takes the CODE
+          # separator (a word character), not the invisible one: a bare
+          # elision would leave the text on both sides ADJACENT, and a
+          # numeral after the link would FUSE into the number in front of
+          # it — "x[Part of #741][]1." would read "Part of #7411" and label
+          # an issue the author never wrote. A word character keeps every
+          # neighbour separated.
+          elide_code()
           e = index(substr(s, i + 2), "]")
           if (e == 0) {
             # An unterminated label: fail closed for the rest of the
@@ -617,6 +708,9 @@ PARA = 0
       vis(c)
       i++
     }
+    # An alt group still open at the end of the line swallows the line
+    # break too (an image may span lines): the rendered line goes on.
+    if (ALT_DEPTH > 0) CONT = 1
     return
   }
 
@@ -707,10 +801,11 @@ PARA = 0
       return i + j + 1
     }
     if (c == "!") {
-      if (substr(s, i + 1, 8) == "[CDATA[") {
-        j = index(substr(s, i + 9), "]]>")
+      # A CDATA section: "<![CDATA[ ... ]]>" (a seven-character opener).
+      if (substr(s, i + 1, 7) == "[CDATA[") {
+        j = index(substr(s, i + 8), "]]>")
         if (j == 0) return 0
-        return i + 9 + j + 2
+        return i + 8 + j + 2
       }
       if (substr(s, i + 1, 1) ~ /^[A-Za-z]$/) {
         # A declaration: "<!X ... >".
@@ -795,7 +890,7 @@ PARA = 0
 
   # Apply the block level rules to one logical line and append the prose it
   # contributes.
-  function process_line(s) {
+  function process_line(s,   rest) {
     # A blockquote marker is not text: its content is. Entering a blockquote
     # (or changing its depth) STARTS a block — ">" interrupts a paragraph,
     # so an inline construct cannot carry into it. LEAVING one is not
@@ -816,6 +911,15 @@ PARA = 0
       close_paragraph()
       return
     }
+    # A fence held by a blockquote ends when the quoted depth DROPS below
+    # the depth the fence was opened at: a fenced block is never continued
+    # lazily, and the inner blockquote that contained it has closed. FDEPTH
+    # must be reset HERE, not only on an open/close — otherwise a stale
+    # depth would let a later fence line at the OLD depth masquerade as the
+    # closer of the dead fence and expose the text behind it. The line that
+    # revealed the drop is ordinary content (it may open a NEW fence at its
+    # own depth), so reset and fall through.
+    if (FCHAR != "" && BQDEPTH < FDEPTH) { FCHAR = ""; FLEN = 0; FDEPTH = -1 }
     if (FCHAR != "") {
       # The content of a fence is RAW text: a blockquote marker on a
       # line is literal content, not a marker, so the closing fence is
@@ -832,16 +936,11 @@ PARA = 0
         # Not a closer: the line is fence content.
         close_paragraph()
         return
-      } else if (FDEPTH > 0 && BQDEPTH == 0) {
-        # The blockquote ended, so the (unterminated) fence ends with it:
-        # a fenced code block is never continued lazily, and a renderer
-        # closes the blockquote at the first line that is not quoted.
-        FCHAR = ""; FLEN = 0; FDEPTH = -1
-        close_paragraph()
-      } else {
-        close_paragraph()
-        return
       }
+      # Deeper than the opener: a quoted line inside a top-level fence is
+      # content, not a closer.
+      close_paragraph()
+      return
     }
     # A blank line ends a paragraph (CommonMark): no inline state — an
     # open code span, an open comment, an open link text — survives it.
@@ -853,8 +952,15 @@ PARA = 0
     if (!PARA && indent_width(s) >= 4) { close_paragraph(); return }
     if (opens_fence(s)) { FDEPTH = BQDEPTH; close_paragraph(); return }
     if (opens_html_block(s)) {
-      if (index(s, "-->") == 0) HTML_BLOCK = 1
+      if (index(s, "-->") == 0) { HTML_BLOCK = 1; close_paragraph(); return }
+      # The comment is complete on this line. The HTML block ends there,
+      # but the REST of the line is live HTML: re-examine it for a raw-text
+      # element opener, which swallows the text that follows in a browser
+      # ("<!-- c --><script>" must not leak the lines behind it). The same
+      # re-examination pattern as the same-line closer in opens_raw_block.
+      rest = substr(s, index(s, "-->") + 3)
       close_paragraph()
+      if (opens_raw_block(rest)) return
       return
     }
     if (opens_raw_block(s)) { close_paragraph(); return }
@@ -869,7 +975,7 @@ PARA = 0
   BEGIN {
     FCHAR = ""; FLEN = 0; FDEPTH = -1; HTML_BLOCK = 0; RB_TAG = ""
     TAGNAME = ""; RAW_INLINE = ""
-    SPAN_RUN = 0; IN_COMMENT = 0; NBRACKET = 0; SUPPRESS = 0
+    SPAN_RUN = 0; IN_COMMENT = 0; NBRACKET = 0; ALT_DEPTH = 0; SUPPRESS = 0
     SEP_INVISIBLE = ""; SEP_CODE = "_"
     CUR = ""; CONT = 0; PARA = 0
     BQDEPTH = 0; BQSEEN = 0

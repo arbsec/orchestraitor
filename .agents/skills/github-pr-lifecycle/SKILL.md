@@ -118,9 +118,20 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   no reference either). An open fence is closed only by a
                   fence at the SAME blockquote depth it was opened at (a
                   `> fence` line inside a top-level fence is CONTENT, not a
-                  closer), a raw-text block (`<script>`, `<style>`) that
-                  opens and closes on one line is complete there, and a
-                  line-break element (`<br>`, `<hr>`) ends the rendered line.
+                  closer, and the fence ends the moment the quoted depth
+                  DROPS below the depth it was opened at), a raw-text block
+                  (`<script>`, `<style>`, `<pre>`, `<textarea>` — CommonMark
+                  HTML block type 1) that opens and closes on one line is
+                  complete there, the rest of a line that completes a
+                  comment is re-examined for such an opener, and a
+                  line-break element (`<br>`, `<hr>`) ends the rendered
+                  line. Image alt text is NOT prose: `![Part of #N](u)`
+                  propagates nothing, while `[Part of #N](u)` (link text)
+                  still does. A full-reference link's label
+                  (`[text][label]`) is not rendered text either: it is
+                  elided with a word character, so a numeral after the link
+                  can never fuse into the number in front of it
+                  (`x[Part of #N][]1.` never reads `#N1`).
                   The closing family is still read from the raw
                   body (the asymmetry is deliberate; #765 tracks aligning
                   it; line endings follow CommonMark — CRLF parses like LF
