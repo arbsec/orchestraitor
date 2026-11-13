@@ -793,6 +793,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   this repository with `--locked`, and the lockfile-scanning `cargo audit`
   gate, no longer carry the advisory.
 
+- The eight `arbsec/arbitraitor` crates are re-pinned from `982517f3` to
+  `df66f2d4` (Arbitraitor `main`, 2026-11-13), the single audited consumer
+  surface Arbitraitor ADR-0044 requires. The bump resolves `zip` 9.5.1
+  (previously 8.6.0), which clears `RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`,
+  `RUSTSEC-2026-0369`, and `RUSTSEC-2026-0429`; the matching advisory
+  ignores are dropped from `deny.toml` and from the `cargo audit` gate in
+  `.github/workflows/security.yml`. The pin also carries the isolation-failure
+  variants Arbitraitor added to `ExecError` (#827, #839, #842), so
+  `orchestraitor-arb-client` now reports the static reason codes
+  `mediated-containment-unavailable`, `network-isolation-unavailable`, and
+  `unshare-target-exec-failed`. No Orchestrator API, schema, or on-disk format
+  changes.
+
 ### Fixed
 
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
