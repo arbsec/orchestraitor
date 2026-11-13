@@ -22,6 +22,13 @@
 #       line ending (keyword, number and comment terminator), and the open
 #       inline state decides what is special (a comment opener or a
 #       destination opener inside a code span is ordinary text)
+#   (u) shapes the differential harness (markdown_it, 6000 generated bodies
+#       per seed, zero fail-opens) found after round 3: a barriered elision
+#       must take its separator from the RENDERED neighbours (a span that
+#       crosses a line break, or a span behind a tag, glues the words around
+#       it), a blockquote marker is not text, four spaces inside a paragraph
+#       are a lazy continuation rather than code, and "<!-->" is a complete
+#       (empty) comment
 #   (v) reviewer round 4 of #767: a code span renders SOMETHING, so it gets
 #       its own separator (a word character) and a reference that spans one
 #       is never visible; an open fence is closed only at the blockquote
@@ -29,13 +36,6 @@
 #       rendered text; a raw-text block that opens and closes on one line
 #       is complete there; and a construct that renders NOTHING leaves the
 #       text around it adjacent
-#   (u) shapes the differential harness (markdown_it, 6000 generated bodies,
-#       zero fail-opens) found after round 3: a barriered elision must take
-#       its separator from the RENDERED neighbours (a span that crosses a
-#       line break, or a span behind a tag, glues the words around it), a
-#       blockquote marker is not text, four spaces inside a paragraph are a
-#       lazy continuation rather than code, and "<!-->" is a complete
-#       (empty) comment
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
