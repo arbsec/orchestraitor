@@ -2838,6 +2838,7 @@ fn spawn_push_branch_server(
                     .unwrap_or_else(|| default_payload.to_string());
                 (String::from("HTTP/1.1 200 OK"), matched)
             };
+            let payload = echo_client_mutation_id(&text, &payload);
             let response = format!(
                 "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
                 payload.len()
@@ -2848,12 +2849,57 @@ fn spawn_push_branch_server(
     Ok((endpoint, auth_rx, body_rx))
 }
 
+/// Placeholder a scripted payload uses to echo the request's
+/// `clientMutationId`, exactly as `UpdateRefsPayload` does: GitHub returns the
+/// input value, and `null` when the input omitted it.
+const CLIENT_MUTATION_ID_PLACEHOLDER: &str = "\"__echo_clientMutationId__\"";
+
+/// Substitutes [`CLIENT_MUTATION_ID_PLACEHOLDER`] with the JSON encoding of
+/// the `clientMutationId` the request carried — the id itself, or `null` when
+/// the input omitted it. A scripted response therefore cannot claim an id the
+/// request never sent, which is what makes this harness able to reproduce the
+/// real API's echo semantics.
+fn echo_client_mutation_id(request: &str, payload: &str) -> String {
+    if !payload.contains(CLIENT_MUTATION_ID_PLACEHOLDER) {
+        return payload.to_string();
+    }
+    let echoed = request
+        .find("\"clientMutationId\":\"")
+        .and_then(|start| request.get(start + "\"clientMutationId\":\"".len()..))
+        .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+        .map_or_else(|| "null".to_string(), |id| format!("\"{id}\""));
+    payload.replace(CLIENT_MUTATION_ID_PLACEHOLDER, &echoed)
+}
+
+/// Extracts the `clientMutationId` the recorded `updateRefs` request carried,
+/// empty when the input omitted it — the shape that made the payload echo
+/// `null` on every landing (issue 775).
+fn recorded_update_refs_mutation_id(bodies: &[String]) -> miette::Result<String> {
+    let update_request = bodies
+        .iter()
+        .find(|body| body.contains("updateRefs"))
+        .ok_or_else(|| miette::miette!("no updateRefs request recorded"))?;
+    let update_body = update_request
+        .split_once("\r\n\r\n")
+        .map(|(_headers, body)| body)
+        .ok_or_else(|| miette::miette!("recorded updateRefs request carries no body"))?;
+    let update_json: serde_json::Value = serde_json::from_str(update_body)
+        .map_err(|_| miette::miette!("recorded updateRefs request is not JSON"))?;
+    Ok(update_json
+        .pointer("/variables/input/clientMutationId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string())
+}
+
 /// Builds the scripted `updateRefs` success payload. `UpdateRefsPayload`
 /// carries only a nullable `clientMutationId` (no refs list exists on the
 /// payload type), so the command verifies the move by re-reading the branch
-/// ref — this stub satisfies exactly that contract.
+/// ref — this stub satisfies exactly that contract AND echoes the request's
+/// `clientMutationId`, so a request that omits the id gets the `null` the real
+/// API returns for it.
 fn update_refs_stub() -> String {
-    r#"{"data":{"updateRefs":{"clientMutationId":"ok"}}}"#.to_string()
+    r#"{"data":{"updateRefs":{"clientMutationId":"__echo_clientMutationId__"}}}"#.to_string()
 }
 
 fn push_branch_cli(
@@ -2926,7 +2972,7 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         ),
         temp_probe_rule,
     ];
-    let (endpoint, auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+    let (endpoint, auth_rx, bodies) = spawn_push_branch_server(rules)?;
 
     let output = push_branch_cli(
         &temp,
@@ -2951,6 +2997,31 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Regression guard for issue 775: the request body itself must carry a
+    // NON-EMPTY `clientMutationId`. `UpdateRefsPayload` is a nullable ECHO of
+    // that input field, so a request that omits it can only ever read back
+    // `null`. This is the assertion that fails against the pre-fix code — the
+    // stub echoes whatever the request sent, exactly like the real API.
+    let bodies: Vec<String> = std::iter::from_fn(|| bodies.try_recv().ok()).collect();
+    let sent_id = recorded_update_refs_mutation_id(&bodies)?;
+    assert!(
+        !sent_id.is_empty(),
+        "the updateRefs input must carry a non-empty clientMutationId (issue 775)"
+    );
+    // Because the request carries the id and the stub echoes it, the payload
+    // can no longer look malformed: the landing takes the primary success
+    // path, so no WARNING may be printed. Before the fix every existing-ref
+    // landing settled on the false-negative fallback and printed one.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("WARNING"),
+        "an existing-ref landing must not warn: {stderr}"
+    );
+    assert!(
+        !stderr.contains("clientMutationId"),
+        "the stub echoes the id the request sent, so the payload cannot look \
+         malformed: {stderr}"
+    );
     // The bearer on the GraphQL calls is the minted installation token, and
     // the branch-ref probe ran before the mutation (CAS shape).
     let mut calls = 0;
@@ -2963,6 +3034,163 @@ fn github_push_branch_lands_app_signed_commit_on_existing_branch() -> miette::Re
     assert_eq!(
         calls, 8,
         "branch probe + repo id + temp-ref probe (null) + createRef + createCommitOnBranch + updateRefs + post-move ref re-read + deleteRef, one minted token each"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_update_refs_null_echo_falls_back_to_ref_re_read() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
+    // A server that drops the `clientMutationId` echo (the pre-fix behaviour
+    // of every landing, and a genuinely malformed payload now that the request
+    // sends an id). The mutation APPLIED, so the ref re-read must still
+    // degrade the false-negative to a WARNING and report success — the
+    // fallback stays by design.
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        (
+            "updateRefs".to_string(),
+            r#"{"data":{"updateRefs":{"clientMutationId":null}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"2222222222222222222222222222222222222222"}}}}}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing clientMutationId") && stderr.contains("provably points at"),
+        "the false-negative guard must report the warning, not a failure: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_push_branch_post_move_mismatch_fails_with_the_verification_error() -> miette::Result<()> {
+    let (temp, repo, _base_tree, feature_tree, main_commit) = spawn_local_repo(&[])?;
+    // The mutation echoes the id (primary success path) but the ref re-read
+    // shows the branch on a DIFFERENT oid — a concurrent rewind, or a server
+    // that acknowledged without applying. The failure must be the honest
+    // post-move verification error, not a "malformed payload" claim: that
+    // block was unreachable while the request omitted `clientMutationId`.
+    let rules = vec![
+        (
+            "ref(qualifiedName".to_string(),
+            format!(
+                r#"{{"data":{{"repository":{{"ref":{{"id":"REF_node","target":{{"oid":"{main_commit}"}}}}}}}}}}"#
+            ),
+        ),
+        (
+            r"name:$repo){id}".to_string(),
+            r#"{"data":{"repository":{"id":"REPO_node"}}}"#.to_string(),
+        ),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":null}}}"#.to_string(),
+        ),
+        (
+            "createRef".to_string(),
+            r#"{"data":{"createRef":{"ref":{"id":"TEMPREF_node","target":{"oid":"1111111111111111111111111111111111111111"}}}}}"#.to_string(),
+        ),
+        (
+            "createCommitOnBranch".to_string(),
+            format!(
+                r#"{{"data":{{"createCommitOnBranch":{{"commit":{{"oid":"2222222222222222222222222222222222222222","tree":{{"oid":"{feature_tree}"}},"signature":{{"isValid":true}}}}}}}}}}"#
+            ),
+        ),
+        ("updateRefs".to_string(), update_refs_stub()),
+        (
+            "ref(qualifiedName".to_string(),
+            r#"{"data":{"repository":{"ref":{"id":"REF_node","target":{"oid":"4444444444444444444444444444444444444444"}}}}}"#.to_string(),
+        ),
+        (
+            "deleteRef".to_string(),
+            r#"{"data":{"deleteRef":{"clientMutationId":"ok"}}}"#.to_string(),
+        ),
+    ];
+    let (endpoint, _auth_rx, _bodies) = spawn_push_branch_server(rules)?;
+
+    let output = push_branch_cli(
+        &temp,
+        &repo,
+        &endpoint,
+        &[
+            "github",
+            "push-branch",
+            "--branch",
+            "feature/signed",
+            "--message",
+            "feat: signed landing",
+            "--owner",
+            "arbsec",
+            "--repo",
+            "orchestraitor",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("post-move verification failed")
+            && stderr.contains("4444444444444444444444444444444444444444")
+            && stderr.contains("2222222222222222222222222222222222222222"),
+        "a ref left on the wrong oid must fail post-move verification: {stderr}"
+    );
+    assert!(
+        !stderr.contains("malformed") && !stderr.contains("clientMutationId"),
+        "the payload echoed the id, so no malformed-payload claim is possible: {stderr}"
     );
     Ok(())
 }

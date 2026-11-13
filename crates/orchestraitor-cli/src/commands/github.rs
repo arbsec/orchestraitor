@@ -2736,11 +2736,19 @@ impl GraphqlSession<'_> {
         observed_head_oid: &str,
         new_oid: &str,
     ) -> Result<()> {
+        // `UpdateRefsPayload.clientMutationId` is a nullable ECHO of the input
+        // field, so a request that omits it can never receive a non-null one
+        // back. Send an invocation-unique id (uuid — already a dependency for
+        // the temp landing branch name) so the echo is meaningful: a non-null
+        // id proves the payload belongs to THIS mutation, and the response
+        // field is no longer structurally guaranteed to be null.
+        let request_mutation_id = uuid::Uuid::new_v4().to_string();
         let data = match self.execute(
             "updateRefs",
             "mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}",
             &serde_json::json!({
                 "input": {
+                    "clientMutationId": request_mutation_id,
                     "repositoryId": repository_id,
                     "refUpdates": [{
                         "name": format!("refs/heads/{remote_branch}"),
@@ -2752,14 +2760,16 @@ impl GraphqlSession<'_> {
             }),
         ) {
             Ok(data) => data,
-            // FALSE-NEGATIVE GUARD: a GraphQL error envelope here is NOT
-            // proof the ref did not move — GitHub has answered updateRefs
-            // with a spurious "malformed: missing updateRefs.clientMutationId"
-            // AFTER applying the mutation, and `execute` surfaces such
-            // envelopes as typed errors. The mutation actually moving the
-            // ref must never be reported as a failure: re-read the branch
-            // ref through the API; when it provably points at `new_oid`,
-            // the landing succeeded and the error degrades to a warning.
+            // FALSE-NEGATIVE GUARD: a GraphQL error envelope (or a transport
+            // failure surfacing after the response was written) is NOT proof
+            // the ref did not move — `execute` cannot tell an error raised
+            // BEFORE the mutation applied from one raised AFTER it. The
+            // mutation actually moving the ref must never be reported as a
+            // failure: re-read the branch ref through the API; when it
+            // provably points at `new_oid`, the landing succeeded and the
+            // error degrades to a warning. This is a genuine fallback, not
+            // the normal path: the request now sends a `clientMutationId` the
+            // payload echoes back, so the success path below is reachable.
             Err(error) => {
                 // Best-effort probe: if the re-read itself fails, the
                 // original mutation error stands (never masked).
@@ -2787,13 +2797,13 @@ impl GraphqlSession<'_> {
         // UpdateRefsPayload carries ONLY the nullable clientMutationId (no
         // refs list exists on the payload type), so the response cannot
         // confirm the move by itself. Verify the move OUTCOME instead:
-        // re-read the branch ref and confirm it now points at `new_oid` —
-        // a null payload with an absent clientMutationId must not be
-        // reported as success.
+        // re-read the branch ref and confirm it now points at `new_oid`.
         let client_mutation_id = graphql_mutation_field(&data, "updateRefs", "clientMutationId");
         if client_mutation_id.is_err() {
-            // Same guard on the null-field path: verify the ref position
-            // before believing any malformed-payload claim.
+            // A null/absent echo means the payload is genuinely malformed (the
+            // request sent an id, so a conforming server echoes one). Same
+            // guard as the error path: verify the ref position before
+            // believing any malformed-payload claim.
             let moved = self
                 .branch_ref(owner, repo, remote_branch)?
                 .as_ref()
