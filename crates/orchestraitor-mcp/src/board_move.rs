@@ -61,12 +61,12 @@ pub(crate) const CHAIN_TRUNCATION_MARKER: &str = "…[chain truncated]";
 /// (`.agents/project/orchestraitor-workflow.md` scheduling states + the
 /// spec's lifecycle mapping, §9.24). Unknown status names are
 /// `StatusClass::Other`: moving INTO them is a terminal/PM decision the
-/// guard refuses (triage is a human gate, §9.38) rather than a scheduling
+/// guard refuses (triage is a human gate, §9.37(b)) rather than a scheduling
 /// transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusClass {
-    /// Human/PM triage gate: where reported issues and drafts land (§9.38).
+    /// Human/PM triage gate: where reported issues and drafts land (§9.37(b), §9.44).
     Triage,
     /// Definition of Ready met; eligible for selection (§9.41).
     Ready,
@@ -119,11 +119,12 @@ impl StatusClass {
 /// Returns whether the workflow policy allows a status-class transition.
 ///
 /// The matrix encodes the scheduling rules the guard enforces
-/// (`.agents/project/orchestraitor-workflow.md`, spec §9.38/§9.40/§9.41):
+/// (`.agents/project/orchestraitor-workflow.md`, spec §9.40/§9.41; the triage
+/// gate itself is §9.37(b)):
 ///
-/// - **Triage is a human/PM gate** (§9.38): only the PM path promotes out
-///   of Triage, and nothing moves INTO it through this tool — both
-///   directions are refused.
+/// - **Triage is a human/PM gate** (§9.37(b)): only the PM path promotes out
+///   of Triage (§9.52(b)), and nothing moves INTO it through this tool
+///   (§9.44, §9.52) — both directions are refused.
 /// - **Scheduling forward** `ready -> in-progress` is the guarded happy
 ///   path; **pause/unpause** between `in-progress` and `held` is allowed
 ///   in both directions (stable, lease-protected states, §9.40).
@@ -1398,7 +1399,7 @@ mod tests {
         );
     }
 
-    /// Triage is a human/PM gate (§9.38): moving INTO and OUT OF Triage
+    /// Triage is a human/PM gate (§9.37(b)): moving INTO and OUT OF Triage
     /// are both refused, board unchanged.
     #[tokio::test]
     async fn triage_is_a_human_gate_both_directions_refused() {
