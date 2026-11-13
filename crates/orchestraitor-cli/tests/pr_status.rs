@@ -70,9 +70,9 @@ fn checks_all_pass() -> String {
                 {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED",
                  "conclusion": "SUCCESS", "detailsUrl": "https://ci/test",
                  "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
-                {"__typename": "CheckRun", "name": "Docs Consistency", "status": "COMPLETED",
+                {"__typename": "CheckRun", "name": "Documentation", "status": "COMPLETED",
                  "conclusion": "SKIPPED", "detailsUrl": "",
-                 "checkSuite": {"workflowRun": {"workflow": {"name": "docs.yml"}}}},
+                 "checkSuite": {"workflowRun": {"workflow": {"name": "code.yml"}}}},
             ],
         }}}}}
     })
@@ -440,7 +440,7 @@ fn pr_status_mergeable_exits_zero_with_full_schema() -> miette::Result<()> {
     assert_eq!(checks.len(), 3);
     let docs = checks
         .iter()
-        .find(|check| check["name"] == "Docs Consistency")
+        .find(|check| check["name"] == "Documentation")
         .expect("docs check");
     assert_eq!(docs["bucket"], "skipping");
     assert_eq!(docs["classification"], "not-applicable");

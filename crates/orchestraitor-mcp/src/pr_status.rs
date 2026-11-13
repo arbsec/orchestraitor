@@ -88,12 +88,19 @@ pub trait PrStatusTransport: Send + Sync {
 }
 
 /// Known-disabled workflow jobs (pr-checks' `KNOWN_DISABLED_JOBS`): deliberately
-/// disabled repo-side via `if: false`, so they report the skipped state and can
+/// disabled or event-gated repo-side, so they report the skipped state and can
 /// never pass. A known-disabled job exempts from the all-passed gate ONLY while
 /// its bucket is `skipping` — the same job actually failing is a failure, never
 /// a pass. Re-enabling a job on PRs means removing its name here AND in the
-/// script, in the same change (one vocabulary).
-const KNOWN_DISABLED_JOBS: [&str; 2] = ["Docs Consistency", "Documentation"];
+/// script, in the same change (one vocabulary): a re-enabled job that still
+/// reports `skipping` must never be silently exempted.
+///
+/// `Docs Consistency` was removed when `markdown.yml` re-enabled it
+/// (arbsec/orchestraitor#741): it now runs `xtask docs-check` on every
+/// markdown/Rust/YAML/TOML pull request, so a skip is no longer tolerated.
+/// `Documentation` stays — `code.yml` gates it on
+/// `github.event_name == 'push'`, so it never runs on a pull request.
+const KNOWN_DISABLED_JOBS: [&str; 1] = ["Documentation"];
 
 /// Size cap for the last-comment excerpt of a review thread (spec §9.48:
 /// excerpts are size-capped, never full bodies).
@@ -1352,7 +1359,41 @@ mod tests {
     // --- pr-checks classification, including known-N/A SKIP semantics -------
 
     #[test]
+    fn known_disabled_jobs_holds_exactly_the_still_disabled_jobs() {
+        // The vocabulary must not keep a job that is now enabled on pull
+        // requests: the exemption matches on name AND `skipping` only, so a
+        // stale entry silently excuses a re-enabled job that reports SKIPPED
+        // (arbsec/orchestraitor#741 — the #750 review's re-enablement
+        // condition). Adding a name here means it is disabled again.
+        assert_eq!(KNOWN_DISABLED_JOBS, ["Documentation"]);
+        assert!(
+            !KNOWN_DISABLED_JOBS.contains(&"Docs Consistency"),
+            "Docs Consistency is enabled on PRs by markdown.yml"
+        );
+    }
+
+    #[test]
     fn known_disabled_skipping_job_is_not_applicable() {
+        let item = classify_check(
+            &json!({
+                "__typename": "CheckRun",
+                "name": "Documentation",
+                "status": "COMPLETED",
+                "conclusion": "SKIPPED",
+            }),
+            "",
+        )
+        .expect("well-formed CheckRun");
+        assert_eq!(item.bucket, "skipping");
+        assert_eq!(item.classification, "not-applicable");
+        assert_eq!(item.skip_reason.as_deref(), Some("known-disabled-job"));
+    }
+
+    #[test]
+    fn re_enabled_docs_consistency_skip_is_never_exempt() {
+        // `Docs Consistency` left the vocabulary when markdown.yml re-enabled
+        // it (arbsec/orchestraitor#741): its skip is now an UNEXPLAINED skip, so
+        // it fails closed instead of laundering to not-applicable.
         let item = classify_check(
             &json!({
                 "__typename": "CheckRun",
@@ -1364,8 +1405,14 @@ mod tests {
         )
         .expect("well-formed CheckRun");
         assert_eq!(item.bucket, "skipping");
-        assert_eq!(item.classification, "not-applicable");
-        assert_eq!(item.skip_reason.as_deref(), Some("known-disabled-job"));
+        assert_eq!(item.classification, "skip");
+        assert_eq!(item.skip_reason, None);
+        let aggregate = aggregate_checks(vec![
+            classify_check(&passing_check("Test"), "").expect("passing check"),
+            item,
+        ]);
+        assert!(!aggregate.all_passed, "an unexplained skip must block");
+        assert!(!aggregate.any_failing, "a skip is not a failure");
     }
 
     #[test]
@@ -1498,7 +1545,7 @@ mod tests {
         assert!(!aggregate_checks(Vec::new()).all_passed);
         let with_na = aggregate_checks(vec![
             passing("cool tests", "pass"),
-            passing("Docs Consistency", "not-applicable"),
+            passing("Documentation", "not-applicable"),
         ]);
         assert!(with_na.all_passed);
         assert!(!with_na.any_failing);

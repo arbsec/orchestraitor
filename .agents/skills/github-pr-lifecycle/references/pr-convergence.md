@@ -97,7 +97,7 @@ The PR stays open, unmerged, in `blocked` state until a human resolves the remai
 
 A **structural skip** is a `SKIPPED` check that can never run for this PR shape, not one that was expected to run and did not. `pr-checks` classifies two kinds as `not-applicable`, excludes them from the `all_passed` gate, and records why in each check's `skip_reason`:
 
-- `known-disabled-job` — a workflow job deliberately disabled or event-gated repo-side (`Docs Consistency`, `Documentation`; see arbsec/orchestraitor#404).
+- `known-disabled-job` — a workflow job deliberately disabled or event-gated repo-side (`Documentation`; see arbsec/orchestraitor#404). The set holds only jobs that are still disabled on pull requests: `Docs Consistency` left it when `markdown.yml` re-enabled it (arbsec/orchestraitor#741), so its skip is an unexplained skip and blocks the gate.
 - `bot-author` — `CodeRabbit` on a PR authored by a GitHub App bot user. CodeRabbit reports `SKIPPED` with the check-run reason "Review skipped: bot user not eligible for review", and every PR this repo's agents open has that author. The GitHub-side check is a no-op regardless: the review mechanism is the LOCAL `pr-review-local` CLI (owner directive 2026-10-09, above), never the GitHub-side bot.
 
 The exemption never overrides state. Only the `skipping` bucket can become `not-applicable`; a known-disabled job or `CodeRabbit` that actually ran and reported `pass`, `fail`, or `pending` is classified from that state, so a failed job is never laundered into a pass.

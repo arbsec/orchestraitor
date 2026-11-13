@@ -624,9 +624,13 @@ pr.status <N> -> {
                                      # surfaces from gh at merge time, not here)
   checks: [ { name, state, bucket, classification, skip_reason?, workflow, link } ],
                                      # classification: pass|fail|pending|skip|not-applicable|unknown,
-                                     # including the KNOWN_DISABLED_JOBS semantics ("Docs
-                                     # Consistency", "Documentation") copied from pr-checks — a
-                                     # known-disabled job exempts only while bucket == "skipping";
+                                     # including the KNOWN_DISABLED_JOBS semantics copied from
+                                     # pr-checks — the set holds only jobs disabled or event-gated
+                                     # repo-side ("Documentation": code.yml runs it on push only);
+                                     # a re-enabled job leaves the set in the same change, so
+                                     # "Docs Consistency" (a pull-request job since #741) is not a
+                                     # known-disabled job and its skip is an unexplained skip.
+                                     # A known-disabled job exempts only while bucket == "skipping";
                                      # the same job actually failing is a failure, never a pass.
                                      # skip_reason (known-disabled-job|bot-author) is present only on
                                      # a not-applicable check: a bot/App-authored PR's CodeRabbit

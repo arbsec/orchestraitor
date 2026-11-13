@@ -112,7 +112,7 @@ export PR_BASE
 # exempts it (skip_reason bot-author); a pre-#707 copy blocks on it.
 jq -cn '[{name:"CodeQL",state:"SUCCESS",bucket:"pass",description:"",workflow:"CI",link:"x"},
         {name:"CodeRabbit",state:"SKIPPED",bucket:"skipping",description:"",workflow:"CI",link:"x"},
-        {name:"Docs Consistency",state:"SKIPPED",bucket:"skipping",description:"",workflow:"CI",link:"x"}]' > "$TMP/checks.json"
+        {name:"Documentation",state:"SKIPPED",bucket:"skipping",description:"",workflow:"CI",link:"x"}]' > "$TMP/checks.json"
 export PR_CHECKS_FIXTURE="$TMP/checks.json"
 
 mkdir -p "$TMP/repo/.orchestraitor/reviews"
