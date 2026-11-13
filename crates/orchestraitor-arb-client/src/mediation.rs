@@ -44,9 +44,14 @@
 //! The preflight consumes Arbitraitor's classification matrix plus its live
 //! probe metadata; two upstream divergences are disclosed rather than hidden:
 //!
-//! - Landlock **active** (arbsec/arbitraitor#754, tracked via #400): the
-//!   network wrapper dies under its own ruleset, so `run_bash` fails closed
-//!   on such hosts (the script never runs). See `docs/sandbox-mediation.md`.
+//! - Network-wrapper identity map (arbsec/arbitraitor#754, tracked via #400):
+//!   the `unshare` wrapper writes `/proc/self/{uid_map,setgroups,gid_map}`
+//!   under the applied Landlock ruleset. The pinned revision grants those
+//!   writes on the `run_bash` path (`ScriptExecution`), so it runs on
+//!   Landlock-active hosts and fails closed with a setup-refusal reason code
+//!   when a host still denies them; the separately assembled `BashChild` rule
+//!   list does not carry the grant and reports such a failure as a result.
+//!   See `docs/sandbox-mediation.md`.
 //! - Landlock **absent on Linux** (arbsec/arbitraitor#755, tracked via #401):
 //!   the classification reports
 //!   [`Available`](crate::sandbox::ControlState::Available) but upstream's
@@ -378,17 +383,19 @@ fn degraded_controls(controls: &EffectiveControls) -> ControlNames {
 /// Captured result of a mediated bash run.
 ///
 /// Host-shape note (arbsec/arbitraitor#754, tracked via #400): a wrapper that
-/// dies before the interpreter starts does not always come back as a result.
-/// Since the pinned revision `df66f2d4` a run that requested network
-/// isolation — which `ScriptExecution::bash` always does — fails closed when
-/// the wrapper refused namespace setup (`network-isolation-unavailable`; the
-/// Landlock-active `cannot open /proc/self/uid_map` diagnostic is one such
-/// refusal) or could not hand the target to the kernel
-/// (`unshare-target-exec-failed`), both as [`MediationError::Bash`]. The
-/// early-close `Ok` shape survives only for a wrapper failure the classifier
-/// does not recognise: a non-zero `exit_code` with an empty `stdout` still
-/// means "the mediated stack may not have started". There is no
-/// isolation-off fallback on this path; see `docs/sandbox-mediation.md`.
+/// dies before the interpreter starts comes back as a result only when it left
+/// no `unshare: ` diagnostic behind. Since the pinned revision `df66f2d4` a run
+/// that requested network isolation — which `ScriptExecution::bash` always
+/// does — fails closed as [`MediationError::Bash`] whenever a non-zero exit
+/// carries an `unshare: ` diagnostic: a namespace-setup refusal reports
+/// `network-isolation-unavailable` (a host whose LSM or policy denies the
+/// wrapper its `/proc/self` identity-map writes is one such refusal), a
+/// target-exec failure reports `unshare-target-exec-failed`, and a diagnostic
+/// the classifier cannot attribute reports `spawn`. A returned [`MediatedRun`]
+/// therefore means the wrapper handed the target to the kernel and the exit
+/// code is the script's own, or — when `exit_code` is `None` — that the child
+/// died from a signal, in which case no enforcement state is claimed. There is
+/// no isolation-off fallback on this path; see `docs/sandbox-mediation.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediatedRun {
     /// Exit code reported by the interpreter. `None` when the interpreter was
@@ -471,14 +478,14 @@ impl MediatedWorker {
     /// - [`MediationError::Bash`] when spawn, script piping, or output
     ///   collection fails at the Arbitraitor exec layer.
     ///
-    /// A wrapper that dies before the interpreter starts is **not** always a
-    /// result: since the pinned revision `df66f2d4` a namespace-setup refusal
-    /// or a target-exec failure fails closed as [`MediationError::Bash`] with
-    /// the static reason codes `network-isolation-unavailable` /
-    /// `unshare-target-exec-failed`. Only a wrapper failure the classifier
-    /// does not recognise still yields `Ok` with a non-zero
-    /// [`MediatedRun::exit_code`] and the wrapper diagnostic in
-    /// [`MediatedRun::stderr`] — see the [`MediatedRun`] host-shape note.
+    /// A wrapper that dies before the interpreter starts yields a result only
+    /// when it left no `unshare: ` diagnostic behind: since the pinned revision
+    /// `df66f2d4` every `unshare: ` failure on a non-zero exit fails closed as
+    /// [`MediationError::Bash`] with the static reason codes
+    /// `network-isolation-unavailable`, `unshare-target-exec-failed`, or
+    /// `spawn` when the diagnostic cannot be attributed. A returned
+    /// [`MediatedRun`] with a non-zero [`MediatedRun::exit_code`] is therefore
+    /// the script's own exit status — see the [`MediatedRun`] host-shape note.
     pub fn run_bash(&self, script: &[u8]) -> Result<MediatedRun, MediationError> {
         linux_exec::run_bash(script)
     }
@@ -942,15 +949,16 @@ mod tests {
     ///
     /// The probe executes `true` through the real `run_bash` path (network
     /// namespace + Landlock + hardening), not a bare `unshare` check: the
-    /// pinned Arbitraitor revision `df66f2d4` applies its Landlock ruleset to
-    /// the `unshare` wrapper process, which needs `/proc/self/uid_map` access
-    /// that the rules deny — on hosts with the Landlock LSM active the wrapper
-    /// dies with `unshare: cannot open /proc/self/uid_map: Permission denied`.
-    /// Upstream's own happy-path tests run with network isolation disabled, so
-    /// only a full-stack probe distinguishes a working enforcement stack from
-    /// that defect. Hosts that cannot run the mediated stack skip the live
-    /// enforcement tests rather than fabricate a weaker claim; the refusal and
-    /// preflight tests above never skip.
+    /// wrapper must write its user-namespace identity map through
+    /// `/proc/self/{uid_map,setgroups,gid_map}` under the applied ruleset, and
+    /// a host whose LSM or policy denies those writes fails the wrapper with a
+    /// `cannot open /proc/self/uid_map`-shaped diagnostic that the pinned
+    /// revision classifies as a setup refusal. Upstream's own happy-path exec
+    /// tests run with network isolation disabled, so only a full-stack probe
+    /// distinguishes a working enforcement stack from that refusal. Hosts that
+    /// cannot run the mediated stack skip the live enforcement tests rather
+    /// than fabricate a weaker claim; the refusal and preflight tests above
+    /// never skip.
     #[cfg(target_os = "linux")]
     fn mediated_stack_or_skip() -> Option<(MediatedWorker, std::sync::MutexGuard<'static, ()>)> {
         // The construction, the probe run, and every subsequent run_bash on

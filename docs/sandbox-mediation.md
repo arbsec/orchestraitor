@@ -61,7 +61,7 @@ MediatedWorker::run_bash(script)
   instead of returning the wrapper's result
   (arbsec/arbitraitor#827): `network-isolation-unavailable` when the wrapper
   refused to set the namespace up (the errno/marker set covers the
-  Landlock-active `cannot open /proc/self/uid_map` shape), and
+  `cannot open /proc/self/uid_map` identity-map shape), and
   `unshare-target-exec-failed` when the namespace existed but the target never
   started. A wrapper failure the classifier does not recognise stays an
   execution failure (`spawn`), never a fabricated refusal.
@@ -107,33 +107,42 @@ pinned Arbitraitor revision the real surface is:
   any `orc doctor` surface for it are owned by the consumer task #310; this
   task ships the probe/gate/record value only.
 
-## Known upstream gap: Landlock-active wrapper (recorded, owned by Arbitraitor)
+## Landlock and the network wrapper's identity map (pinned revision `df66f2d4`)
 
-On hosts with the Landlock LSM active, the pinned revision applies its
-Landlock ruleset to the `unshare` network-namespace wrapper process, which
-then cannot open `/proc/self/uid_map` and the mediated child dies with
-`unshare: cannot open /proc/self/uid_map: Permission denied`. Upstream's own
-happy-path exec tests run with network isolation disabled, so only a
-full-stack smoke run exposes this. Since the pinned revision `df66f2d4` that
-diagnostic is classified as a namespace-setup refusal, so
-`MediatedWorker::run_bash` reports it as `Err(MediationError::Bash)` with
-reason code `network-isolation-unavailable` rather than returning a result
-(see the fail-closed semantics above). The live-enforcement tests in the
-mediation module gate on a full-stack mediated smoke (`true` through the real
-path) and skip on affected hosts instead of weakening the enforcement
-posture; missing-control refusals are host-independent and always run. The
-fix belongs in `arbsec/arbitraitor` (Landlock rules vs. wrapper composition),
-not in Orchestraitor (spec `40-arbitraitor-integration.md` §16.2).
+The `unshare --map-current-user --net` wrapper writes its own user-namespace
+identity map through `/proc/self/uid_map`, `/proc/self/setgroups`, and
+`/proc/self/gid_map` before it execs the interpreter, so a Landlock ruleset
+that withholds those writes stops the mediated run before the script starts.
+The pinned Arbitraitor revision closes that hole for its own exec path:
+`ScriptExecution` adds exactly three per-file, write-only rules for those paths
+whenever network isolation is enabled (`landlock_rules_for_script_execution`,
+`crates/arbitraitor-exec/src/script.rs`; upstream #754, fixed in
+[arbsec/arbitraitor#780](https://github.com/arbsec/arbitraitor/pull/780)).
+`MediatedWorker::run_bash` therefore runs on Landlock-active hosts; a host
+whose LSM or policy still refuses those writes surfaces as a classified setup
+refusal — `Err(MediationError::Bash)` with reason code
+`network-isolation-unavailable` — not as a result (see the fail-closed bullet
+above).
 
-Disclosure: until the upstream fix lands
-([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754)),
-network-isolated script execution is fail-closed-inoperative on
-Landlock-active hosts, and the full negative-test suite (network and
-filesystem canaries) silently skips its live portion on such hosts — the skip
+The separately assembled `BashChild` path (the worker bash pipeline) builds its
+own command and its own rule list
+(`crates/orchestraitor-arb-client/src/bash_child.rs`, `landlock_rules`), which
+mirrors the pinned rule set *without* those three `/proc` grants, and it does
+not classify the wrapper's stderr: a wrapper that dies before the interpreter
+starts there yields `Ok` with the wrapper's non-zero exit code and its
+diagnostic in `stderr`, as recorded above. Orchestraitor does not widen that
+rule list itself — the write-only grant and its non-leverageability argument
+belong to Arbitraitor, which owns the wrapper composition
+([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754);
+the grant covers upstream's own exec path only).
+
+The live-enforcement tests in the mediation module gate on a full-stack
+mediated smoke (`true` through the real path) and skip on hosts where that
+smoke does not complete instead of weakening the enforcement posture; the skip
 convention is `mediated_stack_or_skip`, whose doc comment documents the
-cause. Orchestraitor-side tracking lives in issue
-[#400](https://github.com/arbsec/orchestraitor/issues/400) (blocked by
-`arbsec/arbitraitor#754`).
+identity-map condition. Missing-control refusals are host-independent and
+always run. Orchestraitor-side tracking for the wrapper composition lives in
+issue [#400](https://github.com/arbsec/orchestraitor/issues/400).
 
 ## Known upstream gap: Landlock-absent classification (discovered in review, owned by Arbitraitor)
 

@@ -107,12 +107,16 @@ Concretely:
   path) requires amending or superseding this ADR; the constant
   `WORKER_PLATFORM = "linux"` is the line that has to move first.
 - **Recorded gap:** spec §16.2 names this path fail-closed without a
-  fallback, but does not enumerate the upstream Landlock-active wrapper
-  bug ([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754))
-  — see `docs/sandbox-mediation.md` "Known upstream gap: Landlock-active
-  wrapper". Until upstream fixes the wrapper composition, network-isolated
-  script execution is fail-closed-inoperative on Landlock-active hosts;
-  the fix is owned by Arbitraitor per spec §16.2.
+  fallback, but does not enumerate the network wrapper's Landlock
+  identity-map requirement
+  ([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754))
+  — see `docs/sandbox-mediation.md`, "Landlock and the network wrapper's
+  identity map". Upstream fixed it for `ScriptExecution` (the path
+  `MediatedWorker::run_bash` uses, fix #780), so network-isolated script
+  execution runs on Landlock-active hosts; the separately assembled
+  `BashChild` rule list does not carry the grant and keeps the early-close
+  result shape. The wrapper composition stays owned by Arbitraitor per spec
+  §16.2.
 
 ## Alternatives considered
 
