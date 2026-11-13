@@ -789,9 +789,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   fix first ships in 0.5.16). The crate is transitive under `reqwest`'s
   optional HTTP/3 feature (`http3`), which no workspace crate enables, so no
   compiled artifact changes and no version requirement moved: this is a
-  lockfile-only patch bump inside `quinn`'s existing `^0.5` window. Builds from
-  this repository with `--locked`, and the lockfile-scanning `cargo audit`
-  gate, no longer carry the advisory.
+  lockfile-only patch bump inside `quinn`'s existing `^0.5` window. (The same
+  update unifies five Windows-only transitive edges onto `windows-sys 0.59.0`,
+  already in the lock; no MVP-platform build input changes.) Builds from this
+  repository with `--locked`, and the lockfile-scanning `cargo audit` gate,
+  no longer carry the advisory.
 
 ### Fixed
 
