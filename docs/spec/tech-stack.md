@@ -24,7 +24,7 @@
 | Workspace resolver | Cargo resolver 3 | — | — |
 | Async runtime | Tokio (current_thread default for the daemon) | MIT | crates.io, 17M dl/wk |
 | TUI framework | Ratatui 0.30.2 + crossterm 0.29 | MIT | crates.io, ratatui-org |
-| Inline images (optional) | ratatui-image 11.0.6, feature-gated | MIT | crates.io |
+| Inline images (optional, post-MVP; not yet a dependency) | ratatui-image, feature-gated; release pinned by the PR that adds the image feature — no such feature exists yet (#736) | MIT | crates.io |
 | HTTP client | reqwest 0.13.4 (rustls default) | MIT OR Apache-2.0 | crates.io |
 | HTTP server / proxy | hyper 1.11 + hyper-util + tower 0.5 | MIT | crates.io |
 | TLS | rustls 0.23.42 + aws-lc-rs 1.17.3 provider | Apache-2.0 OR ISC OR MIT | crates.io |
@@ -39,24 +39,24 @@
 | Agent Client Protocol (M4; not yet a dependency) | agent-client-protocol + agent-client-protocol-schema; release pinned by the ACP integration PR (§4.2) | Apache-2.0 | crates.io, agentclientprotocol/rust-sdk |
 | ACP ↔ MCP bridge (M4; not yet a dependency) | agent-client-protocol-rmcp; release pinned with ACP (§4.2) | Apache-2.0 | crates.io |
 | JSON-RPC (non-MCP) | jsonrpsee 0.26.0 | MIT | crates.io |
-| PTY | portable-pty 0.9.0 | MIT | crates.io |
+| PTY (post-MVP; not yet a dependency) | portable-pty; release pinned by the wrapped-harness PTY adapter PR (`20-harness-worker.md` §10.1 priority 5) — no PTY code exists yet (#736) | MIT | crates.io |
 | Errors (lib) | thiserror 2 | MIT OR Apache-2.0 | crates.io |
 | Errors (CLI boundary) | miette (latest 7.x) | MIT | crates.io |
 | Logging / telemetry | tracing 0.1.44 + tracing-subscriber 0.3.23 (env-filter, json) | MIT | crates.io |
 | Storage (metadata) | SQLite via rusqlite 0.x with WAL mode | MIT | crates.io |
 | Storage (blobs) | Filesystem CAS by SHA-256 (same layout as Arbitraitor `store/`) | — | — |
-| Sandbox (Linux) | landlock 0.4.5 + rustix 1.1.4 + nix 0.31.3 | MIT OR Apache-2.0; Apache-2.0 WITH LLVM-exception; MIT | crates.io |
-| Receipt signing | ed25519-dalek 3.0.0; minisign-compat where Arbitraitor calls for it | BSD-3-Clause | crates.io |
+| Sandbox (Linux) | Arbitraitor-owned (`arbitraitor-sandbox`, §7.1); no Orchestraitor-side `landlock` requirement is declared — the Landlock backend is Arbitraitor's (spec `40-arbitraitor-integration.md` §2.2, §16.4). `rustix` 1.1.4 + `nix` 0.31.3 are the declared primitives (#736) | Apache-2.0 WITH LLVM-exception; MIT | crates.io |
+| Receipt signing | Arbitraitor-owned (`arbitraitor-receipt`; minisign-compat where Arbitraitor calls for it, spec `40-arbitraitor-integration.md` §2.2, §16.4); no Orchestraitor-side `ed25519-dalek` requirement is declared — verification-ownership question open, see §8 and #737 (#736) | — | — |
 | Provenance | Arbitraitor-owned (spec `40-arbitraitor-integration.md` §2.2, §16.4); no Orchestraitor-side `sigstore` requirement is declared — ownership question open, see §8 | — | — |
 | Secrets | secrecy 0.10.3 + zeroize 1.9.0 + keyring 4.1.5 | Apache-2.0 OR MIT | crates.io |
 | Schemas | schemars 1.0 (matched to Arbitraitor's version), JSON Schema 2020-12 | MIT OR Apache-2.0 | crates.io |
-| Provider baseline (MVP) | genai 0.6.5 (feature-gated) behind project-owned `ProviderTransport` trait; raw reqwest escape hatch when native extensions are needed | MIT | crates.io |
-| LSP types (client of wrapped harness LSP) | lsp-types 0.97.0 | MIT | crates.io |
+| Provider baseline (planned; not yet a dependency) | genai behind the project-owned `ProviderTransport` trait; `reqwest` 0.13.4 is the wired transport today and no crate calls genai (ADR 0025). Release pinned by the PR that first adopts it (§4.4, #736, #691) | MIT | crates.io |
+| LSP types (client of wrapped-harness LSP; post-MVP, not yet a dependency) | lsp-types; release pinned by the wrapped-harness LSP client PR (§9.2) — no LSP client code exists yet (#736) | MIT | crates.io |
 | Optional GUI (later) | Tauri 2.x, behind a `gui` Cargo feature; default build is headless | Apache-2.0 OR MIT | crates.io |
 | Test runner | cargo-nextest | MIT OR Apache-2.0 | crates.io |
 | Feature matrix | cargo-hack | MIT OR Apache-2.0 | crates.io |
-| Property testing | proptest | MIT OR Apache-2.0 | crates.io |
-| Snapshot testing | insta | MIT | crates.io |
+| Property testing | proptest; not yet declared — the first property test adds it at the release it exercises (§21.2.2, #736) | MIT OR Apache-2.0 | crates.io |
+| Snapshot testing | insta; not yet declared — the first snapshot test adds it at the release it exercises (§21.2.5, #736) | MIT | crates.io |
 | Fuzzing | cargo-fuzz (libFuzzer) | MIT OR Apache-2.0 | crates.io |
 | Miri / unsafe boundary | cargo miri | MIT OR Apache-2.0 | rust-lang |
 | Mutation testing | cargo-mutants (scheduled CI) | MIT | crates.io |
@@ -172,7 +172,7 @@ Orchestraitor features that depend on Arbitraitor capabilities NOT yet present i
 | `https://api.z.ai/api/paas/v4/` | Z.ai | Alternate OpenAI Chat Completions shape; same underlying model. Z.ai also exposes an Anthropic Messages compat gateway at `https://api.z.ai/api/anthropic` for the GLM Coding Plan (model id `glm-5.2` or `glm-5.2[1m]` for 1M context). |
 | ~~`https://open.bigmodel.cn/api/paas/v4/`~~ | (legacy Zhipu) | **Deprecated branding.** Must NOT ship as a default. Config loader accepts it for backward compatibility with user-supplied configs. |
 
-Both OpenAI OpenAI-Chat-Completions-compatible. No first-party Rust SDK from any of Z.ai, Neuralwatt, BigModel. Orchestraitor uses `reqwest` 0.13.4 (default-features off, `json + stream + rustls-tls`) directly, with `genai` 0.6.5 as the primary transport implementation behind the project-owned `ProviderTransport` trait (spec §10.2). `async-openai` 0.41.1 behind `provider-openai-escape`, `claude-api` 0.5.3 behind `provider-anthropic-escape`, `gemini-rust` 2.0.0 (post-MVP) behind `provider-gemini-escape`. Each third-party crate is isolated behind a crate-local adapter so the project trait is the public surface.
+Both OpenAI OpenAI-Chat-Completions-compatible. No first-party Rust SDK from any of Z.ai, Neuralwatt, BigModel. Orchestraitor uses `reqwest` 0.13.4 (default-features off, `json + stream + rustls-tls`) directly — that is the wired transport today — with `genai` planned as the primary transport implementation behind the project-owned `ProviderTransport` trait, not yet declared and not yet called by any crate (spec §10.2, §4.4; ADR 0025). `async-openai` 0.41.1 behind `provider-openai-escape`, `claude-api` 0.5.3 behind `provider-anthropic-escape`, `gemini-rust` 2.0.0 (post-MVP) behind `provider-gemini-escape`. Each third-party crate is isolated behind a crate-local adapter so the project trait is the public surface.
 
 A cassette test for `/v1/models` and `/v1/chat/completions` ships with the MVP for the Neuralwatt+GLM-5.2 path. All transactions run through `secrecy::SecretString` for the API key; the key never enters a serialized serde stream (custom `Serialize` returns `REDACTED`).
 
@@ -281,7 +281,7 @@ No external `models-dev` Rust crate is used. The published `models-dev 0.1.1` (v
 
 | Crate | Version | License | Role |
 |---|---|---|---|
-| `genai` | 0.6.5 (max stable; 0.7.0-beta in flight, NOT pinned for MVP) | MIT OR Apache-2.0 | Primary multi-provider transport. Default rustls → reqwest 0.13.4 + rustls 0.23.42 + aws-lc-rs 1.17.3 (verified via `cargo tree -i aws-lc-rs` — `ring` absent). Covers 30+ providers incl. zai, bigmodel, moonshot, ollama_cloud, vertex, bedrock, open_router, github_copilot. Used behind the project-owned `ProviderTransport` trait. |
+| `genai` | 0.6.5 (max stable; 0.7.0-beta in flight, NOT pinned for MVP). **Status: planned, NOT declared** — no `genai` requirement exists in the workspace and no crate calls it (ADR 0025); the transport PR that first adopts it pins the release it exercises (#736, #691) | MIT OR Apache-2.0 | Primary multi-provider transport, once adopted. Default rustls → reqwest 0.13.4 + rustls 0.23.42 + aws-lc-rs 1.17.3 (verified via `cargo tree -i aws-lc-rs` — `ring` absent). Covers 30+ providers incl. zai, bigmodel, moonshot, ollama_cloud, vertex, bedrock, open_router, github_copilot. Used behind the project-owned `ProviderTransport` trait. |
 | `async-openai` | 0.41.1 | MIT | OpenAI-native escape hatch (responses / audio / realtime). Default rustls. `rustls-no-provider` feature for BYO crypto. Feature-gated `provider-openai-escape`. |
 | `claude-api` | 0.5.3 | MIT OR Apache-2.0 | Anthropic-native fallback when genai lacks an Anthropic feature. Brings its own reqwest 0.12.28 (a known divergence; isolated behind the `ProviderTransport` trait). Includes `claude-api-test` cassette infra. Feature-gated `provider-anthropic-escape`. |
 | `gemini-rust` | 2.0.0 (2026-07-10) | MIT | Gemini-native fallback for the new Gemini Interactions API + legacy generateContent. Feature-gated `provider-gemini-escape`. Post-MVP. |
@@ -344,7 +344,7 @@ For the default snapshot workspace mode (spec §9.4 mode 1), the controller uses
 The MVP runs on Linux. `arbitraitor-sandbox` is the authoritative implementation; Orchestraitor consumes its probes and reports. Concretely:
 
 - `arbitraitor_sandbox::compute_effective_controls(mode, platform)` returns the `EffectiveControls` matrix Orchestraitor must display and honor.
-- `arbitraitor_sandbox::configure_command(&mut Command, SandboxConfig)` and `apply_sandbox(&SandboxConfig)` are called by Orchestraitor when spawning workers. These call into `landlock` 0.4.5, `rustix::process` (1.1.4, `clone3`/`unshare`/`setns`), `libseccomp-rs`, and `nix` 0.31.3.
+- `arbitraitor_sandbox::configure_command(&mut Command, SandboxConfig)` and `apply_sandbox(&SandboxConfig)` are called by Orchestraitor when spawning workers. These call into `landlock`, `rustix::process` (1.1.4, `clone3`/`unshare`/`setns`), `libseccomp-rs`, and `nix`. `landlock` (previously pinned in this workspace at 0.4.5) and `libseccomp-rs` are Arbitraitor-internal requirements at the pinned Arbitraitor revision: Orchestraitor declares neither (#736) and consumes only `arbitraitor-sandbox` probes, reports, and enforcement entry points.
 - Workspace projection: OverlayFS (mount namespaces + upperdir/workdir for transactional change staging) OR Arbitraitor-managed userspace projection (FUSE). Backend selected via `select_workspace_projection_backend()` per spec §9.4.2 + §9.32.2.
 - Polkit-backed privileged operations brokered through Arbitraitor; Orchestraitor does NOT invoke polkit directly.
 
@@ -387,7 +387,7 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 ## 8. Receipts and provenance
 
 - `arbitraitor_receipt::ReceiptBuilder` builds receipts. `canonical_bytes()` produces RFC 8785 JCS bytes via `serde_json_canonicalizer` 0.3.2.
-- `sign_receipt()` uses minisign-ed25519-blake2b-prehashed (Arbitraitor's algorithm). Where Orchestraitor needs to verify receipts independently, `ed25519-dalek` 3.0.0 is used with `verify_strict` to reject weak keys.
+- `sign_receipt()` uses minisign-ed25519-blake2b-prehashed (Arbitraitor's algorithm). No Orchestraitor-side `ed25519-dalek` requirement is declared: the previous `ed25519-dalek` 3.0.0 entry resolved into no build graph and no `Cargo.lock` entry, so it was never advisory- or licence-checked (#736). Whether Orchestraitor may verify receipts independently with `ed25519-dalek` (`verify_strict`, rejecting weak keys) or must route verification through Arbitraitor is an **open ownership question, not a settled dependency** — signatures and trust roots are Arbitraitor-owned per spec `40-arbitraitor-integration.md` §2.2 and §16.4; tracked by #737.
 - No `sigstore` requirement is declared in the workspace: the previous `sigstore` entry resolved into no build graph and no `Cargo.lock` entry, so it was never advisory- or licence-checked (issue #726). cosign/Rekor provenance is listed as an Arbitraitor-owned capability area (spec `40-arbitraitor-integration.md` §2.2, §16.4); whether Orchestraitor needs a direct sigstore crate at all is an open spec question, not a settled dependency.
 - in-toto Statement export (`to_intoto_statement()`) is the supported interchange format for downstream audit systems.
 
@@ -402,8 +402,8 @@ The architecture MUST NOT couple to OverlayFS, FUSE, FSKit, ProjFS, polkit, laun
 
 ### 9.2 LSP
 
-- `lsp-types` 0.97.0 for the wire types. Last release is 2024-06 (LSP 3.17 spec is stable). Monitor for an upstream fork or 0.100 bump.
-- `tower-lsp` is rejected for the MVP because Orchestraitor is a client of LSPs (when wrapping a harness that launches an LSP), not a server. The crate is added later if the harness needs to expose an LSP server surface.
+- `lsp-types` for the wire types (last release 2024-06; LSP 3.17 spec is stable; monitor for an upstream fork or 0.100 bump). **Status: planned, NOT declared** — no `lsp-types` requirement exists in the workspace and no LSP client code exists yet (#736); the wrapped-harness LSP client PR adds it at the release it exercises.
+- `tower-lsp` is rejected for the MVP because Orchestraitor is a client of LSPs (when wrapping a harness that launches an LSP), not a server; wrapped CLI harnesses are outside the MVP matrix (`60-milestones.md` §23.1), so LSP client support lands with that mode. The crate is added later if the harness needs to expose an LSP server surface.
 
 ---
 
@@ -525,7 +525,7 @@ Scheduled CI includes: full cross-platform matrix (Linux + macOS MVP), extended 
 - **`native-tls`** — pulls OS TLS stacks (OpenSSL/SChannel/Secure Transport) with higher CVE churn; rejected in favor of `rustls` + `aws-lc-rs`.
 - **`ring` as a rustls crypto provider** — legacy; use `aws-lc-rs`.
 - **`git2` (libgit2 binding)** — C dependency surface, patched OpenSSL path on Linux; use `gix` (pure Rust, `bail_if_untrusted()`).
-- **`lsp-types` server-side crates** (`tower-lsp`) — Orchestraitor is a client of LSPs in the MVP; server surface deferred.
+- **`lsp-types` server-side crates** (`tower-lsp`) — Orchestraitor is a client of LSPs (when wrapping a harness that launches an LSP), not a server — wrapped CLI harnesses are outside the MVP matrix (`60-milestones.md` §23.1); server surface deferred.
 - **Tauri in the default build** — optional, behind a `gui` Cargo feature; default build is headless.
 - **Per-brand sub-agent taxonomy** (e.g., Sisyphus, Oracle, Metis) — rejected for MVP. Domains and roles are the user-facing shape (spec §9.19.1).
 - **Implementing any security primitive in Orchestraitor** — rejected. Security lives in Arbitraitor (spec §2.2). The `security` domain agent is analysis only.
@@ -538,7 +538,7 @@ Scheduled CI includes: full cross-platform matrix (Linux + macOS MVP), extended 
 - **Exa as a v1 web-search engine** — excluded from v1 on transport grounds, not quality: every search-relevant Exa endpoint (`/search`, `/findSimilar`, `/contents`, `/answer`) is POST-with-JSON-body per Exa's published OpenAPI spec, and the v1 egress scope is GET-only (spec §9.19.3, §9.19.6). Exa returns with a mediated-POST capability under an explicit policy ruling, or a verified GET-conformant access mode. The same transport finding applies to Kagi's current v1 API (POST-only `/search` + `/extract`; GET exists only in the deprecated v0 legacy API) — Kagi is the intended first engine once a mediated-POST ruling lands.
 - **Adding new dependencies for the web tools** — no new deps. The engine adapters are plain REST/JSON over the already-pinned `reqwest 0.13.4` (rustls default), caching uses the already-pinned `rusqlite`, URL canonicalization uses the already-pinned `url` crate, wire mapping uses the already-pinned `serde_json`; no `scraper`/`html5ever` dependency is introduced (JSON APIs only).
 - **Depending on the MCP `sequentialthinking` server (`@modelcontextprotocol/server-sequential-thinking`) for the `think` tool (spec `20-harness-worker.md` §9.48)** — rejected. The reference implementation is a thin stdio MCP server that carries no intelligence; its value is the param contract and state-echo shape, which is implemented natively in `orchestraitor-worker` (MIT-licensed reference consulted for semantics only). No new crate and no new dependency: the tool is a pure in-process state append plus an event-store write, with no wire protocol, no process spawn, and no Arbitraitor mediation surface.
-- **`rig-core` / `rig` (0xPlaygrounds) as a provider/LLM dependency** — rejected (0.40.0 initially, §4.4; re-evaluated at 0.44.0 on 2026-10-13 with the same verdict). The compliance gates all pass (MIT license; MSRV 1.95.0 vs our 1.96.0 pin; zero `unsafe`; resolved tree license-allowlisted) — the disqualifiers are architectural and economic: (1) rig's differentiating layers (agent/tool loop, model catalog, USD cost auto-fill, RAG/vector stores) are precisely the layers spec `30-model-routing.md` §9.19.4 and §9.29 assign to project-owned, Arbitraitor-mediated code — the catalog collides head-on with `orchestraitor-provider-meta` (a second, un-governable capability-metadata copy), and the USD cost auto-fill fights the `monetary_cost_{measured,estimated,basis}` / subscription-utilization separation; (2) breaking-change churn of ~17 breaking changes per release (171 `[breaking]` markers across the 10 releases from 0.37.1 to 0.44.0) is un-payable under the exact-minor pinning policy; (3) a minimal rig-core resolves to a measured ~150-crate dependency tree — roughly doubling the audit/vet surface for a wire layer genai already occupies. Behind the project-owned `ProviderTransport` trait only the HTTP wires would be retained, at higher dependency weight and with a recurring breakage tax. **Adopted as design donor, not dependency:** the typed generation options with per-provider refusal (rig's `GenerationOptions` + `UnsupportedOption` + exhaustive `Mapping::{Send, Omit, Unsupported}` per-wire mapping and `OptionFields` compile-time exhaustiveness) and the retryable-error classification (`ErrorReport{retryable, http_status, request_id}` decided once at conversion time) are reimplemented natively per spec `20-harness-worker.md` §9.49 — per the borrow analysis (`docs/adr/0025-b-rig-0.44.0-design-borrow-memo.md`) and adoption evaluation (`docs/adr/0025-a-rig-0.44.0-dependency-evaluation.md`, verdict REJECT dependency / borrow ideas; ADR 0025, 2026-10-13). Revisit trigger: only if rig reaches semver-stable 1.x with a measurably lower breaking-change rate AND demonstrates a concrete spec-30 provider feature genai and the native escape hatches lack — and then rig-core wires only, feature-gated, never the agent/catalog/cost layers.
+- **`rig-core` / `rig` (0xPlaygrounds) as a provider/LLM dependency** — rejected (0.40.0 initially, §4.4; re-evaluated at 0.44.0 on 2026-10-13 with the same verdict). The compliance gates all pass (MIT license; MSRV 1.95.0 vs our 1.96.0 pin; zero `unsafe`; resolved tree license-allowlisted) — the disqualifiers are architectural and economic: (1) rig's differentiating layers (agent/tool loop, model catalog, USD cost auto-fill, RAG/vector stores) are precisely the layers spec `30-model-routing.md` §9.19.4 and §9.29 assign to project-owned, Arbitraitor-mediated code — the catalog collides head-on with `orchestraitor-provider-meta` (a second, un-governable capability-metadata copy), and the USD cost auto-fill fights the `monetary_cost_{measured,estimated,basis}` / subscription-utilization separation; (2) breaking-change churn of ~17 breaking changes per release (171 `[breaking]` markers across the 10 releases from 0.37.1 to 0.44.0) is un-payable under the exact-minor pinning policy; (3) a minimal rig-core resolves to a measured ~150-crate dependency tree — roughly doubling the audit/vet surface for a wire layer the designated `genai` transport is meant to occupy. Behind the project-owned `ProviderTransport` trait only the HTTP wires would be retained, at higher dependency weight and with a recurring breakage tax. **Adopted as design donor, not dependency:** the typed generation options with per-provider refusal (rig's `GenerationOptions` + `UnsupportedOption` + exhaustive `Mapping::{Send, Omit, Unsupported}` per-wire mapping and `OptionFields` compile-time exhaustiveness) and the retryable-error classification (`ErrorReport{retryable, http_status, request_id}` decided once at conversion time) are reimplemented natively per spec `20-harness-worker.md` §9.49 — per the borrow analysis (`docs/adr/0025-b-rig-0.44.0-design-borrow-memo.md`) and adoption evaluation (`docs/adr/0025-a-rig-0.44.0-dependency-evaluation.md`, verdict REJECT dependency / borrow ideas; ADR 0025, 2026-10-13). Revisit trigger: only if rig reaches semver-stable 1.x with a measurably lower breaking-change rate AND demonstrates a concrete spec-30 provider feature genai and the native escape hatches lack — and then rig-core wires only, feature-gated, never the agent/catalog/cost layers.
 
 ---
 
