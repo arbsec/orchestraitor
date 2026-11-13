@@ -47,20 +47,20 @@ single `sandboxed` flag.
 Concretely:
 
 - `required_capabilities_from` in
-  `crates/orchestraitor-daemon/src/capability.rs:191` returns a
+  `crates/orchestraitor-daemon/src/capability.rs:192` returns a
   `Vec<RequiredCapability>` with one entry per control. The seven
   controls are listed inline; each entry carries its own
   `RequiredCapabilityStatus` (`Available` / `Degraded` / `Unavailable`).
-- The `CapabilityReport` (`capability.rs:179`) embeds the
+- The `CapabilityReport` (`capability.rs:93`) embeds the
   `required_capabilities` vector verbatim. The daemon's `health` JSON-RPC
-  response (`crates/orchestraitor-daemon/src/rpc.rs:55`) surfaces the report
+  response (`crates/orchestraitor-daemon/src/rpc.rs:76`) surfaces the report
   to operators.
 - The bootstrap-worker preflight's `WorkerPreflight`
   (`orchestraitor-arb-client/src/mediation.rs`) carries the same shape:
   a `controls` matrix and a `degraded_controls` vector, so a run-state
   record that persists the preflight output preserves every control's
   state.
-- The test at `crates/orchestraitor-daemon/src/capability.rs:430` —
+- The test at `crates/orchestraitor-daemon/src/capability.rs:436` —
   `required_capabilities_reports_seven_independent_controls` — pins two
   properties of the contract: `caps.len() == 7` for all-available
   controls, and `caps.iter().all(|c| c.status == ControlStatus::Available)`.
@@ -83,7 +83,7 @@ Concretely:
   downstream operator can correlate a `health` report against a
   `WorkerPreflight` by control identifier. They are NOT shape-identical
   — `health` is a `Vec<RequiredCapability>` (daemon
-  `crates/orchestraitor-daemon/src/capability.rs:191`), `WorkerPreflight`
+  `crates/orchestraitor-daemon/src/capability.rs:192`), `WorkerPreflight`
   carries `missing_controls` and `degraded_controls` as `ControlNames`
   collections (worker `crates/orchestraitor-arb-client/src/mediation.rs:302-355`)
   — and their translations differ in one place. The worker preflight
@@ -115,7 +115,7 @@ Concretely:
   collapsing two controls.
 - **Recorded coupling:** the bootstrap-worker preflight
   (`MediatedWorker::spawn`, `crates/orchestraitor-arb-client/src/mediation.rs`)
-  and the daemon's `health` (`crates/orchestraitor-daemon/src/capability.rs:191`)
+  and the daemon's `health` (`crates/orchestraitor-daemon/src/capability.rs:192`)
   consume the same `EffectiveControls` matrix and share the canonical seven
   control identifiers, but they apply **separate translations** — the
   daemon maps to a `Vec<RequiredCapability>` for the JSON-RPC `health`
@@ -151,11 +151,11 @@ Concretely:
 
 - `crates/orchestraitor-daemon/src/capability.rs:64` — `ControlState`
   to `ControlStatus` conversion (`From<ControlState> for ControlStatus`).
-- `crates/orchestraitor-daemon/src/capability.rs:191` —
+- `crates/orchestraitor-daemon/src/capability.rs:192` —
   `required_capabilities_from`, the seven-entry translation.
 - `crates/orchestraitor-daemon/src/capability.rs:431` — test section
   header that names this ADR.
-- `crates/orchestraitor-daemon/src/rpc.rs:55` — `CapabilityReport`
+- `crates/orchestraitor-daemon/src/rpc.rs:76` — `CapabilityReport`
   surface in the `health` JSON-RPC response.
 - `crates/orchestraitor-arb-client/src/mediation.rs` — the bootstrap
   preflight that consumes the same `EffectiveControls` matrix and
@@ -163,6 +163,6 @@ Concretely:
 - Spec `40-arbitraitor-integration.md` §6.7 (record the degradation),
   §9.6 (Arbitraitor sandbox integration), §16.7 (capability report
   semantics), §27.7 (the seven-control taxonomy).
-- `CHANGELOG.md:589`, `CHANGELOG.md:1052` — historical release-note
-  anchors citing the bootstrap-worker fail-closed posture that depends
-  on this ADR's per-control shape.
+- `CHANGELOG.md:671`, `CHANGELOG.md:701` — release-note entries recording the
+  bootstrap-worker mediation surface whose fail-closed posture depends on this
+  ADR's per-control shape.
