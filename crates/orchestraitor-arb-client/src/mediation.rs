@@ -53,13 +53,14 @@
 //!   list does not carry the grant and reports such a failure as a result.
 //!   See `docs/sandbox-mediation.md`.
 //! - Landlock **absent on Linux** (arbsec/arbitraitor#755, tracked via #401):
-//!   the classification reports
-//!   [`Available`](crate::sandbox::ControlState::Available) but upstream's
-//!   enforcement hook installs no ruleset when the kernel probe reports no
-//!   Landlock ABI. Until upstream reports this natively, the verdict
-//!   derivation treats `landlock_abi_version: None` on the supported Linux
-//!   platform as a missing `filesystem_isolation` control and refuses —
-//!   consuming Arbitraitor's own probe datum, not inferring a control state.
+//!   at the pinned revision the classification is probe-coupled — upstream
+//!   reports [`Unavailable`](crate::sandbox::ControlState::Unavailable) for
+//!   `filesystem_isolation` when the kernel probe finds no Landlock ABI
+//!   (upstream commit `f501af7`, ADR-0028), so the matrix and the enforcement
+//!   hook cannot diverge. The verdict derivation additionally treats
+//!   `landlock_abi_version: None` on the supported Linux platform as a missing
+//!   `filesystem_isolation` control and refuses — fail-closed defense in depth
+//!   consuming Arbitraitor's own probe datum, never inferring a control state.
 //!
 //! Spec-narrative mapping (spec `40-arbitraitor-integration.md` §9.6 names
 //! `configure_command` / `apply_sandbox` conceptually): the pinned Arbitraitor
@@ -305,12 +306,15 @@ fn gate_preflight(preflight: WorkerPreflight) -> Result<WorkerPreflight, Mediati
 /// health-report identifiers so run-state records and health RPCs name
 /// controls identically.
 ///
-/// Fail-closed stopgap (arbsec/arbitraitor#755, tracked via #401): on the
-/// supported Linux platform, a missing Landlock ABI probe means upstream's
-/// filesystem-isolation hook installs no ruleset at all, yet the matrix still
-/// classifies `filesystem_isolation` as `Available`. Until upstream reports
-/// the divergence, the probe datum itself (`landlock_abi_version: None`) is
-/// consumed here — treating that control as missing, never inferring states.
+/// Fail-closed defense in depth (arbsec/arbitraitor#755, tracked via #401): at
+/// the pinned revision `filesystem_isolation` is probe-coupled upstream — the
+/// matrix reports `Unavailable` when the Landlock ABI probe is unsupported
+/// (upstream commit `f501af7`, ADR-0028), so the classification and the
+/// enforcement hook agree. The probe datum itself (`landlock_abi_version:
+/// None`) is still consumed here, treating that control as missing, so a
+/// regression in the coupling cannot leave the gate trusting an `Available`
+/// claim on a kernel where no ruleset is installed. Never infers states
+/// beyond the probe.
 fn unavailable_controls(platform: &str, controls: &EffectiveControls) -> ControlNames {
     let landlock_abi_absent =
         is_supported_platform(platform) && controls.landlock_abi_version.is_none();
@@ -680,9 +684,9 @@ mod tests {
             "filesystem_isolation must track the host Landlock probe verbatim"
         );
         // And: the verdict tracks the Landlock probe datum (see the #755
-        // stopgap in `unavailable_controls`). On hosts that deliver Landlock
-        // the verdict is Allowed with no gaps; on hosts that do not, the
-        // record refuses with exactly `filesystem_isolation` missing.
+        // probe check in `unavailable_controls`). On hosts that deliver
+        // Landlock the verdict is Allowed with no gaps; on hosts that do not,
+        // the record refuses with exactly `filesystem_isolation` missing.
         if preflight.controls.landlock_abi_version.is_some() {
             assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
             assert!(preflight.missing_controls.is_empty());
@@ -734,10 +738,13 @@ mod tests {
 
     #[test]
     fn landlock_absent_linux_preflight_refuses_filesystem_isolation() -> TestResult {
-        // gen-2 finding F1 stopgap regression test (arbsec/arbitraitor#755,
-        // tracked via #401): the classification claims Available while the
-        // kernel probe datum reveals the enforcement hook installs no
-        // ruleset. The verdict must refuse that host class.
+        // gen-2 finding F1 regression test (arbsec/arbitraitor#755, tracked via
+        // #401): a matrix that claims `filesystem_isolation: Available` while
+        // the kernel probe datum shows no Landlock ABI must not be trusted —
+        // no ruleset is installed on that host class. Upstream's own matrix is
+        // probe-coupled at the pinned revision, so this all-available fixture
+        // stands in for a regression in that coupling; the verdict must still
+        // refuse the host class.
         //
         // Given: an all-available matrix on linux with no Landlock ABI.
         let controls = EffectiveControls::all_available();

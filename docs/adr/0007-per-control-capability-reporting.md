@@ -85,14 +85,15 @@ Concretely:
   — `health` is a `Vec<RequiredCapability>` (daemon
   `crates/orchestraitor-daemon/src/capability.rs:191`), `WorkerPreflight`
   carries `missing_controls` and `degraded_controls` as `ControlNames`
-  collections (worker `crates/orchestraitor-arb-client/src/mediation.rs:309-346`)
-  — and their semantics diverge in one place. On a supported Linux host
-  with no Landlock ABI the worker preflight records
-  `filesystem_isolation` as missing (the `#755 stopgap`,
-  `mediation.rs:310-311`), while the daemon reports the matrix state
-  directly without that override (`capability.rs:192-214`). A control
-  that is `Available` in `health` is therefore not necessarily
-  `Available` in the worker's view of the same host.
+  collections (worker `crates/orchestraitor-arb-client/src/mediation.rs:302-355`)
+  — and their translations differ in one place. The worker preflight
+  additionally records `filesystem_isolation` as missing when the host
+  Landlock ABI probe is absent (`mediation.rs:319-320`, the `#755`
+  check), while the daemon reports the matrix state directly
+  (`capability.rs:192-214`). At the pinned Arbitraitor revision the matrix
+  is itself probe-coupled, so both views report `Unavailable` on a
+  Landlock-absent host; the worker check is fail-closed defense in depth
+  against a future divergence, not a differing verdict today.
 - **Positive:** `Degraded` controls are reported distinctly from
   `Unavailable` controls. The aggregate-flag design would erase this
   distinction; the per-control design preserves it (spec
@@ -121,14 +122,15 @@ Concretely:
   report, the worker maps to `ControlNames` collections for
   `missing_controls` and `degraded_controls` on the `WorkerPreflight`
   record. The worker preflight additionally applies the
-  `arbsec/arbitraitor#755` Landlock-ABI stopgap: when the kernel probe
+  `arbsec/arbitraitor#755` Landlock-ABI check: when the kernel probe
   reports no Landlock ABI on the supported Linux platform, the worker
-  treats `filesystem_isolation` as `Unavailable` even though Arbitraitor's
-  matrix classifies it as `Available`; the daemon reports the matrix
-  state directly without that override. If the identifier set, the
-  per-path translation, or the Landlock-ABI override semantics diverge in
-  the future, this ADR must be amended or superseded — not silently
-  relaxed.
+  treats `filesystem_isolation` as `Unavailable`; the daemon reports the
+  matrix state directly without that check. Since the pinned Arbitraitor
+  revision classifies that control by the same probe, the two views agree
+  there, and the worker check is retained as fail-closed defense in
+  depth. If the identifier set, the per-path translation, or the
+  Landlock-ABI override semantics diverge in the future, this ADR must be
+  amended or superseded — not silently relaxed.
 
 ## Alternatives considered
 

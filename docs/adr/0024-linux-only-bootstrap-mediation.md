@@ -50,29 +50,29 @@ labelled non-secure mode exists on this path.
 
 Concretely:
 
-- `crates/orchestraitor-arb-client/src/mediation.rs:84` declares
+- `crates/orchestraitor-arb-client/src/mediation.rs:95` declares
   `pub const WORKER_PLATFORM: &str = "linux";` as the single source of
   truth for the platform name consumed by the preflight.
 - `MediatedWorker::spawn` first gates on the platform string
-  (`mediation.rs:431` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
+  (`mediation.rs:447` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
   — `UnsupportedPlatform` is returned before Arbitraitor is probed at all.
   On a supported platform, `spawn` then performs the Arbitraitor preflight
-  and `gate_preflight` (mediation.rs:438-439) before it creates an execution
+  and `gate_preflight` (mediation.rs:452) before it creates an execution
   surface — no child process or temporary execution directory is created by
   this call. The campaign may already have persisted the run-state row
   before the lazy preflight runs (`crates/orchestraitor-campaign/src/loop_run.rs:1585-1595`
   inserts the `running` row first, then calls `self.starter.start(...)`;
   `MediatedBashMediator::worker` defers `MediatedWorker::spawn` until the
-  first bash call — `crates/orchestraitor-worker/src/mediator.rs:60-72`). The
+  first bash call — `crates/orchestraitor-worker/src/mediator.rs:66-75`). The
   `gate_preflight` inner platform check (`is_supported_platform`,
-  mediation.rs:282) is a defense-in-depth second gate, not the first
+  mediation.rs:271) is a defense-in-depth second gate, not the first
   refusal path readers encounter.
-- `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:146`)
+- `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:158`)
   is the typed refusal; its `Display` impl explicitly cites
   "ADR-0024 fails closed; no non-secure mode" so the diagnostic anchors
   the decision in machine-testable form
-  (`mediation.rs:836`).
-- `MediatedBashMediator::worker` (`crates/orchestraitor-worker/src/mediator.rs:60`)
+  (`mediation.rs:900`).
+- `MediatedBashMediator::worker` (`crates/orchestraitor-worker/src/mediator.rs:66`)
   runs the preflight lazily on the first bash call, so a worker run that
   never invokes bash never probes the sandbox — but if it does, the gate
   fires before any execution surface exists.
@@ -83,14 +83,16 @@ Concretely:
 - On Linux-without-Landlock, the preflight consumes Arbitraitor's own
   probe datum (`landlock_abi_version: None`) and records
   `filesystem_isolation` as missing; the gate refuses. This is the
-  `#755 stopgap` (`mediator.rs:49`) until Arbitraitor classifies the
-  Landlock-absent case natively.
+  `#755` check (`mediator.rs:49`). Arbitraitor classifies the
+  Landlock-absent case natively at the pinned revision, so the check is
+  retained as fail-closed defense in depth against a future divergence,
+  not as a workaround for a live misclassification.
 
 ## Consequences
 
 - **Positive:** the bootstrap worker never claims a sandbox posture that
   the host cannot deliver. The run-state record's controls matrix is the
-  truth, not an inferred value. The Landlock-absent stopgap closes the
+  truth, not an inferred value. The Landlock-absent check guards the
   inverse-divergence direction (classification claims available while
   enforcement installs nothing — see the `[Landlock-absent]` section in
   `docs/sandbox-mediation.md`).
@@ -145,21 +147,22 @@ Concretely:
 
 ## References
 
-- `crates/orchestraitor-arb-client/src/mediation.rs:89` — `WORKER_PLATFORM`
+- `crates/orchestraitor-arb-client/src/mediation.rs:95` — `WORKER_PLATFORM`
   constant.
-- `crates/orchestraitor-arb-client/src/mediation.rs:151` —
+- `crates/orchestraitor-arb-client/src/mediation.rs:158` —
   `MediationError::UnsupportedPlatform` (cites ADR-0024).
-- `crates/orchestraitor-arb-client/src/mediation.rs:892` — diagnostic test
+- `crates/orchestraitor-arb-client/src/mediation.rs:900` — diagnostic test
   asserting the `ADR-0024` anchor.
 - `crates/orchestraitor-worker/src/mediator.rs:49` — lazy preflight note
   ("refuses on hosts without the required controls, per ADR-0024 and the
-  #755 stopgap").
+  #755 Landlock-probe check").
 - `crates/orchestraitor-daemon/src/capability.rs:272` —
   `probe_capabilities_on_macos_fails_closed` test (the contrasting
   *daemon* posture — fail-closed with a typed error, not a missing-capability
   refusal; this ADR is the *stricter* sibling).
 - `docs/sandbox-mediation.md` — operator-facing flow doc that names
-  ADR-0024 and links the Landlock-active / Landlock-absent upstream gaps.
+  ADR-0024, links the Landlock-active wrapper gap, and records the
+  Landlock-absent classification history (fixed upstream at the pin).
 - `README.md:243` — the user-facing reference (lines 250-252 in the
   audit snapshot).
 - `CHANGELOG.md:589`, `CHANGELOG.md:1052` — historical release-note

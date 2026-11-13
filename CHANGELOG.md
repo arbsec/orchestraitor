@@ -804,9 +804,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   `nix` 0.31.3 joins 0.29.0; `zstd` 0.13.4, `zstd-safe` 7.4.0, and
   `serde_json_canonicalizer` 0.3.2 leave the graph. The full add/remove list
   is the `Cargo.lock` diff. The reference line numbers in
-  `docs/sandbox-mediation.md` are re-anchored to the new revision, and the
-  isolation documentation distinguishes the two exec paths' wrapper-failure
-  contracts. No Orchestrator API, schema, or on-disk format changes.
+  `docs/sandbox-mediation.md`, ADR-0007, and ADR-0024 are re-anchored to the
+  new revision, the isolation documentation distinguishes the two exec paths'
+  wrapper-failure contracts, and the Landlock-absent classification section
+  records that the pinned revision couples `filesystem_isolation` to the live
+  ABI probe (upstream #755), with the consumer probe check retained as
+  fail-closed defense in depth. No Orchestrator API, schema, or on-disk format
+  changes.
 
 - The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
   tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27

@@ -65,12 +65,16 @@ MediatedWorker::run_bash(script)
   `unshare-target-exec-failed` when the namespace existed but the target never
   started. A wrapper failure the classifier does not recognise stays an
   execution failure (`spawn`), never a fabricated refusal.
-- Landlock probe consumption (#755 stopgap): Arbitraitor classifies
-  `filesystem_isolation` as `Available` on any Linux platform, but its
-  enforcement hook installs no ruleset when the kernel probe reports no
-  Landlock ABI. Until upstream reports the divergence, the verdict consumes
-  the probe datum itself: `landlock_abi_version: None` on linux ⇒
-  `filesystem_isolation` is recorded as missing and the gate refuses. No
+- Landlock probe consumption (defense in depth; arbsec/arbitraitor#755, tracked
+  via #401): at the pinned revision `df66f2d4` the classification is
+  probe-coupled — `compute_effective_controls` reports
+  `filesystem_isolation: Unavailable` when the host Landlock ABI probe is
+  unsupported (upstream commit `f501af7`, ADR-0028), so the matrix and the
+  enforcement hook can no longer diverge. The verdict additionally consumes
+  the probe datum itself: `landlock_abi_version: None` on linux records
+  `filesystem_isolation` as missing and the gate refuses. That check is kept
+  as fail-closed defense in depth against a future regression in the coupling;
+  on the pinned revision it always coincides with upstream's `Unavailable`. No
   control state is inferred beyond what Arbitraitor reported.
 - Degraded controls are recorded, not refused: a
   `ControlState::Degraded` entry lands in `WorkerPreflight::degraded_controls`
@@ -144,29 +148,34 @@ identity-map condition. Missing-control refusals are host-independent and
 always run. Orchestraitor-side tracking for the wrapper composition lives in
 issue [#400](https://github.com/arbsec/orchestraitor/issues/400).
 
-## Known upstream gap: Landlock-absent classification (discovered in review, owned by Arbitraitor)
+## Landlock-absent classification (fixed upstream; consumer check kept as defense in depth)
 
 On Linux hosts **without** a working Landlock probe (kernel < 5.13 or LSM
-disabled), Arbitraitor's classification matrix still reports
-`filesystem_isolation: Available`, while its enforcement hook silently
-installs no ruleset at all (`let Some(abi) = abi else { return Ok(()) }` in
-the `pre_exec` hook). A consumer that trusts the classification alone would
-run mediated workers with **zero filesystem confinement** while its run-state
-records claim isolation — the inverse direction of the gap above, and more
-dangerous for containment.
+disabled), Arbitraitor before the pinned revision classified
+`filesystem_isolation` as `Available` while its enforcement hook installed no
+ruleset at all — `install_landlock_ruleset_plan` returns
+`LandlockInstallOutcome::NoKernelSupport` when `probe.abi_version()` is `None`
+(`crates/arbitraitor-sandbox/src/landlock.rs`). A consumer that trusted the
+classification alone would have run mediated workers with **zero filesystem
+confinement** while its run-state records claimed isolation — the inverse
+direction of the gap above, and more dangerous for containment.
 
-Until upstream reports the divergence, the preflight verdict consumes
-Arbitraitor's own probe datum: `landlock_abi_version: None` on the supported
-Linux platform records `filesystem_isolation` as missing and the gate refuses
-(fail closed). No control state is inferred beyond the probe; when upstream
-reports the divergence natively (degraded or unavailable), the stopgap is
-replaced by the upstream truth. The fix belongs in `arbsec/arbitraitor`
-([arbsec/arbitraitor#755](https://github.com/arbsec/arbitraitor/issues/755)),
-not in Orchestraitor (spec `40-arbitraitor-integration.md` §16.2).
+That divergence is fixed at the pinned revision `df66f2d4`:
+`compute_effective_controls` couples `filesystem_isolation` to the live ABI
+probe and reports `Unavailable` when the probe is unsupported, so "the matrix
+and the hook can no longer diverge" (upstream commit `f501af7`, ADR-0028,
+[arbsec/arbitraitor#755](https://github.com/arbsec/arbitraitor/issues/755)).
 
-Disclosure: the stopgap means mediated workers **do not start** on
-Landlock-absent Linux hosts (typed
-`UnavailableControls { filesystem_isolation }` refusal), and the
+Orchestraitor keeps its own probe-datum check as fail-closed defense in
+depth: `landlock_abi_version: None` on the supported Linux platform still
+records `filesystem_isolation` as missing and the gate refuses. On the pinned
+revision that condition always coincides with upstream's `Unavailable`, so the
+check never overrides upstream truth — it only guards against a future
+regression in the coupling. No control state is inferred beyond the probe
+(spec `40-arbitraitor-integration.md` §16.2).
+
+Disclosure: mediated workers **do not start** on Landlock-absent Linux hosts
+(typed `UnavailableControls { filesystem_isolation }` refusal), and the
 positive-matrix preflight test adapts to its host's actual probe. Tracking
 lives in issue [#401](https://github.com/arbsec/orchestraitor/issues/401)
-(blocked by `arbsec/arbitraitor#755`).
+(upstream `arbsec/arbitraitor#755` is fixed at the pin).
