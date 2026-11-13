@@ -2,7 +2,12 @@
 rust = "1.98.1"
 lefthook = "2.2.2"
 cocogitto = "7.0.0"
-rumdl = "latest"
+# `rumdl` is pinned to an exact version: it is the markdown gate, and a
+# floating tag lets the rule set change without a repository change (the
+# local pre-PR gate then disagrees with CI, which installs the same config).
+# The CI job asserts this exact version before it lints (see
+# `.github/workflows/markdown.yml`).
+rumdl = "0.3.2"
 # Pinned, not "the runner image's": `skills.yml` asserts the installed version
 # against this line before gating, because SC2317/SC2321/SC2012 are
 # version-sensitive and an image bump would silently shift a clean baseline.
