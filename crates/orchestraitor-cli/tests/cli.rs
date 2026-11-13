@@ -1298,6 +1298,193 @@ fn github_gh_env_passes_child_arguments_verbatim() -> miette::Result<()> {
     Ok(())
 }
 
+// Issue #703: `--version`/`--help`/`-h`/`-V` are read-only, credential-free
+// queries. They must reach the real gh binary even when token minting cannot
+// succeed — this is the argv a caller uses to prove WHICH gh build the
+// wrapper would run. The endpoint is a closed port and the child records
+// GH_TOKEN: a successful run proves no mint was attempted and no credential
+// was injected.
+#[test]
+#[cfg(unix)]
+fn github_gh_env_passes_through_read_only_help_and_version_flags() -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    // A COMPLETE App block in `required` mode: the passthrough must also hold
+    // on a healthy deployment, not only when the config is missing.
+    fs::write(
+        temp.path().join("orchestraitor.toml"),
+        "[github_app]\nclient_id = \"Iv1.cli-e2e\"\ninstallation_id = 165043398\n\
+         private_key_uri = \"secret://env/ORCHESTRAITOR_CLI_TEST_GITHUB_APP_PEM\"\n\
+         enforcement = \"required\"\n",
+    )
+    .into_diagnostic()?;
+    let stub_dir = temp.path().join("bin");
+    fs::create_dir_all(&stub_dir).into_diagnostic()?;
+    let child = stub_dir.join("gh");
+    fs::write(
+        &child,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$LOG_DIR/argv.log\"\n\
+         printf '%s %s\\n' \"${GH_TOKEN:-<unset>}\" \"${GITHUB_TOKEN:-<unset>}\" \
+         >> \"$LOG_DIR/token.log\"\n",
+    )
+    .into_diagnostic()?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+    let log_dir = temp.path().join("logs");
+    fs::create_dir_all(&log_dir).into_diagnostic()?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut split = std::env::split_paths(&path).collect::<Vec<_>>();
+    split.insert(0, stub_dir);
+    let path = std::env::join_paths(&split).into_diagnostic()?;
+
+    for flag in ["--version", "--help", "-h", "-V"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_orc"))
+            .args([
+                "--project-dir",
+                &temp.path().display().to_string(),
+                "--config-dir",
+                &temp.path().display().to_string(),
+                // Closed port: any mint attempt would fail the run.
+                "--github-api-endpoint",
+                "http://127.0.0.1:1",
+                "github",
+                "gh-env",
+                "--",
+                "gh",
+                flag,
+            ])
+            .env(GITHUB_APP_PEM_ENV_VAR, GITHUB_APP_FIXTURE_PEM)
+            .env_remove("ORC_GITHUB_APP_ENFORCEMENT")
+            // Ambient credentials the calling session may hold: the
+            // passthrough mints nothing, so the child must NOT inherit either
+            // one (the wrapper clears both when no token is minted).
+            .env("GH_TOKEN", "ambient-personal-marker")
+            .env("GITHUB_TOKEN", "ambient-personal-marker2")
+            .env("PATH", &path)
+            .env("LOG_DIR", &log_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .into_diagnostic()?;
+        assert!(
+            output.status.success(),
+            "`gh {flag}` must pass through, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let observed_argv = fs::read_to_string(log_dir.join("argv.log")).into_diagnostic()?;
+    assert_eq!(
+        observed_argv.lines().collect::<Vec<_>>(),
+        vec!["--version", "--help", "-h", "-V"],
+        "each flag must reach the child verbatim and in order"
+    );
+    let observed_tokens = fs::read_to_string(log_dir.join("token.log")).into_diagnostic()?;
+    assert_eq!(
+        observed_tokens.lines().collect::<Vec<_>>(),
+        vec!["<unset> <unset>"; 4],
+        "the read-only passthrough must neither inject nor inherit a credential"
+    );
+    Ok(())
+}
+
+// Issue #703, control: an argv whose shape cannot be proven is STILL refused
+// in `required` mode, and the refusal quotes the offending flag instead of
+// claiming `gh pr create` was invoked. `gh pr --color always create` IS a
+// real pr create the classifier cannot prove (`--color` is not in its
+// known-flag table); `gh --version pr create` proves the read-only
+// passthrough is exact-shape only and cannot smuggle a pr create through.
+#[test]
+#[cfg(unix)]
+fn github_gh_env_refuses_unprovable_argv_with_an_accurate_diagnostic() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+
+    for (argv, flag) in [
+        (vec!["gh", "pr", "--color", "always", "create"], "--color"),
+        (vec!["gh", "--version", "pr", "create"], "--version"),
+    ] {
+        let mut args = vec!["github", "gh-env", "--"];
+        args.extend_from_slice(&argv);
+        // The guard must fire BEFORE minting: a closed port would fail a
+        // mint attempt with a transport error instead of the typed refusal.
+        let output = github_cli_with_gh_stub(&temp, &stub_dir, "http://127.0.0.1:1", &args)?;
+        assert!(!output.status.success());
+        // The forbidden effect (the child running) did NOT happen.
+        assert!(
+            !temp.path().join("child.out").exists(),
+            "{argv:?}: the child must never run under the guard"
+        );
+        let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+        let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            flat.contains(&format!("`{flag}`")),
+            "{argv:?}: the ambiguity refusal must quote the offending flag: {stderr}"
+        );
+        assert!(
+            !flat.contains("refusestorun`ghprcreate`"),
+            "{argv:?}: an unprovable argv must not be reported as a proven `gh pr create`: {stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn github_gh_env_ambiguity_refusal_never_echoes_a_credential() -> miette::Result<()> {
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let stub_dir = gh_env_pr_create_guard_child(&temp)?;
+
+    // `-H<value>` is valid pflag single-token syntax and a realistic `gh api`
+    // habit, so the value can be a real credential. The refusal must quote the
+    // FLAG (actionable) and never the token (AGENTS.md: errors never contain
+    // secrets, headers, cookies, or tokens) — stderr lands in session
+    // transcripts and CI logs.
+    let output = github_cli_with_gh_stub(
+        &temp,
+        &stub_dir,
+        "http://127.0.0.1:1",
+        &[
+            "github",
+            "gh-env",
+            "--",
+            "gh",
+            "-HAuthorization: token ghp_FAKESECRET456",
+            "pr",
+            "create",
+        ],
+    )?;
+    assert!(!output.status.success());
+    // The forbidden effect (the child running) did NOT happen.
+    assert!(
+        !temp.path().join("child.out").exists(),
+        "the child must never run under the ambiguity guard"
+    );
+    let stderr = String::from_utf8(output.stderr).into_diagnostic()?;
+    let flat: String = stderr.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("`-H`"),
+        "the refusal must name the offending FLAG: {stderr}"
+    );
+    assert!(
+        flat.contains("cannotprovethechildargvisnot"),
+        "the refusal must stay the distinct ambiguity diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ghp_FAKESECRET456"),
+        "the refusal must never echo credential material: {stderr}"
+    );
+    assert!(
+        !stderr.contains("FAKESECRET"),
+        "the refusal must never echo any part of the credential value: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Authorization:"),
+        "the refusal must never echo the header the value belongs to: {stderr}"
+    );
+    Ok(())
+}
+
 #[test]
 fn github_gh_env_fails_typed_when_child_is_missing() -> miette::Result<()> {
     let temp = tempfile::tempdir().into_diagnostic()?;

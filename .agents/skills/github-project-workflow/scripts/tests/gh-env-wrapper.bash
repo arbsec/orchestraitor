@@ -938,3 +938,21 @@ for bad_case in \
 done
 
 echo "PASS pr-mutate service-identity routing + argument validation"
+
+# --- 29. read-only help/version flags are forwarded verbatim (issue #703).
+#         The bash wrapper does not classify argv — `orc github gh-env` does
+#         — so this proves the flags survive the service route unchanged.
+#         The classifier POLICY (passthrough vs. ambiguous refusal) is covered
+#         by the Rust CLI integration tests, which spawn the real binary; it
+#         cannot be exercised here because every case stubs orc.
+for flag in --version --help -h -V; do
+  : > "$ORC_LOG"; : > "$GH_LOG"
+  new_orc_stub required
+  OUT="$(run_service "$flag" 2>&1)" || true
+  grep -qx "orc:github gh-env -- /.*/gh $flag" "$ORC_LOG" \
+    || fail "orc_lib_gh_service must forward $flag to the gh-env child: orc=[$(cat "$ORC_LOG")]"
+  grep -qx "gh:$flag" "$GH_LOG" \
+    || fail "the gh-env child must receive $flag verbatim: gh=[$(cat "$GH_LOG")]"
+done
+
+echo "PASS read-only help/version flag forwarding"
