@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Regression tests for `audit-pr-commits`' service-identity allowlist (#731).
+#
+# The script declares the allowlist as a bash array with an "extend here if the
+# declared set grows" comment — but the classifier's jq filter carried its own
+# hardcoded copy of the same literal. Two copies of an authorization constant,
+# one inert: extending (or emptying) the array changed no verdict at all. The
+# array is now serialized to JSON and handed to jq as `$allowed`.
+#
+# Covers:
+#   (a) a commit by a declared principal passes (`arbsec-agent[bot]`,
+#       `renovate[bot]`) — verdict clean, exit 0
+#   (b) a commit by an undeclared login is `unauthorized-identity`, exit 3, and
+#       the detail names the login
+#   (c) editing the ARRAY — and nothing else — flips the verdict in both
+#       directions: a renamed allowlist rejects `renovate[bot]`, and an emptied
+#       allowlist rejects every login. This is the discriminating proof that the
+#       array is live data rather than a decorative declaration.
+#   (d) the allowlist literal occurs exactly once in the script, and the jq
+#       filter receives it via `--argjson allowed`
+#
+# Hermetic: a `gh` stub on PATH serves the recorded-commits payload and the PR
+# metadata; no network, no auth, no secrets.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/bin" "$TMP/scripts"
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/audit-pr-commits" "$TMP/scripts/"
+
+# gh stub: `pr view` serves the PR metadata, `api --paginate --slurp …/commits`
+# serves the recorded-commits pages from $COMMITS_FILE. Any other call fails
+# loudly — this script is read-only and must not reach further.
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/view)
+    printf '%s\n' '{"state":"OPEN","baseRefName":"main","headRefName":"feature","headRefOid":"1111111111111111111111111111111111111111"}'
+    exit 0 ;;
+  api/*)
+    case "$*" in
+      *pulls/*/commits*) cat "$COMMITS_FILE"; exit 0 ;;
+    esac
+    ;;
+esac
+echo "stub: unexpected gh invocation: $*" >&2
+exit 99
+STUB
+chmod +x "$TMP/bin/gh"
+
+# orc stub: a VALID but partial github_app config (validate succeeds, the
+# installation key lookup fails), so the scope probe takes the ambient path and
+# the gh stub's `auth status` (exit 0) satisfies it. A stub that failed
+# `config validate` would be a *broken* config (exit 2 "refusing the ambient
+# personal-auth check"), not the deployment shape under test.
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/orc"
+
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export COMMITS_FILE="$TMP/commits.json"
+
+PASS=0; FAIL=0
+assert() {
+  if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1"
+  else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
+}
+run() {
+  local script="$1"; shift
+  OUT="$(bash "$script" "$@" 2>"$TMP/stderr")"; RC=$?
+  ERR="$(cat "$TMP/stderr")"
+}
+count_err() { printf '%s\n' "$ERR" | grep -cF -- "$1" 2>/dev/null || true; }
+
+# commits_page <login>… : one gh "page" (an array of pages, as --slurp yields)
+# holding one verified, conventional, web-flow-committed commit per login.
+commits_page() {
+  local logins
+  logins="$(printf '%s\n' "$@" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+  jq -cn --argjson logins "$logins" '
+    [ $logins | to_entries[] | .key as $i | .value as $login
+      | { sha: ("c0ffee\($i)\($login | gsub("[^a-zA-Z0-9]"; "-"))0000000000"),
+          author: {login: $login},
+          committer: {login: "web-flow"},
+          commit: {
+            message: "feat(skills): commit authored by \($login)",
+            verification: {verified: true, reason: "valid"}
+          }
+        } ] | [ . ]'
+}
+
+# --- (a) declared principals pass ------------------------------------------------
+echo "--- (a) declared service principals pass ---"
+commits_page "arbsec-agent[bot]" "renovate[bot]" > "$COMMITS_FILE"
+run "$TMP/scripts/audit-pr-commits" 7 --repo test-org/repo --json
+assert 'declared principals: exit 0' 0 "$RC"
+assert 'declared principals: verdict clean' clean "$(jq -r .verdict <<<"$OUT")"
+assert 'declared principals: zero violations' 0 "$(jq -r .violation_count <<<"$OUT")"
+assert 'renovate[bot] is allowed (no unauthorized-identity)' 0 \
+  "$(jq '[.commits[] | select(.author == "renovate[bot]") | .violations[] | select(.class == "unauthorized-identity")] | length' <<<"$OUT")"
+assert 'no stderr noise on a clean audit' 0 "$(count_err 'error:')"
+
+# --- (b) an undeclared login is refused ------------------------------------------
+echo "--- (b) an undeclared login is unauthorized-identity ---"
+commits_page "arbsec-agent[bot]" "mekwall" > "$COMMITS_FILE"
+run "$TMP/scripts/audit-pr-commits" 7 --repo test-org/repo --json
+assert 'undeclared login: exit 3 (policy)' 3 "$RC"
+assert 'undeclared login: verdict violations' violations "$(jq -r .verdict <<<"$OUT")"
+assert 'undeclared login: exactly one violation' 1 "$(jq -r .violation_count <<<"$OUT")"
+assert 'undeclared login: classified unauthorized-identity' unauthorized-identity \
+  "$(jq -r '.commits[] | select(.author == "mekwall") | .violations[0].class' <<<"$OUT")"
+assert 'undeclared login: detail names the login' 1 \
+  "$(jq -r '.commits[] | select(.author == "mekwall") | .violations[0].detail' <<<"$OUT" | grep -cF '"mekwall"')"
+assert 'declared principal still clean in the same run' 0 \
+  "$(jq '[.commits[] | select(.author == "arbsec-agent[bot]") | .violations[]] | length' <<<"$OUT")"
+
+# --- (c) the array is the single source of truth ---------------------------------
+# The defect: the jq filter carried its own copy, so neither edit below changed
+# anything. Rewriting ONLY the declaration must change the verdict.
+echo "--- (c) the ALLOWED_IDENTITIES array alone decides ---"
+cp -L -- "$TMP/scripts/audit-pr-commits" "$TMP/scripts/narrow"
+sed -i 's|^ALLOWED_IDENTITIES=.*|ALLOWED_IDENTITIES=("replacement[bot]")|' "$TMP/scripts/narrow"
+assert 'fixture: the array was rewritten' 1 \
+  "$(grep -cF 'ALLOWED_IDENTITIES=("replacement[bot]")' "$TMP/scripts/narrow")"
+commits_page "replacement[bot]" "renovate[bot]" > "$COMMITS_FILE"
+run "$TMP/scripts/narrow" 7 --repo test-org/repo --json
+assert 'narrowed allowlist: exit 3' 3 "$RC"
+assert 'narrowed allowlist: the newly declared login passes' 0 \
+  "$(jq '[.commits[] | select(.author == "replacement[bot]") | .violations[]] | length' <<<"$OUT")"
+assert 'narrowed allowlist: renovate[bot] is now refused' unauthorized-identity \
+  "$(jq -r '.commits[] | select(.author == "renovate[bot]") | .violations[0].class' <<<"$OUT")"
+
+cp -L -- "$TMP/scripts/audit-pr-commits" "$TMP/scripts/empty"
+sed -i 's|^ALLOWED_IDENTITIES=.*|ALLOWED_IDENTITIES=()|' "$TMP/scripts/empty"
+commits_page "arbsec-agent[bot]" > "$COMMITS_FILE"
+run "$TMP/scripts/empty" 7 --repo test-org/repo --json
+assert 'emptied allowlist: exit 3' 3 "$RC"
+assert 'emptied allowlist: every login is refused' unauthorized-identity \
+  "$(jq -r '.commits[0].violations[0].class' <<<"$OUT")"
+# `printf '%s\n'` on an empty array emits one blank line, so the serializer must
+# drop empty elements: an `[""]` allowlist is a different (and wrong) constant
+# from the one the declaration states. This mirrors the one-line serializer in
+# the script; assertion (d) pins that the script uses that expression.
+serialize() { local -a ids=("$@"); printf '%s\n' "${ids[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))'; }
+assert 'emptied allowlist: serializes as [] and not [""]' '[]' "$(serialize)"
+assert 'populated allowlist: serializes as a JSON array' '["renovate[bot]"]' "$(serialize 'renovate[bot]')"
+
+# --- (d) structural: one literal, one hand-off -----------------------------------
+echo "--- (d) the allowlist exists once and is handed to jq ---"
+assert 'the allowlist literal appears once' 1 \
+  "$(grep -cF '"renovate[bot]"' "$SCRIPT_DIR/audit-pr-commits")"
+assert 'the array is passed into jq as $allowed' 1 \
+  "$(grep -cF -- '--argjson allowed "$ALLOWED_JSON"' "$SCRIPT_DIR/audit-pr-commits")"
+assert 'the serializer drops empty elements' 1 \
+  "$(grep -cF 'split("\n") | map(select(length > 0))' "$SCRIPT_DIR/audit-pr-commits")"
+assert 'the jq filter has no second hardcoded copy' 0 \
+  "$(grep -cF '| ["arbsec-agent[bot]", "renovate[bot]"] |' "$SCRIPT_DIR/audit-pr-commits")"
+
+printf '\n=== audit-pr-commits allowlist: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

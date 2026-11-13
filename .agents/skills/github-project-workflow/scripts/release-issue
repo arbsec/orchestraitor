@@ -56,6 +56,7 @@ ARGS=(issue edit "$ISSUE" --repo "$REPO" --remove-assignee "@me")
 orc_lib_run_or_dry_run ARGS gh
 
 # Leave a comment explaining why.
+# shellcheck disable=SC2034  # nameref target read by orc_lib_run_or_dry_run (local -n)
 ARGS=(issue comment "$ISSUE" --repo "$REPO" --body "Released: $REASON")
 orc_lib_run_or_dry_run ARGS gh
 

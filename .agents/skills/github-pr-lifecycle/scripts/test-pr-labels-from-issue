@@ -144,7 +144,7 @@ pr_edit_adds() {
   local line out="[" first=true label
   while IFS= read -r line; do
     line="${line#EDIT:}"
-    local prev="" current=0
+    local prev=""
     for label in $line; do
       if [ "$prev" = "--add-label" ]; then
         $first || out+=","

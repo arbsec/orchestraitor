@@ -47,6 +47,7 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
+# shellcheck disable=SC2034  # nameref target read by orc_lib_run_or_dry_run (local -n)
 ARGS=(issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --type "Task")
 ISSUE_URL="$(orc_lib_run_or_dry_run ARGS gh)"
 echo "Created follow-up: $ISSUE_URL" >&2

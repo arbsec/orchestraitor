@@ -129,6 +129,14 @@ while read -r _local_ref local_oid _remote_ref remote_oid; do
     fi
     range="$local_oid --not $(echo "$bases" | tr '\n' ' ')"
   fi
+  # SC2086 is deliberate and MUST NOT be "fixed": `$range` is a space-joined
+  # argv list on purpose (`<oid>..<oid>`, or `<oid> --not <ref> <ref>…`), so the
+  # word splitting IS the argument separation. Quoting it yields a single
+  # argument and `git rev-list` fails with
+  # `fatal: ambiguous argument 'HEAD --not HEAD'` (exit 128) — which makes the
+  # `verified-commits` pre-push hook fail closed on every push. A blind
+  # `shellcheck --format=diff` sweep would do exactly that (#731).
+  # shellcheck disable=SC2086  # intentional word splitting: argv list, not one argument
   if ! oids="$(git rev-list $range)"; then
     echo >&2 "pre-push: cannot enumerate commits for $range"
     exit 1

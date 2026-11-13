@@ -12,10 +12,18 @@
 set -euo pipefail
 
 # --- Exit codes (mirrored from both SKILL.md files) ----------------------------
+# SC2034 is a false positive on these: they are this library's public surface,
+# read by the scripts that `source` it (`git grep -l 'ORC_OK\b'` finds it in the
+# command scripts in both skill trees), never by _lib.sh itself. Suppressed per
+# site rather than file-wide so a genuinely dead assignment in the shared
+# library still reports (#731).
+# shellcheck disable=SC2034  # public constant consumed by sourcing scripts
 ORC_OK=0
 ORC_ERR_UNRECOVERABLE=1
 ORC_ERR_CONFIG=2
+# shellcheck disable=SC2034  # public constant consumed by sourcing scripts
 ORC_ERR_POLICY=3
+# shellcheck disable=SC2034  # public constant consumed by sourcing scripts
 ORC_ERR_CONCURRENT=4
 ORC_ERR_BLOCKED=5
 
@@ -25,6 +33,10 @@ orc_lib_parse_common() {
   OPT_HELP=false; OPT_JSON=false; OPT_DRY_RUN=false; OPT_REPO=""
   ORC_LIB_EXTRA_ARGS=()
   while [ $# -gt 0 ]; do
+    # SC2034 false positive: the caller reads OPT_HELP/OPT_JSON (and the
+    # ORC_LIB_EXTRA_ARGS remainder) after this returns — `git grep -l OPT_HELP`
+    # finds both in every script that sources this file (#731).
+    # shellcheck disable=SC2034  # output parameters read by the caller
     case "$1" in
       -h|--help)       OPT_HELP=true; shift ;;
       --json)          OPT_JSON=true; shift ;;
