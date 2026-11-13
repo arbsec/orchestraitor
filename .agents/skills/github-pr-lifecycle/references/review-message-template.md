@@ -38,9 +38,10 @@ VERIFY
    --workspace --all-targets --all-features -- -D warnings`, `cargo check
    --workspace --all-targets --all-features --locked`, `cargo nextest run
    --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`,
-   `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md
-   §15). Record real counts; mark a gate that does not apply to the change
-   (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+   `rumdl check .`, `cargo deny check`, `cargo audit`
+   (docs/spec/tech-stack.md §15). Record real counts; mark a gate that does
+   not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a
+   one-line reason.
    `rumdl check .` is valid ONLY at the version `.mise.toml` pins. Bare
    `rumdl` is a `PATH` lookup, so an unpinned cargo or distro build shadows
    the pin and hands you a different rule set than CI. Assert the version
@@ -51,13 +52,18 @@ VERIFY
      printf 'pinned=%s installed=%s\n' "${pinned:-<none>}" "${installed:-<not found>}"
 
    `installed` equals `pinned` → run `rumdl check .` and record its counts.
-   They differ, or either is empty → the `PATH` binary is not the pin:
-   `mise install` puts the pinned build on disk without re-pointing `rumdl`,
-   and `mise exec -- rumdl` resolves to that same `PATH` binary. Run the
-   pinned install instead, keeping it only if its `--version` prints exactly
-   `pinned`:
+   They differ, or either is empty → the `PATH` binary is not the pin.
+   `mise install` is the step that populates the pinned build ON DISK; it
+   does not re-point `PATH`, and `mise exec -- rumdl` resolves to that same
+   `PATH` binary. `mise where rumdl` is the step that resolves the pinned
+   install; only that binary's own `--version` proves it is the pin. In a
+   fresh checkout or scratch worktree the config is untrusted and the shim
+   refuses it, so run `mise trust <dir>` in the checkout first. Then
+   populate, resolve, compare and lint in ONE step: the version comparison
+   is mechanical, so a mismatch stops the chain instead of printing a
+   version and linting anyway:
 
-     d="$(mise where rumdl)" && "$d/rumdl" --version && "$d/rumdl" check .
+     mise trust . >/dev/null 2>&1; mise install rumdl >/dev/null 2>&1; d="$(mise where rumdl)" && [ "$("$d/rumdl" --version 2>/dev/null | sed -n 's/^rumdl //p')" = "$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)" ] && "$d/rumdl" check .
 
    Still no binary at `pinned` → do NOT lint and do NOT report a markdown
    finding. Record the gate as `rumdl: N/A — could not run at pinned <pinned>
@@ -123,9 +129,10 @@ VERIFY
    --workspace --all-targets --all-features -- -D warnings`, `cargo check
    --workspace --all-targets --all-features --locked`, `cargo nextest run
    --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`,
-   `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md
-   §15). Record real counts; mark a gate that does not apply to the change
-   (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+   `rumdl check .`, `cargo deny check`, `cargo audit`
+   (docs/spec/tech-stack.md §15). Record real counts; mark a gate that does
+   not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a
+   one-line reason.
    `rumdl check .` is valid ONLY at the version `.mise.toml` pins. Bare
    `rumdl` is a `PATH` lookup, so an unpinned cargo or distro build shadows
    the pin and hands you a different rule set than CI. Assert the version
@@ -136,13 +143,18 @@ VERIFY
      printf 'pinned=%s installed=%s\n' "${pinned:-<none>}" "${installed:-<not found>}"
 
    `installed` equals `pinned` → run `rumdl check .` and record its counts.
-   They differ, or either is empty → the `PATH` binary is not the pin:
-   `mise install` puts the pinned build on disk without re-pointing `rumdl`,
-   and `mise exec -- rumdl` resolves to that same `PATH` binary. Run the
-   pinned install instead, keeping it only if its `--version` prints exactly
-   `pinned`:
+   They differ, or either is empty → the `PATH` binary is not the pin.
+   `mise install` is the step that populates the pinned build ON DISK; it
+   does not re-point `PATH`, and `mise exec -- rumdl` resolves to that same
+   `PATH` binary. `mise where rumdl` is the step that resolves the pinned
+   install; only that binary's own `--version` proves it is the pin. In a
+   fresh checkout or scratch worktree the config is untrusted and the shim
+   refuses it, so run `mise trust <dir>` in the checkout first. Then
+   populate, resolve, compare and lint in ONE step: the version comparison
+   is mechanical, so a mismatch stops the chain instead of printing a
+   version and linting anyway:
 
-     d="$(mise where rumdl)" && "$d/rumdl" --version && "$d/rumdl" check .
+     mise trust . >/dev/null 2>&1; mise install rumdl >/dev/null 2>&1; d="$(mise where rumdl)" && [ "$("$d/rumdl" --version 2>/dev/null | sed -n 's/^rumdl //p')" = "$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)" ] && "$d/rumdl" check .
 
    Still no binary at `pinned` → do NOT lint and do NOT report a markdown
    finding. Record the gate as `rumdl: N/A — could not run at pinned <pinned>
@@ -191,28 +203,35 @@ CONSTRAINTS
 resolves. A cargo install (`~/.cargo/bin/rumdl`) or a distro package shadows
 the mise-managed build of the `.mise.toml` pin without any repository change,
 so an unasserted reviewer lints with a different rule set than CI and reports
-the difference as a defect in the PR. Measured on this repository: `rumdl`
-0.2.20 reported two `MD051` findings in a tree the pinned 0.3.2 calls
-`Success: No issues found in 46 files`, and two independent review generations
-reported those findings as real. They are not — the target heading exists
-(`docs/cli/orcd-watch.md:102`, `## Event ingress (§9.50(b), opt-in)`) and both
-links (`CHANGELOG.md:121`, `CHANGELOG.md:884`) resolve under the pin; 0.2.20's
-slugger is wrong.
+the difference as a defect in the PR. Measured on this repository on
+2026-11-13: `rumdl` 0.2.20 reported two `MD051` findings in a tree the
+pinned 0.3.2 calls `Success: No issues found in 46 files`, and two
+independent review generations reported those findings as real. They are not
+— the target heading exists (`docs/cli/orcd-watch.md:102`,
+`## Event ingress (§9.50(b), opt-in)`) and both links (`CHANGELOG.md:121`,
+`CHANGELOG.md:884`) resolve under the pin; 0.2.20's slugger is wrong.
 
 The prompt carries the procedure; these are the rules behind it.
 
 - `.mise.toml` is the single source of truth for the version. The prompt reads
   it with `sed` instead of restating it, so the pin has no second copy to
   drift.
-- `mise install` and `mise exec -- rumdl` are NOT remedies. `mise install`
-  puts the pinned build on disk without changing which `rumdl` `PATH`
-  resolves; `mise exec -- rumdl --version` prints 0.2.20 here while
-  `rumdl = "0.3.2"` is pinned, and clearing `CARGO_HOME` resolved to 0.3.4 —
-  also not the pin. Compare `rumdl --version` with the pin every time; never
+- `mise install` is NECESSARY BUT NOT SUFFICIENT: it populates the pinned
+  build on disk, but it does not re-point `PATH`. `mise exec -- rumdl
+  --version` printed 0.2.20 on 2026-11-13 while `rumdl = "0.3.2"` is pinned,
+  so `mise exec` is not a remedy at all. Use `mise install` to get the build
+  and `mise where rumdl` to find it; only that binary's own `--version` proves
+  it is the pin. Compare `rumdl --version` with the pin every time; never
   assume a shim fixed it.
 - `mise where rumdl` prints mise's install directory for the active pin, and
   `"$(mise where rumdl)/rumdl"` is the pinned binary even when the shim
   resolves elsewhere — confirmed by its `--version`, not assumed.
+- A fresh checkout or scratch worktree is mise-untrusted: the shim refuses
+  the config, `rumdl --version` fails, and `mise where rumdl` exits 1. Run
+  `mise trust <dir>` in the checkout first. If the shim still refuses, locate
+  the pinned install directly under the mise install root
+  (`~/.local/share/mise/installs/rumdl/<version>/rumdl`) and verify its
+  `--version`.
 - No binary at the pin → the markdown gate did not run: `N/A` with the
   measured `PATH` version, and no markdown finding. Unpinned output is
   gate-environment data, not review evidence.
