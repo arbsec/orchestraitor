@@ -35,8 +35,9 @@ orc pr status 614 --repo arbsec/orchestraitor --json     # typed §9.48 JSON
   (`convergence-status` and `merge-gate` do not read it); a merge refusal
   surfaces from `gh` at merge time.
 - **Known-disabled and structural skips.** The `pr-checks` `KNOWN_DISABLED_JOBS`
-  semantics are consumed verbatim: a known-disabled job ("Docs Consistency",
-  "Documentation") exempts from the all-passed gate only while its bucket is
+  semantics are consumed verbatim: a known-disabled job ("Documentation", the
+  push-gated docs build; `Docs Consistency` is a pull-request job and therefore
+  NOT in the set) exempts from the all-passed gate only while its bucket is
   `skipping`; the same job actually failing is a failure, never a pass. A
   `CodeRabbit` `skipping` check on a PR authored by a bot/App login
   (`<slug>[bot]` or `app/<slug>`) is the structural bot-author no-op

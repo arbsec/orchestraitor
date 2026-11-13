@@ -13,6 +13,11 @@
 #   (d) a known-disabled job that actually ran and FAILED -> all_passed false
 #   (e) known-disabled and CodeRabbit checks that pass/fail/pend are classified
 #       from their state, never not-applicable (state-blindness guard)
+#   (e2) a RE-ENABLED job (`Docs Consistency`, #741) that pends is a plain
+#       pending check, never not-applicable
+#   (e3) a RE-ENABLED job that reports SKIPPED is an unexplained skip: it
+#       blocks the gate instead of being excused from it
+#   (f2) the known-disabled vocabulary holds exactly the still-disabled jobs
 #   (g) CodeRabbit SKIPPED on a HUMAN-authored PR -> all_passed false,
 #       skip_reason null (the tightening from the #707 review)
 #   (h) empty/unknown author -> fails closed
@@ -178,14 +183,39 @@ assert 'd: any_failing true' true "$(jq -r .any_failing <<<"$OUT")"
 fixture "$TMP/e.json" \
   <(check Documentation pass SUCCESS) \
   <(check CodeRabbit fail FAILURE) \
-  <(check "Docs Consistency" pending PENDING)
+  <(check "Advisory Check" pending PENDING)
 export PR_CHECKS_FIXTURE="$TMP/e.json"
 run pr-checks 7 --repo test-org/repo --json
 assert 'e: passing known-disabled job is pass' pass "$(classification Documentation)"
 assert 'e: failing CodeRabbit is fail' fail "$(classification CodeRabbit)"
-assert 'e: pending known-disabled job is pending' pending "$(classification "Docs Consistency")"
+assert 'e: pending non-exempt job is pending' pending "$(classification "Advisory Check")"
 assert 'e: gate still fails' false "$(jq -r .all_passed <<<"$OUT")"
 assert 'e: pending reported' true "$(jq -r .any_pending <<<"$OUT")"
+
+# (e2) `Docs Consistency` was re-enabled by markdown.yml (#741): its PENDING run
+# is a plain pending check, never not-applicable.
+fixture "$TMP/e2.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check "Docs Consistency" pending PENDING)
+export PR_CHECKS_FIXTURE="$TMP/e2.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'e2: re-enabled job pending is pending' pending "$(classification "Docs Consistency")"
+assert 'e2: re-enabled job pending has null reason' null "$(skip_reason "Docs Consistency")"
+assert 'e2: re-enabled job pending blocks' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'e2: re-enabled job pending reported' true "$(jq -r .any_pending <<<"$OUT")"
+
+# (e3) the #750 review condition: a re-enabled job must not stay exempt, or a
+# SKIPPED run of it would be silently laundered to not-applicable. Before #741
+# this exact fixture passed; it now fails closed as an unexplained skip.
+fixture "$TMP/e3.json" \
+  <(check CodeQL pass SUCCESS) \
+  <(check "Docs Consistency" skipping SKIPPED "")
+export PR_CHECKS_FIXTURE="$TMP/e3.json"
+run pr-checks 7 --repo test-org/repo --json
+assert 'e3: re-enabled job skip is not exempt' skip "$(classification "Docs Consistency")"
+assert 'e3: re-enabled job skip has null reason' null "$(skip_reason "Docs Consistency")"
+assert 'e3: re-enabled job skip blocks' false "$(jq -r .all_passed <<<"$OUT")"
+assert 'e3: re-enabled job skip is not a failure' false "$(jq -r .any_failing <<<"$OUT")"
 
 # (f) a known-disabled job in the skipping bucket is exempt and visible.
 fixture "$TMP/f.json" \
@@ -197,6 +227,16 @@ run pr-checks 7 --repo test-org/repo --json
 assert 'f: known-disabled skip all_passed' true "$(jq -r .all_passed <<<"$OUT")"
 assert 'f: known-disabled skip reason' known-disabled-job "$(skip_reason Documentation)"
 assert 'f: known-disabled skip classification' not-applicable "$(classification Documentation)"
+
+# (f2) the known-disabled VOCABULARY: exactly the jobs that are still disabled
+# repo-side. A name left behind after its job is re-enabled is a silent gate
+# hole (#741): the exemption matches on name AND `skipping`, so a re-enabled
+# job reporting SKIPPED would be excused from the all-passed gate.
+KNOWN_LIST="$(sed -n "s/^KNOWN_DISABLED_JOBS='\(.*\)'$/\1/p" "$TMP/repo/scripts/pr-checks")"
+assert 'f2: vocabulary is exactly the still-disabled job' 'Documentation' \
+  "$(printf '%s' "$KNOWN_LIST" | jq -r 'join(",")')"
+assert 'f2: re-enabled job is absent from the vocabulary' 'false' \
+  "$(printf '%s' "$KNOWN_LIST" | jq -r 'index("Docs Consistency") != null')"
 
 # (g) a human-authored PR is never exempted, even with the same empty
 # description: the author predicate carries the discrimination, not the reason.

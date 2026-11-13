@@ -56,17 +56,21 @@ if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
   exit 0
 fi
 
-# Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if: false`
-# (state SKIPPED, conclusion skipped). They are classified "not-applicable" and
-# excluded from the all_passed gate — they can never report pass. Genuinely
-# skipped-but-optioned checks are NOT in this list and still fail the gate.
-#   - "Docs Consistency": replaced by `xtask docs-check` (manual evidence).
+# Known-disabled jobs: workflow jobs deliberately disabled or event-gated
+# repo-side (state SKIPPED, conclusion skipped). They are classified
+# "not-applicable" and excluded from the all_passed gate — they can never
+# report pass. Genuinely skipped-but-optioned checks are NOT in this list and
+# still fail the gate.
 #   - "Documentation":    event-gated in code.yml (`if: github.event_name ==
 #     'push'`), so it never runs on pull-request events; excluded only while
 #     it reports the skipped state — a failing or pending run still fails the
 #     gate. Re-enabling on PRs means removing the name from this list.
+# "Docs Consistency" left this list when markdown.yml re-enabled it
+# (arbsec/orchestraitor#741): it now runs `xtask docs-check` on every
+# markdown/Rust/YAML/TOML pull request, so a skip of that job is an
+# unexplained skip and fails the gate instead of being exempted.
 # See arbsec/orchestraitor#404.
-KNOWN_DISABLED_JOBS='["Docs Consistency","Documentation"]'
+KNOWN_DISABLED_JOBS='["Documentation"]'
 
 # Structural bot-author skip (arbsec/orchestraitor#706): CodeRabbit reports
 # SKIPPED on every PR authored by a GitHub App/bot user. Its check-run output
