@@ -723,7 +723,7 @@ kill during rollback (§9.4.3 history graph mid-restore)
 
 ---
 
-## 24. Recommended immediate implementation decisions
+## Recommended immediate implementation decisions
 
 0. **Use the product name Orchestraitor, repository `arbsec/orchestraitor`, canonical CLI `orc`, long-form alias `orchestraitor`, and daemon `orcd`.**
 1. **Use Rust for the daemon, TUI, policy, workspace control, brokers, and adapter host.**
