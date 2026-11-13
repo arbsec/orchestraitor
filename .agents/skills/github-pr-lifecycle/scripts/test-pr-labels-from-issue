@@ -22,6 +22,13 @@
 #       line ending (keyword, number and comment terminator), and the open
 #       inline state decides what is special (a comment opener or a
 #       destination opener inside a code span is ordinary text)
+#   (v) reviewer round 4 of #767: a code span renders SOMETHING, so it gets
+#       its own separator (a word character) and a reference that spans one
+#       is never visible; an open fence is closed only at the blockquote
+#       depth it was opened at; the label of a full reference link is not
+#       rendered text; a raw-text block that opens and closes on one line
+#       is complete there; and a construct that renders NOTHING leaves the
+#       text around it adjacent
 #   (u) shapes the differential harness (markdown_it, 6000 generated bodies,
 #       zero fail-opens) found after round 3: a barriered elision must take
 #       its separator from the RENDERED neighbours (a span that crosses a
@@ -665,6 +672,164 @@ assert 'an empty comment ends at its own ">" (the rest is prose)' \
   '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
 assert 'the reference after the empty comment lands in the receipt' 1 \
   "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+
+echo "--- prose guard: reviewer round 4 (#767) ---"
+
+# (v1) A code span INSIDE the keyword manufactures a reference when the span
+# is elided as if it rendered nothing: "see part `lexer` of #741" renders
+# "see part lexer of #741", so the phrase "part of" is not contiguous and
+# the reader sees no reference. The span renders SOMETHING, so it gets its
+# own separator: a word character, which breaks both the whitespace run
+# "part of" needs and the word boundary the reference grammar needs.
+export PR_BODY='This lands the parser work; see part `lexer` of #741 for scope.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the reference after a code span is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v2) The same shape with the other keyword: "Refs `x` #741" renders
+# "Refs x #741" — the reference is not visible either.
+export PR_BODY='Refs `x` #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span between the keyword and the number adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v3) The same shape across a line break: the span swallows the break, so
+# the text around it is concatenated on ONE rendered line.
+export PR_BODY=$'Part `x\ny` of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a cross-line code span inside the keyword adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v4) The MIRROR: a reference that comes AFTER the span is visible prose
+# and still propagates ("the `x` part of #741" renders "the x part of
+# #741"). The span must not swallow the phrase that follows it.
+export PR_BODY='the `x` part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a reference after a code span still propagates' '["bug","documentation"]' \
+  "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the span lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (v5) A span glued to the keyword on BOTH sides: "Part`x`of #741" renders
+# "Partxof #741" — no whitespace, no boundary, no reference.
+export PR_BODY='Part`x`of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span glued to the keyword adds no labels' '[]' "$(pr_edit_adds)"
+
+# (v6) MEDIUM 2: a blockquote-quoted fence closer does NOT close a fence the
+# renderer keeps open. The content of an open fence is RAW text, so the
+# "> ```" line is literal content, not a closer, and "Part of #741" stays
+# inside the code block.
+export PR_BODY=$'intro:\n```\ncode\n> ```\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a blockquote-quoted fence closer does not close the fence' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference inside the open fence is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v7) The mirror of (v6): a fence opened INSIDE a blockquote is not closed
+# by a top-level closer either — but the blockquote itself ends at the
+# first line that is not quoted, so the text after it is prose again and
+# the reference there IS visible.
+export PR_BODY=$'> ```\n> code\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence in a blockquote ends when the blockquote ends' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v8) A fence opened and closed inside the blockquote still hides its
+# content.
+export PR_BODY=$'> ```\n> code\n> Part of #741\n> ```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence quoted in a blockquote hides its content' '[]' \
+  "$(pr_edit_adds)"
+
+# (v9) LOW 1: a code span closes ONLY on a run of exactly the opening
+# length. A longer run inside an open span is literal text, so a reference
+# between that run and the true closer is still code.
+export PR_BODY='x ``a``` b Part of #741`` c'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run inside an open span does not close it (same line)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v10) The same across a line break.
+export PR_BODY=$'x ``a\nb``` c Part of #741`` d'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run inside an open span does not close it (cross-line)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v11) LOW 2: the LABEL of a full reference link is the key of a link
+# reference definition, not rendered text: "[x][Part of #741]" with the
+# definition renders "<a href=...>x</a>". The label is elided.
+export PR_BODY=$'[x][Part of #741]\n\n[Part of #741]: http://e.com\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'the label of a full reference link adds no labels' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference label is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v12) LOW 3: a raw-text block that opens AND closes on one line is
+# complete there — the document after it is prose again.
+export PR_BODY=$'<script>var x=1</script>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a one-line script block does not swallow the document' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v13) The same for a style block.
+export PR_BODY=$'<style>a{}</style>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a one-line style block does not swallow the document' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v14) A raw-text block that spans lines still hides everything up to its
+# closing tag — but the text after it is prose again.
+export PR_BODY=$'<script>\nvar x=1\n</script>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a multi-line script block hides only its own content' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v15) An INLINE raw-text element swallows the text that follows it up to
+# its closing tag: "Part <script>of #741." renders "Part " and nothing
+# else, so the reference is not visible.
+export PR_BODY='Part <script>of #741.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline script element swallows the text after it' '[]' \
+  "$(pr_edit_adds)"
+
+# (v16) A construct that renders NOTHING leaves the text on either side of
+# it ADJACENT: "Refs<!-- c -->#741" renders "Refs#741", which is not a
+# reference (the grammar needs whitespace or a colon before the number).
+export PR_BODY='Refs<!-- c -->#741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a comment between the keyword and the number adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v17) The same for a raw HTML tag.
+export PR_BODY='Part<br>of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a line-break element splits the phrase (no labels)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v18) A line-break element ends the rendered line, so the text after it
+# is on the next line: "Part<br> of #741" renders two lines and the
+# reference is not contiguous.
+export PR_BODY='Part<br> of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a line-break element ends the rendered line (no labels)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v19) The tag between the words does not create a whitespace run: the
+# rendered text is "Partof #741" and the reference is not visible.
+export PR_BODY='Part<b>of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline tag does not glue the keyword together' '[]' \
+  "$(pr_edit_adds)"
+
+# (v20) The keyword split by a code span on both sides stays invisible.
+export PR_BODY='Part`x`of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span glued to the keyword keeps it invisible' '[]' \
+  "$(pr_edit_adds)"
 
 # usage errors
 run pr-labels-from-issue

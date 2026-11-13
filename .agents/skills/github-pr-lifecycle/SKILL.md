@@ -110,7 +110,18 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   or comment, or buried in a link destination is ignored —
                   the quoted TEXT is prose and still counts, four spaces
                   inside a paragraph are a lazy continuation rather than
-                  code, and the closing family is still read from the raw
+                  code. A code span renders SOMETHING, so it is elided with
+                  a word character and the phrase around it never re-joins
+                  (`see part [lexer] of #741` is no reference); a construct
+                  that renders NOTHING (a comment, a raw tag, a destination)
+                  leaves the text around it adjacent (`Refs<!-- c -->#741` is
+                  no reference either). An open fence is closed only by a
+                  fence at the SAME blockquote depth it was opened at (a
+                  `> fence` line inside a top-level fence is CONTENT, not a
+                  closer), a raw-text block (`<script>`, `<style>`) that
+                  opens and closes on one line is complete there, and a
+                  line-break element (`<br>`, `<hr>`) ends the rendered line.
+                  The closing family is still read from the raw
                   body (the asymmetry is deliberate; #765 tracks aligning
                   it; line endings follow CommonMark — CRLF parses like LF
                   and a LONE CR ends a line, so `Part o<CR>f #741` is not a
