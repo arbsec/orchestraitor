@@ -427,10 +427,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   branch defaults to the repository's default branch read from the API
   (previously only `origin/main`/`main` resolved locally); for an EXISTING
   remote branch the diff base stays that branch's remote head tree. The
-  `updateRefs` false-negative is fixed: when the ref-swing mutation reports a
-  GraphQL error or a missing `clientMutationId` but a re-read proves the
-  branch moved to the new head, the landing is reported as a success with a
-  WARNING on stderr instead of a spurious typed error. Multiple local
+  `updateRefs` false-negative guard re-reads the branch ref whenever the
+  mutation's response cannot be trusted: if the mutation reports a GraphQL
+  error but a re-read proves the branch moved to the new head, the landing is
+  reported as a success with a WARNING on stderr instead of a spurious typed
+  error. Multiple local
   commits continue to squash-land as ONE App-signed commit (documented).
 - Per-agent cost tracking for loop-run workers: `orc loop` now opens a durable cost ledger at
   `.orchestraitor/cost.db` and records one cost entry per worker model call,
@@ -797,6 +798,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Fixed
 
+- **`orc github push-branch` no longer prints a spurious `clientMutationId`
+  WARNING on every update of an existing remote branch** (issue 775): the
+  `updateRefs` request never sent the field, and GitHub's
+  `UpdateRefsPayload.clientMutationId` is a nullable echo of that input, so
+  the response was deterministically `null` — every existing-branch landing
+  settled on the false-negative guard and printed a WARNING that read like
+  GitHub flakiness. The mutation now sends a unique `clientMutationId` and
+  confirms the landing by re-reading the branch ref, so the success path is
+  the one that runs and a clean landing prints no WARNING. A ref that ends up
+  on the wrong oid now fails with `post-move verification failed: the branch
+  points at …, expected …` instead of the misleading "malformed response"
+  error, and the guard still degrades a genuine post-mutation error to a
+  WARNING when the ref provably moved. Flags, exit codes, and every other
+  landing guarantee are unchanged.
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
   the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
   plain `skip`, so `checks_all_passed` was `false` on a PR whose every real

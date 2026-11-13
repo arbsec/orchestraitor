@@ -337,14 +337,21 @@ Mechanics:
   window makes the update non-fast-forward, and one that REWINDS it makes
   `beforeOid` mismatch — both FAIL with a typed error, and the concurrent
   commit is never overwritten in either direction. A new remote branch is
-  created directly at the verified commit. Additionally, the
-  `updateRefs`/`clientMutationId` response is KNOWN to be flaky: GitHub has
-  answered with a malformed-payload/GraphQL error envelope AFTER the mutation
-  actually applied. Whenever an updateRefs error or a missing
-  `clientMutationId` occurs, the subcommand re-reads the branch ref through
-  the API before failing: a ref that provably points at the new head
-  degrades the failure to a WARNING on stderr and reports success — a
-  mutation that moved the ref is never reported as an error.
+  created directly at the verified commit. `UpdateRefsPayload` carries only a
+  nullable `clientMutationId` echo — no ref state — so the mutation's own
+  response cannot confirm the move. The input now carries a per-invocation
+  `clientMutationId` (the payload echoes it back) and the subcommand re-reads
+  the branch ref through the API afterwards: a ref that points at the new head
+  is a success, a ref left on a different oid fails with `post-move
+  verification failed: …` (never reported as success), and a branch that
+  disappeared fails too. The false-negative guard covers a response that
+  cannot be trusted: whenever an updateRefs GraphQL error (the API can emit an
+  error envelope after applying the change) or a payload without the echoed
+  `clientMutationId` occurs, the subcommand re-reads the branch ref before
+  failing — a ref that provably points at the new head degrades the failure to
+  a WARNING on stderr and reports success, so a mutation that moved the ref is
+  never reported as an error. A landing that takes the success path prints no
+  WARNING.
 - **Executable-file modes (REST tree + commit transport):** GraphQL is still
   the default landing transport, but `createCommitOnBranch` carries no mode
   field: `FileAddition` always lands 100644 and `FileChange` keeps GitHub's
