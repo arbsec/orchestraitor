@@ -34,7 +34,37 @@ VERIFY
 1. Read the full diff of {{base_sha}}..{{head_sha}}.
 2. Read the complete current content of every changed file — do not judge from
    diff hunks alone.
-3. Run the applicable repository gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo check --workspace --all-targets --all-features --locked`, `cargo nextest run --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`, `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md §15). Record real counts; mark a gate that does not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+3. Run the applicable repository gates: `cargo fmt --check`, `cargo clippy
+   --workspace --all-targets --all-features -- -D warnings`, `cargo check
+   --workspace --all-targets --all-features --locked`, `cargo nextest run
+   --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`,
+   `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md
+   §15). Record real counts; mark a gate that does not apply to the change
+   (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+   `rumdl check .` is valid ONLY at the version `.mise.toml` pins. Bare
+   `rumdl` is a `PATH` lookup, so an unpinned cargo or distro build shadows
+   the pin and hands you a different rule set than CI. Assert the version
+   before you lint:
+
+     pinned="$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)"
+     installed="$(rumdl --version 2>/dev/null | sed -n 's/^rumdl //p')"
+     printf 'pinned=%s installed=%s\n' "${pinned:-<none>}" "${installed:-<not found>}"
+
+   `installed` equals `pinned` → run `rumdl check .` and record its counts.
+   They differ, or either is empty → the `PATH` binary is not the pin:
+   `mise install` puts the pinned build on disk without re-pointing `rumdl`,
+   and `mise exec -- rumdl` resolves to that same `PATH` binary. Run the
+   pinned install instead, keeping it only if its `--version` prints exactly
+   `pinned`:
+
+     d="$(mise where rumdl)" && "$d/rumdl" --version && "$d/rumdl" check .
+
+   Still no binary at `pinned` → do NOT lint and do NOT report a markdown
+   finding. Record the gate as `rumdl: N/A — could not run at pinned <pinned>
+   (PATH rumdl <installed>)` and state that the markdown gate could not be run
+   at the pinned version. A markdown finding produced by an unpinned `rumdl`
+   is a gate-environment failure, never a defect in the PR. See "Markdown gate
+   (pinned `rumdl`)" below for the stale build's known false positives.
 4. Check CI status for {{head_sha}} with `pr-checks`. Confirm with `pr-state`
    (headRefOid) that the PR head still equals {{head_sha}} at query time; if
    the head moved, re-review against the new HEAD — never attribute a newer
@@ -89,7 +119,37 @@ VERIFY
 1. Read the full diff of 0ee4c8feb19fbea34d432e209773b1cc65d14611..aca12e5f25990ca4c66bd6158d1d086e9a0545b6.
 2. Read the complete current content of every changed file — do not judge from
    diff hunks alone.
-3. Run the applicable repository gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo check --workspace --all-targets --all-features --locked`, `cargo nextest run --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`, `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md §15). Record real counts; mark a gate that does not apply to the change (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+3. Run the applicable repository gates: `cargo fmt --check`, `cargo clippy
+   --workspace --all-targets --all-features -- -D warnings`, `cargo check
+   --workspace --all-targets --all-features --locked`, `cargo nextest run
+   --workspace`, `cargo test --doc`, `cargo run -p xtask -- docs-check`,
+   `rumdl check .`, `cargo deny check`, `cargo audit` (docs/spec/tech-stack.md
+   §15). Record real counts; mark a gate that does not apply to the change
+   (e.g. Rust gates on a docs-only PR) `N/A` with a one-line reason.
+   `rumdl check .` is valid ONLY at the version `.mise.toml` pins. Bare
+   `rumdl` is a `PATH` lookup, so an unpinned cargo or distro build shadows
+   the pin and hands you a different rule set than CI. Assert the version
+   before you lint:
+
+     pinned="$(sed -n 's/^rumdl = "\(.*\)"$/\1/p' .mise.toml)"
+     installed="$(rumdl --version 2>/dev/null | sed -n 's/^rumdl //p')"
+     printf 'pinned=%s installed=%s\n' "${pinned:-<none>}" "${installed:-<not found>}"
+
+   `installed` equals `pinned` → run `rumdl check .` and record its counts.
+   They differ, or either is empty → the `PATH` binary is not the pin:
+   `mise install` puts the pinned build on disk without re-pointing `rumdl`,
+   and `mise exec -- rumdl` resolves to that same `PATH` binary. Run the
+   pinned install instead, keeping it only if its `--version` prints exactly
+   `pinned`:
+
+     d="$(mise where rumdl)" && "$d/rumdl" --version && "$d/rumdl" check .
+
+   Still no binary at `pinned` → do NOT lint and do NOT report a markdown
+   finding. Record the gate as `rumdl: N/A — could not run at pinned <pinned>
+   (PATH rumdl <installed>)` and state that the markdown gate could not be run
+   at the pinned version. A markdown finding produced by an unpinned `rumdl`
+   is a gate-environment failure, never a defect in the PR. See "Markdown gate
+   (pinned `rumdl`)" below for the stale build's known false positives.
 4. Check CI status for aca12e5f25990ca4c66bd6158d1d086e9a0545b6 with
    `pr-checks`. Confirm with `pr-state` (headRefOid) that the PR head still
    equals aca12e5f25990ca4c66bd6158d1d086e9a0545b6 at query time; if the head
@@ -124,6 +184,44 @@ CONSTRAINTS
 - State facts with evidence (file:line quotes). Do not speculate about
   intent; do not assign blame.
 ```
+
+## Markdown gate (pinned `rumdl`)
+
+`rumdl check .` is the one gate whose result depends on which binary `PATH`
+resolves. A cargo install (`~/.cargo/bin/rumdl`) or a distro package shadows
+the mise-managed build of the `.mise.toml` pin without any repository change,
+so an unasserted reviewer lints with a different rule set than CI and reports
+the difference as a defect in the PR. Measured on this repository: `rumdl`
+0.2.20 reported two `MD051` findings in a tree the pinned 0.3.2 calls
+`Success: No issues found in 46 files`, and two independent review generations
+reported those findings as real. They are not — the target heading exists
+(`docs/cli/orcd-watch.md:102`, `## Event ingress (§9.50(b), opt-in)`) and both
+links (`CHANGELOG.md:121`, `CHANGELOG.md:884`) resolve under the pin; 0.2.20's
+slugger is wrong.
+
+The prompt carries the procedure; these are the rules behind it.
+
+- `.mise.toml` is the single source of truth for the version. The prompt reads
+  it with `sed` instead of restating it, so the pin has no second copy to
+  drift.
+- `mise install` and `mise exec -- rumdl` are NOT remedies. `mise install`
+  puts the pinned build on disk without changing which `rumdl` `PATH`
+  resolves; `mise exec -- rumdl --version` prints 0.2.20 here while
+  `rumdl = "0.3.2"` is pinned, and clearing `CARGO_HOME` resolved to 0.3.4 —
+  also not the pin. Compare `rumdl --version` with the pin every time; never
+  assume a shim fixed it.
+- `mise where rumdl` prints mise's install directory for the active pin, and
+  `"$(mise where rumdl)/rumdl"` is the pinned binary even when the shim
+  resolves elsewhere — confirmed by its `--version`, not assumed.
+- No binary at the pin → the markdown gate did not run: `N/A` with the
+  measured `PATH` version, and no markdown finding. Unpinned output is
+  gate-environment data, not review evidence.
+
+The two `MD051` false positives above are a diagnostic, not a fix: seeing
+exactly those two warnings identifies the binary as the stale 0.2.20. The
+diagnostic is scoped to builds whose `--version` is not the pin — if
+`installed` equals `pinned` and `MD051` appears, it is a real finding and is
+reported like any other.
 
 ## Report shape
 
@@ -184,6 +282,7 @@ One line per gate, with real counts from the run:
 - clippy: {{n}} warnings
 - nextest: {{passed}} passed, {{failed}} failed
 - doc tests: {{n}} warnings
+- rumdl: {{n}} issues in {{n}} files ({{version}} pinned)
 - CI: {{passing}}/{{total}} checks passing @ {{head_sha}}
 ```
 
