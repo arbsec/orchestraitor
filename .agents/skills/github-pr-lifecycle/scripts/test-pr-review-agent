@@ -60,8 +60,21 @@ chmod +x "$TMP/bin/orc"
 export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export GH_LOG="$TMP/gh.jsonl" SERVICE_LOG="$TMP/service.log" TMPDIR="$TMP/files"
+# Review-policy provenance fixture (#748): TWO real base commits whose policy
+# files are identical. `convergence-status`/`merge-gate` verify the running
+# scripts against the PR's baseRefOid; a base ADVANCE that does not touch policy
+# must not refuse (the review-record checks below still see the advance).
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" -c user.name=skills-test -c user.email=skills-test@example.invalid \
+  commit -q -m "fixture: gate scripts at the first base"
+TEST_BASE_DEFAULT="$(git -C "$TMP/repo" rev-parse HEAD)"
+printf 'advance\n' > "$TMP/repo/ADVANCE.txt"
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" -c user.name=skills-test -c user.email=skills-test@example.invalid \
+  commit -q -m "fixture: base advance (review policy unchanged)"
+BASE_ADVANCED="$(git -C "$TMP/repo" rev-parse HEAD)"
+export TEST_BASE_DEFAULT BASE_ADVANCED
 export TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
-export TEST_BASE_DEFAULT=1111111234567890abcdef1234567890abcdef99
 export ORC_GITHUB_APP_ENFORCEMENT=required
 RECORD="$TMP/repo/.orchestraitor/reviews/7-abcdef1.md"
 PASS=0; FAIL=0
@@ -110,7 +123,7 @@ run merge-gate 7 --repo test-org/repo
 assert 'head movement after convergence rejected' 4 "$RC"
 assert 'head movement cannot merge' 0 "$(mutations)"
 unset MERGE_HEAD
-export TEST_BASE=2222221234567890abcdef1234567890abcdef11
+export TEST_BASE="$BASE_ADVANCED"
 run convergence-status 7 --repo test-org/repo --json
 assert 'base advance with unchanged head cannot converge' 5 "$RC"
 assert 'base advance gives stale-record reason' true "$(jq '.reasons | index("agent_review_not_clean_at_head") != null' <<<"$OUT")"

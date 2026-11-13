@@ -479,6 +479,14 @@ fi
 # so the gate passes (empty requests/reviews: nothing pending or approved).
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   case "$*" in
+    *baseRefOid*)
+      # Review-policy provenance (#748): pr-checks refuses (exit 6) unless
+      # the running copy is the PR's trusted base copy. Answer with the base
+      # commit of the committed fixture policy tree built below, so the
+      # reviewer gate sees a checkout standing on its own base.
+      _oid="$(cat "$(dirname -- "$0")/base-ref-oid" 2>/dev/null || true)"
+      [ -n "$_oid" ] && printf '{"baseRefOid":"%s"}\n' "$_oid"
+      exit 0 ;;
     *reviewRequests*) echo '{"requests":[],"approved":[]}'; exit 0 ;;
     *) echo '{"mergeable":"MERGEABLE"}'; exit 0 ;;
   esac
@@ -817,7 +825,26 @@ echo "PASS bot self-approval refusal + verdict body requirements"
 # --- pr-mutate service-identity routing (gh-capabilities review finding: the
 #     documented `gh pr edit|ready|close` writes must go through the wrapper
 #     like pr-create/pr-comment, never ambient personal auth) ---
-PRMUTATE="$HERE/../../../github-pr-lifecycle/scripts/pr-mutate"
+#
+# The reviewer-request gate shells out to pr-checks, which since #748 refuses
+# (exit 6) unless the running copy is the PR's trusted base copy. Run these
+# cases against a COMMITTED copy of the policy scripts instead of this
+# checkout: the fixture then has a real base commit holding exactly the
+# running files, so an edited working tree here cannot colour the routing
+# assertions, and the provenance check gets the base it needs (served by the
+# gh stub's baseRefOid branch from $WORK/base-ref-oid).
+POLICY="$WORK/policy"
+mkdir -p "$POLICY"
+cp "$HERE/../../../github-pr-lifecycle/scripts/_lib.sh" \
+  "$HERE/../../../github-pr-lifecycle/scripts/pr-checks" \
+  "$HERE/../../../github-pr-lifecycle/scripts/pr-mutate" "$POLICY/"
+git -C "$POLICY" init -q
+git -C "$POLICY" add -A
+git -C "$POLICY" -c user.name=skills-test -c user.email=skills-test@example.invalid \
+  commit -q -m "fixture: pr-mutate policy scripts at the trusted base"
+git -C "$POLICY" rev-parse HEAD > "$WORK/base-ref-oid"
+PRMUTATE="$POLICY/pr-mutate"
+chmod +x "$PRMUTATE" "$POLICY/pr-checks"
 
 # --- 24. service path: pr-mutate edit routes through gh-env with the
 #         intended gh subcommand. The reviewer-request gate also performs an

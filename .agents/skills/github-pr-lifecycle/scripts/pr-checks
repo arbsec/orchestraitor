@@ -34,6 +34,19 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ORC_OK"
 fi
 
+# Review-policy provenance (arbsec/orchestraitor#748): a classifier that is not
+# the trusted base's copy produces a confident WRONG answer — the #740/#748
+# symptom is a pre-#707 copy reporting `checks_not_passing` for a MERGEABLE PR.
+# Refuse (exit 6) instead; never emit a classification from a stale policy.
+# Raw JSON is read then filtered locally (like `orc_lib_require_mergeable`): a
+# gh that ignores/tests-without `--jq` still yields parseable state.
+PR_BASE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json baseRefOid 2>/dev/null || true)"
+PR_BASE_SHA="$(echo "$PR_BASE_JSON" | jq -r '.baseRefOid // ""' 2>/dev/null || true)"
+POLICY_MODE=text
+[ "$OPT_JSON" = true ] && POLICY_MODE=json
+orc_lib_require_policy_current "$POLICY_MODE" "$PR_BASE_SHA" "pr-checks" \
+  "$PR --repo $REPO --json" "$SCRIPT_DIR/pr-checks"
+
 RAW="$(orc_lib_gh "${CHECK_ARGS[@]}")" || EXIT_CODE=$?
 
 # gh pr checks exits 8 when pending; capture the JSON regardless.

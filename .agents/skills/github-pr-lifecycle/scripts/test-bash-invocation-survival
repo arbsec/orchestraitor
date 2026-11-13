@@ -83,8 +83,15 @@ chmod +x "$TMP/bin/orc"
 export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export ORC_GITHUB_APP_ENFORCEMENT=required
+# Review-policy provenance fixture (#748): commit the scripts so the trusted
+# base commit — reported as the PR's `baseRefOid` — contains exactly the copies
+# the gate is about to run. Without this, the provenance guard would (correctly)
+# refuse a tree whose policy cannot be matched to a base.
+git -C "$TMP/repo" add -A
+git -C "$TMP/repo" -c user.name=skills-test -c user.email=skills-test@example.invalid \
+  commit -q -m "fixture: gate scripts at the trusted base"
 TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
-TEST_BASE=1111111234567890abcdef1234567890abcdef99
+TEST_BASE="$(git -C "$TMP/repo" rev-parse HEAD)"
 export TEST_HEAD TEST_BASE
 mkdir -p "$TMP/repo/.orchestraitor/reviews"
 # Record format the convergence-status script reads (lines 3, 5, 6):

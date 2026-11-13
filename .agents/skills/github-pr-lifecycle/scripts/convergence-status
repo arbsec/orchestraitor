@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "convergence-status" "Compute PR convergence (mergeable?) by combining checks + threads + checklist + review state. Exit 0=mergeable, 5=blocked."
+  orc_lib_print_help "convergence-status" "Compute PR convergence (mergeable?) by combining checks + threads + checklist + review state. Exit 0=mergeable, 5=blocked, 6=stale review policy (refused; no verdict emitted)."
   exit "$ORC_OK"
 fi
 
@@ -22,6 +22,26 @@ fi
 
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
+
+# 0. Anchor + review-policy provenance. The PR's baseRefOid is the trusted base
+# commit, and review policy MUST come from it, never from this checkout
+# (AGENTS.md). A stale sibling `pr-checks`/`convergence-status` is refused
+# (exit 6) BEFORE any verdict is computed — the #740/#748 defect was a stale
+# copy reporting `checks_not_passing` for a MERGEABLE PR. Reading the anchors
+# first is also what makes the refusal name the base it should match.
+PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,baseRefOid,headRefOid,isDraft)" || {
+  echo "error: failed to read PR state" >&2
+  exit "$ORC_ERR_UNRECOVERABLE"
+}
+REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
+IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
+HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
+BASE_SHA="$(echo "$PR_STATE_JSON" | jq -r '.baseRefOid')"
+
+POLICY_MODE=text
+[ "$OPT_JSON" = true ] && POLICY_MODE=json
+orc_lib_require_policy_current "$POLICY_MODE" "$BASE_SHA" "convergence-status" \
+  "$PR --repo $REPO --json" "$SCRIPT_DIR/pr-checks" "$SCRIPT_DIR/convergence-status"
 
 # 1. Checks: all required + non-optional must pass.
 CHECKS_JSON="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
@@ -48,16 +68,9 @@ UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
-# must never be interpreted as verdict or SHA metadata.
-PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,baseRefOid,headRefOid,isDraft)" || {
-  echo "error: failed to read PR state" >&2
-  exit "$ORC_ERR_UNRECOVERABLE"
-}
-REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
-IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
-HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
-BASE_SHA="$(echo "$PR_STATE_JSON" | jq -r '.baseRefOid')"
-
+# must never be interpreted as verdict or SHA metadata. The PR state (and thus
+# the head/base anchors verified above in step 0) is read once, before the
+# sub-checks run.
 AGENT_REVIEW_CLEAN=false
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "error: convergence-status requires running from the target git checkout" >&2
