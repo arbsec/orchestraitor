@@ -780,6 +780,38 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   on legacy protocol sessions, and `disable_route` fail-closed behavior
   are unchanged; macro-generated handlers adapt automatically.
 
+- The eight `arbsec/arbitraitor` crates are re-pinned from `982517f3` to
+  `df66f2d4` (Arbitraitor `main`, 2026-11-13), the single audited consumer
+  surface Arbitraitor ADR-0044 requires. The bump resolves `zip` 9.5.1
+  (previously 8.6.0), which clears `RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`,
+  `RUSTSEC-2026-0369`, and `RUSTSEC-2026-0429`; the matching advisory
+  ignores are dropped from `deny.toml` and from the `cargo audit` gate in
+  `.github/workflows/security.yml`. The pin also carries the isolation-failure
+  variants Arbitraitor added to `ExecError` (#827, #839, #842), so
+  `orchestraitor-arb-client` now reports the static reason codes
+  `mediated-containment-unavailable`, `network-isolation-unavailable`, and
+  `unshare-target-exec-failed`, and the `MediatedWorker::run_bash` path fails
+  closed on a namespace-setup refusal or a target-exec failure instead of
+  returning the wrapper's non-zero exit code as a result. The worker's bash
+  pipeline (`BashChild`) keeps its early-close result shape. The
+  re-resolution also moves arbitraitor's transitive set:
+  `wasmtime-internal-core` 45.0.3/49.0.1 → 50.0.1 with
+  `pulley-interpreter`/`pulley-macros` 50.0.1, `cranelift-bitset` 0.137.1,
+  `object` 0.40.0, and `wasm-encoder`/`wasmparser` 0.261.0; `zip` 9.5.1
+  replaces 8.6.0 and brings the one new Windows-only `windows-sys 0.61.2`
+  edge; `lzma-rust2` 0.25.0, `ppmd-rust` 1.5.2, `constant_time_eq` 0.6.1,
+  `syn` 3.0.10, and `typed-path` 0.13.0 replace their older copies, while
+  `nix` 0.31.3 joins 0.29.0; `zstd` 0.13.4, `zstd-safe` 7.4.0, and
+  `serde_json_canonicalizer` 0.3.2 leave the graph. The full add/remove list
+  is the `Cargo.lock` diff. The reference line numbers in
+  `docs/sandbox-mediation.md`, ADR-0007, and ADR-0024 are re-anchored to the
+  new revision, the isolation documentation distinguishes the two exec paths'
+  wrapper-failure contracts, and the Landlock-absent classification section
+  records that the pinned revision couples `filesystem_isolation` to the live
+  ABI probe (upstream #755), with the consumer probe check retained as
+  fail-closed defense in depth. No Orchestrator API, schema, or on-disk format
+  changes.
+
 - The tree-sitter baseline indexer (`orchestraitor-context`) now builds against
   tree-sitter 0.27.0 (previously 0.26.11) to align with the Arbitraitor 0.27
   migration; the bump pulls in upstream's UTF-16 buffer over-read fix.

@@ -46,7 +46,7 @@ pub trait BashMediator: Send + Sync {
 /// belongs — before any execution surface exists — while letting a run whose
 /// model never requests bash complete without probing the sandbox (the
 /// preflight is host-dependent by design: it refuses on hosts without the
-/// required controls, per ADR-0024 and the #755 stopgap).
+/// required controls, per ADR-0024 and the #755 Landlock-probe check).
 pub struct MediatedBashMediator {
     client: ArbitraitorClient,
     worker: Mutex<Option<MediatedWorker>>,

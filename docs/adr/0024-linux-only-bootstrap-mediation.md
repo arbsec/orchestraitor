@@ -18,8 +18,9 @@ Two facts constrain the platform posture:
 
 1. `arbitraitor_sandbox::SandboxMode::Restricted` (the containment envelope
    the bootstrap worker demands) is implemented for Linux only in the
-   pinned Arbitraitor revision (`e36644e`, spec `40-arbitraitor-integration.md`
-   §9.6 / §27.7). The controls — Landlock filesystem rules, `no_new_privs`,
+   pinned Arbitraitor revision (`Cargo.toml` `[workspace.dependencies]`,
+   spec `40-arbitraitor-integration.md` §9.6 / §27.7). The controls —
+   Landlock filesystem rules, `no_new_privs`,
    fd closure, network-namespace isolation, fenced `prlimit` resource
    caps — are kernel features that have no portable equivalent on macOS
    (no Landlock; `seatbelt` is a different API surface), Windows
@@ -50,29 +51,31 @@ labelled non-secure mode exists on this path.
 
 Concretely:
 
-- `crates/orchestraitor-arb-client/src/mediation.rs:84` declares
+- `crates/orchestraitor-arb-client/src/mediation.rs:95` declares
   `pub const WORKER_PLATFORM: &str = "linux";` as the single source of
   truth for the platform name consumed by the preflight.
 - `MediatedWorker::spawn` first gates on the platform string
-  (`mediation.rs:431` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
+  (`mediation.rs:447` — `if !platform_matches_host(platform) { return Err(UnsupportedPlatform) }`)
   — `UnsupportedPlatform` is returned before Arbitraitor is probed at all.
   On a supported platform, `spawn` then performs the Arbitraitor preflight
-  and `gate_preflight` (mediation.rs:438-439) before it creates an execution
+  and `gate_preflight` (mediation.rs:452) before it creates an execution
   surface — no child process or temporary execution directory is created by
   this call. The campaign may already have persisted the run-state row
-  before the lazy preflight runs (`crates/orchestraitor-campaign/src/loop_run.rs:1585-1595`
-  inserts the `running` row first, then calls `self.starter.start(...)`;
-  `MediatedBashMediator::worker` defers `MediatedWorker::spawn` until the
-  first bash call — `crates/orchestraitor-worker/src/mediator.rs:60-72`). The
+  before the lazy preflight runs
+  (`crates/orchestraitor-campaign/src/loop_run.rs:1628-1635` writes it via
+  `runs.start(&StartRun { .. })`, then `loop_run.rs:1644` calls
+  `self.starter.start(..)`; `MediatedBashMediator::worker` defers
+  `MediatedWorker::spawn` until the first bash call —
+  `crates/orchestraitor-worker/src/mediator.rs:66-75`). The
   `gate_preflight` inner platform check (`is_supported_platform`,
-  mediation.rs:282) is a defense-in-depth second gate, not the first
+  mediation.rs:271) is a defense-in-depth second gate, not the first
   refusal path readers encounter.
-- `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:146`)
+- `MediationError::UnsupportedPlatform { platform }` (`mediation.rs:158`)
   is the typed refusal; its `Display` impl explicitly cites
   "ADR-0024 fails closed; no non-secure mode" so the diagnostic anchors
   the decision in machine-testable form
-  (`mediation.rs:836`).
-- `MediatedBashMediator::worker` (`crates/orchestraitor-worker/src/mediator.rs:60`)
+  (`mediation.rs:900`).
+- `MediatedBashMediator::worker` (`crates/orchestraitor-worker/src/mediator.rs:66`)
   runs the preflight lazily on the first bash call, so a worker run that
   never invokes bash never probes the sandbox — but if it does, the gate
   fires before any execution surface exists.
@@ -83,14 +86,16 @@ Concretely:
 - On Linux-without-Landlock, the preflight consumes Arbitraitor's own
   probe datum (`landlock_abi_version: None`) and records
   `filesystem_isolation` as missing; the gate refuses. This is the
-  `#755 stopgap` (`mediator.rs:49`) until Arbitraitor classifies the
-  Landlock-absent case natively.
+  `#755` check (`mediator.rs:49`). Arbitraitor classifies the
+  Landlock-absent case natively at the pinned revision, so the check is
+  retained as fail-closed defense in depth against a future divergence,
+  not as a workaround for a live misclassification.
 
 ## Consequences
 
 - **Positive:** the bootstrap worker never claims a sandbox posture that
   the host cannot deliver. The run-state record's controls matrix is the
-  truth, not an inferred value. The Landlock-absent stopgap closes the
+  truth, not an inferred value. The Landlock-absent check guards the
   inverse-divergence direction (classification claims available while
   enforcement installs nothing — see the `[Landlock-absent]` section in
   `docs/sandbox-mediation.md`).
@@ -101,18 +106,23 @@ Concretely:
   `cargo run -p orchestraitor-cli -- loop` on a Mac laptop. The daemon,
   the MCP server, and the board provider all run on macOS for development;
   the bootstrap worker does not. This is documented in
-  `docs/sandbox-mediation.md` and in `README.md` line 250-252.
+  `docs/sandbox-mediation.md` and in `README.md:286` ("Bootstrap worker
+  sandbox mediation").
 - **Negative:** any future cross-platform mediation effort (Arbitraitor
   adds Capsicum / `seatbelt` support, or the spec relaxes §16.2 for this
   path) requires amending or superseding this ADR; the constant
   `WORKER_PLATFORM = "linux"` is the line that has to move first.
 - **Recorded gap:** spec §16.2 names this path fail-closed without a
-  fallback, but does not enumerate the upstream Landlock-active wrapper
-  bug ([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754))
-  — see `docs/sandbox-mediation.md` "Known upstream gap: Landlock-active
-  wrapper". Until upstream fixes the wrapper composition, network-isolated
-  script execution is fail-closed-inoperative on Landlock-active hosts;
-  the fix is owned by Arbitraitor per spec §16.2.
+  fallback, but does not enumerate the network wrapper's Landlock
+  identity-map requirement
+  ([arbsec/arbitraitor#754](https://github.com/arbsec/arbitraitor/issues/754))
+  — see `docs/sandbox-mediation.md`, "Landlock and the network wrapper's
+  identity map". Upstream fixed it for `ScriptExecution` (the path
+  `MediatedWorker::run_bash` uses, fix #780), so network-isolated script
+  execution runs on Landlock-active hosts; the separately assembled
+  `BashChild` rule list does not carry the grant and keeps the early-close
+  result shape. The wrapper composition stays owned by Arbitraitor per spec
+  §16.2.
 
 ## Alternatives considered
 
@@ -141,25 +151,27 @@ Concretely:
 
 ## References
 
-- `crates/orchestraitor-arb-client/src/mediation.rs:84` — `WORKER_PLATFORM`
+- `crates/orchestraitor-arb-client/src/mediation.rs:95` — `WORKER_PLATFORM`
   constant.
-- `crates/orchestraitor-arb-client/src/mediation.rs:146` —
+- `crates/orchestraitor-arb-client/src/mediation.rs:158` —
   `MediationError::UnsupportedPlatform` (cites ADR-0024).
-- `crates/orchestraitor-arb-client/src/mediation.rs:836` — diagnostic test
+- `crates/orchestraitor-arb-client/src/mediation.rs:900` — diagnostic test
   asserting the `ADR-0024` anchor.
 - `crates/orchestraitor-worker/src/mediator.rs:49` — lazy preflight note
   ("refuses on hosts without the required controls, per ADR-0024 and the
-  #755 stopgap").
+  #755 Landlock-probe check").
 - `crates/orchestraitor-daemon/src/capability.rs:272` —
   `probe_capabilities_on_macos_fails_closed` test (the contrasting
   *daemon* posture — fail-closed with a typed error, not a missing-capability
   refusal; this ADR is the *stricter* sibling).
 - `docs/sandbox-mediation.md` — operator-facing flow doc that names
-  ADR-0024 and links the Landlock-active / Landlock-absent upstream gaps.
-- `README.md:243` — the user-facing reference (lines 250-252 in the
-  audit snapshot).
-- `CHANGELOG.md:589`, `CHANGELOG.md:1052` — historical release-note
-  anchors citing ADR-0024.
+  ADR-0024, links the Landlock-active wrapper gap, and records the
+  Landlock-absent classification history (fixed upstream at the pin).
+- `README.md:286` — the user-facing "Bootstrap worker sandbox mediation"
+  section (the `orc config` block the old audit snapshot pointed at is at
+  `README.md:243`, which is unrelated CLI reference).
+- `CHANGELOG.md:671`, `CHANGELOG.md:701` — release-note entries that record
+  the bootstrap-worker mediation surface.
 - `AGENTS.md` — always-active agent rule set; this ADR is the
   fail-closed posture referenced by the bootstrap-worker path.
 - Spec `40-arbitraitor-integration.md` §6.7 (sole security authority,

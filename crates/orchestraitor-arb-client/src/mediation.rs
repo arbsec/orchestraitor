@@ -44,21 +44,27 @@
 //! The preflight consumes Arbitraitor's classification matrix plus its live
 //! probe metadata; two upstream divergences are disclosed rather than hidden:
 //!
-//! - Landlock **active** (arbsec/arbitraitor#754, tracked via #400): the
-//!   network wrapper dies under its own ruleset, so `run_bash` fails closed
-//!   on such hosts (the script never runs). See `docs/sandbox-mediation.md`.
+//! - Network-wrapper identity map (arbsec/arbitraitor#754, tracked via #400):
+//!   the `unshare` wrapper writes `/proc/self/{uid_map,setgroups,gid_map}`
+//!   under the applied Landlock ruleset. The pinned revision grants those
+//!   writes on the `run_bash` path (`ScriptExecution`), so it runs on
+//!   Landlock-active hosts and fails closed with a setup-refusal reason code
+//!   when a host still denies them; the separately assembled `BashChild` rule
+//!   list does not carry the grant and reports such a failure as a result.
+//!   See `docs/sandbox-mediation.md`.
 //! - Landlock **absent on Linux** (arbsec/arbitraitor#755, tracked via #401):
-//!   the classification reports
-//!   [`Available`](crate::sandbox::ControlState::Available) but upstream's
-//!   enforcement hook installs no ruleset when the kernel probe reports no
-//!   Landlock ABI. Until upstream reports this natively, the verdict
-//!   derivation treats `landlock_abi_version: None` on the supported Linux
-//!   platform as a missing `filesystem_isolation` control and refuses —
-//!   consuming Arbitraitor's own probe datum, not inferring a control state.
+//!   at the pinned revision the classification is probe-coupled — upstream
+//!   reports [`Unavailable`](crate::sandbox::ControlState::Unavailable) for
+//!   `filesystem_isolation` when the kernel probe finds no Landlock ABI
+//!   (upstream commit `f501af7`, ADR-0028), so the matrix and the enforcement
+//!   hook cannot diverge. The verdict derivation additionally treats
+//!   `landlock_abi_version: None` on the supported Linux platform as a missing
+//!   `filesystem_isolation` control and refuses — fail-closed defense in depth
+//!   consuming Arbitraitor's own probe datum, never inferring a control state.
 //!
 //! Spec-narrative mapping (spec `40-arbitraitor-integration.md` §9.6 names
 //! `configure_command` / `apply_sandbox` conceptually): the pinned Arbitraitor
-//! revision `4ebebb3` realizes that surface as
+//! revision `df66f2d4` realizes that surface as
 //! `arbitraitor_sandbox::configure_command` +
 //! `arbitraitor_sandbox::configure_filesystem_isolation` (invoked inside
 //! `arbitraitor-exec`'s command construction) and the real
@@ -300,12 +306,15 @@ fn gate_preflight(preflight: WorkerPreflight) -> Result<WorkerPreflight, Mediati
 /// health-report identifiers so run-state records and health RPCs name
 /// controls identically.
 ///
-/// Fail-closed stopgap (arbsec/arbitraitor#755, tracked via #401): on the
-/// supported Linux platform, a missing Landlock ABI probe means upstream's
-/// filesystem-isolation hook installs no ruleset at all, yet the matrix still
-/// classifies `filesystem_isolation` as `Available`. Until upstream reports
-/// the divergence, the probe datum itself (`landlock_abi_version: None`) is
-/// consumed here — treating that control as missing, never inferring states.
+/// Fail-closed defense in depth (arbsec/arbitraitor#755, tracked via #401): at
+/// the pinned revision `filesystem_isolation` is probe-coupled upstream — the
+/// matrix reports `Unavailable` when the Landlock ABI probe is unsupported
+/// (upstream commit `f501af7`, ADR-0028), so the classification and the
+/// enforcement hook agree. The probe datum itself (`landlock_abi_version:
+/// None`) is still consumed here, treating that control as missing, so a
+/// regression in the coupling cannot leave the gate trusting an `Available`
+/// claim on a kernel where no ruleset is installed. Never infers states
+/// beyond the probe.
 fn unavailable_controls(platform: &str, controls: &EffectiveControls) -> ControlNames {
     let landlock_abi_absent =
         is_supported_platform(platform) && controls.landlock_abi_version.is_none();
@@ -377,13 +386,20 @@ fn degraded_controls(controls: &EffectiveControls) -> ControlNames {
 
 /// Captured result of a mediated bash run.
 ///
-/// Host-shape note (arbsec/arbitraitor#754, tracked via #400): on hosts where
-/// the mediated wrapper cannot start at all (Landlock-active hosts), the
-/// failure surfaces as `Ok` with the wrapper's non-zero exit code and its
-/// diagnostic in `stderr` — the script did **not** run, and there is no
-/// isolation-off fallback on this path. Treat a non-zero `exit_code` with an
-/// empty `stdout` as "the mediated stack may not have started"; see
-/// `docs/sandbox-mediation.md`.
+/// Host-shape note (arbsec/arbitraitor#754, tracked via #400): a wrapper that
+/// dies before the interpreter starts comes back as a result only when it left
+/// no `unshare: ` diagnostic behind. Since the pinned revision `df66f2d4` a run
+/// that requested network isolation — which `ScriptExecution::bash` always
+/// does — fails closed as [`MediationError::Bash`] whenever a non-zero exit
+/// carries an `unshare: ` diagnostic: a namespace-setup refusal reports
+/// `network-isolation-unavailable` (a host whose LSM or policy denies the
+/// wrapper its `/proc/self` identity-map writes is one such refusal), a
+/// target-exec failure reports `unshare-target-exec-failed`, and a diagnostic
+/// the classifier cannot attribute reports `spawn`. A returned [`MediatedRun`]
+/// therefore means the wrapper handed the target to the kernel and the exit
+/// code is the script's own, or — when `exit_code` is `None` — that the child
+/// died from a signal, in which case no enforcement state is claimed. There is
+/// no isolation-off fallback on this path; see `docs/sandbox-mediation.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediatedRun {
     /// Exit code reported by the interpreter. `None` when the interpreter was
@@ -466,10 +482,14 @@ impl MediatedWorker {
     /// - [`MediationError::Bash`] when spawn, script piping, or output
     ///   collection fails at the Arbitraitor exec layer.
     ///
-    /// A wrapper that dies before the interpreter starts is **not** an error
-    /// by upstream contract: it yields `Ok` with a non-zero
-    /// [`MediatedRun::exit_code`] and the wrapper diagnostic in
-    /// [`MediatedRun::stderr`] — see the [`MediatedRun`] host-shape note.
+    /// A wrapper that dies before the interpreter starts yields a result only
+    /// when it left no `unshare: ` diagnostic behind: since the pinned revision
+    /// `df66f2d4` every `unshare: ` failure on a non-zero exit fails closed as
+    /// [`MediationError::Bash`] with the static reason codes
+    /// `network-isolation-unavailable`, `unshare-target-exec-failed`, or
+    /// `spawn` when the diagnostic cannot be attributed. A returned
+    /// [`MediatedRun`] with a non-zero [`MediatedRun::exit_code`] is therefore
+    /// the script's own exit status — see the [`MediatedRun`] host-shape note.
     pub fn run_bash(&self, script: &[u8]) -> Result<MediatedRun, MediationError> {
         linux_exec::run_bash(script)
     }
@@ -496,7 +516,7 @@ mod linux_exec {
         // `arbitraitor_sandbox::configure_filesystem_isolation` inside
         // `ScriptExecution`'s command construction; the builder itself
         // exposes `new`/`from_operation`→`policy`→`build` (no
-        // `configure_command`/`apply_sandbox` methods exist at rev 4ebebb3).
+        // `configure_command`/`apply_sandbox` methods exist on the builder).
         let policy = ExecutionPolicy {
             network_policy: NetworkPolicy::Denied,
             ..ExecutionPolicy::default()
@@ -533,6 +553,9 @@ mod linux_exec {
     fn exec_reason(error: &ExecError) -> &'static str {
         match error {
             ExecError::RunningAsRoot => "running-as-root",
+            ExecError::MediatedContainmentUnavailable => "mediated-containment-unavailable",
+            ExecError::NetworkIsolationUnavailable { .. } => "network-isolation-unavailable",
+            ExecError::UnshareTargetExecFailed { .. } => "unshare-target-exec-failed",
             ExecError::ExecuteNotGranted => "execute-capability-not-granted",
             ExecError::NetworkNotGranted => "network-capability-not-granted",
             ExecError::CommandNotAbsolute { .. } => "command-not-absolute",
@@ -559,6 +582,39 @@ mod linux_exec {
             ExecError::WallClockKillFailed { .. } => "wall-clock-kill-failed",
             ExecError::Store { .. } => "store",
             ExecError::MissingContainmentProof { .. } => "missing-containment-proof",
+        }
+    }
+
+    /// Pins the reason codes for the isolation failures arbsec/arbitraitor adds
+    /// to `ExecError` in #827, #839, #842 (present from revision b352278 and
+    /// unchanged at the df66f2d4 pin). The embedded `reason` text is untrusted
+    /// (wrapper stderr), so each error must collapse to a static code, and "the
+    /// wrapper could not exec the target" must stay distinct from a policy
+    /// refusal.
+    #[cfg(test)]
+    mod tests {
+        use super::exec_reason;
+        use crate::exec::ExecError;
+
+        #[test]
+        fn exec_reason_names_isolation_failures_without_leaking_reason_text() {
+            assert_eq!(
+                exec_reason(&ExecError::MediatedContainmentUnavailable),
+                "mediated-containment-unavailable"
+            );
+            assert_eq!(
+                exec_reason(&ExecError::NetworkIsolationUnavailable {
+                    reason: "unshare: operation not permitted".to_owned(),
+                }),
+                "network-isolation-unavailable"
+            );
+            assert_eq!(
+                exec_reason(&ExecError::UnshareTargetExecFailed {
+                    reason: "unshare: cannot execute /bin/bash: No such file or directory"
+                        .to_owned(),
+                }),
+                "unshare-target-exec-failed"
+            );
         }
     }
 }
@@ -612,10 +668,10 @@ mod tests {
         let preflight = probe_worker_preflight(&client, "linux");
 
         // Then: the record always carries the Restricted mode and the
-        // Arbitraitor controls matrix verbatim. Since arbitraitor ab7af5e
-        // (#754/#755) the matrix couples `filesystem_isolation` to the
-        // Landlock probe of the RUNNING host, so on a non-Linux test host
-        // the probed control is correctly `Unavailable` — the matrix is
+        // Arbitraitor controls matrix verbatim. Since upstream commit
+        // `f501af7` (#756, ADR-0028) the matrix couples `filesystem_isolation`
+        // to the Landlock probe of the RUNNING host, so on a non-Linux test
+        // host the probed control is correctly `Unavailable` — the matrix is
         // fail-closed, not all-available.
         assert_eq!(preflight.mode, SandboxMode::Restricted);
         assert_eq!(
@@ -628,9 +684,9 @@ mod tests {
             "filesystem_isolation must track the host Landlock probe verbatim"
         );
         // And: the verdict tracks the Landlock probe datum (see the #755
-        // stopgap in `unavailable_controls`). On hosts that deliver Landlock
-        // the verdict is Allowed with no gaps; on hosts that do not, the
-        // record refuses with exactly `filesystem_isolation` missing.
+        // probe check in `unavailable_controls`). On hosts that deliver
+        // Landlock the verdict is Allowed with no gaps; on hosts that do not,
+        // the record refuses with exactly `filesystem_isolation` missing.
         if preflight.controls.landlock_abi_version.is_some() {
             assert_eq!(preflight.verdict, PreflightVerdict::Allowed);
             assert!(preflight.missing_controls.is_empty());
@@ -682,10 +738,13 @@ mod tests {
 
     #[test]
     fn landlock_absent_linux_preflight_refuses_filesystem_isolation() -> TestResult {
-        // gen-2 finding F1 stopgap regression test (arbsec/arbitraitor#755,
-        // tracked via #401): the classification claims Available while the
-        // kernel probe datum reveals the enforcement hook installs no
-        // ruleset. The verdict must refuse that host class.
+        // gen-2 finding F1 regression test (arbsec/arbitraitor#755, tracked via
+        // #401): a matrix that claims `filesystem_isolation: Available` while
+        // the kernel probe datum shows no Landlock ABI must not be trusted —
+        // no ruleset is installed on that host class. Upstream's own matrix is
+        // probe-coupled at the pinned revision, so this all-available fixture
+        // stands in for a regression in that coupling; the verdict must still
+        // refuse the host class.
         //
         // Given: an all-available matrix on linux with no Landlock ABI.
         let controls = EffectiveControls::all_available();
@@ -897,15 +956,16 @@ mod tests {
     ///
     /// The probe executes `true` through the real `run_bash` path (network
     /// namespace + Landlock + hardening), not a bare `unshare` check: the
-    /// pinned Arbitraitor revision `4ebebb3` applies its Landlock ruleset to
-    /// the `unshare` wrapper process, which needs `/proc/self/uid_map` access
-    /// that the rules deny — on hosts with the Landlock LSM active the wrapper
-    /// dies with `unshare: cannot open /proc/self/uid_map: Permission denied`.
-    /// Upstream's own happy-path tests run with network isolation disabled, so
-    /// only a full-stack probe distinguishes a working enforcement stack from
-    /// that defect. Hosts that cannot run the mediated stack skip the live
-    /// enforcement tests rather than fabricate a weaker claim; the refusal and
-    /// preflight tests above never skip.
+    /// wrapper must write its user-namespace identity map through
+    /// `/proc/self/{uid_map,setgroups,gid_map}` under the applied ruleset, and
+    /// a host whose LSM or policy denies those writes fails the wrapper with a
+    /// `cannot open /proc/self/uid_map`-shaped diagnostic that the pinned
+    /// revision classifies as a setup refusal. Upstream's own happy-path exec
+    /// tests run with network isolation disabled, so only a full-stack probe
+    /// distinguishes a working enforcement stack from that refusal. Hosts that
+    /// cannot run the mediated stack skip the live enforcement tests rather
+    /// than fabricate a weaker claim; the refusal and preflight tests above
+    /// never skip.
     #[cfg(target_os = "linux")]
     fn mediated_stack_or_skip() -> Option<(MediatedWorker, std::sync::MutexGuard<'static, ()>)> {
         // The construction, the probe run, and every subsequent run_bash on
