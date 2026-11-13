@@ -92,7 +92,7 @@ orc board guarded-move <item-id> --status "<Status option name>" --session <sess
   the workflow-policy transition matrix (scheduling forward `Ready -> In Progress`,
   pause/resume between `In Progress`/`Blocked`, completion `In Progress -> Done`,
   retirement; everything else — including anything touching `Triage`, the human/PM
-  gate (§9.38), reopening `Done`, and unclassified columns — refuses), enforces the
+  gate (`10-orchestrator.md` §9.37(b)), reopening `Done`, and unclassified columns — refuses), enforces the
   §9.40 unresolved-blocker rule (an item with any unresolved native `blockedBy` edge
   cannot enter In Progress; a `Done` blocker no longer blocks), and lease-checks
   against the session lease registry (§9.24.2 — runtime state, local-only per
