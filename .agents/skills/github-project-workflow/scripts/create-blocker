@@ -61,6 +61,7 @@ echo "Created blocker: $BLOCKER_URL" >&2
 # If same repo, link via native blockedBy.
 if [ "$TARGET_REPO" = "$ORCH_REPO" ]; then
   BLOCKER_NUM="$(echo "$BLOCKER_URL" | grep -oP '\d+$')"
+  # shellcheck disable=SC2034  # nameref target read by orc_lib_run_or_dry_run (local -n)
   ARGS=(issue edit "$BLOCKED_ISSUE" --repo "$ORCH_REPO" --add-blocked-by "$BLOCKER_NUM")
   orc_lib_run_or_dry_run ARGS gh
   echo "Linked blockedBy edge: $BLOCKED_ISSUE -> #$BLOCKER_NUM" >&2

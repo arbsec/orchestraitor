@@ -66,8 +66,17 @@ REPO="$(orc_lib_resolve_repo)"
 
 # Declared service-identity principals of this repo (workflow policy
 # .agents/project/orchestraitor-workflow.md; AGENTS.md service-identity rules).
+# This array is the ONLY copy of the allowlist: it is serialized to JSON and
+# handed to the classifier below as `$allowed` (#731). Until then the live set
+# was a second hardcoded literal inside the jq filter, so extending this array
+# changed nothing — two copies of an authorization constant, one inert.
 # Extend here if the declared set grows (spec 10-orchestrator.md §9.41).
 ALLOWED_IDENTITIES=("arbsec-agent[bot]" "renovate[bot]")
+# A bash array cannot cross into jq directly; one element per line into a JSON
+# array. `map(select(length > 0))` keeps an empty array an empty array instead
+# of `[""]`, so an emptied allowlist really denies every login.
+ALLOWED_JSON="$(printf '%s\n' "${ALLOWED_IDENTITIES[@]}" \
+  | jq -R -s -c 'split("\n") | map(select(length > 0))')"
 
 # Conventional Commits types for this repo (AGENTS.md; `cog verify` enforces
 # the same set locally with cocogitto defaults).
@@ -121,10 +130,11 @@ fi
 # --- Classify (pure jq over the recorded-commits payload) ----------------------
 # Same filter classifies the live payload and a mock commits fixture:
 # a mock on $GH_BIN substitutes the transport, never this logic.
-AUDIT_JSON="$(jq -e --arg conventional_re "$CONVENTIONAL_RE" --arg pr "$PR" \
+AUDIT_JSON="$(jq -e --argjson allowed "$ALLOWED_JSON" \
+  --arg conventional_re "$CONVENTIONAL_RE" --arg pr "$PR" \
   --arg base_ref "$BASE_REF" --arg head_ref "$HEAD_REF" '
   def allowed: ((.author.login // "") as $login
-    | ["arbsec-agent[bot]", "renovate[bot]"] | index($login) != null);
+    | $allowed | index($login) != null);
   def webflow: . == "web-flow" or . == "GitHub";
   def subject: (.commit.message | split("\n")[0]);
   def violations:

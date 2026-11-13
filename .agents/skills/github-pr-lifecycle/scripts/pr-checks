@@ -27,6 +27,11 @@ REPO="$(orc_lib_resolve_repo)"
 # closed: an unknown author is never treated as a bot.
 PR_AUTHOR="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json author --jq '.author.login // ""' 2>/dev/null || true)"
 
+# SC2054 is deliberate and MUST NOT be "fixed": this is an argv ARRAY whose
+# `--json` element is the `gh pr checks` field list, and `gh` accepts it only
+# comma-joined. Splitting it on spaces would pass eight bogus positional
+# arguments to `gh` and drop the field selection entirely (#731).
+# shellcheck disable=SC2054  # comma-joined --json list is the gh CLI contract
 CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt,description)
 
 if [ "$OPT_DRY_RUN" = true ]; then

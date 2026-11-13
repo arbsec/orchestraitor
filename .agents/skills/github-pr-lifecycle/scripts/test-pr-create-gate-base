@@ -71,6 +71,12 @@ assert() {
   else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
 }
 count() { grep -cF -- "$2" "$1" 2>/dev/null || true; }
+# count_err <literal> : occurrences of <literal> in the captured stderr.
+# Assertions read $ERR — the variable `gate` documents — instead of the
+# $TMP/err scratch file, so an emptied capture fails the suite instead of
+# silently passing it. The typed refusal text is the human remediation message
+# this gate exists to print (#731).
+count_err() { printf '%s\n' "$ERR" | grep -cF -- "$1" 2>/dev/null || true; }
 
 # --- fixture helpers ------------------------------------------------------------
 # Each scenario gets its own bare `origin`, seed repo and work repo so a failure
@@ -126,7 +132,8 @@ write_record() { # <work-dir> <head-sha> <base-oid>
 }
 
 # gate <work-dir> [extra pr-create args...] : runs the real gate in --dry-run.
-# Sets RC and leaves stderr in $TMP/err, stdout in $TMP/out.
+# Sets RC and leaves stderr in $TMP/err, stdout in $TMP/out, and the captured
+# stderr in $ERR (asserted through `count_err` / the typed-marker checks below).
 gate() {
   local repo="$1"; shift
   : > "$GH_LOG"
@@ -157,9 +164,9 @@ write_record "$TMP/a-work" "$A_HEAD" "$A_TIP"
 gate "$TMP/a-work" --base main
 assert 'stale local main: gate passes against the remote base tip' 0 "$RC"
 assert 'stale local main: base reported is the remote tip' 1 \
-  "$(count "$TMP/err" "base $A_TIP = refs/remotes/origin/main")"
+  "$(count_err "base $A_TIP = refs/remotes/origin/main")"
 assert 'stale local main: the ignored local branch is named' 1 \
-  "$(count "$TMP/err" "ignoring local branch 'main' at $A_OLD")"
+  "$(count_err "ignoring local branch 'main' at $A_OLD")"
 assert 'stale local main: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
 
 # --- (b) a record keyed to the stale local tip must NOT pass -------------------
@@ -171,8 +178,8 @@ write_record "$TMP/a-work" "$A_HEAD" "$A_OLD"
 gate "$TMP/a-work" --base main
 assert 'stale-tip record: refused (not a clean generation for this base)' 2 "$RC"
 assert 'stale-tip record: refusal names the remote true base' 1 \
-  "$(count "$TMP/err" "(base $A_TIP = refs/remotes/origin/main)")"
-assert 'stale-tip record: no pass message' 0 "$(count "$TMP/err" 'clean local review generation found')"
+  "$(count_err "(base $A_TIP = refs/remotes/origin/main)")"
+assert 'stale-tip record: no pass message' 0 "$(count_err 'clean local review generation found')"
 assert 'stale-tip record: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
 
 # --- (c) no local `main` at all ------------------------------------------------
@@ -188,8 +195,8 @@ write_record "$TMP/c-work" "$C_HEAD" "$C_TIP"
 gate "$TMP/c-work" --base main
 assert 'no local main: gate passes against the remote base tip' 0 "$RC"
 assert 'no local main: base reported is the remote tip' 1 \
-  "$(count "$TMP/err" "base $C_TIP = refs/remotes/origin/main")"
-assert 'no local main: no stale-branch notice' 0 "$(count "$TMP/err" 'ignoring local branch')"
+  "$(count_err "base $C_TIP = refs/remotes/origin/main")"
+assert 'no local main: no stale-branch notice' 0 "$(count_err 'ignoring local branch')"
 
 # --- (d) origin lacks the base ref: refuse, never fall back to the local one ---
 # The local `main` here WOULD satisfy the old resolver and the record below, so
@@ -210,11 +217,21 @@ write_record "$TMP/d-work" "$D_HEAD" "$D_OLD"
 gate "$TMP/d-work" --base main
 assert 'missing origin ref: distinct fail-closed exit 6' 6 "$RC"
 assert 'missing origin ref: names the fully-qualified ref it tried' 1 \
-  "$(count "$TMP/err" "cannot resolve the base branch 'main' from 'refs/remotes/origin/main'")"
+  "$(count_err "cannot resolve the base branch 'main' from 'refs/remotes/origin/main'")"
 assert 'missing origin ref: names the stale-local-branch possibility' 1 \
-  "$(count "$TMP/err" "a stale or unrelated local branch named 'main' is NOT used")"
-assert 'missing origin ref: no pass message' 0 "$(count "$TMP/err" 'clean local review generation found')"
+  "$(count_err "a stale or unrelated local branch named 'main' is NOT used")"
+assert 'missing origin ref: no pass message' 0 "$(count_err 'clean local review generation found')"
 assert 'missing origin ref: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
+# The typed marker is the whole operator-facing value of this refusal: the first
+# line must identify the gate and the ref it tried, not just exit 6 (#731).
+case "$ERR" in
+  "pre-review-gate: cannot resolve the base branch 'main' from 'refs/remotes/origin/main'"*)
+    assert 'missing origin ref: typed marker opens stderr' ok ok ;;
+  *)
+    assert 'missing origin ref: typed marker opens stderr' \
+      "pre-review-gate: cannot resolve the base branch 'main' from 'refs/remotes/origin/main'…" \
+      "$ERR" ;;
+esac
 
 # --- (e) no `origin` remote at all ---------------------------------------------
 echo "--- (e) no origin remote refuses ---"
@@ -228,7 +245,7 @@ git -C "$TMP/e-work" remote remove origin
 gate "$TMP/e-work" --base main
 assert 'no origin remote: distinct fail-closed exit 6' 6 "$RC"
 assert 'no origin remote: refusal names the fetch command' 1 \
-  "$(count "$TMP/err" 'run: git fetch origin main')"
+  "$(count_err 'run: git fetch origin main')"
 assert 'no origin remote: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
 
 # --- (f) unrelated history ------------------------------------------------------
@@ -246,7 +263,15 @@ write_record "$TMP/f-work" "$F_HEAD" "$(git -C "$TMP/f-seed" rev-parse HEAD)"
 gate "$TMP/f-work" --base main
 assert 'unrelated history: distinct fail-closed exit 6' 6 "$RC"
 assert 'unrelated history: refusal says no shared history' 1 \
-  "$(count "$TMP/err" "shares no history with 'refs/remotes/origin/main'")"
+  "$(count_err "shares no history with 'refs/remotes/origin/main'")"
+case "$ERR" in
+  "pre-review-gate: HEAD $F_HEAD shares no history with 'refs/remotes/origin/main'"*)
+    assert 'unrelated history: typed marker opens stderr' ok ok ;;
+  *)
+    assert 'unrelated history: typed marker opens stderr' \
+      "pre-review-gate: HEAD $F_HEAD shares no history with 'refs/remotes/origin/main'…" \
+      "$ERR" ;;
+esac
 
 # --- (g) the fetch, not the cached remote-tracking ref, decides -----------------
 # A stale CACHED origin/main must never be trusted silently: the record names
@@ -270,9 +295,9 @@ write_record "$TMP/g-work" "$G_HEAD" "$G_TIP"
 gate "$TMP/g-work" --base main
 assert 'stale cached remote ref: gate passes after fetching' 0 "$RC"
 assert 'stale cached remote ref: base is the freshly fetched tip' 1 \
-  "$(count "$TMP/err" "base $G_TIP = refs/remotes/origin/main")"
+  "$(count_err "base $G_TIP = refs/remotes/origin/main")"
 assert 'stale cached remote ref: the stale local main is named' 1 \
-  "$(count "$TMP/err" "ignoring local branch 'main' at $G_CACHED")"
+  "$(count_err "ignoring local branch 'main' at $G_CACHED")"
 
 # --- (h) --skip-review-gate stays a clean escape when the base resolves --------
 echo "--- (h) --skip-review-gate still works ---"
@@ -283,7 +308,7 @@ feature_commit "$TMP/h-work" feature >/dev/null
 gate "$TMP/h-work" --base main --skip-review-gate
 assert 'skip flag: exits 0 with no review record' 0 "$RC"
 assert 'skip flag: prints the loud notice' 1 \
-  "$(count "$TMP/err" 'pre-PR local review gate SKIPPED via --skip-review-gate')"
+  "$(count_err 'pre-PR local review gate SKIPPED via --skip-review-gate')"
 
 # --- (i) docs-only auto-skip still diffs from the fork point -------------------
 # The base tip has moved past the fork point; diffing tip..HEAD would drag the
@@ -299,7 +324,7 @@ git -C "$TMP/i-work" "${GIT_ID[@]}" commit -q -m doc
 advance_seed "$TMP/i-seed" 1          # non-.md change on the base after the fork
 gate "$TMP/i-work" --base main
 assert 'docs-only: gate skipped for a *.md-only diff' 0 "$RC"
-assert 'docs-only: skip message printed' 1 "$(count "$TMP/err" 'docs-only diff')"
+assert 'docs-only: skip message printed' 1 "$(count_err 'docs-only diff')"
 
 # --- (j) an explicit skip is evaluated BEFORE base resolution ------------------
 # #735 review finding: the fail-closed fetch must not veto the operator's
@@ -313,15 +338,15 @@ git -C "$TMP/j-work" remote remove origin
 gate "$TMP/j-work" --base main --skip-review-gate
 assert 'no origin + explicit skip: still reaches creation (exit 0)' 0 "$RC"
 assert 'no origin + explicit skip: no base-resolution refusal' 0 \
-  "$(count "$TMP/err" 'cannot resolve the base branch')"
+  "$(count_err 'cannot resolve the base branch')"
 assert 'no origin + explicit skip: notice names the skip' 1 \
-  "$(count "$TMP/err" 'pre-PR local review gate SKIPPED via --skip-review-gate')"
+  "$(count_err 'pre-PR local review gate SKIPPED via --skip-review-gate')"
 assert 'no origin + explicit skip: dry-run reached gh pr create' 1 \
-  "$(count "$TMP/err" '[dry-run] gh pr create')"
+  "$(count_err '[dry-run] gh pr create')"
 gate "$TMP/j-work" --base main
 assert 'same fixture WITHOUT the flag: fail-closed exit 6' 6 "$RC"
 assert 'same fixture WITHOUT the flag: names the ref it tried' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/main'")"
+  "$(count_err "from 'refs/remotes/origin/main'")"
 
 # --- (k) --base ref normalisation ---------------------------------------------
 # `refs/remotes/origin/`, `refs/heads/` and `origin/` prefixes are stripped
@@ -337,15 +362,15 @@ write_record "$TMP/k-work" "$K_HEAD" "$K_TIP"
 gate "$TMP/k-work" --base origin/main
 assert 'normalisation: origin/-prefixed base resolves (exit 0)' 0 "$RC"
 assert 'normalisation: origin/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
+  "$(count_err "base $K_TIP = refs/remotes/origin/main")"
 gate "$TMP/k-work" --base refs/heads/main
 assert 'normalisation: refs/heads/-prefixed base resolves (exit 0)' 0 "$RC"
 assert 'normalisation: refs/heads/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
+  "$(count_err "base $K_TIP = refs/remotes/origin/main")"
 gate "$TMP/k-work" --base origin/origin/main
 assert 'normalisation: double prefix fails closed (exit 6)' 6 "$RC"
 assert 'normalisation: double prefix names the doubled ref' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/origin/main'")"
+  "$(count_err "from 'refs/remotes/origin/origin/main'")"
 
 printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

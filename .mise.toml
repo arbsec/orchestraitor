@@ -3,6 +3,10 @@ rust = "1.98.1"
 lefthook = "2.2.2"
 cocogitto = "7.0.0"
 rumdl = "latest"
+# Pinned, not "the runner image's": `skills.yml` asserts the installed version
+# against this line before gating, because SC2317/SC2321/SC2012 are
+# version-sensitive and an image bump would silently shift a clean baseline.
+shellcheck = "0.11.0"
 
 [env]
 RUST_BACKTRACE = "1"

@@ -133,6 +133,12 @@ assert() {
   else FAIL=$((FAIL+1)); printf 'FAIL: %s\n  expected: %s\n  actual: %s\n' "$1" "$2" "$3"; fi
 }
 count() { grep -cF -- "$2" "$1" 2>/dev/null || true; }
+# count_err <literal> : occurrences of <literal> in the captured stderr.
+# Assertions read $ERR — the variable `run` documents — instead of the
+# $TMP/stderr scratch file, so an emptied capture fails the suite instead of
+# silently passing it. The typed refusal text is the human remediation message
+# #748 exists to print (#731).
+count_err() { printf '%s\n' "$ERR" | grep -cF -- "$1" 2>/dev/null || true; }
 # run <script> [args...] : from the fixture repo; sets RC/OUT/ERR
 run() {
   : > "$GH_LOG"
@@ -146,7 +152,7 @@ run convergence-status 7 --repo test-org/repo --json
 assert 'current: convergence-status exits 0' 0 "$RC"
 assert 'current: verdict is mergeable' true "$(jq -r .mergeable <<<"$OUT")"
 assert 'current: no reasons' 0 "$(jq -r '.reasons | length' <<<"$OUT")"
-assert 'current: no stale-policy refusal' 0 "$(count "$TMP/stderr" 'stale review policy')"
+assert 'current: no stale-policy refusal' 0 "$(count_err 'stale review policy')"
 
 # --- (b) current copy: dry-run passes, merges nothing --------------------------
 echo "--- (b) current copy: merge-gate --dry-run ---"
@@ -186,11 +192,21 @@ assert 'stale classifier: distinct exit 6' 6 "$RC"
 assert 'stale classifier: typed refusal' stale-review-policy "$(jq -r .error <<<"$OUT")"
 assert 'stale classifier: refusal carries no mergeable verdict' null "$(jq -r '.mergeable // "null"' <<<"$OUT")"
 assert 'stale classifier: refusal carries no reasons' null "$(jq -r '.reasons // "null"' <<<"$OUT")"
-assert 'stale classifier: names the offending file' 1 "$(count "$TMP/stderr" "$TMP/repo/scripts/pr-checks")"
-assert 'stale classifier: names the running commit' 1 "$(count "$TMP/stderr" "$STALE_CLASSIFIER")"
+assert 'stale classifier: names the offending file' 1 "$(count_err "$TMP/repo/scripts/pr-checks")"
+assert 'stale classifier: names the running commit' 1 "$(count_err "$STALE_CLASSIFIER")"
 assert 'stale classifier: names the trusted base oid' 1 \
-  "$(count "$TMP/stderr" "at $PR_BASE (the PR's baseRefOid)")"
-assert 'stale classifier: names the remediation command' 1 "$(count "$TMP/stderr" 'worktree add --detach')"
+  "$(count_err "at $PR_BASE (the PR's baseRefOid)")"
+assert 'stale classifier: names the remediation command' 1 "$(count_err 'worktree add --detach')"
+# JSON mode already pins the machine-readable code (`stale-review-policy`); the
+# HUMAN refusal text is only asserted in text mode (case i) unless it is pinned
+# here too, and it is the remediation message #748 exists to print (#731).
+case "$ERR" in
+  "error: stale review policy: $TMP/repo/scripts/pr-checks is not the copy at the PR's trusted base"*)
+    assert 'stale classifier: typed marker opens stderr' ok ok ;;
+  *)
+    assert 'stale classifier: typed marker opens stderr' \
+      "error: stale review policy: $TMP/repo/scripts/pr-checks is not the copy…" "$ERR" ;;
+esac
 assert 'stale classifier: checks were never read' 0 "$(count "$GH_LOG" 'pr checks')"
 assert 'stale classifier: baseline classification never emitted' 0 \
   "$(printf '%s' "$OUT" | grep -cF 'checks_not_passing' || true)"
@@ -200,7 +216,7 @@ echo "--- (e) stale pr-checks: merge-gate refuses before merging ---"
 run merge-gate 7 --repo test-org/repo
 assert 'stale classifier: merge-gate exits 6' 6 "$RC"
 assert 'stale classifier: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
-assert 'stale classifier: merge-gate surfaces the typed refusal' 1 "$(count "$TMP/stderr" 'stale review policy')"
+assert 'stale classifier: merge-gate surfaces the typed refusal' 1 "$(count_err 'stale review policy')"
 
 # --- (f) a stale convergence-status is caught by merge-gate's OWN guard --------
 # The stale sibling has no working guard of its own (it predates the fix), so
@@ -209,8 +225,8 @@ echo "--- (f) stale convergence-status: merge-gate refuses on its own guard ---"
 git -C "$TMP/repo" switch -q stale-verdict
 run merge-gate 7 --repo test-org/repo
 assert 'stale verdict: merge-gate exits 6' 6 "$RC"
-assert 'stale verdict: names convergence-status' 1 "$(count "$TMP/stderr" "$TMP/repo/scripts/convergence-status")"
-assert 'stale verdict: names the running commit' 1 "$(count "$TMP/stderr" "$STALE_VERDICT")"
+assert 'stale verdict: names convergence-status' 1 "$(count_err "$TMP/repo/scripts/convergence-status")"
+assert 'stale verdict: names the running commit' 1 "$(count_err "$STALE_VERDICT")"
 assert 'stale verdict: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
 assert 'stale verdict: the stale sibling never ran (no PR-state review read)' 0 \
   "$(count "$GH_LOG" 'reviewDecision')"
@@ -221,7 +237,7 @@ git -C "$TMP/repo" switch -q "$DEFAULT_BRANCH"
 printf '\n# uncommitted review-policy edit\n' >> "$TMP/repo/scripts/pr-checks"
 run convergence-status 7 --repo test-org/repo --json
 assert 'uncommitted: exit 6' 6 "$RC"
-assert 'uncommitted: refusal says working tree' 1 "$(count "$TMP/stderr" 'uncommitted content')"
+assert 'uncommitted: refusal says working tree' 1 "$(count_err 'uncommitted content')"
 git -C "$TMP/repo" checkout -- scripts/pr-checks
 
 # --- (h) an unfetched base commit refuses with the fetch remediation ----------
@@ -230,8 +246,8 @@ export PR_BASE=1111111111111111111111111111111111111111
 run convergence-status 7 --repo test-org/repo --json
 assert 'missing base: exit 6' 6 "$RC"
 assert 'missing base: says the commit is not present' 1 \
-  "$(count "$TMP/stderr" 'not present in this repository')"
-assert 'missing base: names the fetch command' 1 "$(count "$TMP/stderr" 'git -C '"$TMP/repo"' fetch origin')"
+  "$(count_err 'not present in this repository')"
+assert 'missing base: names the fetch command' 1 "$(count_err 'git -C '"$TMP/repo"' fetch origin')"
 assert 'missing base: no verdict keys' null "$(jq -r '.mergeable // "null"' <<<"$OUT")"
 export PR_BASE="$REAL_BASE"
 
@@ -241,7 +257,7 @@ git -C "$TMP/repo" switch -q stale-classifier
 run convergence-status 7 --repo test-org/repo
 assert 'text refusal: exit 6' 6 "$RC"
 assert 'text refusal: stdout is empty' "" "$OUT"
-assert 'text refusal: stderr is typed' 1 "$(count "$TMP/stderr" 'error: stale review policy:')"
+assert 'text refusal: stderr is typed' 1 "$(count_err 'error: stale review policy:')"
 
 # --- (j) a shallow checkout is told to --unshallow, not to fetch again --------
 # A plain `git fetch` in a `--depth 1` clone keeps it shallow, so the base

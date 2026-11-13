@@ -194,6 +194,7 @@ Suggested fix: ${FIX}"
 $(cat "$SUMMARY_FILE")
 
 Record: \`.orchestraitor/reviews/${PR}-${HEAD_SHORT}.md\` (reviewer agent: ${REVIEWER_AGENT:-unspecified}, head: ${HEAD_SHA}, base: ${BASE_SHA})"
+    # shellcheck disable=SC2034  # nameref target read by orc_lib_run_or_dry_run (local -n)
     ARGS=(pr comment "$PR" --repo "$REPO" --body "$SUMMARY_BODY")
     orc_lib_run_or_dry_run ARGS gh >/dev/null
   fi

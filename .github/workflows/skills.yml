@@ -63,20 +63,60 @@ jobs:
           fi
           printf 'bash -n: %d scripts\n' "${#scripts[@]}"
           bash -n "${scripts[@]}"
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b  # v5.2.7
+        with:
+          # Only the one tool this job needs: the version comes from the
+          # `.mise.toml` pin below, which is what makes it a pin rather than a
+          # runner-image accident. Installing the Rust toolchain too (the
+          # default for this action) would add minutes to a bash-only job.
+          install_args: shellcheck
       - name: ShellCheck
         run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            echo "error: shellcheck is not installed in the runner image" >&2
+          # The version is PINNED (.mise.toml, installed above) and asserted
+          # here instead of inherited from the runner image: SC2317, SC2321 and
+          # SC2012 are version-sensitive, so an image bump would silently shift
+          # the clean baseline this gate enforces (#731).
+          pinned="$(sed -n 's/^shellcheck = "\(.*\)"$/\1/p' .mise.toml)"
+          if [ -z "$pinned" ]; then
+            echo "error: no shellcheck pin in .mise.toml — the ratchet needs one" >&2
             exit 1
           fi
-          shellcheck --version | sed -n '2p'
+          installed="$(shellcheck --version | sed -n 's/^version: //p')"
+          if [ "$installed" != "$pinned" ]; then
+            echo "error: shellcheck $installed is not the pinned $pinned (.mise.toml)" >&2
+            exit 1
+          fi
+          printf 'shellcheck %s (pinned)\n' "$installed"
           mapfile -t scripts < <(git grep -l '^#!/usr/bin/env bash' -- \
             '.agents/skills/*/scripts/*' '.agents/skills/*/scripts/tests/*')
-          # Error severity only. The scripts still carry ~200 pre-existing
-          # info/warning findings (SC2030/SC2031 subshell semantics dominate);
-          # clearing those is a separate, reviewable change. Errors (e.g.
-          # SC2145 "argument mixes string and array") are gated here.
-          shellcheck --severity=error "${scripts[@]}"
+          # Warning severity, and that tier is at ZERO (#731). Errors are gated
+          # here too — warning is the stricter floor.
+          #
+          # `-x -P SCRIPTDIR`: the scripts source their sibling `_lib.sh`, and
+          # the `# shellcheck source=_lib.sh` annotations resolve relative to the
+          # SCRIPT DIRECTORY (via -P), not to the CWD this job runs in. Without
+          # the flags every one of those annotations is dangling and reports
+          # SC1091 (27 findings at 0.11.0); with them the shared library is
+          # actually analyzed and nothing new appears.
+          #
+          # The info/style tiers are deliberately NOT gated:
+          #   `shellcheck -x -P SCRIPTDIR` totals 309 findings at 0.11.0 —
+          #   285 info, 20 warning, 4 style. 256 of the 309 are the SC2030/
+          #   SC2031 pair in ONE file,
+          #   `github-project-workflow/scripts/tests/gh-env-wrapper.bash`, where
+          #   each case runs inside `( … )` on purpose: the subshell is what
+          #   keeps one case's PATH/ORC_BIN/GH_BIN from leaking into the next.
+          #   Those are intended-locality sites, not defects, and the count
+          #   grows mechanically with every new case — it is not a metric worth
+          #   gating. The rest are single-quoted GraphQL/fixture literals
+          #   (SC2016) and cosmetic style hints.
+          #
+          # Do NOT run `shellcheck --format=diff` over this tree: two suggested
+          # rewrites are actively destructive and are suppressed with reasons
+          # in the scripts — SC2086 on `git rev-list $range`
+          # (check-unsigned-bot-commits: a deliberately space-joined argv list)
+          # and SC2054 on the comma-joined `gh pr checks --json` field list.
+          shellcheck --severity=warning -x -P SCRIPTDIR "${scripts[@]}"
       - name: Skill script self-tests
         run: |
           # Every self-test in the skill script trees is discovered rather than
@@ -100,8 +140,9 @@ jobs:
           # Floor the count so a removal fails the gate instead of silently
           # narrowing it. Bump this number when you ADD a self-test; never lower
           # it when removing one. (9: test-pr-create-gate-base added with #733;
-          # 10: test-review-policy-staleness added with #748.)
-          minimum_suites=10
+          # 10: test-review-policy-staleness added with #748; 11:
+          # test-audit-pr-commits added with #731.)
+          minimum_suites=11
           if [ "${#tests[@]}" -lt "$minimum_suites" ]; then
             echo "error: expected at least $minimum_suites skill self-test suites, found ${#tests[@]}" >&2
             exit 1
