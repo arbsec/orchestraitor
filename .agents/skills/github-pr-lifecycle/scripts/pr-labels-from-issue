@@ -8,11 +8,14 @@
 # to). A related reference propagates labels but never closes anything.
 #
 # A related reference is recognised only where a reader would SEE it: the
-# related family is read from the body's Markdown PROSE, so a reference
+# related family is read from the body's Markdown PROSE (a CRLF body is
+# normalised first, so \r\n line endings parse like \n ones), so a reference
 # quoted inside code (a fenced block, an indented block, an inline code
-# span), hidden inside an HTML comment, or buried in a link destination is
-# not a reference. The closing family is read from the RAW body (unchanged,
-# byte for byte) — see the note below.
+# span — including a span that crosses a line break, and an unmatched
+# backtick run to the end of its paragraph), hidden inside an HTML comment,
+# or buried in a link destination is not a reference. The closing family is
+# read from the RAW body (unchanged, byte for byte) — the asymmetry is
+# deliberate, see the note below.
 #
 # Only the process-classification allowlist is copied, and only when the
 # issue actually carries the label: non-process labels (attribution,
@@ -34,7 +37,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N, from the raw body) and related (Part of/Refs #N, with optional ':', from the body's Markdown prose) — related references propagate labels but never close an issue; bare #N mentions are ignored. A related reference counts only where a reader would see it: fenced code blocks, indented code blocks, inline code spans, HTML comments and link destinations are ignored (the link TEXT is prose). Positional: <pr-number>. Flags: --repo <owner/name>."
+  orc_lib_print_help "pr-labels-from-issue" "Copy process labels from the PR's linked issues onto the PR, idempotently. References read: closing (Closes/Fixes/Resolves #N, from the raw body) and related (Part of/Refs #N, with optional ':', from the body's Markdown prose) — related references propagate labels but never close an issue; bare #N mentions are ignored. A related reference counts only where a reader would see it: fenced code blocks, indented code blocks, inline code spans (including one that crosses a line break), an unmatched backtick run to the end of its paragraph, HTML comments and link destinations are ignored (the link TEXT is prose); CRLF bodies are parsed like LF ones. The closing family is still read from the raw body — the asymmetry is deliberate. Positional: <pr-number>. Flags: --repo <owner/name>."
   exit "$ORC_OK"
 fi
 
@@ -169,6 +172,18 @@ mapfile -t CLOSING_NUMBERS < <(refs_from "$BODY_FILE" "$CLOSING_RE")
 # and an elided construct that sits BETWEEN the two words of a keyword
 # ("Part`x` of #N") leaves whitespace behind, which the keyword grammar
 # still accepts.
+#
+# Two parsing details matter for correctness:
+#   lines  the line endings are normalised (a CR is stripped) before the
+#          line is parsed: a CRLF body leaves a CR at the end of every
+#          record, and that CR would defeat the fence patterns (a closing
+#          fence would never close) and swallow every line that follows it;
+#   spans  an inline code span may CROSS a line break: a run that opens on
+#          one line and closes on a later one is one span, so the open run
+#          is carried across the lines of a PARAGRAPH and the text it covers
+#          is code (dropped). A blank line ends a paragraph and resets the
+#          carried state; an unmatched run fails closed for the rest of its
+#          paragraph.
 awk '
   # Column width of the leading whitespace; a tab advances to the next
   # multiple of four.
@@ -298,11 +313,36 @@ awk '
 
   # Remove the inline code spans of a line: a run of N backticks is closed
   # by the NEXT run of exactly N backticks, and the span (both runs
-  # included) becomes a space. A run with no such closer swallows the rest
-  # of the line (fail closed). Runs are maximal, so a single backtick
+  # included) becomes a space. Runs are maximal, so a single backtick
   # inside a longer run is never a delimiter.
-  function strip_code_spans(s,   out, i, n, runlen, j, r, found) {
+  #
+  # A span may CROSS a line break: a run that opens on one line and closes
+  # on a later one is one span, and a renderer shows its whole content as
+  # code. The open run is therefore carried across the lines of a PARAGRAPH
+  # in SPAN_RUN and closed there by a run of the same length; the lines it
+  # covers are dropped. The carry is bounded by the paragraph: a blank
+  # line, a fence or an HTML block ends a paragraph and resets it. A run
+  # that stays unmatched to the end of the paragraph fails CLOSED: the rest
+  # of the paragraph is swallowed, never recognised.
+  function strip_code_spans(s,   out, i, n, runlen, j, r, found, len) {
     out = ""; i = 1; n = length(s)
+    if (SPAN_RUN > 0) {
+      # A span is still open from an earlier line: everything of this line
+      # up to its closer is code and is dropped, not kept.
+      j = 1
+      found = 0
+      while (j <= n) {
+        if (substr(s, j, 1) != "`") { j++; continue }
+        r = 0
+        while (substr(s, j + r, 1) == "`") r++
+        if (r == SPAN_RUN) { found = 1; break }
+        j = j + r
+      }
+      if (!found) return ""
+      len = SPAN_RUN
+      SPAN_RUN = 0
+      i = j + len
+    }
     while (i <= n) {
       if (substr(s, i, 1) != "`") { out = out substr(s, i, 1); i++; continue }
       runlen = 0
@@ -316,18 +356,32 @@ awk '
         if (r == runlen) { found = 1; break }
         j = j + r
       }
-      if (!found) return out " "
+      if (!found) {
+        # Unterminated on this line: fail closed. The span stays OPEN for
+        # the rest of the paragraph (SPAN_RUN), so the lines that follow it
+        # are code too.
+        SPAN_RUN = runlen
+        return out " "
+      }
       out = out " "
       i = j + runlen
     }
     return out
   }
 
-  BEGIN { FCHAR = ""; FLEN = 0; IN_COMMENT = 0 }
+  BEGIN { FCHAR = ""; FLEN = 0; IN_COMMENT = 0; SPAN_RUN = 0 }
 
   {
+    # Normalise the line ending FIRST: a CRLF body leaves a CR at the end
+    # of every record, and a CR is not whitespace to the fence patterns
+    # below — a closing fence would never close, and every line after the
+    # first fence would be swallowed.
     raw = $0
+    gsub(/\r/, "", raw)
     if (IN_COMMENT) {
+      # The comment swallows the line; the carried span state is NOT reset —
+      # an inline comment that runs onto the next line does not end the
+      # paragraph, so an open span stays open (fail closed).
       if (index(raw, "-->") > 0) IN_COMMENT = 0
       print ""
       next
@@ -337,10 +391,14 @@ awk '
       print ""
       next
     }
+    # A blank line ends a paragraph (CommonMark): an open code span cannot
+    # reach across it, so the carried span state is reset here.
+    if (raw ~ /^[[:space:]]*$/) { SPAN_RUN = 0; print ""; next }
     if (indent_width(raw) >= 4) { print ""; next }
-    if (opens_fence(raw)) { print ""; next }
+    if (opens_fence(raw)) { SPAN_RUN = 0; print ""; next }
     if (opens_html_block(raw)) {
       if (index(raw, "-->") == 0) IN_COMMENT = 1
+      SPAN_RUN = 0
       print ""
       next
     }

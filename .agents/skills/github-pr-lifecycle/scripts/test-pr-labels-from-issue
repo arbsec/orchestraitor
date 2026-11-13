@@ -14,6 +14,10 @@
 #       labels while never closing anything (#744): union + dedup, word
 #       boundaries, the fenced/inline-code guard, and a byte-identical
 #       `Closes #N` regression pin
+#   (h) the prose guard survives real-world Markdown shapes (#767 review):
+#       CRLF bodies, a code span that crosses a line break, the
+#       paragraph-bounded fail-closed carry of an unmatched run, and the
+#       mid-line / unterminated HTML-comment rules
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -461,6 +465,79 @@ assert 'a fence with an info string adds no labels' '[]' "$(pr_edit_adds)"
 export PR_BODY='Example: `Part of #741 and more text'
 run pr-labels-from-issue 77 --repo test-org/repo
 assert 'an unterminated code span adds no labels' '[]' "$(pr_edit_adds)"
+
+echo "--- prose guard: CRLF bodies, cross-line spans, mid-line comments (#767) ---"
+
+# (s1) A CRLF body must parse like an LF body. The CR at the end of every
+# record is not whitespace to the fence patterns: without normalisation a
+# closing fence never closes and every line after the first fence is
+# swallowed — here the legitimate reference after the block would be lost.
+export ISSUE_742_LABELS="spec"
+export PR_BODY=$'Summary.\r\n\r\n```\r\nPart of #742\r\n```\r\n\r\nPart of #741\r\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'CRLF body exits 0' 0 "$RC"
+assert 'CRLF body: the fence closes and the prose after it propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'CRLF body: the reference inside the fence is never fetched' 0 \
+  "$(grep -c 'issues/742' "$GH_LOG")"
+assert 'CRLF body: the prose reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (s2) A reference genuinely inside a fenced block is not prose, in a CRLF
+# body as in an LF one.
+export PR_BODY=$'```\r\nPart of #741\r\n```\r\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'CRLF body: a fenced reference adds no labels' '[]' "$(pr_edit_adds)"
+assert 'CRLF body: the fenced reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s3) A code span may CROSS a line break: a run that opens on one line and
+# closes on a later one is one span, and a renderer shows its whole content
+# as code. The reference inside it must fail closed, not open.
+export PR_BODY=$'Example: `see\nPart of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a span that opens on one line and closes on the next adds no labels' \
+  '[]' "$(pr_edit_adds)"
+assert 'the cross-line span reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s4) The mirror case: an unmatched run fails closed for the rest of its
+# PARAGRAPH, not just its line, so a following reference in the same
+# paragraph is code until the span closes.
+export PR_BODY=$'Example: `unterminated\nPart of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unmatched run swallows the rest of its paragraph' '[]' "$(pr_edit_adds)"
+assert 'the swallowed reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s5) The carry is bounded by the paragraph: a blank line ends it (and
+# resets the carried span), so a reference on the next line is prose again.
+export PR_BODY=$'Example: `unterminated\n\nPart of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a blank line ends the paragraph: the reference after it propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the blank line lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (s6) A MID-LINE HTML comment is not prose, even where it does not start
+# its line (only the block form at the start of a line is covered above).
+export PR_BODY='foo <!-- Part of #741 --> bar'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a mid-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the mid-line comment reference is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (s7) An unterminated comment swallows the rest of its line and carries
+# onto the following lines until it is closed (or the input ends): the
+# references inside it are not prose, the prose after it is.
+export PR_BODY=$'foo <!-- Part of #741\nbar\nPart of #741\n-->\nbaz Part of #742'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unterminated comment suppresses its line and the lines it spans' \
+  '["spec"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'only the reference after the comment closes is fetched' 1 \
+  "$(grep -c 'issues/742' "$GH_LOG")"
+assert 'no reference inside the comment is fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
 
 # usage errors
 run pr-labels-from-issue

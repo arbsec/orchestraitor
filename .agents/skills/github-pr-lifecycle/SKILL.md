@@ -100,10 +100,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   while only a closing keyword auto-closes, and bare `#N`
                   mentions are invisible to both. A related reference counts
                   only where a reader would SEE it: it is read from the
-                  body's Markdown prose, so a reference quoted inside code (a
-                  fenced block, an indented block, an inline code span),
-                  hidden in an HTML comment, or buried in a link destination
-                  is ignored — the link TEXT is prose and still counts,
+                  body's Markdown prose (a CRLF body parses like an LF one),
+                  so a reference quoted inside code (a fenced block, an
+                  indented block, an inline code span — including a span
+                  that crosses a line break — or an unmatched backtick run
+                  to the end of its paragraph), hidden in an HTML comment,
+                  or buried in a link destination is ignored — the link
+                  TEXT is prose and still counts, and the closing family is
+                  still read from the raw body (the asymmetry is
+                  deliberate; #765 tracks aligning it),
                   Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
@@ -137,8 +142,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   copied from issues, it is diff-derived — from the PR's
                   closing (`Closes`/`Fixes`/`Resolves`) and related
                   (`Part of`/`Refs`) issue references, #469, #744; the
-                  related family is read from the body's Markdown prose, so
-                  code, HTML comments and link destinations do not
+                  related family is read from the body's rendered prose only
+                  (code — fenced, indented or inline, including a span that
+                  crosses a line break — HTML comments and link destinations
+                  are ignored; the closing family still reads the raw body),
+                  so code, HTML comments and link destinations do not
                   propagate labels)
                   immediately after the
                   PR exists; both steps are non-fatal and print the exact
