@@ -6,7 +6,7 @@
 //! Why this module exists: `ScriptExecution::execute` spawns the interpreter
 //! in-process and hands back only a finished [`ExecutionResult`] — the
 //! child is unreachable from the caller. The pinned Arbitraitor revision
-//! (4ebebb3) exposes no kill/pid surface, so this module reassembles the
+//! exposes no kill/pid surface, so this module reassembles the
 //! same spawn pipeline from Arbitraitor's *public, policy-level* API
 //! (`ExecutionPolicy`, `ExecutionContextBuilder`, `PathRule`,
 //! `configure_command`, `configure_filesystem_isolation`, `ResourceLimits`)

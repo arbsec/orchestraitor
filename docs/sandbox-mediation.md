@@ -49,11 +49,22 @@ MediatedWorker::run_bash(script)
   `40-arbitraitor-integration.md` §9.23.4).
 - Bash script failures (non-zero exit) are script results, not mediation
   refusals: `MediatedRun` carries the real exit code and captured output.
-- Wrapper-start failures are not refusals either (upstream early-close
-  contract): on hosts where the mediated wrapper cannot start (see the
-  Landlock-active gap below), `run_bash` returns `Ok` with the wrapper's
-  non-zero exit code and its diagnostic in `stderr` — the script did **not**
-  run, and no isolation-off fallback exists on the worker path.
+- Wrapper-start failures are script results, not policy refusals, on the
+  worker bash pipeline (`BashChild`, the `unshare` spawn this crate assembles
+  itself): a wrapper that dies before the interpreter starts yields `Ok` with
+  the wrapper's non-zero exit code and its diagnostic in `stderr` — the script
+  did **not** run, and no isolation-off fallback exists on the worker path.
+- Namespace-isolation refusals **are** typed refusals on the
+  `MediatedWorker::run_bash` path (`ScriptExecution::execute`), which always
+  requests a network namespace. Since the pinned revision `df66f2d4` that call
+  fails closed with `Err(MediationError::Bash)` and a static reason code
+  instead of returning the wrapper's result
+  (arbsec/arbitraitor#827): `network-isolation-unavailable` when the wrapper
+  refused to set the namespace up (the errno/marker set covers the
+  Landlock-active `cannot open /proc/self/uid_map` shape), and
+  `unshare-target-exec-failed` when the namespace existed but the target never
+  started. A wrapper failure the classifier does not recognise stays an
+  execution failure (`spawn`), never a fabricated refusal.
 - Landlock probe consumption (#755 stopgap): Arbitraitor classifies
   `filesystem_isolation` as `Available` on any Linux platform, but its
   enforcement hook installs no ruleset when the kernel probe reports no
@@ -68,19 +79,19 @@ MediatedWorker::run_bash(script)
   revision never emits `Degraded` today; the field exists so run-state
   records already carry it when upstream starts reporting it.
 
-## Spec-narrative mapping (pinned revision `4ebebb3`)
+## Spec-narrative mapping (pinned revision `df66f2d4`)
 
 Spec §9.6 names `configure_command` / `apply_sandbox` conceptually. At the
 pinned Arbitraitor revision the real surface is:
 
 - `arbitraitor_sandbox::compute_effective_controls(mode, platform)` —
-  preflight probe (existing path `crates/arbitraitor-sandbox/src/lib.rs:387`).
+  preflight probe (existing path `crates/arbitraitor-sandbox/src/lib.rs:409`).
 - `arbitraitor_sandbox::configure_command` and
   `arbitraitor_sandbox::configure_filesystem_isolation` — applied inside
   `arbitraitor-exec`'s mediated command construction; the
   `ExecutionContextBuilder` methods are `new`/`from_operation`, `command`,
   `arguments`, `policy`, `source_environment`, `build`
-  (`crates/arbitraitor-exec/src/lib.rs:1104-1228`). The builder has no
+  (`crates/arbitraitor-exec/src/lib.rs:1252`). The builder has no
   `configure_command`/`apply_sandbox` methods; no invented names are used.
 
 ## Recorded deferrals and ownership
@@ -90,7 +101,7 @@ pinned Arbitraitor revision the real surface is:
   realized upstream as `ExecutionContextBuilder::from_operation` — is
   deferred to E5/`Contained` assurance. At `Mediated` assurance the pinned
   revision defaults the exec effective-controls matrix
-  (`crates/arbitraitor-exec/src/lib.rs:1278-1281`), so there is no real
+  (`crates/arbitraitor-exec/src/lib.rs:1426-1428`), so there is no real
   exec matrix for Orchestraitor to consume on this path.
 - Run-state wiring of the preflight record (controls matrix + verdict) and
   any `orc doctor` surface for it are owned by the consumer task #310; this
@@ -103,7 +114,11 @@ Landlock ruleset to the `unshare` network-namespace wrapper process, which
 then cannot open `/proc/self/uid_map` and the mediated child dies with
 `unshare: cannot open /proc/self/uid_map: Permission denied`. Upstream's own
 happy-path exec tests run with network isolation disabled, so only a
-full-stack smoke run exposes this. The live-enforcement tests in the
+full-stack smoke run exposes this. Since the pinned revision `df66f2d4` that
+diagnostic is classified as a namespace-setup refusal, so
+`MediatedWorker::run_bash` reports it as `Err(MediationError::Bash)` with
+reason code `network-isolation-unavailable` rather than returning a result
+(see the fail-closed semantics above). The live-enforcement tests in the
 mediation module gate on a full-stack mediated smoke (`true` through the real
 path) and skip on affected hosts instead of weakening the enforcement
 posture; missing-control refusals are host-independent and always run. The

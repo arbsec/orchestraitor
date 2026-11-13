@@ -58,7 +58,7 @@
 //!
 //! Spec-narrative mapping (spec `40-arbitraitor-integration.md` §9.6 names
 //! `configure_command` / `apply_sandbox` conceptually): the pinned Arbitraitor
-//! revision `4ebebb3` realizes that surface as
+//! revision `df66f2d4` realizes that surface as
 //! `arbitraitor_sandbox::configure_command` +
 //! `arbitraitor_sandbox::configure_filesystem_isolation` (invoked inside
 //! `arbitraitor-exec`'s command construction) and the real
@@ -377,13 +377,18 @@ fn degraded_controls(controls: &EffectiveControls) -> ControlNames {
 
 /// Captured result of a mediated bash run.
 ///
-/// Host-shape note (arbsec/arbitraitor#754, tracked via #400): on hosts where
-/// the mediated wrapper cannot start at all (Landlock-active hosts), the
-/// failure surfaces as `Ok` with the wrapper's non-zero exit code and its
-/// diagnostic in `stderr` — the script did **not** run, and there is no
-/// isolation-off fallback on this path. Treat a non-zero `exit_code` with an
-/// empty `stdout` as "the mediated stack may not have started"; see
-/// `docs/sandbox-mediation.md`.
+/// Host-shape note (arbsec/arbitraitor#754, tracked via #400): a wrapper that
+/// dies before the interpreter starts does not always come back as a result.
+/// Since the pinned revision `df66f2d4` a run that requested network
+/// isolation — which `ScriptExecution::bash` always does — fails closed when
+/// the wrapper refused namespace setup (`network-isolation-unavailable`; the
+/// Landlock-active `cannot open /proc/self/uid_map` diagnostic is one such
+/// refusal) or could not hand the target to the kernel
+/// (`unshare-target-exec-failed`), both as [`MediationError::Bash`]. The
+/// early-close `Ok` shape survives only for a wrapper failure the classifier
+/// does not recognise: a non-zero `exit_code` with an empty `stdout` still
+/// means "the mediated stack may not have started". There is no
+/// isolation-off fallback on this path; see `docs/sandbox-mediation.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediatedRun {
     /// Exit code reported by the interpreter. `None` when the interpreter was
@@ -466,8 +471,12 @@ impl MediatedWorker {
     /// - [`MediationError::Bash`] when spawn, script piping, or output
     ///   collection fails at the Arbitraitor exec layer.
     ///
-    /// A wrapper that dies before the interpreter starts is **not** an error
-    /// by upstream contract: it yields `Ok` with a non-zero
+    /// A wrapper that dies before the interpreter starts is **not** always a
+    /// result: since the pinned revision `df66f2d4` a namespace-setup refusal
+    /// or a target-exec failure fails closed as [`MediationError::Bash`] with
+    /// the static reason codes `network-isolation-unavailable` /
+    /// `unshare-target-exec-failed`. Only a wrapper failure the classifier
+    /// does not recognise still yields `Ok` with a non-zero
     /// [`MediatedRun::exit_code`] and the wrapper diagnostic in
     /// [`MediatedRun::stderr`] — see the [`MediatedRun`] host-shape note.
     pub fn run_bash(&self, script: &[u8]) -> Result<MediatedRun, MediationError> {
@@ -496,7 +505,7 @@ mod linux_exec {
         // `arbitraitor_sandbox::configure_filesystem_isolation` inside
         // `ScriptExecution`'s command construction; the builder itself
         // exposes `new`/`from_operation`→`policy`→`build` (no
-        // `configure_command`/`apply_sandbox` methods exist at rev 4ebebb3).
+        // `configure_command`/`apply_sandbox` methods exist on the builder).
         let policy = ExecutionPolicy {
             network_policy: NetworkPolicy::Denied,
             ..ExecutionPolicy::default()
@@ -933,7 +942,7 @@ mod tests {
     ///
     /// The probe executes `true` through the real `run_bash` path (network
     /// namespace + Landlock + hardening), not a bare `unshare` check: the
-    /// pinned Arbitraitor revision `4ebebb3` applies its Landlock ruleset to
+    /// pinned Arbitraitor revision `df66f2d4` applies its Landlock ruleset to
     /// the `unshare` wrapper process, which needs `/proc/self/uid_map` access
     /// that the rules deny — on hosts with the Landlock LSM active the wrapper
     /// dies with `unshare: cannot open /proc/self/uid_map: Permission denied`.

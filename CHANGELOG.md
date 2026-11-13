@@ -803,8 +803,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   variants Arbitraitor added to `ExecError` (#827, #839, #842), so
   `orchestraitor-arb-client` now reports the static reason codes
   `mediated-containment-unavailable`, `network-isolation-unavailable`, and
-  `unshare-target-exec-failed`. No Orchestrator API, schema, or on-disk format
-  changes.
+  `unshare-target-exec-failed`, and the `MediatedWorker::run_bash` path fails
+  closed on a namespace-setup refusal or a target-exec failure instead of
+  returning the wrapper's non-zero exit code as a result. The worker's bash
+  pipeline (`BashChild`) keeps its early-close result shape. The reference
+  line numbers in `docs/sandbox-mediation.md` are re-anchored to the new
+  revision. No Orchestrator API, schema, or on-disk format changes.
 
 ### Fixed
 
