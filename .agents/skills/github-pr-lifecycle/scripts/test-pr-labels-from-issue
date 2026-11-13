@@ -10,6 +10,41 @@
 #   (d) non-fatal behavior when one issue fetch fails (others still apply)
 #   (e) pr-create chains pr-labels then pr-labels-from-issue after creation
 #   (f) the chain is non-fatal: a failing labeler still exits 0 from pr-create
+#   (g) related references (`Part of #N`, `Refs #N`, colon forms) propagate
+#       labels while never closing anything (#744): union + dedup, word
+#       boundaries, the fenced/inline-code guard, and a byte-identical
+#       `Closes #N` regression pin
+# (h) the prose guard survives real-world Markdown shapes (#767 review):
+#       CRLF bodies, a code span that crosses a line break, the
+#       paragraph-bounded fail-closed carry of an unmatched run, and the
+#       mid-line / unterminated HTML-comment rules
+#   (t) reviewer round 3 of #767, replayed against d1b545a: a lone CR is a
+#       line ending (keyword, number and comment terminator), and the open
+#       inline state decides what is special (a comment opener or a
+#       destination opener inside a code span is ordinary text)
+#   (u) shapes the differential harness (markdown_it, 6000 generated bodies
+#       per seed, zero fail-opens) found after round 3: a barriered elision
+#       must take its separator from the RENDERED neighbours (a span that
+#       crosses a line break, or a span behind a tag, glues the words around
+#       it), a blockquote marker is not text, four spaces inside a paragraph
+#       are a lazy continuation rather than code, and "<!-->" is a complete
+#       (empty) comment
+#   (v) reviewer round 4 of #767: a code span renders SOMETHING, so it gets
+#       its own separator (a word character) and a reference that spans one
+#       is never visible; an open fence is closed only at the blockquote
+#       depth it was opened at; the label of a full reference link is not
+#       rendered text; a raw-text block that opens and closes on one line
+#       is complete there; and a construct that renders NOTHING leaves the
+#       text around it adjacent
+#   (w) reviewer round 5 of #767: an elided full-reference label is
+#       SEPARATED (a trailing numeral cannot fuse into the number in front
+#       of it), image alt text is not prose, <pre>/<textarea> are raw-text
+#       blocks (CommonMark HTML block type 1) and the rest of a line that
+#       completes a comment is re-examined for a raw-text opener, FDEPTH is
+#       reset the moment the quoted depth drops below it, the CDATA opener
+#       is a seven-character slice, and the code-span opener is closed only
+#       by a run of EXACTLY the opening length (a mutant that relaxes the
+#       opener side to >= is killed by (w13)-(w15))
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -230,6 +265,717 @@ export PR_BODY="__GH_FAIL__"
 run pr-labels-from-issue 77 --repo test-org/repo
 assert 'unreadable PR body exits 1' 1 "$RC"
 export PR_BODY="Closes #101"
+
+echo "--- related references: Part of / Refs (#744) ---"
+
+# A related reference ("Part of #N", "Refs #N") means "related, merging must
+# NOT close the issue" — the partial-landing form SKILL.md already prescribes.
+# It propagates the same allowlisted process labels a closing reference does;
+# nothing here closes an issue (auto-close is GitHub's own body parser).
+export ISSUE_741_LABELS="bug,agent-created,documentation"
+
+# (r1) plain `Part of #N` propagates labels.
+export PR_BODY="Part of #741" PR_LABELS="agent-created"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Part of ref exits 0' 0 "$RC"
+assert 'Part of ref propagates allowlisted labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'Part of ref lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+assert 'related ref never closes the issue (no issue-close call)' 0 \
+  "$(grep -cE '"issue","close"' "$GH_LOG")"
+
+# (r2) colon form `Part of: #N`.
+export PR_BODY="Part of: #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Part of: ref (colon form) exits 0' 0 "$RC"
+assert 'Part of: ref (colon form) propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r3) `Refs #N` — the form SKILL.md tells partial landings to use.
+export PR_BODY="Refs #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Refs ref exits 0' 0 "$RC"
+assert 'Refs ref propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r4) colon form `Refs: #N`.
+export PR_BODY="Refs: #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Refs: ref (colon form) exits 0' 0 "$RC"
+assert 'Refs: ref (colon form) propagates labels' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r5) closing + related in one body: union of labels, deduplicated, each
+# issue fetched once, and the receipt keeps closing-first order.
+export ISSUE_101_LABELS="MVP,agent-created,bug" PR_LABELS="agent-created"
+export PR_BODY="Closes #101 and Part of #741"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'closing + related exits 0' 0 "$RC"
+assert 'closing + related labels are unioned and deduplicated' \
+  '["MVP","bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'closing + related fetch each issue once' 2 \
+  "$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+assert 'receipt lists closing then related references' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[101,741]')"
+
+# (r6) the SAME issue named by both families is fetched once.
+export PR_BODY="Closes #101, Part of #101"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'same issue in both families fetched once' 1 \
+  "$(grep -cF '"api","repos/test-org/repo/issues/' "$GH_LOG")"
+
+# (r7) a fenced block quoting `Part of #N` must not gain labels.
+export PR_BODY=$'Summary.\n\n```\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'fenced Part of ref exits 0' 0 "$RC"
+assert 'fenced Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+assert 'fenced-only body reports nothing to copy' 1 \
+  "$(grep -cF 'nothing to copy' "$TMP/stderr")"
+
+# (r8) tilde fences are honoured too (a tilde line inside a backtick fence
+# must not close it — that pairing is exercised by the mixed-fence case below).
+export PR_BODY=$'~~~text\nPart of #741\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tilde-fenced Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'```\n~~~\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tilde line inside a backtick fence does not close it' '[]' "$(pr_edit_adds)"
+
+# (r9) an inline code span quoting `Part of #N` must not gain labels.
+export PR_BODY='Example only: `Part of #741` is the partial-landing form.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'inline-code Part of ref adds no labels' '[]' "$(pr_edit_adds)"
+
+# (r10) word boundaries: `Subpart of #N` / `Crossrefs #N` never match.
+export PR_BODY='Subpart of #741 and Crossrefs #741 are different words.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'Subpart/Crossrefs prefixes do not match (word boundary)' '[]' "$(pr_edit_adds)"
+
+# (r11) an unreachable related issue is non-fatal; the others still apply.
+export ISSUE_FAIL=999 ISSUE_102_LABELS="spec"
+export PR_BODY="Part of #999 and Part of #102"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'unreachable related issue does not fail the run' 0 "$RC"
+assert 'warning names the unreachable related issue' 1 \
+  "$(grep -cF 'could not read labels of issue #999' "$TMP/stderr")"
+assert 'reachable related issue still contributes labels' \
+  '["spec"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+unset ISSUE_FAIL
+
+# (r12) grammar stays keyword-bounded: bare mentions and advisory forms
+# (`See #N`, `Related to #N`) are still not links.
+export PR_BODY='Incidental #741 mention; See #741; Related to #741.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'bare/advisory mentions do not propagate (See and Related to stay out)' \
+  '[]' "$(pr_edit_adds)"
+
+# (r13) REGRESSION PIN: a plain `Closes #N` body keeps its exact label set
+# AND its exact receipt, byte for byte, as before #744.
+export ISSUE_101_LABELS="MVP,agent-created,bug" PR_LABELS="agent-created"
+export PR_BODY="Closes #101"
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'plain Closes label set unchanged (regression pin)' \
+  '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'plain Closes receipt byte-identical to pre-#744' \
+  '{"pr":77,"issues":[101],"labels_added":["MVP","bug"]}' "$OUT"
+
+# (r14) The prose guard is scoped to the RELATED family on purpose: the
+# closing path has never had one (it matched inside fences before #744 too),
+# so its historical behaviour is pinned rather than silently changed here;
+# unifying the two is arbsec/orchestraitor#765.
+export PR_BODY=$'```\nCloses #101\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'closing ref inside a fence keeps its pre-#744 behaviour (unchanged)' \
+  '["MVP","bug"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (r15) The prose extractor is MARKDOWN-AWARE (#767 review finding): a
+# related reference is recognised only in genuine prose. Every construct a
+# renderer does not show as text must be ignored, and every construct that
+# IS prose must still be recognised. The cases below are the reviewer's
+# reproductions plus the ones found while implementing them.
+#
+# A fence is closed only by a run of the SAME character that is at least as
+# long as the opener: a shorter run inside a four-backtick fence is content,
+# not a closer.
+export PR_BODY=$'````\n```\nPart of #741\n```\n````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'four-backtick fence is not closed by a shorter fence' '[]' "$(pr_edit_adds)"
+assert 'four-backtick fence yields no reference in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# A code span is delimited by MATCHING backtick runs of any length: a
+# double-backtick span is a code span too.
+export PR_BODY='Example: ``Part of #741``'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'double-backtick code span adds no labels' '[]' "$(pr_edit_adds)"
+
+# An HTML comment is invisible: a reference inside it is not prose.
+export PR_BODY='<!-- Part of #741 -->'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'single-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'<!--\nPart of #741\n-->\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'multi-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+
+# A one-line "```...```" is an inline code span, NOT a fence opener (a
+# backtick fence's info string may not contain a backtick) — so it must not
+# swallow the prose line that follows it.
+export PR_BODY=$'```Part of #101```\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline triple-backtick span does not swallow the next prose line' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the prose reference after an inline span lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+assert 'the inline span reference is never fetched' 0 \
+  "$(grep -c 'issues/101' "$GH_LOG")"
+
+# An elided span is replaced by WHITESPACE, so the words around it cannot be
+# concatenated into a reference.
+export PR_BODY='Par`x`t of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+
+# An indented code block (four columns, or a tab) is not prose.
+export PR_BODY=$'Summary.\n\n    Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'indented code block adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'Summary.\n\n\tPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'tab-indented code block adds no labels' '[]' "$(pr_edit_adds)"
+
+# A link destination is not prose — in both forms: the bare "(...)" and the
+# angle-bracket "<...>" one.
+export PR_BODY='[x](<part of #741>)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'angle-bracket link destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='[x](part of #741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'bare link destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='![x](part of #741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'image destination adds no labels' '[]' "$(pr_edit_adds)"
+export PR_BODY='[part]: part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'link reference definition adds no labels' '[]' "$(pr_edit_adds)"
+
+# The link TEXT is prose: a reference that is what the reader sees still
+# propagates.
+export PR_BODY='[Part of #741](https://example.com/issues/741)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a link TEXT carrying the reference still propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'a link TEXT carrying the reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# A longer fence run does not close a shorter fence, and a fence of the other
+# character never closes it.
+export PR_BODY=$'`````\n```\nPart of #741\n```\n`````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'five-backtick fence is not closed by a three-backtick fence' '[]' \
+  "$(pr_edit_adds)"
+export PR_BODY=$'~~~\n```\nPart of #741\n```\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a backtick fence does not close a tilde fence' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'~~~js\n```\nPart of #741\n~~~\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a backtick fence inside a tilde fence adds no labels' '[]' \
+  "$(pr_edit_adds)"
+export PR_BODY=$'```\nPart of #741\n````\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer closing fence run closes the block' '[]' "$(pr_edit_adds)"
+export PR_BODY=$'```text\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence with an info string adds no labels' '[]' "$(pr_edit_adds)"
+
+# An unterminated code span cannot be resolved: the extractor fails CLOSED.
+export PR_BODY='Example: `Part of #741 and more text'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unterminated code span adds no labels' '[]' "$(pr_edit_adds)"
+
+echo "--- prose guard: CRLF bodies, cross-line spans, mid-line comments (#767) ---"
+
+# (s1) A CRLF body must parse like an LF body. The CR at the end of every
+# record is not whitespace to the fence patterns: without normalisation a
+# closing fence never closes and every line after the first fence is
+# swallowed — here the legitimate reference after the block would be lost.
+export ISSUE_742_LABELS="spec"
+export PR_BODY=$'Summary.\r\n\r\n```\r\nPart of #742\r\n```\r\n\r\nPart of #741\r\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'CRLF body exits 0' 0 "$RC"
+assert 'CRLF body: the fence closes and the prose after it propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'CRLF body: the reference inside the fence is never fetched' 0 \
+  "$(grep -c 'issues/742' "$GH_LOG")"
+assert 'CRLF body: the prose reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (s2) A reference genuinely inside a fenced block is not prose, in a CRLF
+# body as in an LF one.
+export PR_BODY=$'```\r\nPart of #741\r\n```\r\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'CRLF body: a fenced reference adds no labels' '[]' "$(pr_edit_adds)"
+assert 'CRLF body: the fenced reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s3) A code span may CROSS a line break: a run that opens on one line and
+# closes on a later one is one span, and a renderer shows its whole content
+# as code. The reference inside it must fail closed, not open.
+export PR_BODY=$'Example: `see\nPart of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a span that opens on one line and closes on the next adds no labels' \
+  '[]' "$(pr_edit_adds)"
+assert 'the cross-line span reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s4) The mirror case: an unmatched run fails closed for the rest of its
+# PARAGRAPH, not just its line, so a following reference in the same
+# paragraph is code until the span closes.
+export PR_BODY=$'Example: `unterminated\nPart of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unmatched run swallows the rest of its paragraph' '[]' "$(pr_edit_adds)"
+assert 'the swallowed reference does not reach the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (s5) The carry is bounded by the paragraph: a blank line ends it (and
+# resets the carried span), so a reference on the next line is prose again.
+export PR_BODY=$'Example: `unterminated\n\nPart of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a blank line ends the paragraph: the reference after it propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the blank line lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (s6) A MID-LINE HTML comment is not prose, even where it does not start
+# its line (only the block form at the start of a line is covered above).
+export PR_BODY='foo <!-- Part of #741 --> bar'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a mid-line HTML comment adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the mid-line comment reference is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (s7) An unterminated comment swallows the rest of its line and carries
+# onto the following lines until it is closed (or the input ends): the
+# references inside it are not prose, the prose after it is.
+export PR_BODY=$'foo <!-- Part of #741\nbar\nPart of #741\n-->\nbaz Part of #742'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an unterminated comment suppresses its line and the lines it spans' \
+  '["spec"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'only the reference after the comment closes is fetched' 1 \
+  "$(grep -c 'issues/742' "$GH_LOG")"
+assert 'no reference inside the comment is fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (i) reviewer round 3 + differential-harness findings (#767) -----------------
+
+echo "--- prose guard: reviewer round 3 (#767) ---"
+
+# (t1) A LONE CR is a line ending (CommonMark), and a keyword cannot span one:
+# "Part o<CR>f #741" is two rendered lines, so it is not a reference.
+export PR_BODY=$'Part o\rf #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a lone CR inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a lone CR inside the keyword reports nothing to copy' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (t2) The same CR inside the NUMBER: the reference is #74, and fusing the
+# digits (normalising every CR away instead of splitting on it) would
+# manufacture a reference to #741 that no reader sees.
+export PR_BODY=$'Part of #74\r1\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a lone CR inside the number does not fuse the digits' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[74]')"
+assert 'a lone CR inside the number never references #741' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (t3) A CR inside the comment terminator does not terminate the comment:
+# "--<CR>>" is two rendered lines, so the HTML block runs on to the "-->" on
+# the last line and the reference quoted inside it is never prose.
+export PR_BODY=$'<!-- hidden\n--\r>\nPart of #741\n-->'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a CR inside the comment terminator adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a CR inside the comment terminator reports nothing to copy' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[]')"
+
+# (t4) Inside a code span "<!--" is ordinary text: the span closes at its own
+# backtick, the " -->" between the two spans is prose, and the reference in
+# the SECOND span is code. A pass that strips comments first would expose it.
+export PR_BODY='foo `<!-- x ` -->` Part of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a comment opener inside a code span adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the reference after the spanned comment opener is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (t5) The same precedence for "](": inside a span it is ordinary text, so
+# "](d" never opens a destination and the span that follows is code.
+export PR_BODY='foo `x ](d` y) `Part of #741`'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a destination opener inside a code span adds no labels' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference after the spanned destination opener is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+echo "--- prose guard: differential-harness findings (#767) ---"
+
+# (u1) A code span that CROSSES a line break swallows the break, so the text
+# on either side is CONCATENATED: "text" + "Part of #741" reads
+# "textPart of #741". The separator that replaces the span must therefore be
+# chosen from the RENDERED neighbours, across the joined line, and not from
+# the raw character next to the opening backtick.
+export PR_BODY=$'text`x\ny`Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a cross-line span glues the words around it (no labels)' '[]' \
+  "$(pr_edit_adds)"
+assert 'the glued reference is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u2) Two adjacent elisions: a raw HTML tag contributes no text, so the
+# character before it is still the rendered neighbour of the code span that
+# follows. Reading the neighbour off the raw line would see the ">" of the
+# tag and open a word boundary the reader never sees.
+export PR_BODY='text<br>``x``Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a span behind a tag glues the words around it (no labels)' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference behind the tag is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u3) A fence quoted inside a blockquote is still a fence: the ">" marker is
+# not text, and the info string of the fence it opens is not prose.
+export PR_BODY=$' >~~~Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence inside a blockquote adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the fenced reference inside the blockquote is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (u4) The same at nesting depth two.
+export PR_BODY=$'>> ~~~Part of #741    >\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a nested blockquote fence adds no labels' '[]' "$(pr_edit_adds)"
+
+# (u5) The mirror: quoted prose IS prose — the marker is not text, its
+# content is, so a reference in a blockquote still propagates.
+export PR_BODY=$'> Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a reference in a blockquote still propagates' '["bug","documentation"]' \
+  "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the quoted reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (u6) Four spaces of indentation open an indented code block only where a
+# block may START: inside a paragraph the line is a lazy continuation and its
+# text is rendered, so the reference is prose (the blank-line form above is
+# still code, which the existing indented-code asserts pin).
+export PR_BODY=$'Summary.\n    Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an indented line inside a paragraph is prose (no swallow)' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the lazily continued reference lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (u7) "<!-->" is a COMPLETE (empty) comment, so it ends at its own ">": a
+# scan that looks for the next "-->" swallows the "Part of #741-->" the
+# renderer shows as text.
+export PR_BODY='a <!-->Part of #741--> b'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an empty comment ends at its own ">" (the rest is prose)' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the empty comment lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+
+echo "--- prose guard: reviewer round 4 (#767) ---"
+
+# (v1) A code span INSIDE the keyword manufactures a reference when the span
+# is elided as if it rendered nothing: "see part `lexer` of #741" renders
+# "see part lexer of #741", so the phrase "part of" is not contiguous and
+# the reader sees no reference. The span renders SOMETHING, so it gets its
+# own separator: a word character, which breaks both the whitespace run
+# "part of" needs and the word boundary the reference grammar needs.
+export PR_BODY='This lands the parser work; see part `lexer` of #741 for scope.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span inside the keyword adds no labels' '[]' "$(pr_edit_adds)"
+assert 'the reference after a code span is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v2) The same shape with the other keyword: "Refs `x` #741" renders
+# "Refs x #741" — the reference is not visible either.
+export PR_BODY='Refs `x` #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span between the keyword and the number adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v3) The same shape across a line break: the span swallows the break, so
+# the text around it is concatenated on ONE rendered line.
+export PR_BODY=$'Part `x\ny` of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a cross-line code span inside the keyword adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v4) The MIRROR: a reference that comes AFTER the span is visible prose
+# and still propagates ("the `x` part of #741" renders "the x part of
+# #741"). The span must not swallow the phrase that follows it.
+export PR_BODY='the `x` part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a reference after a code span still propagates' '["bug","documentation"]' \
+  "$(pr_edit_adds | jq -c 'unique | sort')"
+assert 'the reference after the span lands in the receipt' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (v5) A span glued to the keyword on BOTH sides: "Part`x`of #741" renders
+# "Partxof #741" — no whitespace, no boundary, no reference.
+export PR_BODY='Part`x`of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span glued to the keyword adds no labels' '[]' "$(pr_edit_adds)"
+
+# (v6) MEDIUM 2: a blockquote-quoted fence closer does NOT close a fence the
+# renderer keeps open. The content of an open fence is RAW text, so the
+# "> ```" line is literal content, not a closer, and "Part of #741" stays
+# inside the code block.
+export PR_BODY=$'intro:\n```\ncode\n> ```\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a blockquote-quoted fence closer does not close the fence' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference inside the open fence is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v7) The mirror of (v6): a fence opened INSIDE a blockquote is not closed
+# by a top-level closer either — but the blockquote itself ends at the
+# first line that is not quoted, so the text after it is prose again and
+# the reference there IS visible.
+export PR_BODY=$'> ```\n> code\nPart of #741\n```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence in a blockquote ends when the blockquote ends' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v8) A fence opened and closed inside the blockquote still hides its
+# content.
+export PR_BODY=$'> ```\n> code\n> Part of #741\n> ```\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence quoted in a blockquote hides its content' '[]' \
+  "$(pr_edit_adds)"
+
+# (v9) LOW 1: a code span closes ONLY on a run of exactly the opening
+# length. A longer run inside an open span is literal text, so a reference
+# between that run and the true closer is still code.
+export PR_BODY='x ``a``` b Part of #741`` c'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run inside an open span does not close it (same line)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v10) The same across a line break.
+export PR_BODY=$'x ``a\nb``` c Part of #741`` d'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run inside an open span does not close it (cross-line)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v11) LOW 2: the LABEL of a full reference link is the key of a link
+# reference definition, not rendered text: "[x][Part of #741]" with the
+# definition renders "<a href=...>x</a>". The label is elided.
+export PR_BODY=$'[x][Part of #741]\n\n[Part of #741]: http://e.com\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'the label of a full reference link adds no labels' '[]' \
+  "$(pr_edit_adds)"
+assert 'the reference label is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (v12) LOW 3: a raw-text block that opens AND closes on one line is
+# complete there — the document after it is prose again.
+export PR_BODY=$'<script>var x=1</script>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a one-line script block does not swallow the document' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v13) The same for a style block.
+export PR_BODY=$'<style>a{}</style>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a one-line style block does not swallow the document' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v14) A raw-text block that spans lines still hides everything up to its
+# closing tag — but the text after it is prose again.
+export PR_BODY=$'<script>\nvar x=1\n</script>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a multi-line script block hides only its own content' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (v15) An INLINE raw-text element swallows the text that follows it up to
+# its closing tag: "Part <script>of #741." renders "Part " and nothing
+# else, so the reference is not visible.
+export PR_BODY='Part <script>of #741.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline script element swallows the text after it' '[]' \
+  "$(pr_edit_adds)"
+
+# (v16) A construct that renders NOTHING leaves the text on either side of
+# it ADJACENT: "Refs<!-- c -->#741" renders "Refs#741", which is not a
+# reference (the grammar needs whitespace or a colon before the number).
+export PR_BODY='Refs<!-- c -->#741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a comment between the keyword and the number adds no labels' '[]' \
+  "$(pr_edit_adds)"
+
+# (v17) The same for a raw HTML tag.
+export PR_BODY='Part<br>of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a line-break element splits the phrase (no labels)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v18) A line-break element ends the rendered line, so the text after it
+# is on the next line: "Part<br> of #741" renders two lines and the
+# reference is not contiguous.
+export PR_BODY='Part<br> of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a line-break element ends the rendered line (no labels)' '[]' \
+  "$(pr_edit_adds)"
+
+# (v19) The tag between the words does not create a whitespace run: the
+# rendered text is "Partof #741" and the reference is not visible.
+export PR_BODY='Part<b>of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline tag does not glue the keyword together' '[]' \
+  "$(pr_edit_adds)"
+
+# (v20) The keyword split by a code span on both sides stays invisible.
+export PR_BODY='Part`x`of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a code span glued to the keyword keeps it invisible' '[]' \
+  "$(pr_edit_adds)"
+
+
+echo "--- prose guard: reviewer round 5 (#767) ---"
+
+# (w1) F8: a full-reference link label is elided, and the elision takes a
+# WORD-CHARACTER separator: a numeral after the link must not fuse into
+# the number in front of it. With a bare (invisible) elision,
+# "x[Part of #741][]1." reads "Part of #7411" and labels an issue the
+# author never wrote. The link TEXT is visible prose, so the number the
+# author actually wrote still propagates — only the fusion is impossible.
+export ISSUE_7411_LABELS="spec" ISSUE_741_LABELS="bug,agent-created,documentation"
+export PR_BODY='x[Part of #741][]1.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an elided reference label never fuses a trailing numeral' 0 \
+  "$(grep -c 'issues/7411' "$GH_LOG")"
+assert 'the author-written number in the link text survives the elided label' 1 \
+  "$(printf '%s\n' "$OUT" | grep -cF '"issues":[741]')"
+
+# (w2) The control: a legitimate `[Part of #741]` in visible prose (literal
+# brackets, no link syntax) still propagates.
+export PR_BODY='[Part of #741] is visible prose.'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a bracketed reference in visible prose still propagates' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w3) F5: image ALT text is an attribute the reader sees as an IMAGE, not
+# as prose: it propagates nothing.
+export PR_BODY='![Part of #741](u)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'image alt text adds no labels' '[]' "$(pr_edit_adds)"
+assert 'image alt text is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (w4) The mirror: the SAME bracket group as link TEXT (no "!") is prose
+# and still propagates.
+export PR_BODY='[Part of #741](u)'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'link text still propagates where image alt text does not' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w5) F4: <pre> and <textarea> are raw-text blocks (CommonMark HTML block
+# type 1), in the block form and the inline form.
+export PR_BODY=$'<pre>\nPart of #741\n</pre>'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a pre block adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a pre block is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+export PR_BODY='<pre>Part of #741</pre>'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline pre element adds no labels' '[]' "$(pr_edit_adds)"
+
+export PR_BODY=$'<textarea>\nPart of #741\n</textarea>'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a textarea block adds no labels' '[]' "$(pr_edit_adds)"
+
+export PR_BODY='<textarea>Part of #741</textarea>'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'an inline textarea element adds no labels' '[]' "$(pr_edit_adds)"
+
+# (w6) The control: a pre block that closes on its opener line does not
+# swallow the document after it.
+export PR_BODY=$'<pre>x</pre>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a one-line pre block does not swallow the document' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w7) F1: after a comment that closes on its own line, the REST of the
+# line is re-examined for a raw-text opener: "<!-- c --><script>" must not
+# leak the lines behind it.
+export PR_BODY=$'<!-- c --><script>\nPart of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a script opener behind a same-line comment hides the rest' '[]' \
+  "$(pr_edit_adds)"
+assert 'the line behind the same-line script opener is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (w8) The control: a script that OPENS AND CLOSES on that line still
+# clears, so the document after it is prose again.
+export PR_BODY=$'<!-- c --><script>x</script>\n\nPart of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a same-line script closer still clears the raw-text state' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w9) F2: FDEPTH must be reset the moment the quoted depth DROPS below it
+# — otherwise a later fence line at the old depth masquerades as the closer
+# of the dead fence and exposes the text behind it.
+export PR_BODY=$'>> ```\n> x\n>> ```\n>> Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a partial blockquote-depth decrease kills the stale fence' '[]' \
+  "$(pr_edit_adds)"
+assert 'the text behind the dead fence is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (w10) The control: a fence that closes at its own depth still leaves the
+# text after it prose.
+export PR_BODY=$'>> ```\n>> code\n>> ```\n>> Part of #741\n'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a fence closed at its own depth leaves the rest prose' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w11) F6: the CDATA opener is a SEVEN-character slice compared against a
+# seven-character literal; the previous eight-character slice could never
+# match, so a CDATA section read as prose.
+export PR_BODY='<![CDATA[Part of #741]]>'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a CDATA section adds no labels' '[]' "$(pr_edit_adds)"
+assert 'a CDATA section is never fetched' 0 "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (w12) The control: a CDATA section that completes on its line leaves the
+# text after it prose.
+export PR_BODY='<![CDATA[x]]>Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'text after a completed CDATA section is prose' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
+
+# (w13) PIN: a code span is closed only by a run of EXACTLY the opening
+# length — on the OPENER side too. With the opener comparison relaxed to
+# ">=", the longer run would close the span early and expose the reference
+# behind it.
+export PR_BODY='x ``a``` Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run does not close a span on the opener side (same line)' \
+  '[]' "$(pr_edit_adds)"
+assert 'the reference behind the early-closed span is never fetched' 0 \
+  "$(grep -c 'issues/741' "$GH_LOG")"
+
+# (w14) The same across a line break.
+export PR_BODY=$'x ``a\nb``` Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'a longer run does not close a span on the opener side (cross-line)' \
+  '[]' "$(pr_edit_adds)"
+
+# (w15) The control: the true (exact-length) closer still closes the span,
+# and the prose after it propagates.
+export PR_BODY='x ``a``` b`` Part of #741'
+run pr-labels-from-issue 77 --repo test-org/repo
+assert 'the exact-length closer still closes the span' \
+  '["bug","documentation"]' "$(pr_edit_adds | jq -c 'unique | sort')"
 
 # usage errors
 run pr-labels-from-issue

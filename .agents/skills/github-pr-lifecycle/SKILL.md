@@ -94,9 +94,49 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   The body follows `.github/PULL_REQUEST_TEMPLATE.md`
                   (Summary, exactly ONE primary closing reference on its own
                   line early in the body — `Closes #N` for full-scope
-                  landings, a bare `Refs #N` for partial landings whose
-                  remaining scope stays tracked; bare `#N` mentions are
-                  invisible to auto-close and `pr-labels-from-issue`,
+                  landings, a bare `Refs #N` — or `Part of #N` — for partial
+                  landings whose remaining scope stays tracked; both related
+                  forms reach `pr-labels-from-issue` (the labels propagate)
+                  while only a closing keyword auto-closes, and bare `#N`
+                  mentions are invisible to both. A related reference counts
+                  only where a reader would SEE it: it is read from the
+                  body's Markdown prose — one left-to-right scan that emits
+                  what a renderer SHOWS — so a reference quoted inside code
+                  (a fenced block, an indented block, an inline code span —
+                  including a span that crosses a line break, which joins the
+                  lines it spans — or an unmatched backtick run to the end of
+                  its paragraph), hidden in an HTML comment (an empty
+                  `<!-->` ends at its own `>`), inside a blockquote's fence
+                  or comment, or buried in a link destination is ignored —
+                  the quoted TEXT is prose and still counts, four spaces
+                  inside a paragraph are a lazy continuation rather than
+                  code. A code span renders SOMETHING, so it is elided with
+                  a word character and the phrase around it never re-joins
+                  (`see part [lexer] of #741` is no reference); a construct
+                  that renders NOTHING (a comment, a raw tag, a destination)
+                  leaves the text around it adjacent (`Refs<!-- c -->#741` is
+                  no reference either). An open fence is closed only by a
+                  fence at the SAME blockquote depth it was opened at (a
+                  `> fence` line inside a top-level fence is CONTENT, not a
+                  closer, and the fence ends the moment the quoted depth
+                  DROPS below the depth it was opened at), a raw-text block
+                  (`<script>`, `<style>`, `<pre>`, `<textarea>` — CommonMark
+                  HTML block type 1) that opens and closes on one line is
+                  complete there, the rest of a line that completes a
+                  comment is re-examined for such an opener, and a
+                  line-break element (`<br>`, `<hr>`) ends the rendered
+                  line. Image alt text is NOT prose: `![Part of #N](u)`
+                  propagates nothing, while `[Part of #N](u)` (link text)
+                  still does. A full-reference link's label
+                  (`[text][label]`) is not rendered text either: it is
+                  elided with a word character, so a numeral after the link
+                  can never fuse into the number in front of it
+                  (`x[Part of #N][]1.` never reads `#N1`).
+                  The closing family is still read from the raw
+                  body (the asymmetry is deliberate; #765 tracks aligning
+                  it; line endings follow CommonMark — CRLF parses like LF
+                  and a LONE CR ends a line, so `Part o<CR>f #741` is not a
+                  reference),
                   Specification
                   references, Change, Design summary (feature/design-changing
                   spec PRs only), Test evidence, Review convergence (reviewed
@@ -128,7 +168,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   dependencies, github-actions, spec, blocked:arbitraitor,
                   blocked:orchestraitor; `needs-human-review` is never
                   copied from issues, it is diff-derived — from the PR's
-                  Closes/Fixes/Resolves issues, #469) immediately after the
+                  closing (`Closes`/`Fixes`/`Resolves`) and related
+                  (`Part of`/`Refs`) issue references, #469, #744; the
+                  related family is read from the body's rendered prose only
+                  (code — fenced, indented or inline, including a span that
+                  crosses a line break — HTML comments and link destinations
+                  are ignored; the closing family still reads the raw body),
+                  so code, HTML comments and link destinations do not
+                  propagate labels)
+                  immediately after the
                   PR exists; both steps are non-fatal and print the exact
                   manual command on failure.
                   `pr-labels <pr>` remains the manual fallback/reconcile

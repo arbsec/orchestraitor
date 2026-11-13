@@ -14,11 +14,44 @@
 <!-- Exactly ONE primary closing keyword on its own line, early in the body:
      Closes #N. (Not Fixes/Resolves — single-`Closes` usage is project policy
      for a consistent primary reference; the `pr-labels-from-issue` extractor
-     itself also accepts `Fixes`/`Resolves` forms.) Bare #N mentions are
-     invisible to auto-close and to pr-labels-from-issue. For partial
-     landings, use a bare `Refs #N` line and put the scope note on the NEXT
+     itself also accepts `Fixes`/`Resolves`, plus the related forms
+     `Part of #N` / `Refs #N` — labels propagate from both families, but only
+     a closing keyword auto-closes.) Bare #N mentions are invisible to
+     auto-close and to pr-labels-from-issue. For partial landings, use a bare
+     `Refs #N` (or `Part of #N`) line and put the scope note on the NEXT
      line. Use `Closes #N` only when the whole tracked scope lands in this
-     PR — a closing keyword triggers auto-close on merge. -->
+     PR — a closing keyword triggers auto-close on merge.
+     Put the reference in PROSE. The related forms are read from the body's
+     Markdown prose only — one left-to-right scan that emits what a renderer
+     SHOWS — so a `Part of #N` quoted inside code (a fenced block, an
+     indented block, an inline code span — including a span that crosses a
+     line break, which joins the lines it spans — or an unmatched backtick
+     run to the end of its paragraph), hidden in an HTML comment (an empty
+     `<!-->` ends at its own `>`), inside a blockquote fence or comment, or
+     buried in a link destination does NOT propagate labels; the link TEXT
+     is prose and does count, and four spaces inside a paragraph are a lazy
+     continuation rather than code. A code span renders SOMETHING, so it is
+     elided with a word character and the phrase around it never re-joins
+     (`see part [lexer] of #741` is NO reference); a construct that renders
+     NOTHING (a comment, a raw tag, a link destination) leaves the text
+     around it adjacent (`Refs<!-- c -->#741` is NO reference either). An
+     open fence is closed only by a fence at the SAME blockquote depth it
+     was opened at, and it ends the moment the quoted depth DROPS below
+     that depth, so a `> fence` line inside a top-level fence is CONTENT,
+     not a closer; a raw-text block (`<script>`, `<style>`, `<pre>`,
+     `<textarea>` — CommonMark HTML block type 1) that opens and closes on
+     one line is complete there, and the rest of a line that completes a
+     comment is re-examined for such an opener; a line-break element
+     (`<br>`, `<hr>`) ends the rendered line. Image alt text is NOT prose:
+     `![Part of #N](u)` propagates nothing, while `[Part of #N](u)` (link
+     text) still does. A full-reference link's label (`[text][label]`) is
+     not rendered text either: it is elided with a word character, so a
+     numeral after the link can never fuse into the number in front of it
+     (`x[Part of #N][]1.` never reads `#N1`). Line endings follow CommonMark: a CRLF
+     body parses like an LF one, and a LONE CR ends a line, so `Part
+     o<CR>f #N` is not a reference. (The closing family is still read from
+     the raw body — the asymmetry is deliberate; #765 tracks aligning the
+     two.) -->
 
 ## Specification references
 
