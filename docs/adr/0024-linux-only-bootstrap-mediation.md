@@ -60,10 +60,12 @@ Concretely:
   and `gate_preflight` (mediation.rs:452) before it creates an execution
   surface — no child process or temporary execution directory is created by
   this call. The campaign may already have persisted the run-state row
-  before the lazy preflight runs (`crates/orchestraitor-campaign/src/loop_run.rs:1585-1595`
-  inserts the `running` row first, then calls `self.starter.start(...)`;
-  `MediatedBashMediator::worker` defers `MediatedWorker::spawn` until the
-  first bash call — `crates/orchestraitor-worker/src/mediator.rs:66-75`). The
+  before the lazy preflight runs
+  (`crates/orchestraitor-campaign/src/loop_run.rs:1628-1635` writes it via
+  `runs.start(&StartRun { .. })`, then `loop_run.rs:1644` calls
+  `self.starter.start(..)`; `MediatedBashMediator::worker` defers
+  `MediatedWorker::spawn` until the first bash call —
+  `crates/orchestraitor-worker/src/mediator.rs:66-75`). The
   `gate_preflight` inner platform check (`is_supported_platform`,
   mediation.rs:271) is a defense-in-depth second gate, not the first
   refusal path readers encounter.
@@ -103,7 +105,8 @@ Concretely:
   `cargo run -p orchestraitor-cli -- loop` on a Mac laptop. The daemon,
   the MCP server, and the board provider all run on macOS for development;
   the bootstrap worker does not. This is documented in
-  `docs/sandbox-mediation.md` and in `README.md` line 250-252.
+  `docs/sandbox-mediation.md` and in `README.md:286` ("Bootstrap worker
+  sandbox mediation").
 - **Negative:** any future cross-platform mediation effort (Arbitraitor
   adds Capsicum / `seatbelt` support, or the spec relaxes §16.2 for this
   path) requires amending or superseding this ADR; the constant
@@ -163,10 +166,11 @@ Concretely:
 - `docs/sandbox-mediation.md` — operator-facing flow doc that names
   ADR-0024, links the Landlock-active wrapper gap, and records the
   Landlock-absent classification history (fixed upstream at the pin).
-- `README.md:243` — the user-facing reference (lines 250-252 in the
-  audit snapshot).
-- `CHANGELOG.md:589`, `CHANGELOG.md:1052` — historical release-note
-  anchors citing ADR-0024.
+- `README.md:286` — the user-facing "Bootstrap worker sandbox mediation"
+  section (the `orc config` block the old audit snapshot pointed at is at
+  `README.md:243`, which is unrelated CLI reference).
+- `CHANGELOG.md:671`, `CHANGELOG.md:701` — release-note entries that record
+  the bootstrap-worker mediation surface.
 - `AGENTS.md` — always-active agent rule set; this ADR is the
   fail-closed posture referenced by the bootstrap-worker path.
 - Spec `40-arbitraitor-integration.md` §6.7 (sole security authority,

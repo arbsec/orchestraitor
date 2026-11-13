@@ -668,10 +668,10 @@ mod tests {
         let preflight = probe_worker_preflight(&client, "linux");
 
         // Then: the record always carries the Restricted mode and the
-        // Arbitraitor controls matrix verbatim. Since arbitraitor ab7af5e
-        // (#754/#755) the matrix couples `filesystem_isolation` to the
-        // Landlock probe of the RUNNING host, so on a non-Linux test host
-        // the probed control is correctly `Unavailable` — the matrix is
+        // Arbitraitor controls matrix verbatim. Since upstream commit
+        // `f501af7` (#756, ADR-0028) the matrix couples `filesystem_isolation`
+        // to the Landlock probe of the RUNNING host, so on a non-Linux test
+        // host the probed control is correctly `Unavailable` — the matrix is
         // fail-closed, not all-available.
         assert_eq!(preflight.mode, SandboxMode::Restricted);
         assert_eq!(

@@ -240,11 +240,12 @@ mod tests {
         let report = probe_capabilities(&client, "linux");
 
         // Then: protected services are allowed exactly when the running host
-        // delivers every probed control. Since arbitraitor ab7af5e (#754/#755)
-        // the matrix couples `filesystem_isolation` to the host's Landlock
-        // probe, so a non-Linux CI host probing the "linux" reference platform
-        // correctly sees that control unavailable (fail closed), while a
-        // Linux host with Landlock sees the fully-allowed report.
+        // delivers every probed control. Since upstream commit `f501af7`
+        // (#756, ADR-0028) the matrix couples `filesystem_isolation` to the
+        // host's Landlock probe, so a non-Linux CI host probing the "linux"
+        // reference platform correctly sees that control unavailable (fail
+        // closed), while a Linux host with Landlock sees the fully-allowed
+        // report.
         assert_eq!(
             report.protected_services_allowed,
             report.missing_controls.is_empty()
