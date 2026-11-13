@@ -145,11 +145,11 @@ Concretely:
 
 ## References
 
-- `crates/orchestraitor-arb-client/src/mediation.rs:84` — `WORKER_PLATFORM`
+- `crates/orchestraitor-arb-client/src/mediation.rs:89` — `WORKER_PLATFORM`
   constant.
-- `crates/orchestraitor-arb-client/src/mediation.rs:146` —
+- `crates/orchestraitor-arb-client/src/mediation.rs:151` —
   `MediationError::UnsupportedPlatform` (cites ADR-0024).
-- `crates/orchestraitor-arb-client/src/mediation.rs:836` — diagnostic test
+- `crates/orchestraitor-arb-client/src/mediation.rs:892` — diagnostic test
   asserting the `ADR-0024` anchor.
 - `crates/orchestraitor-worker/src/mediator.rs:49` — lazy preflight note
   ("refuses on hosts without the required controls, per ADR-0024 and the

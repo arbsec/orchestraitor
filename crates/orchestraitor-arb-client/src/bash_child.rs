@@ -20,14 +20,17 @@
 //!    future (the loop runner's `kill_where`) drops the guard mid-`await` —
 //!    the interpreter and its descendants die before the run is treated as
 //!    aborted.
-//! 3. Enforcement is byte-equivalent with the pinned `ScriptExecution`
-//!    profile: the same default `ExecutionPolicy` with an explicit
-//!    network-denied override, the same interpreter (`/bin/bash
-//!    --noprofile --norc`), the same controlled environment, the same
-//!    Landlock rule set, and the same fenced resource limits (SIGSTOP →
-//!    prlimit → SIGCONT). No security decision is made here — every rule
-//!    comes from Arbitraitor's own API (spec §2.2; this is orchestration
-//!    process hygiene, not a security primitive).
+//! 3. Enforcement mirrors the pinned `ScriptExecution` profile: the same
+//!    default `ExecutionPolicy` with an explicit network-denied override, the
+//!    same interpreter (`/bin/bash --noprofile --norc`), the same controlled
+//!    environment, a Landlock rule list that is the pinned set **minus** the
+//!    three per-file `/proc/self` identity-map write grants the pinned layer
+//!    adds for the network wrapper (upstream #754; see
+//!    `docs/sandbox-mediation.md`, "Landlock and the network wrapper's
+//!    identity map"), and the same fenced resource limits (SIGSTOP → prlimit →
+//!    SIGCONT). No security decision is made here — every rule comes from
+//!    Arbitraitor's own API (spec §2.2; this is orchestration process hygiene,
+//!    not a security primitive).
 //!
 //! The output cap uses the pinned exec layer's default (combined
 //! stdout+stderr bytes); overflow kills and reaps the child and fails with
@@ -250,8 +253,12 @@ impl BashChild {
             // `with_sandbox_config` (this bootstrap path never does), so
             // the default here is the same configuration.
             configure_command(&mut command, arbitraitor_sandbox::SandboxConfig::default());
-            // Apply Landlock filesystem confinement with the pinned
-            // exec layer's exact rule set.
+            // Apply Landlock filesystem confinement with the pinned exec
+            // layer's rule set minus the wrapper identity-map grants: the
+            // pinned `ScriptExecution` additionally allows the `unshare`
+            // wrapper to write `/proc/self/{uid_map,setgroups,gid_map}`; this
+            // list deliberately does not (see the module docs and
+            // `docs/sandbox-mediation.md`).
             configure_filesystem_isolation(
                 &mut command,
                 &landlock_rules(&interpreter, &environment),
@@ -532,9 +539,12 @@ pub(crate) fn apply_limits_fenced(
     Ok(())
 }
 
-/// The pinned `ScriptExecution` Landlock rule set: read-execute on the
-/// interpreter's directory and the system paths, read-write-execute only on
-/// the per-execution working and HOME directories.
+/// The pinned `ScriptExecution` Landlock rule set without the network
+/// wrapper's identity-map grants: read-execute on the interpreter's directory
+/// and the system paths, read-write-execute only on the per-execution working
+/// and HOME directories. The pinned layer adds three per-file write-only
+/// `/proc/self/{uid_map,setgroups,gid_map}` rules on top of this whenever it
+/// runs under the `unshare` wrapper (upstream #754); this list does not.
 #[cfg(target_os = "linux")]
 pub(crate) fn landlock_rules(
     interpreter: &std::path::Path,
