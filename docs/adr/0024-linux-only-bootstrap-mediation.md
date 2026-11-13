@@ -18,8 +18,9 @@ Two facts constrain the platform posture:
 
 1. `arbitraitor_sandbox::SandboxMode::Restricted` (the containment envelope
    the bootstrap worker demands) is implemented for Linux only in the
-   pinned Arbitraitor revision (`e36644e`, spec `40-arbitraitor-integration.md`
-   §9.6 / §27.7). The controls — Landlock filesystem rules, `no_new_privs`,
+   pinned Arbitraitor revision (`Cargo.toml` `[workspace.dependencies]`,
+   spec `40-arbitraitor-integration.md` §9.6 / §27.7). The controls —
+   Landlock filesystem rules, `no_new_privs`,
    fd closure, network-namespace isolation, fenced `prlimit` resource
    caps — are kernel features that have no portable equivalent on macOS
    (no Landlock; `seatbelt` is a different API surface), Windows
