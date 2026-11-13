@@ -347,7 +347,7 @@ Users MAY define custom roles; the registry is configuration, not a hardcoded ta
 
 #### 9.45.1 Role presets
 
-A **role preset** is the built-in default value set for the subagent-relevant fields of a declared `[tools.<id>]` subagent tool (`20-harness-worker.md` §9.15, "Declared tools") whose `subagent_role` matches a built-in role. A preset bundles:
+A **role preset** is the built-in default value set for the subagent-relevant fields of a declared `[tools.<id>]` subagent tool (`20-harness-worker.md` §9.5, "Declared tools") whose `subagent_role` matches a built-in role. A preset bundles:
 
 - `instructions` — the operator-authored instruction body (§9.15.1 `origin = trusted-config`, `trust_class = trusted`) prepended to the sub-session prompt;
 - `internal_tools` — the scoped internal-tool allowlist (`read_file`, `search`, `bash`, and the default-on `think`, §9.48.2);
@@ -363,7 +363,7 @@ Presets ship as built-in-defaults-layer TOML data, never compiled-in logic (§9.
 
 #### 9.45.2 Preset trust gate
 
-Preset instruction bodies are honored from the **trusted configuration layers only** — built-in defaults, plugin defaults, global user, organization/team, in §9.22.2/§9.22.7 chain order (plugin defaults inserted between built-in defaults and global user config; they never override user/project settings) — mirroring the declared-tools gate (`20-harness-worker.md` §9.15): a preset instruction definition or override in any UNTRUSTED layer — project config, directory/domain config, task/agent override, explicit CLI flag (`50-contracts-data.md` §9.22.2 chain order) — is a **typed registry error naming the key**, never a silent drop and never an implicit grant (§9.15.1: untrusted repository content MUST NOT gain instruction authority by entering model context; a preset body is `trusted-config` provenance by construction, so a project-layer write path could smuggle repository content into instruction authority). The same trusted-layer rule governs the preset's non-instruction fields (`effort`, `max_summary_bytes`, `structured_summary`, `output_contract`, `budget.*`) at every trusted layer above the built-in defaults. Routing keys are NOT governed by this gate: `roles.<id>.routing.*` resolves under §9.19.2's own contract — routing sub-keys live at every layer, and non-security routing choices may be weakened freely at any higher layer (§9.19.2).
+Preset instruction bodies are honored from the **trusted configuration layers only** — built-in defaults, plugin defaults, global user, organization/team, in §9.22.2/§9.22.7 chain order (plugin defaults inserted between built-in defaults and global user config; they never override user/project settings) — mirroring the declared-tools gate (`20-harness-worker.md` §9.5): a preset instruction definition or override in any UNTRUSTED layer — project config, directory/domain config, task/agent override, explicit CLI flag (`50-contracts-data.md` §9.22.2 chain order) — is a **typed registry error naming the key**, never a silent drop and never an implicit grant (§9.15.1: untrusted repository content MUST NOT gain instruction authority by entering model context; a preset body is `trusted-config` provenance by construction, so a project-layer write path could smuggle repository content into instruction authority). The same trusted-layer rule governs the preset's non-instruction fields (`effort`, `max_summary_bytes`, `structured_summary`, `output_contract`, `budget.*`) at every trusted layer above the built-in defaults. Routing keys are NOT governed by this gate: `roles.<id>.routing.*` resolves under §9.19.2's own contract — routing sub-keys live at every layer, and non-security routing choices may be weakened freely at any higher layer (§9.19.2).
 
 **Key-level replacement, no composition.** An operator `instructions` key at a higher-precedence trusted layer **fully replaces** the preset body (last-setting-layer-wins per §9.22.2). There is no preset-body-plus-appendix merge semantic: composition would add a third merge rule to the layered chain. `orc config explain` reports which layer supplied each resolved preset field.
 
@@ -391,7 +391,7 @@ The context fields are **advisory inputs**, never a forced route: the preset's e
 
 #### 9.45.4 Built-in presets
 
-One built-in preset per §9.45 built-in role. Presets express read-only-ness **structurally** through the `internal_tools` allowlist — a sub-session whose allowlist excludes `bash` never constructs a bash mediator (`20-harness-worker.md` §9.15) — never through prose alone; and presets **narrow, never widen**, the requested capability shapes (Arbitraitor owns enforcement; §9.19.3 "request shapes, not grants").
+One built-in preset per §9.45 built-in role. Presets express read-only-ness **structurally** through the `internal_tools` allowlist — a sub-session whose allowlist excludes `bash` never constructs a bash mediator (`20-harness-worker.md` §9.5) — never through prose alone; and presets **narrow, never widen**, the requested capability shapes (Arbitraitor owns enforcement; §9.19.3 "request shapes, not grants").
 
 | Preset | Purpose | `internal_tools` | `effort` | `structured_summary` | Output contract (fielded finish summary) |
 |---|---|---|---|---|---|
