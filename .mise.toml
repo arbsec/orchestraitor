@@ -8,7 +8,7 @@ cocogitto = "7.0.0"
 # Both gates assert this exact version before they lint: the CI job (see
 # `.github/workflows/markdown.yml`) and the local pre-commit markdown hook
 # (see `lefthook.yml`), so a `rumdl` first on `PATH` cannot shift either.
-rumdl = "0.3.2"
+rumdl = "0.3.4"
 
 [env]
 RUST_BACKTRACE = "1"
