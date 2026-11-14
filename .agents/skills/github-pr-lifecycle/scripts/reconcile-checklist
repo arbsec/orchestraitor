@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region or an HTML comment are examples, not checklist items. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces is reported unparseable (all_checked false), whether or not that fence closes: its container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. A managed marker has ONE canonical form: '- [x] <!-- orc:NAME -->' with exactly one ASCII space between every token, a box of x, X or a single space, and one of the nine managed names. A line that is not canonical but carries BOTH a task-item box token and an orc:NAME reference is a NEAR-MARKER: the gate cannot tell what it asserts, so it is reported unparseable (all_checked false) and the verdict blocks with checklist_unparseable. Markers inside a fenced code region, an HTML comment or a raw HTML block are examples, not checklist items, and a fence opener inside an HTML block opens nothing. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces is reported unparseable (all_checked false), whether or not that fence closes: its container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
   exit "$ORC_OK"
 fi
 
@@ -31,13 +31,19 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
 # Extract each checklist line with its orc marker.
 # Pattern: - [ ] <!-- orc:XXX --> description  OR  - [x] <!-- orc:XXX --> description
-# The box holds a REAL checkbox character and nothing else: a space (unchecked),
-# `x` or `X` (checked). Any other character is not a checklist line — the Rust
-# engine (`parse_checklist`) accepts exactly the same three.
-# Only SPACE and TAB indent an item: the leading class is `[ \t]`, never PCRE
-# `\s` (which also matches a vertical tab the Rust engine does not trim;
-# arbsec/orchestraitor#799 F18). The `\s*` between the dash and `[` is a
-# separate open divergence tracked in arbsec/orchestraitor#807.
+#
+# A managed marker has ONE CANONICAL form: `[ \t]*- [BOX] <!-- orc:NAME -->`
+# where every separator is EXACTLY ONE ASCII SPACE, `<BOX>` is `x`, `X` or a
+# single space, and `<NAME>` is one of the nine managed names
+# (`ORC_LIB_CANONICAL_MARKER_RE`, derived from the single managed list). A line
+# that is not canonical but carries BOTH a task-item box token (`[` + exactly
+# one character + `]`) AND a reference to one of the nine managed names is a
+# NEAR-MARKER: the author presented a managed marker and the gate cannot tell
+# what they asserted, so the reading is INDETERMINATE and the verdict blocks
+# with `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that only
+# mentions `orc:NAME` (prose) or carries only a box token (a plain task) is not
+# a near-marker and is ignored — prose must never block.
+#
 # A body with zero markers is legitimate to PARSE (custom PR bodies; #394 keeps
 # "an empty parse is an empty list"), so grep matching nothing is guarded under
 # pipefail — empty means an empty checklist. An empty checklist is NOT a
@@ -48,28 +54,52 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 # evidence and always fails closed (an exemption may only come from an
 # authority the author does not hold — arbsec/orchestraitor#801).
 #
-# Fenced code regions are EXAMPLES, not evidence: a marker inside a fence is
-# not a checklist item. `orc_lib_strip_fenced_code` (in _lib.sh) removes
-# them; the Rust engine applies the same rule, so creation and
+# Fenced code regions, HTML comments and RAW HTML BLOCKS are EXAMPLES, not
+# evidence: a marker inside one is not a checklist item, and a fence opener
+# inside an HTML block opens nothing. `orc_lib_strip_fenced_code` (in _lib.sh)
+# removes them; the Rust engine applies the same rule, so creation and
 # reconciliation agree on what a marker is.
 SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
-# A fence OPENER indented 1-3 spaces may sit inside a list item or a block
-# quote, and the scanner has no container model. The region it models can
-# swallow a genuine unchecked item, so the reading is INDETERMINATE and
-# `all_checked` must never be true for it (arbsec/orchestraitor#809). The
-# condition stands only while that region is OPEN: a region that CLOSES has a
-# known extent, so its contents are determinately code. The verdict blocks with
-# `checklist_unparseable`; the fix names the construct.
-UNPARSEABLE_LINE="$(printf '%s\n' "$BODY" | orc_lib_fence_unparseable_line)"
-RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -oP '^[ \t]*-\s*\[[xX ]\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
-  CHECKED="$(printf '%s\n' "$line" | grep -oP '^[ \t]*-\s*\[[xX ]\]' | grep -oP '(?<=\[).' || echo " ")"
-  MARKER="$(printf '%s\n' "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
-  DESC="$(printf '%s\n' "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
+# Two constructs make the reading INDETERMINATE, and both are reported with
+# the line they sit on:
+#
+#   - a fence OPENER indented 1-3 spaces may sit inside a list item or a block
+#     quote, and the scanner has no container model. The region it models can
+#     swallow a genuine unchecked item, so the reading is INDETERMINATE and
+#     `all_checked` must never be true for it (arbsec/orchestraitor#809). The
+#     condition is STICKY: it is NOT cleared when the region closes, because a
+#     closer can end the region EARLIER for the renderer than for this scanner
+#     — a marker swallowed by the scanner's region can then still be VISIBLE
+#     to a human, and reading such a body as "all checked" is the false pass
+#     this rule exists to stop. The remedy is to DEDENT the opener to column 0;
+#   - a NEAR-MARKER (arbsec/orchestraitor#799 R1): the author presented a
+#     managed marker whose form the gate cannot read, so the gate must not
+#     guess what they asserted. The remedy is to write the marker in the
+#     canonical form.
+#
+# The EARLIEST of the two wins: both make the reading undecidable.
+INDENTED_OPENER_LINE="$(printf '%s\n' "$BODY" | orc_lib_fence_unparseable_line)"
+NEAR_MARKER_LINE="$(printf '%s\n' "$BODY" | orc_lib_near_marker_line)"
+UNPARSEABLE_LINE=""
+UNPARSEABLE_CONSTRUCT=""
+if [ -n "$INDENTED_OPENER_LINE" ] &&
+   { [ -z "$NEAR_MARKER_LINE" ] || [ "$INDENTED_OPENER_LINE" -le "$NEAR_MARKER_LINE" ]; }; then
+  UNPARSEABLE_LINE="$INDENTED_OPENER_LINE"
+  UNPARSEABLE_CONSTRUCT="indented_fence_opener"
+elif [ -n "$NEAR_MARKER_LINE" ]; then
+  UNPARSEABLE_LINE="$NEAR_MARKER_LINE"
+  UNPARSEABLE_CONSTRUCT="near_marker"
+fi
+RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -P "$ORC_LIB_CANONICAL_MARKER_RE" || true; } | while IFS= read -r line; do
+  CHECKED="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]].*/\1/p')"
+  MARKER="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:([A-Za-z0-9_-]+) -->.*/\2/p')"
+  DESC="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:[A-Za-z0-9_-]+ -->(.*)$/\1/p' | sed -E 's/^[[:blank:]]+//; s/[[:blank:]]+$//')"
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
 done)"
 
 if [ "$OPT_JSON" = true ]; then
-  echo "$RESULT" | jq -R -s --arg unparseable_line "$UNPARSEABLE_LINE" '
+  echo "$RESULT" | jq -R -s --arg unparseable_line "$UNPARSEABLE_LINE" \
+    --arg unparseable_construct "$UNPARSEABLE_CONSTRUCT" '
     split("\n") | map(select(length > 0)) |
     ($unparseable_line != "") as $indeterminate |
     map(split("\t")) | map({
@@ -83,15 +113,25 @@ if [ "$OPT_JSON" = true ]; then
       all_checked: (($indeterminate | not) and (length > 0) and all(.[]; .checked == true)),
       unparseable: $indeterminate,
       unparseable_line: (if $indeterminate then ($unparseable_line | tonumber) else null end),
+      unparseable_construct: (if $indeterminate then $unparseable_construct else null end),
       unchecked: map(select(.checked == false))
     }
   '
 else
   echo "PR checklist reconciliation:"
   if [ -n "$UNPARSEABLE_LINE" ]; then
-    echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE, closed or not;"
-    echo "   its container scope (top level, list item, block quote) cannot be determined, so no checklist reading is trusted)"
-    echo "   fix: dedent the fence opener to column 0"
+    case "$UNPARSEABLE_CONSTRUCT" in
+      near_marker)
+        echo "  (UNPARSEABLE: line $UNPARSEABLE_LINE presents a managed marker that is NOT in the canonical form;"
+        echo "   it carries a task-item box token and an orc:NAME reference, so the gate cannot tell what it asserts)"
+        echo "   fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
+        ;;
+      *)
+        echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE, closed or not;"
+        echo "   its container scope (top level, list item, block quote) cannot be determined, so no checklist reading is trusted)"
+        echo "   fix: dedent the fence opener to column 0"
+        ;;
+    esac
   fi
   if [ -z "$RESULT" ]; then
     echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"

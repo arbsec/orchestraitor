@@ -1,0 +1,6 @@
+# A raw HTML BLOCK is an invisible region: CommonMark passes its content
+# through as raw HTML, so the fence characters inside the <pre> block are
+# LITERAL TEXT and open nothing. The unchecked item after the block is
+# therefore VISIBLE and counted — an engine that opened the fence inside the
+# block would hide the item and report a vacuous pass.
+marker_count=2 all_checked=false unparseable=false

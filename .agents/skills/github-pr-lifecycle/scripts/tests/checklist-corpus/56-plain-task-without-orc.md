@@ -1,0 +1,2 @@
+- [ ] plain task, no managed marker
+- [x] <!-- orc:tests --> a real, canonical marker

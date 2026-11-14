@@ -342,6 +342,104 @@ async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
     );
 }
 
+/// The summary's LINE ENDINGS must be normalised before the neutraliser reads
+/// them (`CommonMark` §2.1): a lone CR is a line ending and so is CRLF, and both
+/// production scanners normalise the same way before they read a body.
+///
+/// The neutraliser used to split on `\n` alone, so a lone-CR summary was ONE
+/// line: its indented fence opener survived (the composed PR then reported
+/// `checklist_unparseable` — permanently unconvergeable) and its line-start
+/// `<!--` survived (the summary's tail was hidden from the reviewer). This
+/// test drives the REAL `open_pr` over the three line-ending flavours — LF,
+/// CRLF and a lone CR — and asserts the SAME composed body each time.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_neutralises_the_summary_regardless_of_its_line_endings() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The same summary in three line-ending flavours: an indented fence opener
+    // and a line-start HTML comment.
+    let lf = String::from(
+        "- Example:\n  ```\n  sample\n  ```\n<!-- a note the model wrote\nstill the summary",
+    );
+    let crlf = lf.replace('\n', "\r\n");
+    let lone_cr = lf.replace('\n', "\r");
+
+    for (flavour, summary) in [
+        ("lf", lf.clone()),
+        ("crlf", crlf.clone()),
+        ("lone-cr", lone_cr.clone()),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let capture = temp.path().join("body.txt");
+        let orc_stub = temp.path().join("orc");
+        std::fs::write(
+            &orc_stub,
+            format!(
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/5\\n'\n",
+                capture.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sink =
+            PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+                .unwrap();
+        let request = DeliveryRequest {
+            summary: summary.clone(),
+            ..request()
+        };
+        sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+            .await
+            .expect("the fake orc succeeds");
+
+        let body = std::fs::read_to_string(&capture).unwrap();
+        // The trusted block leads and carries the nine unchecked markers.
+        assert!(body.starts_with("## Merge checklist"), "{flavour}: {body}");
+        assert_eq!(
+            body.matches("- [ ] <!-- orc:").count(),
+            9,
+            "{flavour}: {body}"
+        );
+        // No indented fence opener survives anywhere in the composed body: that
+        // is what makes the checklist reading determinate.
+        assert!(
+            !body.lines().any(|line| {
+                let indent = line.chars().take_while(|c| *c == ' ').count();
+                let rest = line.get(indent..).unwrap_or_default();
+                (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"))
+            }),
+            "{flavour}: an indented fence opener survived neutralisation: {body}"
+        );
+        // No line-start HTML comment survives either: the summary's tail must
+        // stay visible to the reviewer.
+        let summary_tail = &body[body.find("- Example:").expect("the summary")..];
+        assert!(
+            !summary_tail
+                .lines()
+                .any(|line| line.trim_start_matches(' ').starts_with("<!--")),
+            "{flavour}: a line-start comment opener survived neutralisation: {body}"
+        );
+        // The comment opener is escaped, so it renders as literal text.
+        assert!(
+            summary_tail.contains("&lt;!--"),
+            "{flavour}: the comment opener was not escaped: {body}"
+        );
+        // The summary's tail survives, and the body carries no CR byte: the
+        // scanners normalise line endings themselves, so the composed body is
+        // already in the form they read.
+        assert!(
+            body.ends_with("still the summary"),
+            "{flavour}: the summary's tail must stay visible: {body}"
+        );
+        assert!(
+            !body.contains('\r'),
+            "{flavour}: a CR byte survived into the composed body: {body:?}"
+        );
+    }
+}
+
 /// Drift guard: the checklist appended to delivery PRs is the repository's
 /// managed checklist, verbatim (the marker lines in
 /// `.github/PULL_REQUEST_TEMPLATE.md`).

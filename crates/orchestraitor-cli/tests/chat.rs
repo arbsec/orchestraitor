@@ -91,7 +91,7 @@ fn threads_one_actionable() -> String {
 fn body_all_checked() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded",
+            "body": "- [x] <!-- orc:issue --> evidence recorded",
         }}}
     })
     .to_string()

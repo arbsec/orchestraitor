@@ -1,0 +1,4 @@
+# A task-item box token with NO `orc:NAME` reference is a PLAIN TASK, not a
+# managed marker: it is not a near-marker, so it never blocks and it is not
+# counted. Only the canonical marker counts.
+marker_count=1 all_checked=true unparseable=false

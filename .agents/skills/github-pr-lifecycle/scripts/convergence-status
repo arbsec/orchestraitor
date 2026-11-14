@@ -133,16 +133,22 @@ sub_read "$CHECKLIST_JSON" markers_present "reconcile-checklist"
 MARKERS_PRESENT="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" marker_count "reconcile-checklist"
 MARKER_COUNT="$SUB_READ_VALUE"
-# A body whose fenced scope is INDETERMINATE cannot be read at all: an opener
-# indented 1-3 spaces may belong to a list item or a block quote, and the
-# scanner has no container model (#809). Fail closed — never guess. The
-# condition is STICKY: it applies whether or not the region closes, because a
-# closer can end the region earlier for the renderer than for the scan, so a
-# swallowed marker can still be visible to a human.
+# A body whose checklist reading is INDETERMINATE cannot be read at all. Two
+# constructs make it so: an opener indented 1-3 spaces (it may belong to a list
+# item or a block quote, and the scanner has no container model — #809) and a
+# NEAR-MARKER (a line that presents a managed marker but not in the canonical
+# form, so the gate cannot tell what it asserts — #799 R1). Fail closed — never
+# guess. The indented-opener condition is STICKY: it applies whether or not the
+# region closes, because a closer can end the region earlier for the renderer
+# than for the scan, so a swallowed marker can still be visible to a human.
 sub_read "$CHECKLIST_JSON" unparseable "reconcile-checklist"
 CHECKLIST_UNPARSEABLE="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" unparseable_line "reconcile-checklist" yes
 CHECKLIST_UNPARSEABLE_LINE="$SUB_READ_VALUE"
+# The construct that made the reading indeterminate. Nullable: a sibling copy
+# that predates the field leaves it empty and the generic message is used.
+sub_read "$CHECKLIST_JSON" unparseable_construct "reconcile-checklist" yes
+CHECKLIST_UNPARSEABLE_CONSTRUCT="$SUB_READ_VALUE"
 
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
@@ -173,11 +179,13 @@ REASONS=""
 # Two distinct checklist failures: a marker-less body is MISSING evidence
 # (`checklist_markers_missing`) and a marker-bearing body with unticked boxes is
 # `unchecked_items(N)` — never collapsed into one code (#788). An INDETERMINATE
-# fenced scope is a third, distinct code (`checklist_unparseable`): the scan
-# cannot say what is code, so no checklist reading is trusted (#809). There is NO
-# author-granted opt-out: a body that carries no marker always blocks, because
-# the author cannot grant themselves the exemption (an exemption needs an
-# authority they lack — arbsec/orchestraitor#801).
+# checklist reading is a third, distinct code (`checklist_unparseable`): a
+# fence opener indented 1-3 spaces (#809) or a NEAR-MARKER — a line that
+# presents a managed marker but not in the canonical form, so the scan cannot
+# say what it asserts (#799 R1). There is NO author-granted opt-out: a body that
+# carries no marker always blocks, because the author cannot grant themselves
+# the exemption (an exemption needs an authority they lack —
+# arbsec/orchestraitor#801).
 if [ "$CHECKLIST_UNPARSEABLE" = "true" ]; then
   REASONS="${REASONS}checklist_unparseable, "
 elif [ "$MARKERS_PRESENT" = "true" ]; then
@@ -192,10 +200,17 @@ REASONS="${REASONS%, }"
 MERGEABLE="true"
 [ -n "$REASONS" ] && MERGEABLE="false"
 
-# The explanatory line for an indeterminate fence scope: it NAMES the construct
-# and the fix. Printed on stdout in text mode and on stderr in JSON mode (the
-# JSON stdout stays a pure typed payload).
-UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}), closed or not; its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence opener to column 0."
+# The explanatory line for an indeterminate checklist reading: it NAMES the
+# construct and the fix. Printed on stdout in text mode and on stderr in JSON
+# mode (the JSON stdout stays a pure typed payload).
+case "$CHECKLIST_UNPARSEABLE_CONSTRUCT" in
+  near_marker)
+    UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body carries a NEAR-MARKER on line ${CHECKLIST_UNPARSEABLE_LINE:-?} — a line that presents a managed marker (a task-item box token plus an orc:NAME reference) but not in the canonical form, so the gate cannot tell what it asserts. Fix: write the marker canonically, as \`- [x] <!-- orc:NAME -->\` — exactly one ASCII space between every token."
+    ;;
+  *)
+    UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}), closed or not; its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence opener to column 0."
+    ;;
+esac
 if [ "$CHECKLIST_UNPARSEABLE" = "true" ] && [ "$OPT_JSON" = true ]; then
   echo "$UNPARSEABLE_EXPLANATION" >&2
 fi

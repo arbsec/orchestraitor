@@ -14,23 +14,41 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 ### Changed
 
 - **`orc pr status` / `pr.status`**: the §9.48 checklist verdict now FAILS
-  CLOSED when the PR body's fenced scope is indeterminate — a fence OPENER
+  CLOSED when the PR body's checklist reading is indeterminate — a fence OPENER
   indented 1-3 spaces may belong to a list item or a block quote, and the
   scanner has no container model, so the checklist is not read and the verdict
-  blocks with the NEW reason code `checklist_unparseable`
+  blocks with the reason code `checklist_unparseable`
   (`checklist.unparseable` + `checklist.unparseable_line` in the JSON; the one
-  remedy is to dedent the fence opener to column 0 — closing the region does
-  NOT clear the condition, because a closer can end the region earlier for the
-  renderer than for the scan). The same scan now models HTML comments
-  (`<!--` … `-->`): a comment opens only when `<!--` is the line's first
-  non-whitespace content (a `<!--` inside an inline code span is literal text,
-  so it no longer hides the rest of the body), it closes at the first line
-  carrying `-->`, and an unclosed comment runs to the end of the body. A marker
-  inside a comment is not evidence, a fence inside a comment opens nothing, and
-  line endings are normalised once (CommonMark §2.1: lone CR and CRLF both
-  become LF) so both engines agree on every body. Delivery PRs are unaffected:
-  the delivery lane neutralises an untrusted summary's indented fence openers
-  and line-start comments before composing the body.
+  remedy for that construct is to dedent the fence opener to column 0 — closing
+  the region does NOT clear the condition, because a closer can end the region
+  earlier for the renderer than for the scan). The same scan now models HTML
+  comments (`<!--` … `-->`): a comment opens only when `<!--` is the line's
+  first non-whitespace content (a `<!--` inside an inline code span is literal
+  text, so it no longer hides the rest of the body), it closes at the first
+  line carrying `-->`, and an unclosed comment runs to the end of the body. A
+  marker inside a comment is not evidence, a fence inside a comment opens
+  nothing, and line endings are normalised once (CommonMark §2.1: lone CR and
+  CRLF both become LF) so both engines agree on every body. It also models RAW
+  HTML BLOCKS: their content is raw HTML, so a task item inside one is not a
+  checkbox and backticks inside one are not a fence — a fence opener inside an
+  HTML block opens nothing and therefore cannot hide anything outside it.
+- **The managed checklist marker has ONE canonical form.** A managed marker is
+  `- [BOX] <!-- orc:NAME -->` with exactly one ASCII space between every
+  token, a box of `x`, `X` or a single space, and one of the nine managed
+  names. A line that presents a managed marker but is not in that form — a
+  non-breaking space, a tab, two spaces, a nonsense box character, a
+  block-quote prefix — is a NEAR-MARKER: the gate cannot tell what the author
+  asserted, so the checklist is not read, `all_checked` is false, and the
+  verdict blocks with `checklist_unparseable` instead of silently ignoring the
+  line. Prose that merely mentions a managed name, and a plain task with no
+  managed name, are not near-markers and never block. There is still NO
+  author-granted opt-out: a bare `<!-- orc:none -->` grants nothing.
+- **Delivery PRs**: the delivery lane now normalises the untrusted summary's
+  line endings (lone CR and CRLF both become LF) before neutralising it, and
+  neutralises an untrusted summary's indented fence openers and line-start
+  comments, so a summary using lone-CR line endings can neither make the
+  composed PR permanently unconvergeable nor hide the summary's own tail from
+  the reviewer.
 
 ### Added
 

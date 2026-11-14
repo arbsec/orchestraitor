@@ -1,0 +1,5 @@
+# A managed marker behind a block-quote prefix is not the canonical form: the
+# indent class is SPACES and TABS, so `>` makes the line a NEAR-MARKER. The
+# reading is INDETERMINATE and the verdict blocks with
+# `checklist_unparseable`.
+marker_count=1 all_checked=false unparseable=true unparseable_construct=near_marker

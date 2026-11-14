@@ -8,4 +8,4 @@
 # (corpus case 48 is the swallowed-item shape this rule protects). Only the
 # marker after the region is visible, and it is ticked. A 0-space opener is
 # modelled exactly as before, and 4+ spaces is literal indented code.
-marker_count=1 all_checked=false
+marker_count=1 all_checked=false unparseable=true unparseable_construct=indented_fence_opener

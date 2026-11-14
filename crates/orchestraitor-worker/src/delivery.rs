@@ -182,9 +182,20 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 /// After this, the only region the summary can open is a COLUMN-0 fence: that
 /// one is determinate, and because the trusted checklist leads the body it can
 /// never enclose it.
+///
+/// The summary's LINE ENDINGS are normalised first (`CommonMark` §2.1): every
+/// `\r\n` becomes `\n` and every remaining lone `\r` becomes `\n`. Both
+/// production scanners normalise the same way before they read a body, so a
+/// summary that uses lone-CR line endings must be seen by the neutraliser as
+/// the same LINES the scanners will see. Splitting on `\n` alone left a
+/// lone-CR summary as ONE line: its indented fence opener and its line-start
+/// `<!--` survived neutralisation, and the composed PR then reported
+/// `checklist_unparseable` (permanently unconvergeable) or hid the summary's
+/// tail from the reviewer.
 fn neutralise_summary(summary: &str) -> String {
-    let mut out = String::with_capacity(summary.len());
-    for line in summary.split_inclusive('\n') {
+    let normalized = summary.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(normalized.len());
+    for line in normalized.split_inclusive('\n') {
         // Keep the terminator out of the tests, then put it back: an opener is
         // recognised from the line's content alone.
         let (content, newline) = match line.strip_suffix('\n') {

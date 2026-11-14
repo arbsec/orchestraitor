@@ -250,6 +250,64 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 - [ ] <!-- orc:review --> All noteworthy findings are resolved
 - [ ] <!-- orc:threads --> All actionable review threads are resolved'
 
+# --- The managed marker grammar (arbsec/orchestraitor#799) --------------------
+# A managed marker line has ONE canonical form:
+#
+#     [ \t]*- [BOX] <!-- orc:NAME --> <description>
+#
+#   - the indent is SPACES and TABS (`[[:blank:]]`) and nothing else — never a
+#     whitespace CLASS that one engine reads as ASCII and the other as Unicode;
+#   - every separator is EXACTLY ONE ASCII SPACE: between `-` and `[`, between
+#     `]` and `<!--`, and inside `<!-- orc:NAME -->` (one space after `<!--`,
+#     one before `-->`);
+#   - `<BOX>` is exactly one of `x`, `X` or a single SPACE;
+#   - `<NAME>` is one of the nine MANAGED names below.
+#
+# Anything else that presents itself as a managed marker is a NEAR-MARKER (see
+# `orc_lib_near_marker_line`): the author clearly presented a managed marker
+# and the gate cannot tell what they asserted, so the reading is REFUSED
+# (indeterminate) rather than guessed.
+#
+# The nine names are derived from the SINGLE existing list — the fallback
+# above, which the drift guard in `test-reconcile-checklist` asserts equals
+# `.github/PULL_REQUEST_TEMPLATE.md` verbatim. There is no second copy: the
+# canonical form and the near-marker rule both read these names.
+ORC_LIB_MANAGED_NAMES=""
+ORC_LIB_MANAGED_NAMES_RE=""
+ORC_LIB_FALLBACK_MARKER_RE='<!-- orc:([A-Za-z0-9_-]+) -->'
+while IFS= read -r _orc_fallback_line; do
+  if [[ "$_orc_fallback_line" =~ $ORC_LIB_FALLBACK_MARKER_RE ]]; then
+    case " $ORC_LIB_MANAGED_NAMES " in
+      *" ${BASH_REMATCH[1]} "*) ;;
+      *)
+        ORC_LIB_MANAGED_NAMES="${ORC_LIB_MANAGED_NAMES:+$ORC_LIB_MANAGED_NAMES }${BASH_REMATCH[1]}"
+        ORC_LIB_MANAGED_NAMES_RE="${ORC_LIB_MANAGED_NAMES_RE:+$ORC_LIB_MANAGED_NAMES_RE|}${BASH_REMATCH[1]}"
+        ;;
+    esac
+  fi
+done <<< "$ORC_LIB_CHECKLIST_FALLBACK"
+unset _orc_fallback_line ORC_LIB_FALLBACK_MARKER_RE
+# The CANONICAL managed-marker form. Written so that POSIX ERE (awk) and PCRE
+# (grep -P) read it IDENTICALLY: `[[]` and `[]]` are the portable spellings of
+# a literal `[` and `]`, and `[[:blank:]]` is space+tab and nothing else.
+ORC_LIB_CANONICAL_MARKER_RE="^[[:blank:]]*- [[](x|X|[ ])[]] <!-- orc:(${ORC_LIB_MANAGED_NAMES_RE}) -->"
+# A task-item BOX TOKEN: `[` + exactly one character + `]`. A near-marker needs
+# one of these — a line that only mentions `orc:NAME` is prose, not a marker.
+ORC_LIB_BOX_TOKEN_RE='[[][^]][]]'
+
+# The scan runs in a UTF-8 locale so its CHARACTER semantics match the Rust
+# engine's, whatever the ambient locale is: the box-token test is a CHARACTER
+# test, and in the C locale a regex matches a single BYTE — so a multi-byte
+# character inside the brackets would be a box token in one engine and not in
+# the other. The probe is FUNCTIONAL (it asks awk whether it sees one
+# character), so a machine without `C.UTF-8` falls back to the ambient locale
+# instead of failing the scan. Rust has no locale, so the two agree on every
+# machine that can decode UTF-8.
+ORC_LIB_SCAN_LOCALE=""
+if printf 'x' | LC_ALL=C.UTF-8 awk 'BEGIN { exit (length("é") == 1) ? 0 : 1 }' 2>/dev/null; then
+  ORC_LIB_SCAN_LOCALE="C.UTF-8"
+fi
+
 # --- Fenced code regions (arbsec/orchestraitor#788) ---------------------------
 # A managed checklist marker inside a FENCED code region is an EXAMPLE, not
 # evidence: the marker scan must ignore it, or a body that merely SHOWS the
@@ -307,18 +365,38 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #     opener is reported by `orc_lib_fence_unparseable_line` and every checklist
 #     verdict BLOCKS with `checklist_unparseable` rather than guessing
 #     (arbsec/orchestraitor#809 tracks real container tracking). The remedy is
-#     to DEDENT the opener to column 0.
+#     to DEDENT the opener to column 0;
+#   - a RAW HTML BLOCK is an invisible region too: CommonMark passes its
+#     content through as raw HTML, so a task item inside it is not a checkbox
+#     and backticks inside it are not a fence. The block OPENS on a line whose
+#     first content is `<` followed by an ASCII letter (raw HTML block types
+#     1-6; the `<!--` comment case is modelled separately above). It CLOSES at
+#     the first SUBSEQUENT line containing `</tag>` (any case) for the type-1
+#     tags `pre`, `script`, `style` and `textarea`, and at the next BLANK line
+#     for every other tag; an unclosed block runs to the end of the body. Every
+#     line inside the block — including the opener and the closer — is
+#     invisible, and a fence opener inside it opens NOTHING (so it can never
+#     hide anything outside the block);
+#   - a NEAR-MARKER is a line that is not canonical but carries BOTH a task-item
+#     box token (`[` + exactly one character + `]`) AND a reference to one of
+#     the nine managed names (`orc:NAME`). The author presented a managed
+#     marker and the gate cannot tell what they asserted, so the line is
+#     INDETERMINATE: `orc_lib_near_marker_line` reports it and the verdict
+#     BLOCKS with `checklist_unparseable`. A line that only mentions `orc:NAME`
+#     (prose) and a line that carries only a box token (a plain task) are NOT
+#     near-markers and are ignored — prose must never block.
 #
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
-# every fenced region and every HTML comment removed).
+# every fenced region, every HTML comment and every HTML block removed).
 #
-# ONE state machine, three modes: `orc_lib__fence_scan` owns the rules above,
+# ONE state machine, four modes: `orc_lib__fence_scan` owns the rules above,
 # and every caller drives it. A second, separately written scanner is exactly
 # how the shell and Rust engines drifted before (arbsec/orchestraitor#788).
 orc_lib_strip_fenced_code() { orc_lib__fence_scan strip; }
 
-# The scan state at the END of the body: `closed`, or `open <char> <len>` for a
-# fence that never closed. Reads the body on STDIN.
+# The scan state at the END of the body: `closed`, `open <char> <len>` for a
+# fence that never closed, or `open html <tag>` for a raw HTML block that never
+# closed. Reads the body on STDIN.
 orc_lib_fence_state() { orc_lib__fence_scan state; }
 
 # The 1-based line number of the FIRST fence opener indented 1-3 spaces, when
@@ -330,6 +408,16 @@ orc_lib_fence_state() { orc_lib__fence_scan state; }
 # STDIN.
 orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
 
+# The 1-based line number of the FIRST NEAR-MARKER — a line that is not the
+# canonical managed-marker form but carries BOTH a task-item box token (`[` +
+# exactly one character + `]`) AND a reference to one of the nine managed
+# names (`orc:NAME`). The author presented a managed marker and the gate
+# cannot tell what they asserted, so the reading is INDETERMINATE and the
+# verdict BLOCKS with `checklist_unparseable` (arbsec/orchestraitor#799). A
+# line that only mentions `orc:NAME` (prose) or carries only a box token (a
+# plain task) is NOT a near-marker and never blocks. Reads the body on STDIN.
+orc_lib_near_marker_line() { orc_lib__fence_scan near-marker; }
+
 # CommonMark §2.1 line endings, normalised ONCE before any scan: replace every
 # `\r\n` with `\n`, then every remaining lone `\r` with `\n`. Reading the body
 # on STDIN, this prints it with no CR byte left, so every later rule is written
@@ -337,13 +425,17 @@ orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
 # strip; the scanners used to strip a second CR by hand and disagreed on
 # `` ```\r\r\n `` (arbsec/orchestraitor#799 gen-7).
 orc_lib_normalize_line_endings() {
-  awk '{ line = $0; gsub(/\r$/, "", line); gsub(/\r/, "\n", line); print line }'
+  LC_ALL="$ORC_LIB_SCAN_LOCALE" awk '{ line = $0; gsub(/\r$/, "", line); gsub(/\r/, "\n", line); print line }'
 }
 
-# Usage: orc_lib__fence_scan <strip|state|indeterminate>   (stdin = body)
+# Usage: orc_lib__fence_scan <strip|state|indeterminate|near-marker>  (stdin = body)
 orc_lib__fence_scan() {
   orc_lib_normalize_line_endings |
-  awk -v mode="${1:?fence scan mode required}" '
+  LC_ALL="$ORC_LIB_SCAN_LOCALE" \
+  awk -v mode="${1:?fence scan mode required}" \
+      -v names="$ORC_LIB_MANAGED_NAMES" \
+      -v canon="$ORC_LIB_CANONICAL_MARKER_RE" \
+      -v boxtok="$ORC_LIB_BOX_TOKEN_RE" '
     # The part of the line a fence may open or close at. CommonMark/GFM allow
     # at most THREE leading spaces before a top-level fence; four or more — or
     # a tab, which reaches the 4-column tab stop — is an INDENTED code block,
@@ -354,7 +446,9 @@ orc_lib__fence_scan() {
     #
     # The SAME view decides an HTML comment opener: `<!--` opens a comment only
     # when it is the FIRST non-whitespace content of the line (#799 gen-9), so a
-    # `<!--` inside an inline code span is literal text and opens nothing.
+    # `<!--` inside an inline code span is literal text and opens nothing. It
+    # also decides an HTML BLOCK opener: a raw HTML block starts at a line
+    # whose first content is `<` followed by an ASCII letter (#799 R2).
     function fence_view(line,   n, rest) {
       n = 0
       while (substr(line, n + 1, 1) == " ") n++
@@ -380,8 +474,41 @@ orc_lib__fence_scan() {
     function closes_here(s, n) {
       return substr(s, n + 1) ~ /^[ \t]*$/
     }
+    # The NEAR-MARKER test (#799 R1). A line that is not the CANONICAL managed
+    # marker form but carries BOTH a task-item box token and a reference to one
+    # of the nine managed names: the author presented a managed marker and the
+    # gate cannot tell what they asserted, so the reading is INDETERMINATE.
+    #
+    # The reference test is a plain substring search for `orc:NAME` — no
+    # whitespace class is involved — and the canonical test is an exact ASCII
+    # comparison. There is no whitespace class left for the two engines to
+    # disagree about.
+    function is_near_marker(line,   i) {
+      if (line ~ canon) return 0
+      if (line !~ boxtok) return 0
+      for (i = 1; i <= n_names; i++) {
+        if (index(line, "orc:" name_list[i]) > 0) return 1
+      }
+      return 0
+    }
+    BEGIN {
+      n_names = split(names, name_list, " ")
+    }
     {
       s = fence_view($0)
+      if (in_html) {
+        # Inside a raw HTML BLOCK: the content is passed through as raw HTML,
+        # so it is not marker evidence and a fence opener inside it opens
+        # NOTHING — it can never hide anything outside the block. The block
+        # closes at the first SUBSEQUENT line carrying `</tag>` (any case) for
+        # the type-1 tags, and at the next blank line for every other tag.
+        if (html_tag != "") {
+          if (index(tolower($0), "</" html_tag ">") > 0) in_html = 0
+        } else {
+          if ($0 ~ /^[[:blank:]]*$/) in_html = 0
+        }
+        next
+      }
       if (fence_char != "") {
         # Inside a region: only the SAME character, repeated at least as many
         # times as the opener, with nothing but a blank tail after it, closes
@@ -414,6 +541,21 @@ orc_lib__fence_scan() {
         if (index(substr(s, 5), "-->") == 0) in_comment = 1
         next
       }
+      # A RAW HTML BLOCK opens at a line whose first content is `<` followed by
+      # an ASCII letter (CommonMark raw HTML block types 1-6). Its content is
+      # invisible: not marker evidence, and a fence opener inside it opens
+      # nothing.
+      if (s ~ /^<[A-Za-z]/) {
+        tag = tolower(substr(s, 2))
+        if (match(tag, /^[a-z]+/)) tag = substr(tag, 1, RLENGTH)
+        else tag = ""
+        in_html = 1
+        html_tag = ""
+        if (tag == "pre" || tag == "script" || tag == "style" || tag == "textarea") {
+          html_tag = tag
+        }
+        next
+      }
       if (s != "") {
         c = substr(s, 1, 1)
         if (c == "`" || c == "~") {
@@ -439,34 +581,35 @@ orc_lib__fence_scan() {
           }
         }
       }
+      # A VISIBLE line: it is evidence, and it may be a NEAR-MARKER.
+      if (near_marker_line == 0 && is_near_marker($0)) near_marker_line = NR
       if (mode == "strip") print $0
     }
     END {
       if (mode == "state") {
         if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
+        else if (in_html) printf "open html %s\n", html_tag
         else print "closed"
       } else if (mode == "indeterminate" && indeterminate_line > 0) {
         print indeterminate_line
+      } else if (mode == "near-marker" && near_marker_line > 0) {
+        print near_marker_line
       }
     }
   '
 }
 
 # True (exit 0) when the text is already CHECKLIST-BEARING: at least one
-# `- [ ] <!-- orc:NAME -->` item line OUTSIDE any fenced code region. Such a
-# body is never rewritten: author content is evidence, not something a helper
-# edits.
+# CANONICAL managed marker line OUTSIDE any fenced code region, HTML comment or
+# HTML block. Such a body is never rewritten: author content is evidence, not
+# something a helper edits.
 #
-# The marker line must carry a REAL box character — a space (unchecked), `x`
-# or `X` (checked) — and nothing else: any other character is not a checklist
-# line at all (the Rust engine accepts exactly the same three).
-#
-# Only SPACE and TAB indent a checklist item — Rust trims
-# `trim_start_matches([' ', '\t'])` and nothing else. The leading class is
-# deliberately not PCRE `\s`, which also matches a vertical tab: that would
-# count a `\v`-led marker line the Rust engine skips (#799 F18). The `\s*`
-# between the dash and `[` is a SEPARATE, still-open divergence
-# (arbsec/orchestraitor#807) and is not narrowed here.
+# The marker line must be in the CANONICAL form — exactly one ASCII space
+# between every token, a box character of `x`, `X` or a single space, and one of
+# the nine managed names (see `ORC_LIB_CANONICAL_MARKER_RE`). A NEAR-MARKER is
+# not checklist-bearing: the gate cannot tell what such a line asserted, so it
+# is refused rather than counted, and a body that carries only near-markers
+# still receives the real checklist.
 #
 # There is NO author-granted opt-out: a body that carries no marker is
 # missing evidence and fails closed with `checklist_markers_missing`
@@ -476,7 +619,7 @@ orc_lib_has_checklist() {
   local text="$1" stripped
   stripped="$(printf '%s\n' "$text" | orc_lib_strip_fenced_code)"
   printf '%s\n' "$stripped" \
-    | grep -cP '^[ \t]*-\s*\[[xX ]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->' >/dev/null
+    | grep -cP "$ORC_LIB_CANONICAL_MARKER_RE" >/dev/null
 }
 
 # Prints the managed checklist (nine UNCHECKED markers). Reads
@@ -519,6 +662,16 @@ orc_lib_ensure_checklist_markers() {
   if [ -n "$body" ]; then
     fence_state="$(printf '%s\n' "$body" | orc_lib_fence_state)"
     if [ "$fence_state" != "closed" ]; then
+      if [ "${fence_state#open html }" != "$fence_state" ]; then
+        # An unclosed RAW HTML BLOCK swallows everything after it, so a
+        # checklist appended there would be invisible to every marker scan —
+        # the same failure the unclosed-fence refusal exists to stop.
+        fence_name="${fence_state#open html }"
+        echo "error: refusing to append the managed merge checklist: the PR body ends inside an unclosed HTML block (<$fence_name>)" >&2
+        echo "  a checklist appended there would render as raw HTML and be ignored by the merge gate (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
+        echo "  fix: close the HTML block before adding the checklist — add a line carrying </$fence_name> — then rerun this command" >&2
+        exit "$ORC_ERR_CONFIG"
+      fi
       fence_char="${fence_state#open }"
       fence_len="${fence_char#* }"
       fence_char="${fence_char%% *}"

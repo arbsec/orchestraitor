@@ -1,0 +1,6 @@
+# A box character other than `x`, `X` or a single space is not the
+# canonical form. The line still carries a task-item box token AND an
+# `orc:NAME` reference, so it is a NEAR-MARKER: a malformed managed marker is
+# something the gate must not silently ignore. The reading is INDETERMINATE
+# and the verdict blocks with `checklist_unparseable`.
+marker_count=1 all_checked=false unparseable=true unparseable_construct=near_marker

@@ -1,0 +1,6 @@
+# A managed marker's own `-->` CLOSES an open HTML comment (CommonMark ends
+# a type-2 HTML block at the line containing `-->`), and the closing line is
+# itself invisible — so the marker on it is not evidence, and the marker AFTER
+# it is visible again. This is the SEPARATE case from corpus case 45, which
+# pins a comment that is never closed at all.
+marker_count=1 all_checked=true unparseable=false

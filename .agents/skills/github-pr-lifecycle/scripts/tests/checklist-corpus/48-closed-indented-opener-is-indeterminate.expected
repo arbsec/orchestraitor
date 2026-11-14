@@ -7,4 +7,4 @@
 # The 2-space opener is therefore refused (`checklist_unparseable`) and
 # `all_checked` is false, closed or not (corpus case 18 is the symmetric
 # 3-space shape; case 47 is the unclosed one).
-marker_count=1 all_checked=false
+marker_count=1 all_checked=false unparseable=true unparseable_construct=indented_fence_opener

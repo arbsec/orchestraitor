@@ -358,8 +358,13 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   state"). A marker after a closed fence counts. An HTML comment
                   opens only when `<!--` is the line's first non-whitespace
                   content (so a `<!--` inside an inline code span is literal
-                  text) and closes at the first line carrying `-->`. A fence
-                  opener indented 1-3 spaces makes the checklist reading
+                  text) and closes at the first line carrying `-->`; a raw HTML
+                  block is an invisible region too, so a fence or a marker inside
+                  one is not state. A managed marker has ONE canonical form —
+                  `- [BOX] <!-- orc:NAME -->` with exactly one ASCII space
+                  between every token — and a line that presents a managed
+                  marker but not in that form (a near-marker) is INDETERMINATE.
+                  A fence opener indented 1-3 spaces makes the checklist reading
                   INDETERMINATE — closed or not — so the verdict blocks with
                   `checklist_unparseable`; the one remedy is to dedent the fence
                   opener to column 0.

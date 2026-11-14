@@ -162,6 +162,26 @@ run merge-gate 7 --repo test-org/repo
 assert 'current: merge-gate exits 0' 0 "$RC"
 assert 'current: merge command was issued once' 1 "$(count "$GH_LOG" 'pr merge')"
 
+# --- (c2) an INDETERMINATE checklist blocks the merge before any merge --------
+# arbsec/orchestraitor#799 R1: a body that carries a NEAR-MARKER (a line that
+# presents a managed marker but not in the canonical form) cannot be read, so
+# the verdict is not mergeable and `merge-gate` must stop BEFORE it constructs
+# a merge call.
+echo "--- (c2) current copy: an indeterminate checklist blocks the merge ---"
+cat > "$TMP/repo/scripts/reconcile-checklist" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"markers_present":true,"marker_count":9,"all_checked":true,"unparseable":true,"unparseable_line":10,"unparseable_construct":"near_marker","unchecked":[]}'
+STUB
+run merge-gate 7 --repo test-org/repo
+assert 'near-marker: merge-gate exits 5 (blocked)' 5 "$RC"
+assert 'near-marker: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
+assert 'near-marker: the gate names the indeterminate reason' 1 \
+  "$(count "$TMP/stderr" 'checklist_unparseable')"
+cat > "$TMP/repo/scripts/reconcile-checklist" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unparseable":false,"unchecked":[]}'
+STUB
+
 # --- fixture: branches carrying policy that is NOT the base's ------------------
 git -C "$TMP/repo" switch -q -c stale-classifier
 # The pre-#707 policy shape: no bot-author exemption -> CodeRabbit SKIPPED is a

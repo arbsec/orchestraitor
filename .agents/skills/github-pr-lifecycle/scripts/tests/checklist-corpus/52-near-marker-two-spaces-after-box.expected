@@ -1,0 +1,4 @@
+# TWO spaces after the box are not the canonical form (exactly one ASCII
+# space). The line is a NEAR-MARKER, so the reading is INDETERMINATE and the
+# verdict blocks with `checklist_unparseable`.
+marker_count=1 all_checked=false unparseable=true unparseable_construct=near_marker

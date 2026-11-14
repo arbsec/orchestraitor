@@ -645,7 +645,7 @@ pr.status <N> -> {
                                      # excerpts are size-capped (see below), never full bodies
   checklist: { items: [ { marker, checked, description } ],
                marker_count, markers_present, all_checked, unchecked_count,
-               unparseable, unparseable_line },
+               unparseable, unparseable_line, unparseable_construct },
                                     # `all_checked` is true only when at least one marker exists AND
                                     # every marker is checked: a marker-less body is MISSING evidence,
                                     # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
@@ -653,10 +653,35 @@ pr.status <N> -> {
                                     # There is NO author-granted opt-out: the body cannot waive
                                     # itself, so a marker-less body always blocks with
                                     # `checklist_markers_missing` (arbsec/orchestraitor#801).
-                                    # Markers inside a fenced code region (3+ backticks or 3+
-                                    # tildes) or an HTML comment (`<!--` ... `-->`) are EXAMPLES,
-                                    # not checklist items: the whole region is excluded from the
-                                    # scan (arbsec/orchestraitor#788). A comment opens ONLY when
+                                    # A managed marker has ONE CANONICAL form:
+                                    # `[ \t]*- [BOX] <!-- orc:NAME --> <description>`, where
+                                    # every separator is EXACTLY one ASCII space (between
+                                    # `-` and `[`, between `]` and `<!--`, and inside
+                                    # `<!-- orc:NAME -->`), `<BOX>` is exactly one of `x`,
+                                    # `X` or a single space, and `<NAME>` is one of the
+                                    # nine managed names. The grammar contains NO
+                                    # whitespace class: the managed-name reference is a
+                                    # plain substring search for `orc:NAME` and the
+                                    # canonical form is an exact ASCII comparison, so
+                                    # the two engines cannot disagree about it
+                                    # (arbsec/orchestraitor#799 R1).
+                                    # A line that is NOT canonical but carries BOTH a
+                                    # task-item box token (`[` + exactly one character
+                                    # + `]`) AND a reference to one of the nine
+                                    # managed names is a NEAR-MARKER: the author
+                                    # presented a managed marker and the gate cannot
+                                    # tell what they asserted, so the reading is
+                                    # REFUSED (`unparseable` is true,
+                                    # `unparseable_construct` = `near_marker`) and the
+                                    # verdict blocks with `checklist_unparseable`. A line
+                                    # that only mentions `orc:NAME` (prose) and a line
+                                    # that carries only a box token (a plain task) are
+                                    # NOT near-markers and never block.
+                                    # Markers inside a fenced code region (3+ backticks or
+                                    # 3+ tildes), an HTML comment (`<!--` ... `-->`) or a
+                                    # RAW HTML BLOCK are EXAMPLES, not checklist items:
+                                    # the whole region is excluded from the scan
+                                    # (arbsec/orchestraitor#788). A comment opens ONLY when
                                     # `<!--` is the line's first non-whitespace content (at most
                                     # three leading spaces) — a `<!--` inside an inline code span,
                                     # or after prose, is literal text and opens nothing, and a
@@ -664,7 +689,14 @@ pr.status <N> -> {
                                     # line's first content. It closes at the FIRST line carrying
                                     # `-->` (the opener line included, so `<!-- orc:none -->` is a
                                     # one-line comment), and an unclosed comment hides everything
-                                    # after it to the end of the body (fail closed). Line endings
+                                    # after it to the end of the body (fail closed). A raw HTML
+                                    # BLOCK opens on a line whose first content is `<` followed
+                                    # by an ASCII letter; it closes at the first SUBSEQUENT line
+                                    # carrying `</tag>` (any case) for the type-1 tags `pre`,
+                                    # `script`, `style` and `textarea`, and at the next BLANK
+                                    # line for every other tag — and a fence opener inside it
+                                    # opens NOTHING, so it can never hide anything outside the
+                                    # block (arbsec/orchestraitor#799 R2). Line endings
                                     # are normalised ONCE before any scan (CommonMark §2.1: a lone
                                     # CR and CRLF both become LF), so a closer followed by a
                                     # CRLF-CRLF terminator closes in both engines. A fence line
@@ -679,16 +711,22 @@ pr.status <N> -> {
                                     # CONTENT, so it leaves the region OPEN, in both engines
                                     # (arbsec/orchestraitor#799 F18). Only a space or a tab
                                     # indents a checklist item.
-                                    # `unparseable` is true when the body OPENS a fence indented
-                                    # 1-3 spaces (`unparseable_line` = the 1-based line): the
+                                    # `unparseable` is true when the checklist reading is
+                                    # INDETERMINATE: the body OPENS a fence indented 1-3
+                                    # spaces (`unparseable_line` = the 1-based line,
+                                    # `unparseable_construct` = `indented_fence_opener`), or
+                                    # the body carries a NEAR-MARKER
+                                    # (`unparseable_construct` = `near_marker`): the
                                     # container scope (top level, list item, block quote) is
                                     # indeterminate without a container model, so no checklist
                                     # reading is trusted, `all_checked` is false, and the verdict
-                                    # blocks with `checklist_unparseable` (arbsec/orchestraitor#809).
-                                    # The condition is STICKY: closing the region does not clear
-                                    # it (a closer can end the region earlier for the renderer
-                                    # than for the scan, so a swallowed marker can still be
-                                    # visible). The remedy is to dedent the opener to column 0.
+                                    # blocks with `checklist_unparseable` (arbsec/orchestraitor#809,
+                                    # arbsec/orchestraitor#799 R1).
+                                    # The indented-opener condition is STICKY: closing the
+                                    # region does not clear it (a closer can end the region
+                                    # earlier for the renderer than for the scan, so a
+                                    # swallowed marker can still be visible). The remedy is to
+                                    # dedent the opener to column 0.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

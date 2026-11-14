@@ -17,7 +17,9 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 
 use crate::cli::{ConfigPaths, PrCommand, PrStatusArgs};
-use orchestraitor_mcp::pr_status::{Engine, PrStatus, PrStatusError, PrStatusTransport};
+use orchestraitor_mcp::pr_status::{
+    Checklist, Engine, PrStatus, PrStatusError, PrStatusTransport, UnparseableConstruct,
+};
 
 /// A miette `Diagnostic` wrapper around the shared [`PrStatusError`]. The
 /// mcp crate has no miette dependency (the shared engine is transport- and
@@ -436,6 +438,41 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 /// `orc chat pr-status` view (reasons, failing/pending checks, actionable
 /// threads, checklist delta) — one renderer so the two operator views
 /// cannot drift. Provider-supplied text is sanitized before writing.
+/// Renders the INDETERMINATE checklist state: the reading is refused, so the
+/// verdict blocks with `checklist_unparseable` — and the message names the
+/// construct and its one remedy.
+///
+/// The construct is either a fence OPENER indented 1-3 spaces (CLOSED OR NOT —
+/// it may belong to a list item or a block quote) or a NEAR-MARKER (a line
+/// that presents a managed marker but not in the canonical form, so the gate
+/// cannot tell what it asserts) — arbsec/orchestraitor#809 and
+/// arbsec/orchestraitor#799 R1.
+fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
+    let line = checklist
+        .unparseable_line
+        .map_or_else(|| String::from("?"), |line| line.to_string());
+    if let Some(UnparseableConstruct::NearMarker) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a near-marker on line {line}: the line presents a managed marker (a task-item box token plus an orc:NAME reference) but not in the canonical form, so the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    writeln!(
+        writer,
+        "checklist: UNPARSEABLE — a fenced code opener is indented 1-3 spaces (line {line}), closed or not; its container scope cannot be determined, so the checklist is not read (checklist_unparseable)"
+    )
+    .into_diagnostic()?;
+    writeln!(writer, "  fix: dedent the fence opener to column 0").into_diagnostic()?;
+    Ok(())
+}
+
 pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus) -> Result<()> {
     if verdict.convergence.reasons.is_empty() {
         writeln!(writer, "reasons: (none — all gates pass)").into_diagnostic()?;
@@ -486,20 +523,7 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
     }
     if let Some(checklist) = &verdict.checklist {
         if checklist.unparseable {
-            // The fenced scope cannot be determined (an opener indented 1-3
-            // spaces — CLOSED OR NOT — may belong to a list item or a block
-            // quote), so no checklist reading is trusted: the verdict blocks
-            // with `checklist_unparseable` and names the construct and the one
-            // remedy (arbsec/orchestraitor#809).
-            writeln!(
-                writer,
-                "checklist: UNPARSEABLE — a fenced code opener is indented 1-3 spaces (line {}), closed or not; its container scope cannot be determined, so the checklist is not read (checklist_unparseable)",
-                checklist
-                    .unparseable_line
-                    .map_or_else(|| String::from("?"), |line| line.to_string())
-            )
-            .into_diagnostic()?;
-            writeln!(writer, "  fix: dedent the fence opener to column 0").into_diagnostic()?;
+            write_unparseable_checklist(writer, checklist)?;
         } else if !checklist.markers_present {
             // A marker-less body is missing evidence, never a complete checklist
             // (arbsec/orchestraitor#788) — name the state, not "0 unchecked".

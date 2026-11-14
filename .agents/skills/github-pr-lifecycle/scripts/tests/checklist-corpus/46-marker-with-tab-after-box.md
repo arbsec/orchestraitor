@@ -1,1 +1,1 @@
-- [ ]	<!-- orc:tests --> a tab after the box is still a checklist item
+- [ ]	<!-- orc:tests --> a tab after the box is not the canonical form

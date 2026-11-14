@@ -1,0 +1,4 @@
+# A marker inside a raw HTML BLOCK renders invisible, so it is not evidence
+# at all: only the marker after the block counts. A block type-1 element ends
+# at the first subsequent line carrying </pre>.
+marker_count=1 all_checked=true unparseable=false

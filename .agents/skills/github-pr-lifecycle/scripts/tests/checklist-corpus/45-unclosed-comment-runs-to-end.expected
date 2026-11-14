@@ -1,5 +1,7 @@
-# An UNCLOSED comment runs to the end of the body (fail closed): the marker
-# inside it is invisible evidence, so only the marker before it counts. An
-# engine that let a stray `<!--` open a comment it never closed would hide the
-# rest of the body.
-marker_count=1 all_checked=true
+# An UNCLOSED comment runs to the end of the body (fail closed): everything
+# after the opener is invisible evidence, so only the marker before it counts.
+# The comment carries NO `-->` at all — the marker-shaped line inside it is
+# incomplete — so this case pins the unclosed-to-EOF rule itself; the old
+# fixture's final marker carried `-->`, which CLOSED the comment and made the
+# case indistinguishable from an implementation that closes on that line.
+marker_count=1 all_checked=true unparseable=false

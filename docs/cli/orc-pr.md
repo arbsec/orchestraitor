@@ -86,6 +86,24 @@ is false, and the verdict blocks with the distinct reason
 closing the region does not clear it — and the one remedy is to dedent the fence
 opener to column 0.
 
+A managed marker has ONE canonical form: `[ \t]*- [BOX] <!-- orc:NAME -->`, where
+every separator is EXACTLY one ASCII space (between `-` and `[`, between `]` and
+`<!--`, and inside `<!-- orc:NAME -->`), `<BOX>` is exactly one of `x`, `X` or a
+single space, and `<NAME>` is one of the nine managed names (`issue`,
+`service-identity`, `tests`, `security`, `docs`, `rollback`, `checks`, `review`,
+`threads`). A line that is not canonical but carries BOTH a task-item box token
+(`[` + exactly one character + `]`) AND a reference to one of the nine managed
+names (`orc:NAME`) is a **near-marker**: the gate cannot tell what the author
+asserted, so the checklist is not read, `all_checked` is false, and the verdict
+blocks with `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that
+only mentions `orc:NAME` (prose) and a line that carries only a box token (a
+plain task) are not near-markers and never block. A RAW HTML BLOCK is an
+invisible region as well: its content is raw HTML, so a task item inside it is
+not a checkbox and backticks inside it are not a fence — the block opens on a
+line whose first content is `<` followed by an ASCII letter, closes at the first
+subsequent line carrying `</tag>` for the type-1 tags `pre`, `script`, `style`
+and `textarea` and at the next blank line for every other tag.
+
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending
 check, one line per unresolved actionable thread, and the checklist delta.

@@ -49,6 +49,19 @@
 #       opens nothing), and a fence OPENER indented 1-3 spaces is INDETERMINATE
 #       scope — the reading is refused with `checklist_unparseable` rather than
 #       guessed (#809 stays open for real container tracking)
+#   (f8) arbsec/orchestraitor#799 R1, the CANONICAL managed-marker form: a
+#       managed marker is `- [BOX] <!-- orc:NAME -->` with exactly one ASCII
+#       space between every token, a box of `x`, `X` or a single space, and one
+#       of the nine managed names. Every near-marker form (a non-breaking
+#       space, an em space, a narrow no-break space, a TAB, two spaces, a
+#       nonsense box character, a block-quote prefix) is REFUSED with
+#       `checklist_unparseable`, while PROSE that mentions `orc:NAME` and a
+#       PLAIN TASK are ignored — prose must never block. A bare
+#       `<!-- orc:none -->` still grants nothing.
+#   (f8b) arbsec/orchestraitor#799 R2, a RAW HTML BLOCK is an invisible region:
+#       a fence opener inside it opens nothing, a marker inside it is not
+#       evidence, a type-1 tag runs to its closing tag and every other tag ends
+#       at the next blank line
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
 #   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
@@ -503,29 +516,45 @@ CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
 # green on `-ge 30` with a 38-case corpus — the floor tracked nothing.
 # (48: cases 39/40 pin the CommonMark §2.1 line-ending normalisation, 41 pins
 # a marker hidden inside an HTML comment, 42-45 pin the comment rule (a `<!--`
-# is literal text unless it starts the line), 46 pins a marker whose line
-# carries a TAB after the box, and 47/48 pin the STICKY indeterminate
-# opener — 47 unclosed, 48 closed with the swallowed-but-visible item that a
-# "closing clears the condition" rule reports as a pass; 25 was re-derived for
-# the corrected comment semantics; 18 carries the #809 indeterminate
-# `all_checked=false`; 33's in-region markers are unchecked so the case
-# discriminates.)
+# is literal text unless it starts the line), 46 pins the CANONICAL marker form
+# (a TAB after the box is a NEAR-MARKER, not an ordinary item), 47/48 pin the
+# STICKY indeterminate opener — 47 unclosed, 48 closed with the
+# swallowed-but-visible item that a "closing clears the condition" rule reports
+# as a pass; 25 was re-derived for the corrected comment semantics; 18 carries
+# the #809 indeterminate `all_checked=false`; 33's in-region markers are
+# unchecked so the case discriminates. Cases 45 (re-derived: a comment with NO
+# `-->` at all) and 46 (re-derived: the TAB-after-box near-marker) changed
+# meaning under the canonical grammar. Cases 49-54 pin the six near-marker
+# forms, 55/56 pin that PROSE and a PLAIN TASK never block, 57-60 pin the raw
+# HTML BLOCK model, and 61 pins that a marker's own `-->` closes the comment.)
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=48
+CORPUS_FLOOR=61
 CORPUS_CASES=0
 for corpus_body in "$CORPUS_DIR"/*.md; do
   corpus_slug="$(basename "$corpus_body" .md)"
   corpus_expected="$CORPUS_DIR/$corpus_slug.expected"
-  corpus_count="$(sed -n 's/.*marker_count=\([0-9][0-9]*\).*/\1/p' "$corpus_expected")"
-  corpus_all="$(sed -n 's/.*all_checked=\(true\|false\).*/\1/p' "$corpus_expected")"
+  # The expectation line is the LAST line of the file; the comments above it
+  # may mention the tokens, so the extraction is anchored on that line.
+  corpus_count="$(sed -n 's/.*marker_count=\([0-9][0-9]*\).*/\1/p' "$corpus_expected" | tail -1)"
+  corpus_all="$(sed -n 's/.*all_checked=\(true\|false\).*/\1/p' "$corpus_expected" | tail -1)"
+  # `unparseable` defaults to false and the construct is asserted only when the
+  # case states it — the rule it pins.
+  corpus_unparseable="$(sed -n 's/.*unparseable=\(true\|false\).*/\1/p' "$corpus_expected" | tail -1)"
+  corpus_construct="$(sed -n 's/.*unparseable_construct=\([a-z_]*\).*/\1/p' "$corpus_expected" | tail -1)"
   export BODY_FIXTURE="$corpus_body"
   run reconcile-checklist 7 --repo test-org/repo --json
   assert "f5: $corpus_slug marker_count" "$corpus_count" \
     "$(jq -r .marker_count <<<"$OUT")"
   assert "f5: $corpus_slug all_checked" "$corpus_all" \
     "$(jq -r .all_checked <<<"$OUT")"
+  assert "f5: $corpus_slug unparseable" "${corpus_unparseable:-false}" \
+    "$(jq -r .unparseable <<<"$OUT")"
+  if [ -n "$corpus_construct" ]; then
+    assert "f5: $corpus_slug unparseable_construct" "$corpus_construct" \
+      "$(jq -r .unparseable_construct <<<"$OUT")"
+  fi
   CORPUS_CASES=$((CORPUS_CASES+1))
 done
 # Exact, not `-ge`: a deleted case must FAIL instead of silently narrowing the
@@ -770,6 +799,168 @@ assert 'f7: text mode names the construct and the fix (#809)' 1 \
 # STICKY rule (closing never clears the condition), so no message may offer it.
 assert 'f7: no message offers the ineffective "or close it" (#809)' 0 \
   "$(grep -cF 'or close it' <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f8) the CANONICAL marker form and the NEAR-MARKER rule ------------------
+# arbsec/orchestraitor#799 R1: a managed marker has ONE canonical form, and a
+# line that presents itself as one but is NOT canonical is INDETERMINATE — the
+# gate cannot tell what the author asserted, so it refuses the reading instead
+# of guessing.
+#
+# The canonical form: `[ \t]*- [BOX] <!-- orc:NAME -->` where every separator is
+# EXACTLY one ASCII space, `<BOX>` is `x`, `X` or a single space, and `<NAME>`
+# is one of the nine managed names.
+#
+# The near-marker rule: a line that is NOT canonical but carries BOTH a
+# task-item box token (`[` + exactly one character + `]`) AND a reference to
+# one of the nine managed names (`orc:NAME`) is REFUSED.
+NBSP="$(printf '\302\240')"
+EMSPACE="$(printf '\342\200\203')"
+NNBSP="$(printf '\342\200\257')"
+TABCHAR="$(printf '\011')"
+nine_canonical() { # nine_canonical <extra-line> -> the nine ticked markers + one line
+  local extra="$1" name
+  for name in issue service-identity tests security docs rollback checks review threads; do
+    printf -- '- [x] <!-- orc:%s --> linked\n' "$name"
+  done
+  printf '%s\n' "$extra"
+}
+# The canonical form is counted, ticked, and never indeterminate.
+printf -- '- [x] <!-- orc:issue --> x\n' > "$TMP/files/canon-ticked.md"
+export BODY_FIXTURE="$TMP/files/canon-ticked.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a canonical marker is counted' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: and it is ticked' true "$(jq -r '.items[0].checked' <<<"$OUT")"
+assert 'f8: and the body is determinate' false "$(jq -r .unparseable <<<"$OUT")"
+# Every near-marker form is REFUSED — the same verdict in both engines.
+for near_form in nbsp-after-box emspace-after-box nnbsp-after-box \
+  nbsp-after-comment nbsp-before-closer tab-after-box two-spaces-after-box \
+  box-char-y blockquote; do
+  case "$near_form" in
+    nbsp-after-box)       extra="- [ ]${NBSP}<!-- orc:security --> visible unchecked" ;;
+    emspace-after-box)    extra="- [ ]${EMSPACE}<!-- orc:security --> visible unchecked" ;;
+    nnbsp-after-box)      extra="- [ ]${NNBSP}<!-- orc:security --> visible unchecked" ;;
+    nbsp-after-comment)   extra="- [ ] <!--${NBSP}orc:security --> visible unchecked" ;;
+    nbsp-before-closer)   extra="- [ ] <!-- orc:security${NBSP}--> visible unchecked" ;;
+    tab-after-box)        extra="- [ ]${TABCHAR}<!-- orc:tests --> visible unchecked" ;;
+    two-spaces-after-box) extra="- [ ]  <!-- orc:tests --> visible unchecked" ;;
+    box-char-y)           extra="- [y] <!-- orc:tests --> a nonsense box" ;;
+    blockquote)           extra="> - [ ] <!-- orc:tests --> quoted task" ;;
+  esac
+  nine_canonical "$extra" > "$TMP/files/near-$near_form.md"
+  export BODY_FIXTURE="$TMP/files/near-$near_form.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f8: $near_form is indeterminate" true "$(jq -r .unparseable <<<"$OUT")"
+  assert "f8: $near_form names the construct" 'near_marker' \
+    "$(jq -r .unparseable_construct <<<"$OUT")"
+  assert "f8: $near_form is never all checked" false "$(jq -r .all_checked <<<"$OUT")"
+  assert "f8: $near_form counts only the canonical markers" 9 \
+    "$(jq -r .marker_count <<<"$OUT")"
+  run convergence-status 7 --repo test-org/repo --json
+  assert "f8: $near_form blocks the gate" 5 "$RC"
+  assert "f8: $near_form blocks with the indeterminate reason" \
+    '["checklist_unparseable"]' "$(jq -c .reasons <<<"$OUT")"
+done
+# PROSE that mentions a managed name (no box token) is never a near-marker.
+printf '%s\n' \
+  'The managed markers look like `<!-- orc:issue -->` and name one of the nine items.' \
+  '- [x] <!-- orc:tests --> a real, canonical marker' > "$TMP/files/prose-mention.md"
+export BODY_FIXTURE="$TMP/files/prose-mention.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: prose is not a marker' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: prose is not indeterminate' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f8: prose does not block' true "$(jq -r .all_checked <<<"$OUT")"
+# A PLAIN TASK (a box token, no managed name) is never a near-marker either.
+printf '%s\n' '- [ ] plain task' \
+  '- [x] <!-- orc:tests --> a real, canonical marker' > "$TMP/files/plain-task.md"
+export BODY_FIXTURE="$TMP/files/plain-task.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a plain task is not a marker' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: a plain task is not indeterminate' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f8: a plain task does not block' true "$(jq -r .all_checked <<<"$OUT")"
+# NO opt-out: a bare `<!-- orc:none -->` grants nothing — `none` is not one of
+# the nine managed names, so it is neither a canonical marker nor a
+# near-marker, and a body that carries only it has NO checklist evidence.
+printf '%s\n' '<!-- orc:none -->' > "$TMP/files/sentinel-only.md"
+export BODY_FIXTURE="$TMP/files/sentinel-only.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a bare sentinel is not a marker' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: a bare sentinel is not a near-marker' false "$(jq -r .unparseable <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f8: a bare sentinel still blocks' 5 "$RC"
+assert 'f8: with the missing-marker reason' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+# A sentinel WITH a box token is still not a managed marker (`none` is not one
+# of the nine names) and grants nothing.
+printf '%s\n' '- [x] <!-- orc:none -->' > "$TMP/files/sentinel-box.md"
+export BODY_FIXTURE="$TMP/files/sentinel-box.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a sentinel with a box token is not a marker' 0 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: a sentinel with a box token is not a near-marker' false \
+  "$(jq -r .unparseable <<<"$OUT")"
+
+# --- (f8b) a RAW HTML BLOCK is an invisible region ----------------------------
+# CommonMark passes an HTML block's content through as raw HTML: a task item
+# inside it is not a checkbox, and backticks inside it are not a fence.
+cat > "$TMP/files/html-pre-fence.md" <<'EOF'
+- [x] <!-- orc:issue --> linked
+
+<pre>
+```
+</pre>
+
+- [ ] <!-- orc:tests --> not tested
+EOF
+export BODY_FIXTURE="$TMP/files/html-pre-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a fence inside a <pre> block opens nothing' 2 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: and the unchecked item after the block is counted' 1 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
+assert 'f8: so the body is not all checked' false "$(jq -r .all_checked <<<"$OUT")"
+assert 'f8: an HTML block is not an indeterminate scope' false \
+  "$(jq -r .unparseable <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f8: so the gate blocks the <pre> body' 5 "$RC"
+assert 'f8: on the item count, not a missing marker' '["unchecked_items(1)"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+# A marker inside a <pre> block renders invisible: it is not evidence.
+cat > "$TMP/files/html-pre-marker.md" <<'EOF'
+<pre>
+- [x] <!-- orc:tests --> hidden inside the pre block
+</pre>
+- [x] <!-- orc:issue --> visible
+EOF
+export BODY_FIXTURE="$TMP/files/html-pre-marker.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a marker inside a <pre> block is not evidence' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+# A <details> block ends at the next blank line.
+cat > "$TMP/files/html-details.md" <<'EOF'
+<details>
+- [ ] <!-- orc:tests --> hidden inside the details block
+
+- [x] <!-- orc:issue --> visible after the blank line
+EOF
+export BODY_FIXTURE="$TMP/files/html-details.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a <details> block ends at the next blank line' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: and the hidden item is not counted as unchecked' 0 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
+# A <script> block runs to its closing tag.
+cat > "$TMP/files/html-script.md" <<'EOF'
+<script>
+- [ ] <!-- orc:tests --> hidden inside the script block
+</script>
+- [x] <!-- orc:issue --> visible
+EOF
+export BODY_FIXTURE="$TMP/files/html-script.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8: a <script> block runs to </script>' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8: and the hidden item is not counted as unchecked' 0 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------

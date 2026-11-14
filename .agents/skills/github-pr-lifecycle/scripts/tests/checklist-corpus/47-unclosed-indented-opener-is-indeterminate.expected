@@ -5,4 +5,4 @@
 # verdict blocks with `checklist_unparseable`). The region never closes here,
 # which is exactly the case that stays indeterminate: a CLOSED indented region
 # has a known extent and is determinate (corpus case 18).
-marker_count=1 all_checked=false
+marker_count=1 all_checked=false unparseable=true unparseable_construct=indented_fence_opener

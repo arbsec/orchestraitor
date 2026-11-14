@@ -148,7 +148,7 @@ fn threads_one_actionable() -> String {
 fn body_with_unchecked_item() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded\n- [ ] <!-- orc:docs --> docs updated",
+            "body": "- [x] <!-- orc:issue --> evidence recorded\n- [ ] <!-- orc:docs --> docs updated",
         }}}
     })
     .to_string()
@@ -157,7 +157,7 @@ fn body_with_unchecked_item() -> String {
 fn body_all_checked() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded",
+            "body": "- [x] <!-- orc:issue --> evidence recorded",
         }}}
     })
     .to_string()
@@ -169,7 +169,7 @@ fn body_all_checked() -> String {
 fn body_with_indented_fence() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded\n- Example:\n  ```\n  sample\n\n- [ ] <!-- orc:docs --> docs updated",
+            "body": "- [x] <!-- orc:issue --> evidence recorded\n- Example:\n  ```\n  sample\n\n- [ ] <!-- orc:docs --> docs updated",
         }}}
     })
     .to_string()

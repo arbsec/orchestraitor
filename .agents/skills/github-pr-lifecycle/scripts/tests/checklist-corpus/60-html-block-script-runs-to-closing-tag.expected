@@ -1,0 +1,4 @@
+# A type-1 raw HTML block (`script`, `pre`, `style`, `textarea`) runs
+# to the first subsequent line carrying its closing tag, so the marker inside
+# the <script> block is invisible and the marker after </script> is visible.
+marker_count=1 all_checked=true unparseable=false
