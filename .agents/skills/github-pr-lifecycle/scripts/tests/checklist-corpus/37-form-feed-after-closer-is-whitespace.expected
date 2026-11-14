@@ -1,0 +1,3 @@
+# F18 inverse: a form feed after the closer IS fence-tail whitespace, so the region closes and
+# the checked marker after it is real evidence (pins the FF half so the fix cannot over-narrow).
+marker_count=1 all_checked=true

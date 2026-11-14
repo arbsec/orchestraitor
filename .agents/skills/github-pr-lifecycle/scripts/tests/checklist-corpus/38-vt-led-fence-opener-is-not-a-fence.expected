@@ -1,0 +1,3 @@
+# F18: a fence opens only after 0-3 spaces, never after a vertical tab, so a VT-led fence line
+# opens nothing and the checked marker below it is a real item in BOTH engines.
+marker_count=1 all_checked=true

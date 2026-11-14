@@ -660,7 +660,11 @@ pr.status <N> -> {
                                      # fence characters are literal text and neither open nor close
                                      # a region. A backtick fence's info string may not contain a
                                      # backtick (```example``` is a closed inline span, not an
-                                     # opener); a tilde fence's info string may.
+                                     # opener); a tilde fence's info string may. A CLOSING fence
+                                     # may carry only space, tab, carriage return and form feed
+                                     # after its run: a vertical tab leaves the region OPEN, in
+                                     # both engines (arbsec/orchestraitor#799 F18). Only a space
+                                     # or a tab indents a checklist item.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

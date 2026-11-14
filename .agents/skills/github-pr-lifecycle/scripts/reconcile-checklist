@@ -34,6 +34,10 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 # The box holds a REAL checkbox character and nothing else: a space (unchecked),
 # `x` or `X` (checked). Any other character is not a checklist line — the Rust
 # engine (`parse_checklist`) accepts exactly the same three.
+# Only SPACE and TAB indent an item: the leading class is `[ \t]`, never PCRE
+# `\s` (which also matches a vertical tab the Rust engine does not trim;
+# arbsec/orchestraitor#799 F18). The `\s*` between the dash and `[` is a
+# separate open divergence tracked in arbsec/orchestraitor#807.
 # A body with zero markers is legitimate to PARSE (custom PR bodies; #394 keeps
 # "an empty parse is an empty list"), so grep matching nothing is guarded under
 # pipefail — empty means an empty checklist. An empty checklist is NOT a
@@ -49,8 +53,8 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 # them; the Rust engine applies the same rule, so creation and
 # reconciliation agree on what a marker is.
 SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
-RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -oP '^\s*-\s*\[[xX ]\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
-  CHECKED="$(printf '%s\n' "$line" | grep -oP '^\s*-\s*\[[xX ]\]' | grep -oP '(?<=\[).' || echo " ")"
+RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -oP '^[ \t]*-\s*\[[xX ]\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
+  CHECKED="$(printf '%s\n' "$line" | grep -oP '^[ \t]*-\s*\[[xX ]\]' | grep -oP '(?<=\[).' || echo " ")"
   MARKER="$(printf '%s\n' "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
   DESC="$(printf '%s\n' "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"

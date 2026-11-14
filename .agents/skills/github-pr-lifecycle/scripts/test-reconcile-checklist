@@ -874,6 +874,18 @@ An example that DOES close:
 - [ ] not a real item
 ```
 EOF
+# arbsec/orchestraitor#799 F18 (generation-5 review): gawk `[[:space:]]` carries
+# a VERTICAL TAB while Rust `char::is_ascii_whitespace` does not, so the
+# closer's tail class drifted: "```\v" CLOSED the region in the shell gate and
+# left it OPEN to the Rust engine and to GitHub. The merge-lane consequence is
+# here — the guard saw a closed fence and appended markers into one that renders
+# open — while the FF half pins the tail set so the narrowing cannot go too far.
+{ printf '## Summary\n\nAn example whose closer carries a vertical tab:\n\n'
+  printf '```markdown\n- [ ] not a real item\n```\013\n'; } \
+  > "$TMP/files/vt-tail-fence.md"
+{ printf '## Summary\n\nAn example whose closer carries a form feed:\n\n'
+  printf '```markdown\n- [ ] not a real item\n```\014\n'; } \
+  > "$TMP/files/ff-tail-fence.md"
 
 rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/unclosed-backtick.md"
@@ -895,6 +907,23 @@ rm -f "$TMP/edited-body.md"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/closed-fence-tail.md"
 assert 'k: a body ending with a CLOSED fence still appends' 0 "$RC"
 assert 'k: the closed-fence body gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+
+# F18: a vertical tab after the closer does NOT close, so the append is refused
+# exactly like an unclosed fence; a form feed after it DOES close, so the same
+# body still appends. Before the fix the VT body passed the guard and the nine
+# markers were appended inside a fence GitHub renders as open.
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/vt-tail-fence.md"
+assert 'k: a ```<VT> closer is not a closer: the append is refused' 2 "$RC"
+assert 'k: the VT refusal names the unclosed fence' 1 \
+  "$(grep -cF 'unclosed code fence' "$TMP/stderr")"
+assert 'k: the VT refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/ff-tail-fence.md"
+assert 'k: a ```<FF> closer IS a closer: the body still appends' 0 "$RC"
+assert 'k: the FF-tailed body gains the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 
 # `pr-create` shares the helper, so the same refusal applies at creation.

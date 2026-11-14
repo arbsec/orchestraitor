@@ -268,8 +268,9 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #     F17);
 #   - the region CLOSES at the first later line whose first 0-3 characters are
 #     spaces and whose next characters are the SAME fence character repeated
-#     at least as many times as the opener, with only whitespace after them (a
-#     DIFFERENT fence character never closes it);
+#     at least as many times as the opener, with nothing but fence-tail
+#     whitespace after them — space, tab, carriage return or form feed, never a
+#     vertical tab (a DIFFERENT fence character never closes it);
 #   - an unclosed fence runs to the end of the body;
 #   - every line inside the region — INCLUDING the opening and the closing
 #     fence lines — is excluded from marker scanning.
@@ -310,10 +311,15 @@ orc_lib__fence_scan() {
       s = fence_view($0)
       if (fence_char != "") {
         # Inside a region: only the SAME character, repeated at least as many
-        # times as the opener, with nothing but whitespace after it, closes it.
+        # times as the opener, with nothing but FENCE-TAIL whitespace after it,
+        # closes it. That set is space, tab, carriage return and form feed —
+        # exactly what Rust `char::is_ascii_whitespace` accepts. It is NOT the
+        # POSIX `[[:space:]]` class, which also carries VERTICAL TAB: gawk
+        # would close on "```\v" while GitHub renders the fence as still open,
+        # so the shell gate counted markers a human sees as code (#799 F18).
         if (s != "" && substr(s, 1, 1) == fence_char) {
           n = run_length(s, fence_char)
-          if (n >= fence_len && substr(s, n + 1) ~ /^[[:space:]]*$/) {
+          if (n >= fence_len && substr(s, n + 1) ~ /^[ \t\r\f]*$/) {
             fence_char = ""
             fence_len = 0
           }
@@ -353,6 +359,13 @@ orc_lib__fence_scan() {
 # or `X` (checked) — and nothing else: any other character is not a checklist
 # line at all (the Rust engine accepts exactly the same three).
 #
+# Only SPACE and TAB indent a checklist item — Rust trims
+# `trim_start_matches([' ', '\t'])` and nothing else. The leading class is
+# deliberately not PCRE `\s`, which also matches a vertical tab: that would
+# count a `\v`-led marker line the Rust engine skips (#799 F18). The `\s*`
+# between the dash and `[` is a SEPARATE, still-open divergence
+# (arbsec/orchestraitor#807) and is not narrowed here.
+#
 # There is NO author-granted opt-out: a body that carries no marker is
 # missing evidence and fails closed with `checklist_markers_missing`
 # (arbsec/orchestraitor#788). An exemption may only come from an authority
@@ -361,7 +374,7 @@ orc_lib_has_checklist() {
   local text="$1" stripped
   stripped="$(printf '%s\n' "$text" | orc_lib_strip_fenced_code)"
   printf '%s\n' "$stripped" \
-    | grep -cP '^\s*-\s*\[[xX ]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->' >/dev/null
+    | grep -cP '^[ \t]*-\s*\[[xX ]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->' >/dev/null
 }
 
 # Prints the managed checklist (nine UNCHECKED markers). Reads

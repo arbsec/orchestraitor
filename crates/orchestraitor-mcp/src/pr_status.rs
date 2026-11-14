@@ -1199,6 +1199,10 @@ fn gh_bucket(state: &str) -> String {
 /// (unchecked), `x` or `X` (checked). Any other character is not a checklist
 /// line at all — the shell engine accepts exactly the same three.
 ///
+/// Only SPACE and TAB indent an item (the shell engine's leading `[ \t]`
+/// class, matching this trim): a `\v`-led marker line is prose in BOTH
+/// engines, never a checklist item (arbsec/orchestraitor#799 F18).
+///
 /// Markers inside a FENCED code region are EXAMPLES, not evidence: they are
 /// excluded before the scan (see [`strip_fenced_code`]).
 ///
@@ -1279,8 +1283,10 @@ fn parse_checklist(body: &str) -> Checklist {
 ///   tilde fence MAY carry backticks in its info string (F17);
 /// - the region CLOSES at the first later line whose first 0-3 characters are
 ///   spaces and whose next characters are the SAME fence character repeated at
-///   least as many times as the opener, with only whitespace after them (a
-///   DIFFERENT fence character never closes it);
+///   least as many times as the opener, with nothing but fence-tail whitespace
+///   after them — space, tab, carriage return or form feed, exactly
+///   [`char::is_ascii_whitespace`] and NEVER a vertical tab (a DIFFERENT fence
+///   character never closes it);
 /// - an unclosed fence runs to the end of the body;
 /// - every line inside the region — INCLUDING the opening and the closing
 ///   fence lines — is excluded from marker scanning.
@@ -1292,7 +1298,10 @@ fn strip_fenced_code(body: &str) -> String {
         let candidate = fence_line(line);
         if let Some((fence_char, fence_len)) = fence {
             // Only the SAME character, repeated at least as many times as the
-            // opener, with nothing but whitespace after it, closes the region.
+            // opener, with nothing but fence-tail whitespace after it, closes
+            // the region: space, tab, carriage return or form feed. A vertical
+            // tab is NOT fence-tail whitespace — GitHub leaves the fence open
+            // there, and the shell engine narrows its class to match (#799 F18).
             if let Some(trimmed) = candidate
                 && trimmed.starts_with(fence_char)
             {

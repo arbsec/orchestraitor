@@ -1,0 +1,3 @@
+# F18: only space and tab indent a checklist item, so a VT-led marker line is prose in BOTH
+# engines: it is skipped and the real item after it is still counted.
+marker_count=1 all_checked=true

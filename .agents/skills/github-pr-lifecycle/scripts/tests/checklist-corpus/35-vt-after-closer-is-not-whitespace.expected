@@ -1,0 +1,3 @@
+# F18: a vertical tab after the closer is NOT fence-tail whitespace, so the region stays open
+# and the checked marker after it is an EXAMPLE, not evidence (GitHub renders it as code).
+marker_count=0 all_checked=false
