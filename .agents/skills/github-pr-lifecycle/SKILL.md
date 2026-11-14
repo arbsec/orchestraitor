@@ -339,11 +339,18 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `pr-mutate` body route carries the same invariant: `edit --body`
                   and `edit --body-file` append the markers when the supplied body
                   carries none, so replacing a PR body can never drop the
-                  checklist. For a PR that ALREADY EXISTS whose body is already
+                  checklist (`--body-file` is read by the script and goes through
+                  the same trusted-root guard as `--body @file`; `-` reads STDIN).
+                  A supplied body that ENDS inside an unclosed code fence is
+                  refused with exit 2 — appended markers would render as code and
+                  be hidden from the scan — so close the fence and rerun.
+                  For a PR that ALREADY EXISTS whose body is already
                   set, one command clears it:
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate
                   edit <pr> --inject-checklist` reads the current body, appends
-                  the managed checklist and sets the body. Markers inside a
+                  the managed checklist and sets the body (when the body already
+                  carries it, only the body update is skipped — other edit flags
+                  in the same invocation still run). Markers inside a
                   fenced code region are EXAMPLES, not checklist items — a
                   marker after a closed fence counts.
 

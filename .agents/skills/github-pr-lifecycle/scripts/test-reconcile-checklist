@@ -47,8 +47,18 @@
 #       and its dry-run never reaches gh
 #   (k) EVERY pr-mutate body route carries the checklist: `edit --body` and
 #       `edit --body-file` append the nine markers to a body that carries none,
-#       set an already-checklisted body byte-verbatim, and the bodyless-PR note
-#       names exactly that route (pinned by running the advice it prints)
+#       set an already-checklisted body with its content unchanged, and the
+#       bodyless-PR note names exactly that route (pinned by running the advice
+#       it prints)
+#   (k2) a REFUSED body argument STOPS the script: an out-of-root `@file`, a
+#       path-shaped value and their `=` forms exit 2 and never reach gh (a
+#       nested command substitution used to swallow the guard's status)
+#   (k3) pr-mutate `--body-file` reads through the SAME trusted-root guard as
+#       pr-create, supports `-` STDIN, and refuses a terminal on STDIN
+#   (k4) a body ending inside an UNCLOSED fence (backtick or tilde) is refused
+#       with an error naming the fence; a CLOSED fence at the end still appends
+#   (k5) `--inject-checklist` skips only the body update: other edit flags run
+#   (k6) the `=` forms of both body routes carry the checklist
 #   (j) the fixture's git calls ignore an ambient git LOCATION (GIT_DIR /
 #       GIT_WORK_TREE / GIT_INDEX_FILE): `git -C` does not isolate the git
 #       location, so an inherited location would commit the CALLER's tree
@@ -596,8 +606,9 @@ assert 'i: the dry-run says it does not reach gh' 1 \
 # verbatim it would REPLACE the whole body and strip the injected checklist,
 # dropping the PR back to `checklist_markers_missing` — advice that undoes
 # itself. Both body routes therefore carry the same marker invariant through the
-# same helper `pr-create` uses, and a body that already has a marker is set
-# BYTE-VERBATIM.
+# same helper `pr-create` uses, and a body that already has a marker keeps its
+# content unchanged (a command substitution normalises trailing newlines; that
+# is the only difference — see the `--body-file=` trailing-newline assertion).
 export BODY_FIXTURE="$TMP/files/all-checked.md"
 
 rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
@@ -635,7 +646,7 @@ assert 'k: --body-file never reaches gh as a flag' 0 \
   "$(grep -c -- '--body-file' "$TMP/edited-argv.txt")"
 
 # A supplied body that already carries a marker is a verified fact: set it
-# byte-for-byte, never re-injected, never rewritten.
+# unchanged, never re-injected, never rewritten.
 OWN_BODY='## Summary
 - [x] <!-- orc:tests --> the suite passes'
 printf '%s' "$OWN_BODY" > "$TMP/files/own-marker-body.txt"
@@ -667,6 +678,177 @@ assert 'k: a body-route dry-run exits 0' 0 "$RC"
 assert 'k: a body-route dry-run never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
 assert 'k: the dry-run argv carries the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+
+# --- (k2) a REFUSED body argument must STOP the script -------------------------
+# `X="$(f "$(g)")"` takes the OUTER substitution's status, so when `g` exits 2
+# the failure never reaches `set -e`: the typed error was printed and `gh pr
+# edit` then ran anyway with a checklist-only body, exit 0 — the body the author
+# wrote was discarded (#788 gen-3 review; both adversarial sources). Each route
+# now resolves in its own assignment, so the guard's status IS the assignment's
+# status. `gh` must never be invoked, which the argv capture proves: the file
+# only exists if the stub was reached.
+OUT_OF_ROOT=/etc/passwd
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body "@$OUT_OF_ROOT"
+assert 'k: --body @<out-of-root> is refused' 2 "$RC"
+assert 'k: the out-of-root @file refusal is typed' 1 \
+  "$(grep -cF 'outside the trusted roots' "$TMP/stderr")"
+assert 'k: the out-of-root @file refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body "$OUT_OF_ROOT"
+assert 'k: a path-shaped --body value is refused' 2 "$RC"
+assert 'k: the path-shaped refusal is typed' 1 \
+  "$(grep -cF 'is an existing file path, not body text' "$TMP/stderr")"
+assert 'k: the path-shaped refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo "--body=@$OUT_OF_ROOT"
+assert 'k: --body=@<out-of-root> is refused' 2 "$RC"
+assert 'k: the --body=@ refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+# --- (k3) --body-file reads through the SAME trusted-root guard ----------------
+# The delta turned this route from "gh reads the path" into "the script reads the
+# path": without the guard the script posted any readable file, while `pr-create`
+# refused the identical path (#788 gen-3 review).
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$OUT_OF_ROOT"
+assert 'k: --body-file <out-of-root> is refused' 2 "$RC"
+assert 'k: the --body-file refusal is typed' 1 \
+  "$(grep -cF 'outside the trusted roots' "$TMP/stderr")"
+assert 'k: the --body-file refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo "--body-file=$OUT_OF_ROOT"
+assert 'k: --body-file=<out-of-root> is refused' 2 "$RC"
+assert 'k: the --body-file= refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+# STDIN parity with `pr-create`: `--body-file -` is the gh convention.
+rm -f "$TMP/edited-body.md"
+OUT="$(printf '%s\n' 'a stdin summary, no markers' | (
+  cd "$TMP/repo" && bash scripts/pr-mutate edit 7 --repo test-org/repo --body-file - 2>"$TMP/stderr"
+))"; RC=$?
+assert 'k: --body-file - exits 0' 0 "$RC"
+EDITED="$(cat "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'k: --body-file - gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$EDITED")"
+assert 'k: --body-file - keeps the STDIN content' 1 \
+  "$(grep -cF 'a stdin summary, no markers' <<<"$EDITED")"
+
+# `--body-file -` with a TERMINAL on STDIN is refused (never a silent hang).
+# A pty is required to observe the `-t 0` branch; `script` provides one. The
+# child is wrapped in `bash -c` because `script -c` runs the string through the
+# INVOKING user's shell (not necessarily bash).
+if command -v script >/dev/null 2>&1; then
+  rm -f "$TMP/edited-body.md"
+  PTY_RC=0
+  ( cd "$TMP/repo" && script -qec \
+    "bash -c 'exec bash scripts/pr-mutate edit 7 --repo test-org/repo --body-file -'" \
+    /dev/null ) >"$TMP/pty.txt" 2>&1 || PTY_RC=$?
+  assert 'k: --body-file - on a terminal is refused' 2 "$PTY_RC"
+  assert 'k: the terminal refusal names the STDIN forms' 1 \
+    "$(grep -cF 'STDIN is a terminal' "$TMP/pty.txt")"
+  assert 'k: the terminal refusal never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+else
+  echo 'NOTICE: `script` unavailable — the terminal-on-STDIN refusal was NOT exercised'
+fi
+
+# --- (k4) an append inside an UNCLOSED fence is refused ------------------------
+# Markers appended inside an open fence are rendered as code and stripped from
+# the marker scan: the "remediation" would change nothing visible and a second
+# `--inject-checklist` run would append another invisible copy (#788 gen-3
+# review, CodeRabbit major). The author's body is neither reordered nor repaired.
+cat > "$TMP/files/unclosed-backtick.md" <<'EOF'
+## Summary
+
+An example that never closes:
+
+```markdown
+- [ ] not a real item
+EOF
+cat > "$TMP/files/unclosed-tilde.md" <<'EOF'
+## Summary
+
+~~~text
+an example that never closes
+EOF
+cat > "$TMP/files/closed-fence-tail.md" <<'EOF'
+## Summary
+
+An example that DOES close:
+
+```markdown
+- [ ] not a real item
+```
+EOF
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/unclosed-backtick.md"
+assert 'k: a body ending inside a backtick fence is refused' 2 "$RC"
+assert 'k: the refusal names the unclosed fence' 1 \
+  "$(grep -cF 'unclosed code fence' "$TMP/stderr")"
+assert 'k: the refusal names the backtick run' 1 \
+  "$(grep -cF 'opened with 3 backticks' "$TMP/stderr")"
+assert 'k: the refused append never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/unclosed-tilde.md"
+assert 'k: a body ending inside a tilde fence is refused' 2 "$RC"
+assert 'k: the refusal names the tilde run' 1 \
+  "$(grep -cF 'opened with 3 tildes' "$TMP/stderr")"
+assert 'k: the tilde refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/closed-fence-tail.md"
+assert 'k: a body ending with a CLOSED fence still appends' 0 "$RC"
+assert 'k: the closed-fence body gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+
+# `pr-create` shares the helper, so the same refusal applies at creation.
+OUT="$(dry_run --title t --body-file "$TMP/files/unclosed-backtick.md" 2>&1)"; RC=$?
+assert 'k: pr-create refuses a body ending inside a fence' 2 "$RC"
+assert 'k: the pr-create refusal names the fence' 1 \
+  "$(grep -cF 'unclosed code fence' <<<"$OUT")"
+
+# --- (k5) --inject-checklist skips ONLY the body update -----------------------
+# A body that already carries the checklist used to exit 0 before executing the
+# rest of the edit flags, silently discarding them (#788 gen-3 review,
+# CodeRabbit minor).
+export BODY_FIXTURE="$TMP/files/all-checked.md"
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist --add-label needs-triage
+assert 'k: --inject-checklist + another edit flag exits 0' 0 "$RC"
+assert 'k: the other edit flag still reaches gh' 1 \
+  "$(grep -cx -- '--add-label' "$TMP/edited-argv.txt")"
+assert 'k: the other edit flag keeps its operand' 1 \
+  "$(grep -cx -- 'needs-triage' "$TMP/edited-argv.txt")"
+assert 'k: the skipped body update sets no --body' 0 \
+  "$(grep -cx -- '--body' "$TMP/edited-argv.txt")"
+
+# --- (k6) the `=` forms of both body routes ------------------------------------
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file="$TMP/files/no-markers.md"
+assert 'k: --body-file= carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+assert 'k: --body-file= keeps the summary' 1 \
+  "$(grep -cF 'false quantitative claim' "$TMP/edited-body.md")"
+assert 'k: --body-file= never reaches gh as a flag' 0 \
+  "$(grep -c -- '--body-file' "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo "--body=$OWN_BODY"
+assert 'k: an already-checklisted --body= is content-identical' identical \
+  "$(cmp -s "$TMP/files/own-marker-body.txt" "$TMP/edited-body.md" && echo identical || echo different)"
+
+# The routes resolve the body through a command substitution, so trailing
+# newlines are normalised away and NOTHING else changes. That is the guarantee
+# `references/pr-convergence.md` states — not "byte-for-byte".
+printf '%s\n\n' "$OWN_BODY" > "$TMP/files/own-marker-trailing.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/own-marker-trailing.md"
+assert 'k: a supplied body keeps its content (trailing newlines normalised)' identical \
+  "$(cmp -s "$TMP/files/own-marker-body.txt" "$TMP/edited-body.md" && echo identical || echo different)"
 
 # --- the bodyless-PR advice must name a route that KEEPS the checklist --------
 # Pinned end to end: extract the command pr-create prints, then run that exact

@@ -57,14 +57,16 @@ async fn non_git_worktree_is_a_typed_branch_state_failure() {
     assert_eq!(error.reason, DELIVERY_BRANCH_STATE_FAILED);
 }
 
-/// The delivery body carries the managed checklist UNCHECKED: a marker-less
-/// body is blocked at merge (`checklist_markers_missing`,
-/// arbsec/orchestraitor#788), and pre-ticking a box would assert an
-/// unsubstantiated fact.
+/// The delivery body carries the managed checklist UNCHECKED and AHEAD of the
+/// model-authored summary: a marker-less body is blocked at merge
+/// (`checklist_markers_missing`, arbsec/orchestraitor#788), and pre-ticking a
+/// box would assert an unsubstantiated fact. Ordering is load-bearing — see
+/// `untrusted_summary_cannot_enclose_the_trusted_checklist`.
 #[test]
-fn delivery_body_appends_the_managed_checklist_unchecked() {
-    let body = format!("{}{DELIVERY_PR_CHECKLIST}", request().summary);
-    assert!(body.starts_with("did the thing"));
+fn delivery_body_puts_the_trusted_checklist_before_the_summary() {
+    let body = format!("{DELIVERY_PR_CHECKLIST}{}", request().summary);
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert!(body.ends_with("did the thing"), "{body}");
     assert_eq!(body.matches("<!-- orc:").count(), 9, "{body}");
     assert!(!body.contains("- [x]"), "delivery never pre-ticks a box");
 }
@@ -109,10 +111,15 @@ async fn delivery_pr_body_carries_the_managed_checklist() {
 
     let body = std::fs::read_to_string(&capture).unwrap();
 
-    // The SUMMARY survives, and all NINE managed markers ride along UNCHECKED.
+    // The trusted checklist comes FIRST and the SUMMARY follows it, and all
+    // NINE managed markers ride along UNCHECKED.
     assert!(
-        body.starts_with("did the thing"),
-        "the summary must survive: {body}"
+        body.starts_with("## Merge checklist"),
+        "the trusted checklist must lead the body: {body}"
+    );
+    assert!(
+        body.ends_with("did the thing"),
+        "the summary must survive, after the checklist: {body}"
     );
     assert_eq!(body.matches("<!-- orc:").count(), 9, "{body}");
     for marker in [
@@ -132,6 +139,79 @@ async fn delivery_pr_body_carries_the_managed_checklist() {
         );
     }
     assert!(!body.contains("- [x]"), "delivery never pre-ticks a box");
+}
+
+/// UNTRUSTED model output must never be able to enclose the trusted checklist
+/// (arbsec/orchestraitor#788 gen-3 review, `CodeRabbit` major): a summary that
+/// carries a checked managed marker AND leaves a code fence open used to make
+/// the nine appended markers land INSIDE that fence, where `strip_fenced_code`
+/// drops them — the parser then saw the summary's single checked marker and
+/// reported `all_checked: true` for a body with no evidence at all.
+///
+/// The production body is driven through the REAL `open_pr` and parsed the way
+/// the gate parses (the shell/Rust engines share one rule set): the trusted
+/// block leads, the untrusted summary follows it, so no fence in the summary
+/// can reach the nine markers. `parse_checklist`'s own regression for this exact
+/// body shape lives next to the parser
+/// (`crates/orchestraitor-mcp/src/pr_status.rs`), because the worker crate does
+/// not depend on the MCP gateway and a second parser here is the drift this
+/// repository has already paid for.
+#[cfg(unix)]
+#[tokio::test]
+async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The adversarial summary: a checked managed marker followed by a fence that
+    // never closes, echoing the shape the reviewer used.
+    let summary = "- [x] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n```\nunclosed";
+
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/2\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.to_string(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        body.ends_with(summary),
+        "the untrusted summary must be the tail of the body: {body}"
+    );
+    // Nothing before the summary can be fenced by it: the trusted block carries
+    // no fence opener, so every marker in it is scanned as evidence.
+    let trusted = &body[..body.len() - summary.len()];
+    assert!(
+        !trusted.contains("```") && !trusted.contains("~~~"),
+        "the trusted block must carry no fence opener: {trusted}"
+    );
+    // Nine trusted markers, ALL unchecked, and all of them ahead of the
+    // summary's single checked marker.
+    let checked_at = body.find("- [x] <!-- orc:issue -->").unwrap();
+    let unchecked: Vec<usize> = body
+        .match_indices("- [ ] <!-- orc:")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(unchecked.len(), 9, "{body}");
+    assert!(
+        unchecked.iter().all(|offset| *offset < checked_at),
+        "every trusted marker must precede the untrusted one: {body}"
+    );
 }
 
 /// Drift guard: the checklist appended to delivery PRs is the repository's

@@ -801,7 +801,9 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   vacuously** (issue 788): `reconcile-checklist` reported `all_checked: true`
   for a body with zero `<!-- orc:* -->` markers (an empty set is vacuously
   true), so a wholesale body rewrite (PR #767's) reached `mergeable: true` with
-  no checklist evidence at all. The checklist now keeps the two states apart:
+  no checklist evidence at all — `orc pr status` (and the `pr.status` MCP tool
+  that shares its engine) reported the same green. The checklist now keeps the
+  two states apart:
   the `checklist` object gains `marker_count` and `markers_present`;
   `all_checked` is true only when at least one marker exists AND every marker
   is checked; a marker-less body blocks with the new reason
@@ -814,24 +816,10 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   backticks or 3+ tildes) is an EXAMPLE, not a checklist item: the whole
   region, including its opening and closing fence lines, is excluded from the
   scan, so a body that merely shows the checklist shape no longer satisfies the
-  gate. The rule stays satisfiable on EVERY body-setting route: `pr-create`
-  appends the nine `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a
-  supplied body that carries none, a bodyless PR receives a body carrying only
-  the managed checklist, the delivery lane appends them to its model-authored PR
-  summary, `pr-mutate edit --body` / `--body-file` append them as well (so
-  replacing a body can never drop the checklist), and `pr-mutate edit <pr>
-  --inject-checklist` is the one-command remediation for a PR whose body is
-  already set. Documented in
+  gate. The rule stays satisfiable: PRs opened by the orchestration delivery
+  lane (`orc worker run --deliver`, `orc loop --deliver`) carry the nine managed
+  markers UNCHECKED in their body, ahead of the run summary. Documented in
   [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
-- **`pr-create --body-file` now resolves the path through the trusted-root
-  guard** (issue 788): the base `pr-create` forwarded `--body-file` straight to
-  `gh`, which accepted any readable path. The body is now read by the script
-  itself (so the managed-checklist injection applies to both body routes),
-  which means a path outside the trusted roots — the current workspace or the
-  system/user temp directories — is refused with exit 2 instead of being read.
-  `--body-file -` is supported explicitly and reads the body from STDIN (gh's
-  own convention, preserved); a terminal on STDIN is refused with a message
-  naming the supported forms.
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
   the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
   plain `skip`, so `checks_all_passed` was `false` on a PR whose every real

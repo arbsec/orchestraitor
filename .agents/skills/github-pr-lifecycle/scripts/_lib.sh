@@ -138,9 +138,10 @@ orc_lib_body_arg() {
 # the fixture's own `git add -A` / `git commit` stage and commit the caller's
 # working tree. GIT_INDEX_FILE has the same effect on the index.
 #
-# Scope: the `@file`/`--body-file` trusted-root check and the body-file routes of
-# `pr-create` / `pr-mutate` go through here. Production gate scripts that still
-# call `git rev-parse --show-toplevel` directly are NOT covered — tracked in
+# Scope: every `@file` resolution (`orc_lib_body_arg`) and every `--body-file`
+# route (`orc_lib_read_body_file`, used by BOTH `pr-create` and `pr-mutate`)
+# takes its "workspace" root from here. Production gate scripts that still call
+# `git rev-parse --show-toplevel` directly are NOT covered — tracked in
 # arbsec/orchestraitor#806.
 orc_lib_git_toplevel() {
   env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
@@ -269,8 +270,19 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
 # every fenced region removed).
-orc_lib_strip_fenced_code() {
-  awk '
+#
+# ONE state machine, two modes: `orc_lib__fence_scan` owns the rules above, and
+# both callers drive it. A second, separately written scanner is exactly how the
+# shell and Rust engines drifted before (arbsec/orchestraitor#788).
+orc_lib_strip_fenced_code() { orc_lib__fence_scan strip; }
+
+# The fence state at the END of the body: `closed`, or `open <char> <len>` for a
+# fence that never closed. Reads the body on STDIN.
+orc_lib_fence_state() { orc_lib__fence_scan state; }
+
+# Usage: orc_lib__fence_scan <strip|state>   (reads the body on STDIN)
+orc_lib__fence_scan() {
+  awk -v mode="${1:?fence scan mode required}" '
     function trim_lead(s) { sub(/^[ \t]+/, "", s); return s }
     function run_length(s, c,   n) {
       n = 0
@@ -296,7 +308,12 @@ orc_lib_strip_fenced_code() {
         n = run_length(s, c)
         if (n >= 3) { fence_char = c; fence_len = n; next }
       }
-      print $0
+      if (mode == "strip") print $0
+    }
+    END {
+      if (mode != "state") exit
+      if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
+      else print "closed"
     }
   '
 }
@@ -344,13 +361,36 @@ orc_lib_checklist_markers() {
 # still owes the PR a compliant body, and a body that carries only the
 # checklist is better than a body that can never converge (#683 class: a
 # fail-closed rule no caller can satisfy is worse than the bug).
+#
+# A body that ends INSIDE an unclosed fenced code region is REFUSED (exit 2):
+# anything appended there renders as code and is dropped by every marker scan,
+# so the append would look like a remediation while the body still reported
+# `checklist_markers_missing` — and a second `--inject-checklist` run would
+# append yet another invisible copy. The author's body is neither reordered nor
+# repaired: the error names the fence to close (#788 gen-3 review, CodeRabbit
+# major).
 orc_lib_ensure_checklist_markers() {
-  local body="$1" root="${2:-}"
+  local body="$1" root="${2:-}" fence_state="" fence_char="" fence_len="" fence_name=""
   if orc_lib_has_checklist "$body"; then
     printf '%s' "$body"
     return 0
   fi
   if [ -n "$body" ]; then
+    fence_state="$(printf '%s\n' "$body" | orc_lib_fence_state)"
+    if [ "$fence_state" != "closed" ]; then
+      fence_char="${fence_state#open }"
+      fence_len="${fence_char#* }"
+      fence_char="${fence_char%% *}"
+      case "$fence_char" in
+        '`') fence_name="backticks" ;;
+        '~') fence_name="tildes" ;;
+        *) fence_name="fence characters" ;;
+      esac
+      echo "error: refusing to append the managed merge checklist: the PR body ends inside an unclosed code fence (opened with $fence_len $fence_name)" >&2
+      echo "  a checklist appended there would render as code and be ignored by the merge gate (arbsec/orchestraitor#788): nothing is appended and your body is not modified" >&2
+      echo "  fix: close the fence before adding the checklist — add a line of at least $fence_len $fence_name — then rerun this command" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
     printf '%s\n\n' "$body"
   fi
   printf '## Merge checklist\n\n'

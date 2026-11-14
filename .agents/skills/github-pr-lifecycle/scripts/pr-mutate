@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set verbatim), so replacing a PR body can never drop the checklist. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788)."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set with its content unchanged; only trailing newlines are normalised), so replacing a PR body can never drop the checklist. --body-file is READ by the script and resolved through the trusted-root guard (workspace or temp directory; '-' reads the body from STDIN). A supplied body that ENDS inside an unclosed code fence is refused with exit 2 — appended markers would render as code and be hidden — so close the fence and rerun; the body is never reordered or repaired. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788). When the body already carries the checklist it skips only the body update and still executes any other edit flags."
   exit "$ORC_OK"
 fi
 
@@ -83,23 +83,37 @@ if [ "$ACTION" = "edit" ]; then
     case "${REST[$index]}" in
       --body)
         [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-        REST[$((index + 1))]="$(pr_mutate_ensure_body "$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")")"
+        # RESOLVE FIRST, in its OWN assignment. `X="$(f "$(g)")"` takes the
+        # OUTER substitution's status, so `g`'s `exit 2` never trips `set -e`:
+        # the guard's typed error was printed and the body was then rewritten
+        # anyway, exit 0 (#788 gen-3 review — both adversarial sources). The
+        # guard's status must BE the assignment's status.
+        resolved="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"
+        REST[$((index + 1))]="$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 2)) ;;
       --body=*)
-        REST[$index]="--body=$(pr_mutate_ensure_body "$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")")"
+        resolved="$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")"
+        REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
       # `--body-file` is READ here, not forwarded: the checklist cannot be
       # appended to a path gh expands on its own side. The file itself is never
       # rewritten — the resolved content becomes an explicit `--body` value.
+      #
+      # The reader is `orc_lib_read_body_file`, NOT `cat`: the delta turned this
+      # route from "gh reads the path" into "the script reads the path", so the
+      # trusted-root guard has to follow the read. It is the same helper
+      # `pr-create` uses, so both routes refuse an out-of-root path with exit 2
+      # (#599), resolve symlinks on the FULL target, refuse an empty body, and
+      # accept `-` for STDIN (#788 gen-3 review).
       --body-file)
         [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-        orc_lib_require_body_file "--body-file" "${REST[$((index + 1))]}"
+        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$((index + 1))]}")"
         REST[$index]="--body"
-        REST[$((index + 1))]="$(pr_mutate_ensure_body "$(cat -- "${REST[$((index + 1))]}")")"
+        REST[$((index + 1))]="$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 2)) ;;
       --body-file=*)
-        orc_lib_require_body_file "--body-file" "${REST[$index]#--body-file=}"
-        REST[$index]="--body=$(pr_mutate_ensure_body "$(cat -- "${REST[$index]#--body-file=}")")"
+        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$index]#--body-file=}")"
+        REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
       *) index=$((index + 1)) ;;
     esac
@@ -145,7 +159,7 @@ ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 # `--body-file` routes above carry the checklist themselves.)
 #
 # The nine markers land UNCHECKED (a checked box is a verified fact). A body
-# that already carries the checklist is left VERBATIM — the operation is
+# that already carries the checklist is left unchanged — the operation is
 # idempotent and never rewrites author content.
 if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
   if [ "$OPT_DRY_RUN" = true ]; then
@@ -158,11 +172,20 @@ if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
   }
   PR_MUTATE_NEW_BODY="$(pr_mutate_ensure_body "$PR_MUTATE_BODY")"
   if [ "$PR_MUTATE_NEW_BODY" = "$PR_MUTATE_BODY" ]; then
-    echo "PR #$PR body already carries the managed merge checklist — no change needed" >&2
-    exit "$ORC_OK"
+    # Only the BODY update is skipped: the caller may have asked for other
+    # mutations in the same invocation (`--add-label`, `--add-assignee`,
+    # `--add-reviewer`, …). Exiting here silently discarded them (#788 gen-3
+    # review, CodeRabbit minor) — a no-op must be a no-op for the BODY only.
+    echo "PR #$PR body already carries the managed merge checklist — body update skipped" >&2
+    if [ "${#REST[@]}" -eq 0 ]; then
+      echo "  (no other edit flag was given; nothing left to do)" >&2
+      exit "$ORC_OK"
+    fi
+    echo "  the remaining edit flags are still executed" >&2
+  else
+    ARGS+=(--body "$PR_MUTATE_NEW_BODY")
+    echo "NOTE: appending the managed merge checklist to PR #$PR's body (arbsec/orchestraitor#788)" >&2
   fi
-  ARGS+=(--body "$PR_MUTATE_NEW_BODY")
-  echo "NOTE: appending the managed merge checklist to PR #$PR's body (arbsec/orchestraitor#788)" >&2
 fi
 
 # Reviewer-request gate (workflow policy "PR labeling and human attention"):

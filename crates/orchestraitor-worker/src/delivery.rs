@@ -115,7 +115,8 @@ pub const DELIVERY_ORC_BIN_MISSING: &str = "delivery-orc-bin-missing";
 const ORC_CHILD_TIMEOUT_SECS: u64 = 300;
 
 /// The managed PR checklist (`.github/PULL_REQUEST_TEMPLATE.md`'s nine
-/// `<!-- orc:* -->` markers, UNCHECKED) appended to every delivery PR body.
+/// `<!-- orc:* -->` markers, UNCHECKED) placed at the TOP of every delivery PR
+/// body, AHEAD of the model-authored summary.
 ///
 /// `convergence-status` FAILS CLOSED on a body with no managed marker
 /// (`checklist_markers_missing`, arbsec/orchestraitor#788), and a delivery body
@@ -123,12 +124,19 @@ const ORC_CHILD_TIMEOUT_SECS: u64 = 300;
 /// without this the loop's own PRs would be unmergeable by construction (#683:
 /// a fail-closed rule no caller can satisfy is worse than the bug). The markers
 /// land UNCHECKED because a checked box is a verified fact: the reviewing agent
-/// ticks them with evidence. They are appended unconditionally, never "only
+/// ticks them with evidence. They are added unconditionally, never "only
 /// when the summary carries none" — untrusted model output must not decide
 /// whether the gate applies to itself (spec `40-arbitraitor-integration.md`
-/// §6.1). The drift guard in `delivery_tests` asserts these lines match the
-/// template.
-const DELIVERY_PR_CHECKLIST: &str = "\n\n## Merge checklist\n\n\
+/// §6.1).
+///
+/// It comes FIRST because the summary is untrusted: a summary that leaves a
+/// code fence OPEN would enclose anything appended after it, and every scanner
+/// (`strip_fenced_code`, the shell fence engine) drops fenced regions as
+/// examples — so a summary carrying one ticked marker plus an unclosed fence
+/// could certify the gate for itself (review gen-3 HIGH). No fence in trusted
+/// text can reach the markers placed ahead of untrusted text. The drift guard in
+/// `delivery_tests` asserts these lines match the template.
+const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 - [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n\
 - [ ] <!-- orc:service-identity --> All GitHub writes (PR creation, comments, review posts, merges, commits) attributed to arbsec-agent — no personal-account (@mekwall) writes (owner mandate; .agents/project/orchestraitor-workflow.md \"GitHub service identity\")\n\
 - [ ] <!-- orc:tests --> Tests are added or updated\n\
@@ -137,7 +145,8 @@ const DELIVERY_PR_CHECKLIST: &str = "\n\n## Merge checklist\n\n\
 - [ ] <!-- orc:rollback --> Rollback or recovery behavior is verified where applicable\n\
 - [ ] <!-- orc:checks --> All required and non-optional checks pass\n\
 - [ ] <!-- orc:review --> All noteworthy findings are resolved\n\
-- [ ] <!-- orc:threads --> All actionable review threads are resolved\n";
+- [ ] <!-- orc:threads --> All actionable review threads are resolved\n\
+\n";
 
 /// Real delivery sink (issue #656): hands a completed run's committed
 /// worktree state to `orc github push-branch` (the App-signed landing
@@ -277,10 +286,14 @@ impl PushBranchDeliverySink {
         request: &DeliveryRequest,
     ) -> Result<String, &'static str> {
         let title = format!("feat(loop): task {task}", task = request.task_id);
-        // The managed checklist rides the body: without it the PR is blocked at
-        // merge by `checklist_markers_missing` (see DELIVERY_PR_CHECKLIST).
+        // The managed checklist rides the body and comes FIRST: the summary is
+        // UNTRUSTED model output (spec `40-arbitraitor-integration.md` §6.1) and
+        // may leave a code fence open. Appended after it, the trusted markers
+        // would land INSIDE that fence, where every scanner strips them as an
+        // example — a summary with one ticked marker plus an unclosed fence
+        // would then pass the merge gate on its own (see DELIVERY_PR_CHECKLIST).
         let body = format!(
-            "{summary}{DELIVERY_PR_CHECKLIST}",
+            "{DELIVERY_PR_CHECKLIST}{summary}",
             summary = request.summary
         );
         let mut pr = tokio::process::Command::new(&self.orc_bin);
