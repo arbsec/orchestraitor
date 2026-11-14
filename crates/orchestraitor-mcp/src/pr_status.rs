@@ -233,8 +233,8 @@ const MANAGED_MARKER_NAMES: [&str; 9] = [
 
 /// The construct that made a checklist reading INDETERMINATE.
 ///
-/// The verdict reason is the same for both (`checklist_unparseable`), but the
-/// explanatory message names the construct, so the reader knows WHICH rule
+/// The verdict reason is the same for all three (`checklist_unparseable`), but
+/// the explanatory message names the construct, so the reader knows WHICH rule
 /// refused the reading and what remedy applies.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -246,11 +246,135 @@ pub enum UnparseableConstruct {
     /// (arbsec/orchestraitor#809). The remedy is to dedent the opener to
     /// column 0.
     IndentedFenceOpener,
+    /// An HTML BLOCK opener indented 1-3 spaces: `CommonMark` ends such a block
+    /// at its container boundary, which this scanner cannot determine, so a
+    /// marker it hides may still be visible to a human (arbsec/orchestraitor#799
+    /// R1, the #809 family). The remedy is to dedent the opener to column 0.
+    IndentedHtmlBlockOpener,
     /// A NEAR-MARKER: a line that presents a managed marker — a task-item box
     /// token plus an `orc:NAME` reference — but not in the canonical form, so
     /// the gate cannot tell what the author asserted (arbsec/orchestraitor#799
     /// R1). The remedy is to write the marker canonically.
     NearMarker,
+}
+
+/// The `CommonMark` 0.31 "HTML blocks" type-6 tag names (arbsec/orchestraitor#799
+/// R1). A line beginning with `<` or `</` followed by one of these, then
+/// whitespace, the end of the line, `>` or `/>`, opens an HTML block that ends at
+/// the next blank line.
+///
+/// This is the ONE copy in the Rust engine; the shell engine reads
+/// `ORC_LIB_HTML_BLOCK_TAGS` in `.agents/skills/github-pr-lifecycle/scripts/_lib.sh`,
+/// which carries the same names. The shared corpus is what keeps the two in
+/// step.
+const HTML_BLOCK_TAGS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+];
+
+/// `CommonMark` 0.31 "HTML blocks" type 1: the opening tag prefix and the
+/// closing tag that ends the block.
+const HTML_RAW_TEXT_ENDINGS: [(&str, &str); 4] = [
+    ("<pre", "</pre>"),
+    ("<script", "</script>"),
+    ("<style", "</style>"),
+    ("<textarea", "</textarea>"),
+];
+
+/// Which of the seven `CommonMark` 0.31 HTML block types a line opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HtmlBlockKind {
+    /// Type 1: `<pre`, `<script`, `<style` or `<textarea`; ends at the matching
+    /// closing tag, which may be on the OPENING line.
+    RawText(&'static str),
+    /// Type 2: `<!--`; ends at `-->`, which may be on the opening line.
+    Comment,
+    /// Type 3: `<?`; ends at `?>`.
+    ProcessingInstruction,
+    /// Type 4: `<!` followed by an ASCII letter; ends at `>`.
+    Declaration,
+    /// Type 5: `<![CDATA[`; ends at `]]>`.
+    Cdata,
+    /// Type 6: a `CommonMark` block tag; ends at the next blank line.
+    BlockTag,
+    /// Type 7: a complete open or closing tag alone on its line; ends at the
+    /// next blank line.
+    CompleteTag,
+}
+
+impl HtmlBlockKind {
+    /// The string that ENDS this block, lower-cased for a case-insensitive
+    /// comparison; `None` for the blank-line-terminated types 6 and 7.
+    fn terminator(self) -> Option<&'static str> {
+        match self {
+            Self::RawText(ending) => Some(ending),
+            Self::Comment => Some("-->"),
+            Self::ProcessingInstruction => Some("?>"),
+            Self::Declaration => Some(">"),
+            Self::Cdata => Some("]]>"),
+            Self::BlockTag | Self::CompleteTag => None,
+        }
+    }
 }
 
 /// Checklist reconciliation (reconcile-checklist semantics, verbatim).
@@ -1305,25 +1429,28 @@ fn parse_checklist(body: &str) -> Checklist {
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
     // An indeterminate reading is never "all checked": the scan cannot say what
     // the body asserts, so the reading is refused (fail closed). The EARLIEST
-    // of the two constructs wins — both make the reading undecidable.
-    let (unparseable_line, unparseable_construct) = match (scan.indented_opener, scan.near_marker) {
-        (Some(indented), Some(near)) => {
-            if indented <= near {
-                (
-                    Some(indented),
-                    Some(UnparseableConstruct::IndentedFenceOpener),
-                )
-            } else {
-                (Some(near), Some(UnparseableConstruct::NearMarker))
-            }
-        }
-        (Some(indented), None) => (
-            Some(indented),
-            Some(UnparseableConstruct::IndentedFenceOpener),
+    // of the constructs wins — every one of them makes the reading undecidable.
+    let mut unparseable_line: Option<u64> = None;
+    let mut unparseable_construct: Option<UnparseableConstruct> = None;
+    for (line, construct) in [
+        (
+            scan.indented_opener,
+            UnparseableConstruct::IndentedFenceOpener,
         ),
-        (None, Some(near)) => (Some(near), Some(UnparseableConstruct::NearMarker)),
-        (None, None) => (None, None),
-    };
+        (
+            scan.indented_html_opener,
+            UnparseableConstruct::IndentedHtmlBlockOpener,
+        ),
+        (scan.near_marker, UnparseableConstruct::NearMarker),
+    ] {
+        let Some(line) = line else {
+            continue;
+        };
+        if unparseable_line.is_none_or(|earliest| line < earliest) {
+            unparseable_line = Some(line);
+            unparseable_construct = Some(construct);
+        }
+    }
     let unparseable = unparseable_line.is_some();
     let all_checked = !unparseable && markers_present && items.iter().all(|item| item.checked);
     Checklist {
@@ -1440,8 +1567,8 @@ fn normalize_line_endings(body: &str) -> String {
 /// One fence/comment/HTML-block scan over the normalised body.
 struct FenceScan {
     /// The VISIBLE lines with their 1-based line numbers in the ORIGINAL body.
-    /// Every line inside a fenced region, an HTML comment or a raw HTML block
-    /// is absent: it is an example, not evidence.
+    /// Every line inside a fenced region or a raw HTML block is absent: it is an
+    /// example, not evidence.
     lines: Vec<(u64, String)>,
     /// 1-based line number of the first fence OPENER indented 1-3 spaces.
     /// Such an opener may belong to a list item or a block quote, and this
@@ -1449,6 +1576,11 @@ struct FenceScan {
     /// is REFUSED rather than guessed (arbsec/orchestraitor#809). The condition
     /// is STICKY: closing the region does not clear it.
     indented_opener: Option<u64>,
+    /// 1-based line number of the first HTML BLOCK opener indented 1-3 spaces.
+    /// `CommonMark` ends such a block at its container boundary, which this
+    /// scanner cannot determine, so the reading is REFUSED for the same reason
+    /// (arbsec/orchestraitor#799 R1, the #809 family).
+    indented_html_opener: Option<u64>,
     /// 1-based line number of the first NEAR-MARKER: a line that presents a
     /// managed marker (a task-item box token plus an `orc:NAME` reference) but
     /// not in the canonical form, so the gate cannot tell what the author
@@ -1508,45 +1640,49 @@ struct FenceScan {
 ///   hid a genuine unchecked item in one engine and not the other;
 /// - a RAW HTML BLOCK is an invisible region too: `CommonMark` passes its
 ///   content through as raw HTML, so a task item inside it is not a checkbox
-///   and backticks inside it are not a fence. The block OPENS on a line whose
-///   first content is `<` followed by an ASCII letter (raw HTML block types
-///   1-6; the `<!--` comment case is modelled separately above). It CLOSES at
-///   the first SUBSEQUENT line containing `</tag>` (any case) for the type-1
-///   tags `pre`, `script`, `style` and `textarea`, and at the next BLANK line
-///   for every other tag; an unclosed block runs to the end of the body. Every
-///   line inside the block — including the opener and the closer — is
-///   invisible, and a fence opener inside it opens NOTHING (so it can never
-///   hide anything outside the block).
+///   and backticks inside it are not a fence. The seven `CommonMark` 0.31 block
+///   types are implemented EXACTLY (arbsec/orchestraitor#799 R1), never
+///   approximated — see [`html_block_kind`]. Two consequences are load-bearing:
+///   an AUTOLINK (`<https://example.com>`) and INLINE HTML (`<em>x</em> prose`)
+///   are ORDINARY TEXT, not blocks, because neither is a complete tag alone on
+///   its line (type 7) and neither names a `CommonMark` block tag (type 6); and
+///   every block ends at the END of the line carrying its terminator, so
+///   `<pre></pre>`, `<!-->`, `<!--->`, `<?...?>` and `<![CDATA[...]]>` are
+///   COMPLETE ONE-LINE blocks — the opening line is checked for the terminator.
+///   Every line inside a block — opener and closer included — is invisible, and
+///   a fence opener inside it opens NOTHING (so it can never hide anything
+///   outside the block);
+/// - an HTML BLOCK opener indented 1-3 spaces is recorded in
+///   [`FenceScan::indented_html_opener`] and REFUSES the reading, for the same
+///   container reason as the indented fence opener. An opener indented 4+
+///   spaces — or led by a tab — is literal text (indented code), not a block. A
+///   marker inside an indented code block is likewise not evidence, but
+///   detecting indented code blocks needs block context: that gap is tracked by
+///   arbsec/orchestraitor#802 and is NOT modelled here.
 fn scan_fences(body: &str) -> FenceScan {
     let normalized = normalize_line_endings(body);
     let mut lines: Vec<(u64, String)> = Vec::new();
     // The open fence: its character and how many times it was repeated.
     let mut fence: Option<(char, usize)> = None;
-    // Inside a `<!--` … `-->` HTML comment.
-    let mut in_comment = false;
-    // Inside a raw HTML BLOCK. `html_tag` is the closing tag for the type-1
-    // tags (`pre`, `script`, `style`, `textarea`); `None` means the block is
-    // terminated by the next BLANK line.
-    let mut in_html = false;
-    let mut html_tag: Option<String> = None;
+    // The open raw HTML block, if any.
+    let mut html: Option<HtmlBlockKind> = None;
     let mut indented_opener = None;
+    let mut indented_html_opener = None;
     let mut near_marker = None;
     for (index, line) in normalized.lines().enumerate() {
         let candidate = fence_line(line);
         let line_number = u64::try_from(index + 1).ok();
-        if in_html {
+        if let Some(kind) = html {
             // Inside a raw HTML BLOCK: the content is raw HTML, so it is not
-            // marker evidence and a fence opener inside it opens NOTHING. The
-            // block closes at the first SUBSEQUENT line carrying `</tag>` (any
-            // case) for the type-1 tags, and at the next blank line for every
-            // other tag.
-            let ends = match html_tag.as_deref() {
-                Some(tag) => line.to_ascii_lowercase().contains(&format!("</{tag}>")),
+            // marker evidence and a fence opener inside it opens NOTHING. Types
+            // 1-5 end at the END of the first line carrying their terminator
+            // (the opener line included); types 6-7 end at the next BLANK line.
+            let ends = match kind.terminator() {
+                Some(terminator) => line.to_ascii_lowercase().contains(terminator),
                 None => line.chars().all(|c| c == ' ' || c == '\t'),
             };
             if ends {
-                in_html = false;
-                html_tag = None;
+                html = None;
             }
             continue;
         }
@@ -1573,52 +1709,24 @@ fn scan_fences(body: &str) -> FenceScan {
             }
             continue;
         }
-        if in_comment {
-            // The delimiter line carrying `-->` ends the comment (inclusive:
-            // CommonMark ends a type-2 HTML block at the END of that line, so
-            // text after the delimiter is still invisible), and nothing on the
-            // line opens or closes a fence.
-            if line.contains("-->") {
-                in_comment = false;
-            }
-            continue;
-        }
-        // `<!--` opens an HTML comment ONLY when it is the line's first
-        // non-whitespace content (CommonMark HTML block type 2). A `<!--`
-        // further along the line — inside an inline code span, or after prose —
-        // is LITERAL TEXT: it opens nothing, so the line stays visible and
-        // every marker on it is still evidence.
-        if let Some((_, trimmed)) = candidate
-            && trimmed.starts_with("<!--")
+        // A RAW HTML BLOCK opens here when the first content of the line
+        // satisfies one of the seven `CommonMark` 0.31 start conditions. A
+        // `<!--` is type 2 of that model, so it is NOT a separate state: an
+        // opener line carrying its own terminator (`<!-->`, `<!--->`,
+        // `<!-- orc:none -->`) is a complete one-line block.
+        if let Some((indent, trimmed)) = candidate
+            && let Some(kind) = html_block_kind(trimmed)
         {
-            // The opener line ends the comment itself when it carries `-->`
-            // after the `<!--` (CommonMark: the block ends at the line
-            // containing `-->`).
-            if !trimmed[4..].contains("-->") {
-                in_comment = true;
+            if indent > 0 && indented_html_opener.is_none() {
+                indented_html_opener = line_number;
             }
-            continue;
-        }
-        // A RAW HTML BLOCK opens at a line whose first content is `<` followed
-        // by an ASCII letter (CommonMark raw HTML block types 1-6). Its content
-        // is invisible: not marker evidence, and a fence opener inside it
-        // opens nothing.
-        if let Some((_, trimmed)) = candidate
-            && trimmed.starts_with('<')
-            && trimmed
-                .as_bytes()
-                .get(1)
-                .is_some_and(u8::is_ascii_alphabetic)
-        {
-            // The tag name is the run of ASCII letters after the `<`.
-            let name: String = trimmed[1..]
-                .chars()
-                .take_while(char::is_ascii_alphabetic)
-                .collect::<String>()
-                .to_ascii_lowercase();
-            in_html = true;
-            html_tag =
-                matches!(name.as_str(), "pre" | "script" | "style" | "textarea").then_some(name);
+            // Types 1-5: the OPENING line is checked for the terminator too.
+            let same_line_end = kind
+                .terminator()
+                .is_some_and(|terminator| line.to_ascii_lowercase().contains(terminator));
+            if !same_line_end {
+                html = Some(kind);
+            }
             continue;
         }
         // Outside a region: a line whose first 0-3 characters are spaces and
@@ -1659,8 +1767,215 @@ fn scan_fences(body: &str) -> FenceScan {
     FenceScan {
         lines,
         indented_opener,
+        indented_html_opener,
         near_marker,
     }
+}
+
+/// True when `haystack` begins with `needle`, ASCII-case-insensitively.
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .get(..needle.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// True when the character at BYTE `at` of `line` is a tag-name boundary:
+/// whitespace, the end of the line, `>` or `/>` (`CommonMark` 0.31 spells the
+/// end-of-line case out for type 6).
+fn is_tag_boundary(line: &str, at: usize) -> bool {
+    match line.as_bytes().get(at) {
+        None | Some(b' ' | b'\t' | b'>') => true,
+        Some(b'/') => line.as_bytes().get(at + 1) == Some(&b'>'),
+        Some(_) => false,
+    }
+}
+
+/// The closing tag of the type-1 raw-text tag this line opens, or `None`.
+fn type_one_ending(line: &str) -> Option<&'static str> {
+    HTML_RAW_TEXT_ENDINGS
+        .iter()
+        .find(|(opening, _)| {
+            starts_with_ignore_ascii_case(line, opening) && is_tag_boundary(line, opening.len())
+        })
+        .map(|(_, ending)| *ending)
+}
+
+/// True when the line begins with `<` or `</` followed by one of the
+/// `CommonMark` block tag names, then a tag-name boundary (`CommonMark` 0.31
+/// HTML block type 6). Every tag name is tried, so `param` is never read as `p`
+/// followed by a non-boundary.
+fn is_block_tag_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("</").or_else(|| line.strip_prefix('<')) else {
+        return false;
+    };
+    HTML_BLOCK_TAGS.iter().any(|tag| {
+        rest.as_bytes()
+            .get(..tag.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(tag.as_bytes()))
+            && is_tag_boundary(rest, tag.len())
+    })
+}
+
+/// True when the line is a COMPLETE open tag (any tag name other than the
+/// type-1 four) or a complete closing tag, followed only by spaces and tabs to
+/// the end of the line (`CommonMark` 0.31 HTML block type 7).
+///
+/// A line that merely BEGINS with `<` and a name — `<notatag nonsense`,
+/// `<https://example.com>`, `<em>x</em> prose` — is ordinary text: the tag-name
+/// grammar is `[A-Za-z][A-Za-z0-9-]*`, so `:` ends the name in the autolink and
+/// the rest is not a tag, and a complete tag with trailing content is not
+/// "followed only by whitespace".
+fn is_complete_html_tag(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('<') else {
+        return false;
+    };
+    let (closing, rest) = match rest.strip_prefix('/') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let bytes = rest.as_bytes();
+    let Some(name_len) = html_tag_name_len(bytes) else {
+        return false;
+    };
+    let name = rest[..name_len].to_ascii_lowercase();
+    if !closing
+        && HTML_RAW_TEXT_ENDINGS
+            .iter()
+            .any(|(opening, _)| *opening == format!("<{name}"))
+    {
+        return false;
+    }
+    let Some(after_attributes) = skip_html_attributes(bytes, name_len) else {
+        return false;
+    };
+    let mut index = skip_blanks(bytes, after_attributes);
+    while bytes.get(index) == Some(&b'/') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'>') {
+        return false;
+    }
+    index += 1;
+    bytes[index..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
+}
+
+/// The length of the tag name at the start of `bytes` (`[A-Za-z][A-Za-z0-9-]*`),
+/// or `None` when `bytes` does not begin with one.
+fn html_tag_name_len(bytes: &[u8]) -> Option<usize> {
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut index = 1;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        index += 1;
+    }
+    Some(index)
+}
+
+/// The byte offset after `from` and every space/tab there.
+fn skip_blanks(bytes: &[u8], from: usize) -> usize {
+    let mut index = from;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+    {
+        index += 1;
+    }
+    index
+}
+
+/// Walks the attribute list of an HTML tag from `from` and returns the byte
+/// offset at which it ends, or `None` when the list is malformed.
+///
+/// `CommonMark` 0.31: `attribute = space_or_tab+ attr_name (space_or_tab* "="
+/// space_or_tab* attr_value)?`, where an attribute name is
+/// `[A-Za-z_:][A-Za-z0-9_.:-]*` and an attribute value is unquoted (no space,
+/// tab, `"`, `'`, `=`, `<`, `>` or backtick) or single/double quoted.
+fn skip_html_attributes(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut index = from;
+    loop {
+        let after_space = skip_blanks(bytes, index);
+        if after_space == index {
+            return Some(index);
+        }
+        index = after_space;
+        let first = bytes.get(index)?;
+        if !(first.is_ascii_alphabetic() || *first == b'_' || *first == b':') {
+            return None;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'.' | b':' | b'-')
+        }) {
+            index += 1;
+        }
+        let mut value = skip_blanks(bytes, index);
+        if bytes.get(value) != Some(&b'=') {
+            continue;
+        }
+        value = skip_blanks(bytes, value + 1);
+        if let Some(quote @ (b'"' | b'\'')) = bytes.get(value) {
+            let mut cursor = value + 1;
+            while bytes.get(cursor).is_some_and(|byte| byte != quote) {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                return None;
+            }
+            index = cursor + 1;
+        } else {
+            let mut cursor = value;
+            while let Some(byte) = bytes.get(cursor) {
+                if matches!(
+                    *byte,
+                    b' ' | b'\t' | b'"' | b'\'' | b'=' | b'<' | b'>' | b'`'
+                ) {
+                    break;
+                }
+                cursor += 1;
+            }
+            index = cursor;
+        }
+    }
+}
+
+/// The `CommonMark` 0.31 HTML block type a line's content-after-indent opens,
+/// or `None` when it opens no raw HTML block. The types are tried in the spec's
+/// own order.
+fn html_block_kind(line: &str) -> Option<HtmlBlockKind> {
+    if let Some(ending) = type_one_ending(line) {
+        return Some(HtmlBlockKind::RawText(ending));
+    }
+    if line.starts_with("<!--") {
+        return Some(HtmlBlockKind::Comment);
+    }
+    if line.starts_with("<?") {
+        return Some(HtmlBlockKind::ProcessingInstruction);
+    }
+    if line.starts_with("<![CDATA[") {
+        return Some(HtmlBlockKind::Cdata);
+    }
+    if line
+        .as_bytes()
+        .first()
+        .is_some_and(|_| line.starts_with("<!"))
+        && line.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic)
+    {
+        return Some(HtmlBlockKind::Declaration);
+    }
+    if is_block_tag_line(line) {
+        return Some(HtmlBlockKind::BlockTag);
+    }
+    if is_complete_html_tag(line) {
+        return Some(HtmlBlockKind::CompleteTag);
+    }
+    None
 }
 
 /// The part of `line` at which a fence may open or close, with its leading
@@ -2618,12 +2933,130 @@ mod tests {
         assert_eq!(script.unchecked_count, 0);
     }
 
+    /// The `CommonMark` 0.31 HTML block rules, EXACTLY (arbsec/orchestraitor#799
+    /// R1). The shell engine applies the same rules; the shared corpus pins a
+    /// body for each of them, and this test pins the boundaries the corpus
+    /// cannot express compactly.
+    #[test]
+    fn html_blocks_follow_the_common_mark_start_and_end_conditions() {
+        // Type 1 ends at the END of the line carrying its closing tag, and the
+        // OPENING line is checked: `<pre></pre>` is a complete one-line block.
+        let same_line =
+            parse_checklist("<pre></pre>\n- [ ] <!-- orc:tests --> visible unchecked\n");
+        assert_eq!(same_line.marker_count, 1);
+        assert_eq!(same_line.unchecked_count, 1);
+        assert!(!same_line.all_checked, "the visible item must block");
+
+        // Type 2, same rule: `<!-->` and `<!--->` end on their own line.
+        for opener in ["<!-->", "<!--->"] {
+            let body = parse_checklist(&format!("{opener}\n- [ ] <!-- orc:tests --> v\n"));
+            assert_eq!(body.marker_count, 1, "opener {opener}");
+            assert_eq!(body.unchecked_count, 1, "opener {opener}");
+        }
+
+        // An AUTOLINK, INLINE HTML and an INCOMPLETE tag are ORDINARY TEXT: none
+        // is a complete tag alone on its line (type 7) and none names a block
+        // tag (type 6).
+        for text in [
+            "<https://example.com>",
+            "<em>emphasis</em> prose",
+            "<notatag nonsense",
+            "<not a tag at all",
+            "<1div>",
+        ] {
+            let body = parse_checklist(&format!("{text}\n- [ ] <!-- orc:tests --> v\n"));
+            assert_eq!(
+                body.marker_count, 1,
+                "line {text:?} must not hide the marker"
+            );
+            assert_eq!(body.unchecked_count, 1, "line {text:?}");
+        }
+
+        // Type 3 and type 5 run to their terminators, so the markers between
+        // them are not evidence at all.
+        let pi = parse_checklist("<?xml version=\"1.0\"\n- [x] <!-- orc:tests --> hidden\n?>\n");
+        assert_eq!(pi.marker_count, 0);
+        assert!(!pi.markers_present);
+        let cdata = parse_checklist("<![CDATA[\n- [x] <!-- orc:tests --> hidden\n]]>\n");
+        assert_eq!(cdata.marker_count, 0);
+
+        // Type 4 ends at `>`, so a one-line declaration hides nothing after it.
+        let declaration =
+            parse_checklist("<!DOCTYPE html>\n- [ ] <!-- orc:tests --> visible unchecked\n");
+        assert_eq!(declaration.marker_count, 1);
+
+        // Type 6 and type 7 end at the next BLANK line.
+        let div = parse_checklist(
+            "<div>\n- [ ] <!-- orc:tests --> hidden\n\n- [x] <!-- orc:issue --> visible\n",
+        );
+        assert_eq!(div.marker_count, 1);
+        assert!(div.all_checked);
+        let span = parse_checklist(
+            "<span class=\"x\">\n- [ ] <!-- orc:tests --> hidden\n\n- [x] <!-- orc:issue --> visible\n",
+        );
+        assert_eq!(span.marker_count, 1);
+
+        // An unclosed type-1 block runs to the end of the body.
+        let unclosed = parse_checklist("<pre>\n- [ ] <!-- orc:tests --> hidden\n");
+        assert_eq!(unclosed.marker_count, 0);
+
+        // An opener indented 4+ spaces — or led by a tab — is INDENTED CODE, so
+        // it opens nothing and the marker below it stays visible.
+        for opener in ["    <div>", "    <pre>", "\t<div>"] {
+            let body = parse_checklist(&format!("{opener}\n- [ ] <!-- orc:tests --> v\n"));
+            assert_eq!(
+                body.marker_count, 1,
+                "opener {opener:?} must be literal text"
+            );
+        }
+
+        // An opener indented 1-3 spaces is a CONTAINER ambiguity: the reading is
+        // refused, never guessed (#809 family).
+        let indented = parse_checklist("  <div>\n- [ ] <!-- orc:tests --> v\n");
+        assert!(indented.unparseable);
+        assert_eq!(indented.unparseable_line, Some(1));
+        assert_eq!(
+            indented.unparseable_construct,
+            Some(UnparseableConstruct::IndentedHtmlBlockOpener)
+        );
+        assert!(!indented.all_checked);
+
+        // Types 6 and 7 terminate on an opening line that is itself followed by
+        // a blank line.
+        let one_line_then_blank =
+            parse_checklist("<div>\n\n- [ ] <!-- orc:tests --> visible unchecked\n");
+        assert_eq!(one_line_then_blank.marker_count, 1);
+    }
+
+    /// The description is the text AFTER the delimiter, for a checked and an
+    /// unchecked item alike (arbsec/orchestraitor#799 R2): the shell engine used
+    /// to emit the BOX character here while this engine returned the text.
+    #[test]
+    fn descriptions_are_the_text_after_the_delimiter() {
+        let body =
+            parse_checklist("- [x] <!-- orc:issue --> alpha\n- [ ] <!-- orc:tests --> beta\n");
+        assert_eq!(body.marker_count, 2);
+        assert_eq!(body.items[0].marker, "issue");
+        assert!(body.items[0].checked);
+        assert_eq!(body.items[0].description, "alpha");
+        assert_eq!(body.items[1].marker, "tests");
+        assert!(!body.items[1].checked);
+        assert_eq!(body.items[1].description, "beta");
+
+        // The empty description stays empty, and spaces/tabs are trimmed from
+        // both ends only (never a Unicode whitespace class).
+        let empty =
+            parse_checklist("- [ ] <!-- orc:tests -->\n- [x] <!-- orc:issue -->  \tgamma\t \n");
+        assert_eq!(empty.items[0].description, "");
+        assert_eq!(empty.items[1].description, "gamma");
+    }
+
     /// The EXACT size of the shared corpus. A deleted case must FAIL, so this
     /// is a floor that is also a ceiling: bump it whenever a case is added and
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 61;
+    const CORPUS_FLOOR: u32 = 75;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
@@ -2694,6 +3127,7 @@ mod tests {
                 .unparseable_construct
                 .map(|construct| match construct {
                     UnparseableConstruct::IndentedFenceOpener => "indented_fence_opener",
+                    UnparseableConstruct::IndentedHtmlBlockOpener => "indented_html_block_opener",
                     UnparseableConstruct::NearMarker => "near_marker",
                 });
             if let Some(expected_construct) = expected_construct

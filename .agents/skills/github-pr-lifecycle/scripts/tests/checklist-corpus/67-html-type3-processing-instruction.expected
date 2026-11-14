@@ -1,0 +1,6 @@
+# CommonMark 0.31 HTML block TYPE 3 (`<?` … `?>`): every line between the
+# delimiters is raw HTML, so the nine markers inside it are NOT evidence and the
+# body is MISSING its checklist (`checklist_markers_missing`), never "all
+# checked". A scanner without type 3 reads them as nine ticked items
+# (arbsec/orchestraitor#799 R1, the vacuous pass).
+marker_count=0 all_checked=false unparseable=false

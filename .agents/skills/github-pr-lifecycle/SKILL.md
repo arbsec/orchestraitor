@@ -360,14 +360,18 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   content (so a `<!--` inside an inline code span is literal
                   text) and closes at the first line carrying `-->`; a raw HTML
                   block is an invisible region too, so a fence or a marker inside
-                  one is not state. A managed marker has ONE canonical form —
+                  one is not state — the seven CommonMark 0.31 HTML block types
+                  are implemented exactly, so an autolink or inline HTML is NOT a
+                  block and `<pre></pre>` ends on its own line (the type-by-type
+                  table is in `references/pr-convergence.md`). A managed marker
+                  has ONE canonical form —
                   `- [BOX] <!-- orc:NAME -->` with exactly one ASCII space
                   between every token — and a line that presents a managed
                   marker but not in that form (a near-marker) is INDETERMINATE.
-                  A fence opener indented 1-3 spaces makes the checklist reading
-                  INDETERMINATE — closed or not — so the verdict blocks with
-                  `checklist_unparseable`; the one remedy is to dedent the fence
-                  opener to column 0.
+                  A fence OR HTML block opener indented 1-3 spaces makes the
+                  checklist reading INDETERMINATE — closed or not — so the verdict
+                  blocks with `checklist_unparseable`; the one remedy is to dedent
+                  the opener to column 0.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

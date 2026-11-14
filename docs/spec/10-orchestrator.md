@@ -681,24 +681,39 @@ pr.status <N> -> {
                                     # 3+ tildes), an HTML comment (`<!--` ... `-->`) or a
                                     # RAW HTML BLOCK are EXAMPLES, not checklist items:
                                     # the whole region is excluded from the scan
-                                    # (arbsec/orchestraitor#788). A comment opens ONLY when
-                                    # `<!--` is the line's first non-whitespace content (at most
-                                    # three leading spaces) — a `<!--` inside an inline code span,
-                                    # or after prose, is literal text and opens nothing, and a
-                                    # marker line never opens one because its `<!--` is not the
-                                    # line's first content. It closes at the FIRST line carrying
-                                    # `-->` (the opener line included, so `<!-- orc:none -->` is a
-                                    # one-line comment), and an unclosed comment hides everything
-                                    # after it to the end of the body (fail closed). A raw HTML
-                                    # BLOCK opens on a line whose first content is `<` followed
-                                    # by an ASCII letter; it closes at the first SUBSEQUENT line
-                                    # carrying `</tag>` (any case) for the type-1 tags `pre`,
-                                    # `script`, `style` and `textarea`, and at the next BLANK
-                                    # line for every other tag — and a fence opener inside it
-                                    # opens NOTHING, so it can never hide anything outside the
-                                    # block (arbsec/orchestraitor#799 R2). Line endings
-                                    # are normalised ONCE before any scan (CommonMark §2.1: a lone
-                                    # CR and CRLF both become LF), so a closer followed by a
+                                    # (arbsec/orchestraitor#788). The seven `CommonMark` 0.31 HTML
+                                    # block types are implemented EXACTLY, never approximated, and
+                                    # a block's content is invisible: not marker evidence, and a
+                                    # fence opener inside it opens NOTHING. Type 1: a line
+                                    # beginning `<pre`, `<script`, `<style` or `<textarea`
+                                    # (case-insensitive) followed by whitespace, `>` or `/>`,
+                                    # ended by the line containing the matching closing tag. Type
+                                    # 2: a line beginning `<!--`, ended by `-->`. Type 3: `<?`,
+                                    # ended by `?>`. Type 4: `<!` plus an ASCII letter, ended by
+                                    # `>`. Type 5: `<![CDATA[`, ended by `]]>`. Type 6: `<` or
+                                    # `</` plus one of the CommonMark block tag names (`address`,
+                                    # `article`, ... `ul`) followed by whitespace, the end of the
+                                    # line, `>` or `/>`, ended by the next BLANK line. Type 7: a
+                                    # COMPLETE open tag (any tag name other than the type-1 four)
+                                    # or a complete closing tag ALONE on its line, ended by the
+                                    # next BLANK line. For types 1-5 the OPENING line is checked
+                                    # for the terminator, so `<pre></pre>`, `<!-->`, `<!--->`,
+                                    # `<?...?>` and `<![CDATA[...]]>` are COMPLETE ONE-LINE
+                                    # blocks. An AUTOLINK (`<https://example.com>`) and INLINE
+                                    # HTML (`<em>emphasis</em> prose`) are NOT blocks: the type-7
+                                    # complete-tag grammar (`[A-Za-z][A-Za-z0-9-]*` for the name,
+                                    # attributes after it, nothing but whitespace after the
+                                    # closing `>`) rejects them and neither names a block tag, so
+                                    # a task item beside them stays evidence. A block opener
+                                    # indented 1-3 spaces is a CONTAINER ambiguity and refuses the
+                                    # reading (`unparseable_construct` =
+                                    # `indented_html_block_opener`); an opener indented 4+ spaces,
+                                    # or led by a tab, is literal indented code and opens nothing
+                                    # — and a marker inside an indented code block is likewise NOT
+                                    # evidence, though detecting indented code blocks needs block
+                                    # context and is tracked by arbsec/orchestraitor#802.
+                                    # Line endings are normalised ONCE before any scan (CommonMark
+                                    # §2.1: a lone CR and CRLF both become LF), so a closer followed by a
                                     # CRLF-CRLF terminator closes in both engines. A fence line
                                     # carries at most THREE leading spaces; four or more (or a
                                     # leading tab) is an indented code block, where fence
@@ -712,21 +727,25 @@ pr.status <N> -> {
                                     # (arbsec/orchestraitor#799 F18). Only a space or a tab
                                     # indents a checklist item.
                                     # `unparseable` is true when the checklist reading is
-                                    # INDETERMINATE: the body OPENS a fence indented 1-3
-                                    # spaces (`unparseable_line` = the 1-based line,
-                                    # `unparseable_construct` = `indented_fence_opener`), or
+                                    # INDETERMINATE, which happens in three cases, and
+                                    # `unparseable_line` is the 1-based line of the EARLIEST of
+                                    # them: the body OPENS a fence indented 1-3 spaces
+                                    # (`unparseable_construct` = `indented_fence_opener`); the body
+                                    # OPENS an HTML block indented 1-3 spaces
+                                    # (`unparseable_construct` = `indented_html_block_opener`); or
                                     # the body carries a NEAR-MARKER
-                                    # (`unparseable_construct` = `near_marker`): the
-                                    # container scope (top level, list item, block quote) is
-                                    # indeterminate without a container model, so no checklist
-                                    # reading is trusted, `all_checked` is false, and the verdict
-                                    # blocks with `checklist_unparseable` (arbsec/orchestraitor#809,
+                                    # (`unparseable_construct` = `near_marker`). In each case the
+                                    # construct's scope or assertion cannot be determined without a
+                                    # container model or a canonical form, so no checklist reading is
+                                    # trusted, `all_checked` is false, and the verdict blocks with
+                                    # `checklist_unparseable` (arbsec/orchestraitor#809,
                                     # arbsec/orchestraitor#799 R1).
-                                    # The indented-opener condition is STICKY: closing the
-                                    # region does not clear it (a closer can end the region
+                                    # The indented-opener conditions are STICKY: closing the
+                                    # region does not clear them (a closer can end the region
                                     # earlier for the renderer than for the scan, so a
                                     # swallowed marker can still be visible). The remedy is to
-                                    # dedent the opener to column 0.
+                                    # dedent the opener to column 0; a near-marker's remedy is to
+                                    # write it canonically.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

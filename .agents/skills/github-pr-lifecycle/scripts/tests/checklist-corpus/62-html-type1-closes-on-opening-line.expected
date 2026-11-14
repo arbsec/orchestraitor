@@ -1,0 +1,7 @@
+# CommonMark 0.31 HTML block TYPE 1 end condition: the block ends at the line
+# carrying the matching closing tag, and the OPENING line is checked — so
+# `<pre></pre>` is a complete ONE-LINE block. Before the exact rule, the scanner
+# looked only at SUBSEQUENT lines, swallowed the unchecked item below, and
+# reported all nine ticked markers as `all_checked: true` while a human saw an
+# unticked box (arbsec/orchestraitor#799 R1, the fail-open this case pins).
+marker_count=10 all_checked=false unparseable=false

@@ -1,0 +1,6 @@
+# CommonMark 0.31 HTML block TYPE 5 (`<![CDATA[` … `]]>`): every line between the
+# delimiters is raw text, so the nine markers inside are NOT evidence and the
+# body is MISSING its checklist (`checklist_markers_missing`). `<![CDATA[` must be
+# recognised as its own type — it is `<` `!` `[`, so the type-4 declaration rule
+# (`<!` + an ASCII letter) does not match it (arbsec/orchestraitor#799 R1).
+marker_count=0 all_checked=false unparseable=false

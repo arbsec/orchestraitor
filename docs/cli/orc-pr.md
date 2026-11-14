@@ -77,14 +77,17 @@ or a tab indents a checklist item. An HTML comment opens only when `<!--` is the
 line's first non-whitespace content (at most three leading spaces) — a `<!--`
 inside an inline code span or after prose is literal text, so the rest of that
 line stays visible — and closes at the first line carrying `-->` (the opener line
-included), while an unclosed comment runs to the end of the body. A fence OPENER
-indented 1-3 spaces has an
-INDETERMINATE container scope (it may belong to a list item or a block quote,
-and the scanner has no container model): the checklist is not read, `all_checked`
-is false, and the verdict blocks with the distinct reason
-`checklist_unparseable` (arbsec/orchestraitor#809). The condition is sticky —
-closing the region does not clear it — and the one remedy is to dedent the fence
-opener to column 0.
+included), while an unclosed type-2 block runs to the end of the body. A
+FENCE or HTML BLOCK OPENER indented 1-3 spaces has an INDETERMINATE container
+scope (it may belong to a list item or a block quote, and the scanner has no
+container model): the checklist is not read, `all_checked` is false, and the
+verdict blocks with the distinct reason `checklist_unparseable`
+(arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1), with
+`unparseable_construct` naming which one — `indented_fence_opener` or
+`indented_html_block_opener`. The condition is sticky — closing the region does
+not clear it — and the one remedy is to dedent the opener to column 0. The
+`checklist.items[].description` field is the text AFTER the `-->` delimiter, for
+checked and unchecked items alike.
 
 A managed marker has ONE canonical form: `[ \t]*- [BOX] <!-- orc:NAME -->`, where
 every separator is EXACTLY one ASCII space (between `-` and `[`, between `]` and
@@ -99,10 +102,18 @@ blocks with `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that
 only mentions `orc:NAME` (prose) and a line that carries only a box token (a
 plain task) are not near-markers and never block. A RAW HTML BLOCK is an
 invisible region as well: its content is raw HTML, so a task item inside it is
-not a checkbox and backticks inside it are not a fence — the block opens on a
-line whose first content is `<` followed by an ASCII letter, closes at the first
-subsequent line carrying `</tag>` for the type-1 tags `pre`, `script`, `style`
-and `textarea` and at the next blank line for every other tag.
+not a checkbox and backticks inside it are not a fence. The seven CommonMark
+0.31 HTML block types are implemented exactly: a type-1 raw-text tag (`pre`,
+`script`, `style`, `textarea`) runs to its matching closing tag; a comment
+(`<!--`) to `-->`; a processing instruction (`<?`) to `?>`; a declaration (`<!`
+plus a letter) to `>`; a CDATA section (`<![CDATA[`) to `]]>`; and a CommonMark
+block tag or a complete tag alone on its line ends at the next blank line. For
+the first five the OPENING line is checked for the terminator, so `<pre></pre>`,
+`<!-->` and `<!--->` are complete one-line blocks. An autolink
+(`<https://example.com>`) and inline HTML (`<em>x</em> prose`) are ordinary
+text, not blocks. An HTML block opener indented 1-3 spaces is an indeterminate
+scope and blocks with `checklist_unparseable`; one indented 4+ spaces is
+indented code.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

@@ -1,0 +1,5 @@
+# INLINE HTML is NOT a CommonMark HTML block. `<em>` is a complete open tag, but
+# the line does not hold that tag ALONE — type 7 requires the tag to be followed
+# only by whitespace — and `em` is not a type-6 block tag. The line is ordinary
+# text, so the marker below it stays evidence (arbsec/orchestraitor#799 R1).
+marker_count=1 all_checked=false unparseable=false

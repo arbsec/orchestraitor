@@ -1,0 +1,13 @@
+# The delivery lane's denial-of-progress vector (arbsec/orchestraitor#799 R4): a
+# model summary line with a TAB after the box is NOT the canonical managed
+# marker, but it carries BOTH a task-item box token and an `orc:NAME` reference,
+# so every scanner REFUSES the whole reading (`checklist_unparseable`). Ticking
+# the nine managed boxes does not remove the line, so a body composed from this
+# summary can never converge. The lane therefore neutralises the line (see
+# `delivery_clears_a_near_marker_in_the_summary`); this case pins the reading of
+# the RAW summary that makes the neutralisation necessary.
+# The SAME lane has two further, narrower vectors that this round did NOT fix —
+# an indented HTML block opener, and an unclosed raw HTML block hiding the
+# summary's tail. Both block rather than pass, so they are tracked separately in
+# arbsec/orchestraitor#810 rather than widened into this PR.
+marker_count=0 all_checked=false unparseable=true unparseable_construct=near_marker

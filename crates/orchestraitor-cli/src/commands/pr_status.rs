@@ -442,11 +442,12 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 /// verdict blocks with `checklist_unparseable` — and the message names the
 /// construct and its one remedy.
 ///
-/// The construct is either a fence OPENER indented 1-3 spaces (CLOSED OR NOT —
-/// it may belong to a list item or a block quote) or a NEAR-MARKER (a line
-/// that presents a managed marker but not in the canonical form, so the gate
-/// cannot tell what it asserts) — arbsec/orchestraitor#809 and
-/// arbsec/orchestraitor#799 R1.
+/// The construct is a fence OPENER indented 1-3 spaces (CLOSED OR NOT — it may
+/// belong to a list item or a block quote), an HTML BLOCK opener indented 1-3
+/// spaces (the same container ambiguity: `CommonMark` ends such a block at its
+/// container boundary), or a NEAR-MARKER (a line that presents a managed marker
+/// but not in the canonical form, so the gate cannot tell what it asserts) —
+/// arbsec/orchestraitor#809 and arbsec/orchestraitor#799 R1.
 fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
     let line = checklist
         .unparseable_line
@@ -462,6 +463,15 @@ fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) 
             "  fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
         )
         .into_diagnostic()?;
+        return Ok(());
+    }
+    if let Some(UnparseableConstruct::IndentedHtmlBlockOpener) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — an HTML block opener is indented 1-3 spaces (line {line}); CommonMark ends such a block at its container boundary, which the scanner cannot determine, so the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(writer, "  fix: dedent the HTML block opener to column 0").into_diagnostic()?;
         return Ok(());
     }
     writeln!(

@@ -1,0 +1,8 @@
+# An AUTOLINK is NOT a CommonMark HTML block. `<https://example.com>` fails the
+# type-7 complete-tag grammar (`:` is not a tag-name continuation, and the line
+# carries no `>` after the name) and `https` is not a type-6 block tag, so the
+# line is ORDINARY TEXT and the marker below it stays evidence. A scanner that
+# treats "line begins with `<` and a letter" as a block hides the marker and
+# reports `checklist_markers_missing` for a body that plainly carries one
+# (arbsec/orchestraitor#799 R1).
+marker_count=1 all_checked=false unparseable=false

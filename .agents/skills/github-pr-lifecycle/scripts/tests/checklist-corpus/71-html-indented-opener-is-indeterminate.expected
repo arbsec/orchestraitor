@@ -1,0 +1,9 @@
+# An HTML block opener indented 1-3 spaces is the SAME container ambiguity as an
+# indented fence opener: inside a list item or a block quote CommonMark ends the
+# block at the CONTAINER boundary, which this line scanner cannot model — so the
+# marker it hides may still be visible to a human. The reading is therefore
+# REFUSED (`checklist_unparseable`) rather than guessed, and `all_checked` is
+# false. The marker count is 0 because the block runs to the end of the body
+# here; what matters is that this body can never be read as a pass
+# (arbsec/orchestraitor#799 R1, the #809 family).
+marker_count=0 all_checked=false unparseable=true unparseable_construct=indented_html_block_opener

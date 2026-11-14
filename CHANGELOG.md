@@ -31,7 +31,38 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   CRLF both become LF) so both engines agree on every body. It also models RAW
   HTML BLOCKS: their content is raw HTML, so a task item inside one is not a
   checkbox and backticks inside one are not a fence — a fence opener inside an
-  HTML block opens nothing and therefore cannot hide anything outside it.
+  HTML block opens nothing and therefore cannot hide anything outside it. The
+  seven CommonMark 0.31 HTML block types are now implemented exactly rather
+  than approximated: a type-1 raw-text tag (`pre`, `script`, `style`,
+  `textarea`) ends at its matching closing tag, a comment at `-->`, a
+  processing instruction at `?>`, a declaration at `>`, a CDATA section at
+  `]]>`, and a CommonMark block tag or a complete tag alone on its line at the
+  next blank line. For the first five the OPENING line is checked, so
+  `<pre></pre>`, `<!-->` and `<!--->` are complete one-line blocks instead of
+  swallowing the items below them. An autolink (`<https://example.com>`) and
+  inline HTML (`<em>x</em> prose`) are ordinary text, not blocks, so a task
+  item beside them is evidence again. An HTML block opener indented 1-3 spaces
+  is an indeterminate scope: the verdict blocks with `checklist_unparseable`
+  and `checklist.unparseable_construct` = `indented_html_block_opener`; an
+  opener indented 4+ spaces is indented code.
+- **`pr-create` / `pr-mutate`**: a body that ends inside an unterminated HTML
+  block is refused with a remedy that works. The error now names the actual
+  terminator for the block type — `</pre>`, `</script>`, `</style>`,
+  `</textarea>`, `-->`, `?>`, `>` or `]]>` — instead of the nonsense "add a
+  line carrying `</>`", and a blank-line-terminated block (a CommonMark block
+  tag or a complete tag alone on its line) is no longer refused at all: the
+  appended checklist lands after the blank line that ends it and is visible.
+- **`orc pr status` / `reconcile-checklist --json`**: `checklist.items[].description`
+  is the text after the `-->` delimiter again, for checked and unchecked items
+  alike. The shell engine emitted the BOX character (`"x"` / `""`) while the
+  Rust engine returned the text.
+- **The delivery lane cannot be made permanently unconvergeable.** A
+  model-authored run summary that carries a task item mentioning a managed
+  marker (`- [ ]\t<!-- orc:tests --> example`) is a near-marker, so a PR body
+  composed from it could never converge — no author action removes it. The lane
+  now renders such a line as literal text (`<!--` becomes `&lt;!--` and
+  `orc:NAME` becomes `orc&#58;NAME`, both of which a reviewer reads exactly as
+  written), while a plain task item and a canonical marker are left untouched.
 - **The managed checklist marker has ONE canonical form.** A managed marker is
   `- [BOX] <!-- orc:NAME -->` with exactly one ASCII space between every
   token, a box of `x`, `X` or a single space, and one of the nine managed

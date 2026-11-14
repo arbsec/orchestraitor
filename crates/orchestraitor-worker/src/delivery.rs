@@ -148,8 +148,8 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 - [ ] <!-- orc:threads --> All actionable review threads are resolved\n\
 \n";
 
-/// Neutralises the two constructs an UNTRUSTED model summary could use to make
-/// the composed PR body **INDETERMINATE** or to hide content from a reviewer.
+/// Neutralises the constructs an UNTRUSTED model summary could use to make the
+/// composed PR body **INDETERMINATE** or to hide content from a reviewer.
 ///
 /// The checklist gate refuses a body that carries a fence OPENER indented 1-3
 /// spaces (`checklist_unparseable`, arbsec/orchestraitor#809), and that
@@ -160,7 +160,7 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 /// make every delivery PR unmergeable by construction — and the summary is
 /// untrusted content the LANE composed, so the lane owns that guarantee.
 ///
-/// Two transformations, both minimal and both idempotent:
+/// Three transformations, all minimal and all idempotent:
 ///
 /// - a line indented 1-3 SPACES whose next characters are 3+ backticks or 3+
 ///   tildes is **dedented to column 0**. That is exactly the remedy the gate's
@@ -177,7 +177,20 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 ///   UNCLOSED `<!--` would swallow the rest of the summary and hide it from the
 ///   reviewer, which is content the lane must not let untrusted text suppress.
 ///   Escaping keeps every byte the model wrote VISIBLE; only the ability to
-///   open a region is removed.
+///   open a region is removed;
+/// - a line that carries BOTH a task-item box token (`[` + exactly one
+///   character + `]`) AND a reference to one of the nine managed marker names
+///   is a **NEAR-MARKER** to every scanner: the gate cannot tell whether the
+///   model meant to assert a managed item, so it REFUSES the whole reading with
+///   `checklist_unparseable` — permanently, because ticking the nine boxes does
+///   not remove the line (arbsec/orchestraitor#799 R4, the denial-of-progress
+///   vector). The lane therefore renders it so it can no longer be a marker:
+///   the `<` of its `<!--` becomes `&lt;` (no delimiter) and the `:` of every
+///   `orc:NAME` reference becomes `&#58;` (no name reference). Both are
+///   character references, so the reviewer still reads exactly the text the
+///   model wrote; only the ability to BE a managed marker is removed. A summary
+///   line with a box token and NO managed reference (`- [ ] plain task`) is a
+///   PLAIN TASK, which no scanner refuses, so it is left untouched.
 ///
 /// After this, the only region the summary can open is a COLUMN-0 fence: that
 /// one is determinate, and because the trusted checklist leads the body it can
@@ -207,18 +220,102 @@ fn neutralise_summary(summary: &str) -> String {
         let indented_opener =
             (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"));
         let comment_opener = indent <= 3 && !rest.starts_with('\t') && rest.starts_with("<!--");
+        let near_marker = is_near_marker_line(content);
+        let mut rendered = String::with_capacity(content.len());
         if indented_opener {
-            out.push_str(rest);
+            rendered.push_str(rest);
         } else if comment_opener {
-            out.push_str(&content[..indent]);
-            out.push_str("&lt;");
-            out.push_str(rest.get(1..).unwrap_or_default());
+            rendered.push_str(&content[..indent]);
+            rendered.push_str("&lt;");
+            rendered.push_str(rest.get(1..).unwrap_or_default());
         } else {
-            out.push_str(content);
+            rendered.push_str(content);
         }
+        if near_marker {
+            // Escape the REMAINING delimiter and the name reference of a
+            // managed-marker line. `&lt;!--` / `orc&#58;NAME` render as the
+            // bytes the model wrote, so nothing is hidden from the reviewer.
+            rendered = escape_marker_delimiters(&rendered);
+        }
+        out.push_str(&rendered);
         out.push_str(newline);
     }
     out
+}
+
+/// True when the line is a NEAR-MARKER: it carries a task-item BOX TOKEN (`[` +
+/// exactly one character + `]`) AND a reference to one of the nine managed
+/// marker names (`orc:NAME`) but is NOT in the canonical managed-marker form.
+///
+/// This is the exact condition both scanner engines refuse the whole reading
+/// for. A CANONICAL marker in the summary is deliberately NOT escaped: it is a
+/// real checklist item a reviewer can tick, so it is remediable, whereas a
+/// near-marker makes the reading indeterminate with nothing to tick.
+fn is_near_marker_line(line: &str) -> bool {
+    has_box_token(line)
+        && managed_marker_names().any(|name| line.contains(&name_reference(name)))
+        && !is_canonical_marker_line(line)
+}
+
+/// True when the line already has the canonical managed-marker prefix
+/// (`[ \t]*- [x|X| ] <!-- orc:NAME -->`), so it is a real checklist item the
+/// reviewer can act on. The prefix test is the shared grammar's own prefix; the
+/// shared corpus pins the grammar, and `neutraliser_knows_every_managed_marker_name`
+/// pins that the name set cannot drift.
+fn is_canonical_marker_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    managed_marker_names().any(|name| {
+        ["x", "X", " "]
+            .iter()
+            .any(|box_char| trimmed.starts_with(&format!("- [{box_char}] <!-- orc:{name} -->")))
+    })
+}
+
+/// The `orc:NAME` text a scanner looks for.
+fn name_reference(name: &str) -> String {
+    format!("orc:{name}")
+}
+
+/// True when the line contains a `[` + exactly one character + `]` box token.
+fn has_box_token(line: &str) -> bool {
+    line.char_indices().any(|(index, character)| {
+        if character != '[' {
+            return false;
+        }
+        let Some(rest) = line.get(index + 1..) else {
+            return false;
+        };
+        let mut characters = rest.chars();
+        let Some(middle) = characters.next() else {
+            return false;
+        };
+        middle != ']' && characters.next() == Some(']')
+    })
+}
+
+/// The nine MANAGED marker names, derived from [`DELIVERY_PR_CHECKLIST`] — the
+/// single copy in this crate — so the near-marker shape the neutraliser removes
+/// can never drift from the checklist it composes.
+fn managed_marker_names() -> impl Iterator<Item = &'static str> {
+    DELIVERY_PR_CHECKLIST
+        .match_indices("<!-- orc:")
+        .filter_map(|(index, prefix)| {
+            let tail = DELIVERY_PR_CHECKLIST.get(index + prefix.len()..)?;
+            tail.split_once(" -->").map(|(name, _)| name)
+        })
+}
+
+/// Renders a near-marker line so it can no longer present a managed marker,
+/// while keeping every character readable: `<!--` becomes `&lt;!--` and
+/// `orc:NAME` becomes `orc&#58;NAME`. Both are character references, so the
+/// reviewer reads the text the model wrote and no delimiter survives for a
+/// scanner to find. Idempotent: the escaped forms contain neither needle.
+fn escape_marker_delimiters(line: &str) -> String {
+    let mut escaped = line.replace("<!--", "&lt;!--");
+    for name in managed_marker_names() {
+        escaped = escaped.replace(&name_reference(name), &format!("orc&#58;{name}"));
+    }
+    escaped
 }
 
 /// Real delivery sink (issue #656): hands a completed run's committed

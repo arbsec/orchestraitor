@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. A managed marker has ONE canonical form: '- [x] <!-- orc:NAME -->' with exactly one ASCII space between every token, a box of x, X or a single space, and one of the nine managed names. A line that is not canonical but carries BOTH a task-item box token and an orc:NAME reference is a NEAR-MARKER: the gate cannot tell what it asserts, so it is reported unparseable (all_checked false) and the verdict blocks with checklist_unparseable. Markers inside a fenced code region, an HTML comment or a raw HTML block are examples, not checklist items, and a fence opener inside an HTML block opens nothing. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces is reported unparseable (all_checked false), whether or not that fence closes: its container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. A managed marker has ONE canonical form: '- [x] <!-- orc:NAME -->' with exactly one ASCII space between every token, a box of x, X or a single space, and one of the nine managed names. A line that is not canonical but carries BOTH a task-item box token and an orc:NAME reference is a NEAR-MARKER: the gate cannot tell what it asserts, so it is reported unparseable (all_checked false) and the verdict blocks with checklist_unparseable. Markers inside a fenced code region, an HTML comment or a raw HTML block are examples, not checklist items, and a fence opener inside an HTML block opens nothing. HTML blocks follow CommonMark 0.31 types 1-7 exactly: a type-1 raw-text tag (pre, script, style, textarea) runs to its closing tag and may close on its own opening line, a comment runs to -->, a processing instruction to ?>, a declaration to >, a CDATA section to ]]>, and a known block tag or a complete tag alone on its line ends at the next blank line. An HTML comment opens only when <!-- is the line's first content, so a <!-- inside an inline code span is literal text. An autolink like <https://example.com> and inline HTML like <em>x</em> prose are ordinary text, not blocks. A body that OPENS a fence or an HTML block with 1-3 leading spaces is reported unparseable (all_checked false), whether or not that region closes: its container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the opener to column 0."
   exit "$ORC_OK"
 fi
 
@@ -75,25 +75,38 @@ SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
 #   - a NEAR-MARKER (arbsec/orchestraitor#799 R1): the author presented a
 #     managed marker whose form the gate cannot read, so the gate must not
 #     guess what they asserted. The remedy is to write the marker in the
-#     canonical form.
+#     canonical form;
+#   - an HTML BLOCK opener indented 1-3 spaces (arbsec/orchestraitor#799 R1):
+#     CommonMark ends such a block at its container boundary, which this
+#     scanner cannot model, so a marker it hides may still be visible to a
+#     human. The remedy is to dedent the opener to column 0.
 #
-# The EARLIEST of the two wins: both make the reading undecidable.
+# The EARLIEST of the three wins: each makes the reading undecidable.
 INDENTED_OPENER_LINE="$(printf '%s\n' "$BODY" | orc_lib_fence_unparseable_line)"
+INDENTED_HTML_LINE="$(printf '%s\n' "$BODY" | orc_lib_html_unparseable_line)"
 NEAR_MARKER_LINE="$(printf '%s\n' "$BODY" | orc_lib_near_marker_line)"
 UNPARSEABLE_LINE=""
 UNPARSEABLE_CONSTRUCT=""
-if [ -n "$INDENTED_OPENER_LINE" ] &&
-   { [ -z "$NEAR_MARKER_LINE" ] || [ "$INDENTED_OPENER_LINE" -le "$NEAR_MARKER_LINE" ]; }; then
-  UNPARSEABLE_LINE="$INDENTED_OPENER_LINE"
-  UNPARSEABLE_CONSTRUCT="indented_fence_opener"
-elif [ -n "$NEAR_MARKER_LINE" ]; then
-  UNPARSEABLE_LINE="$NEAR_MARKER_LINE"
-  UNPARSEABLE_CONSTRUCT="near_marker"
-fi
+# The EARLIEST construct wins: every one of them makes the reading undecidable,
+# so the message names the first line the author has to look at.
+for candidate in "$INDENTED_OPENER_LINE:indented_fence_opener" \
+                 "$INDENTED_HTML_LINE:indented_html_block_opener" \
+                 "$NEAR_MARKER_LINE:near_marker"; do
+  candidate_line="${candidate%%:*}"
+  candidate_construct="${candidate#*:}"
+  [ -n "$candidate_line" ] || continue
+  if [ -z "$UNPARSEABLE_LINE" ] || [ "$candidate_line" -lt "$UNPARSEABLE_LINE" ]; then
+    UNPARSEABLE_LINE="$candidate_line"
+    UNPARSEABLE_CONSTRUCT="$candidate_construct"
+  fi
+done
 RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -P "$ORC_LIB_CANONICAL_MARKER_RE" || true; } | while IFS= read -r line; do
   CHECKED="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]].*/\1/p')"
   MARKER="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:([A-Za-z0-9_-]+) -->.*/\2/p')"
-  DESC="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:[A-Za-z0-9_-]+ -->(.*)$/\1/p' | sed -E 's/^[[:blank:]]+//; s/[[:blank:]]+$//')"
+  # The DESCRIPTION is group 2 — everything after `-->`. Group 1 is the BOX
+  # character, and emitting it here reported `description: "x"` / `""` instead
+  # of the text the Rust engine returns (arbsec/orchestraitor#799 R2).
+  DESC="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:[A-Za-z0-9_-]+ -->(.*)$/\2/p' | sed -E 's/^[[:blank:]]+//; s/[[:blank:]]+$//')"
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
 done)"
 
@@ -125,6 +138,11 @@ else
         echo "  (UNPARSEABLE: line $UNPARSEABLE_LINE presents a managed marker that is NOT in the canonical form;"
         echo "   it carries a task-item box token and an orc:NAME reference, so the gate cannot tell what it asserts)"
         echo "   fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
+        ;;
+      indented_html_block_opener)
+        echo "  (UNPARSEABLE: the body opens a raw HTML block indented 1-3 spaces on line $UNPARSEABLE_LINE;"
+        echo "   CommonMark ends such a block at its container boundary, which this scanner cannot determine, so no checklist reading is trusted)"
+        echo "   fix: dedent the HTML block opener to column 0"
         ;;
       *)
         echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE, closed or not;"

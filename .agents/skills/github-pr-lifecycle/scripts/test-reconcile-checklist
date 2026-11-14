@@ -131,7 +131,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
   GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_COMMON_DIR GIT_NAMESPACE
 
-for script in _lib.sh reconcile-checklist convergence-status pr-create pr-mutate; do
+for script in _lib.sh reconcile-checklist convergence-status pr-create pr-mutate merge-gate; do
   cp -L -- "$SCRIPT_DIR/$script" "$TMP/repo/scripts/"
 done
 cp -L -- "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$TMP/repo/.github/"
@@ -194,6 +194,11 @@ case "$1/${2:-}" in
     done
     printf '%s' "$body" > "${GH_EDIT_BODY_FILE:-/dev/null}"
     exit 0 ;;
+  pr/merge)
+    # `merge-gate` must NEVER reach this. Recording the call proves it: an
+    # assertion on the EXIT CODE alone could pass while the merge still ran.
+    printf '%s\n' "$@" > "$TMP_GH_MERGE_ARGV_FILE"
+    exit 0 ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 STUB
@@ -213,6 +218,10 @@ export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export ORC_GITHUB_APP_ENFORCEMENT=required
 export GH_EDIT_BODY_FILE="$TMP/edited-body.md"
 export GH_EDIT_ARGV_FILE="$TMP/edited-argv.txt"
+# `merge-gate` must never reach `gh pr merge`; the stub records the call here so
+# the suite can assert its ABSENCE (an exit-code assertion alone could pass
+# while the merge still ran).
+export TMP_GH_MERGE_ARGV_FILE="$TMP/merge-argv.txt"
 
 # Review-policy provenance fixture (#748): the trusted base commit — reported as
 # the PR's `baseRefOid` — holds exactly the copies the gate is about to run, so
@@ -527,10 +536,17 @@ CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
 # meaning under the canonical grammar. Cases 49-54 pin the six near-marker
 # forms, 55/56 pin that PROSE and a PLAIN TASK never block, 57-60 pin the raw
 # HTML BLOCK model, and 61 pins that a marker's own `-->` closes the comment.)
+# (62-72 pin the CommonMark 0.31 HTML block rules EXACTLY — type 1 closing on its
+# opening line, the type-2 empty terminators, an autolink and inline HTML and an
+# incomplete tag being ordinary TEXT, types 3 and 5 hiding the markers inside
+# them, type 6 and type 7 ending at a blank line, a type-1 block running to EOF,
+# and an indented opener refusing the reading; 73 pins the near-marker the
+# delivery lane must neutralise; 74 pins the description field both engines
+# publish; 75 pins the `<!--->` terminator separately from `<!-->`.)
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=61
+CORPUS_FLOOR=75
 CORPUS_CASES=0
 for corpus_body in "$CORPUS_DIR"/*.md; do
   corpus_slug="$(basename "$corpus_body" .md)"
@@ -961,6 +977,149 @@ run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f8: a <script> block runs to </script>' 1 "$(jq -r .marker_count <<<"$OUT")"
 assert 'f8: and the hidden item is not counted as unchecked' 0 \
   "$(jq -r '.unchecked | length' <<<"$OUT")"
+
+# --- (f8b2) the CommonMark HTML block rules, exactly ---------------------------
+# arbsec/orchestraitor#799 R1: the seven CommonMark 0.31 HTML block types are
+# implemented as the RULE, not as an approximation. The shared corpus pins the
+# reading of each body; this block pins the GATE-level outcome the merge path
+# consumes — the convergence reason, and that `merge-gate` never reaches
+# `gh pr merge`.
+export BODY_FIXTURE="$CORPUS_DIR/62-html-type1-closes-on-opening-line.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8b: <pre></pre> ends on its own line (nine + one visible)' 10 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8b: and the visible unchecked item is counted' 1 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
+assert 'f8b: so the nine ticked markers are not a pass' false "$(jq -r .all_checked <<<"$OUT")"
+assert 'f8b: and the reading is determinate' false "$(jq -r .unparseable <<<"$OUT")"
+
+# Every corpus case with an HTML construct must block for the reason it pins.
+# A body the gate would merge while a human sees an unticked box is the
+# fail-open these rules exist to stop.
+while IFS='|' read -r html_case html_reasons; do
+  [ -n "$html_case" ] || continue
+  export BODY_FIXTURE="$CORPUS_DIR/$html_case.md"
+  run convergence-status 7 --repo test-org/repo --json
+  assert "f8b: $html_case blocks on $html_reasons" "$html_reasons" \
+    "$(jq -c .reasons <<<"$OUT")"
+done <<'TABLE'
+62-html-type1-closes-on-opening-line|["unchecked_items(1)"]
+63-html-comment-empty-terminator|["unchecked_items(1)"]
+75-html-comment-dash-terminator|["unchecked_items(1)"]
+64-autolink-is-not-a-block|["unchecked_items(1)"]
+65-inline-html-is-not-a-block|["unchecked_items(1)"]
+66-incomplete-tag-is-not-a-block|["unchecked_items(1)"]
+67-html-type3-processing-instruction|["checklist_markers_missing"]
+68-html-type5-cdata-section|["checklist_markers_missing"]
+69-html-type6-ends-at-blank-line|["unchecked_items(1)"]
+70-html-type1-unclosed-runs-to-eof|["checklist_markers_missing"]
+71-html-indented-opener-is-indeterminate|["checklist_unparseable"]
+72-html-type7-complete-tag-only|["unchecked_items(1)"]
+73-near-marker-in-a-delivery-summary|["checklist_unparseable"]
+TABLE
+
+# The `<pre></pre>` body is the reported fail-open: before the exact end
+# condition the scanner swallowed the visible unchecked item and the gate
+# reported `mergeable: true`. `merge-gate` performs the merge, so it must stop
+# at the blocked verdict and never construct a `gh pr merge` call.
+export BODY_FIXTURE="$CORPUS_DIR/62-html-type1-closes-on-opening-line.md"
+rm -f "$TMP/merge-argv.txt"
+run merge-gate 7 --repo test-org/repo
+assert 'f8b: merge-gate refuses the <pre></pre> body' 5 "$RC"
+assert 'f8b: naming the visible unchecked item' 1 \
+  "$(grep -cF 'unchecked_items(1)' "$TMP/stderr")"
+assert 'f8b: and it NEVER invokes gh pr merge' 0 "$(exists "$TMP/merge-argv.txt")"
+
+# The indeterminate HTML opener names its own construct and its own remedy, so
+# the message is actionable rather than a fence remedy that does not apply.
+export BODY_FIXTURE="$CORPUS_DIR/71-html-indented-opener-is-indeterminate.md"
+run reconcile-checklist 7 --repo test-org/repo
+assert 'f8b: text mode names the indented HTML block opener' 1 \
+  "$(grep -cF 'opens a raw HTML block indented 1-3 spaces' <<<"$OUT")"
+assert 'f8b: and offers the remedy that works' 1 \
+  "$(grep -cF 'dedent the HTML block opener to column 0' <<<"$OUT")"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8b: the JSON construct is indented_html_block_opener' 'indented_html_block_opener' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+assert 'f8b: and it names the opener line' 1 "$(jq -r .unparseable_line <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f8c) the DESCRIPTION field is the text after the delimiter ----------------
+# arbsec/orchestraitor#799 R2: `reconcile-checklist --json` emitted the BOX
+# character (`"x"` / `""`) because its sed emitted capture group 1 instead of
+# group 2, while the Rust engine returned the text — a cross-engine divergence
+# in a field `pr status` publishes.
+export BODY_FIXTURE="$CORPUS_DIR/74-description-text.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8c: a CHECKED item description is the text after the delimiter' 'alpha' \
+  "$(jq -r '.items[0].description' <<<"$OUT")"
+assert 'f8c: an UNCHECKED item description is the text after the delimiter' 'beta' \
+  "$(jq -r '.items[1].description' <<<"$OUT")"
+assert 'f8c: the marker ids are unchanged by the fix' 'issue,tests' \
+  "$(jq -r '[.items[].marker] | join(",")' <<<"$OUT")"
+assert 'f8c: the box characters are unchanged by the fix' 'true,false' \
+  "$(jq -r '[.items[].checked] | join(",")' <<<"$OUT")"
+run reconcile-checklist 7 --repo test-org/repo
+assert 'f8c: and the text form prints the description, checked' 1 \
+  "$(grep -cF '[x] issue: alpha' <<<"$OUT")"
+assert 'f8c: and the text form prints the description, unchecked' 1 \
+  "$(grep -cF '[ ] tests: beta' <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f8d) the HTML append refusal names a workable remedy ---------------------
+# arbsec/orchestraitor#799 R3: a body ending inside a blank-line-terminated HTML
+# block was refused with "add a line carrying </>", which is nonsense — those
+# blocks end at a blank line, not a closing tag. Types 6 and 7 must NOT be
+# refused at all, and the appended markers must land AFTER the blank line (which
+# is the only place they are visible).
+for html_tag in '<div>' '<details>'; do
+  html_ensured="$(ensure "$html_tag" "$TMP/repo" 2>"$TMP/stderr")"
+  RC=$?
+  assert "f8d: $html_tag is not refused" 0 "$RC"
+  assert "f8d: $html_tag gains the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$html_ensured")"
+  assert "f8d: $html_tag keeps its own opener first" 1 \
+    "$(head -1 <<<"$html_ensured" | grep -cF "$html_tag")"
+  assert "f8d: $html_tag is followed by the blank line that ENDS the block" "" \
+    "$(sed -n 2p <<<"$html_ensured")"
+  # The proof that matters: the composed body reconciles to nine VISIBLE markers
+  # and is not indeterminate, so the appended checklist is real evidence.
+  printf '%s\n' "$html_ensured" > "$TMP/files/f8d-ensured.md"
+  export BODY_FIXTURE="$TMP/files/f8d-ensured.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f8d: the $html_tag body then carries nine markers" 9 \
+    "$(jq -r .marker_count <<<"$OUT")"
+  assert "f8d: and reads as determinate" false "$(jq -r .unparseable <<<"$OUT")"
+  assert "f8d: and every marker is unchecked" 9 \
+    "$(jq -r '.unchecked | length' <<<"$OUT")"
+done
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# A type-1 block names the ACTUAL closing tag, and types 2-5 the ACTUAL
+# terminator. An unclosed raw HTML block still refuses: the appended checklist
+# would be swallowed.
+cat > "$TMP/files/f8d-html-remedies.tsv" <<'TABLE'
+<pre>|</pre>
+<script>|</script>
+<style>|</style>
+<textarea>|</textarea>
+<!--|-->
+<?xml|?>
+<!DOCTYPE html|>
+<![CDATA[|]]>
+TABLE
+while IFS='|' read -r remedy_body remedy_term; do
+  [ -n "$remedy_body" ] || continue
+  rm -f "$TMP/stderr"
+  ensure "$remedy_body" "$TMP/repo" >/dev/null 2>"$TMP/stderr"
+  RC=$?
+  assert "f8d: '$remedy_body' is refused" 2 "$RC"
+  assert "f8d: '$remedy_body' names its terminator '$remedy_term'" 1 \
+    "$(grep -cF "add a line carrying $remedy_term" "$TMP/stderr")"
+  assert "f8d: '$remedy_body' offers no invented closing tag" 0 \
+    "$(grep -cF 'carrying </>' "$TMP/stderr")"
+done < "$TMP/files/f8d-html-remedies.tsv"
+
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------

@@ -233,6 +233,72 @@ fn neutralise_summary_dedents_openers_and_escapes_comments() {
     );
 }
 
+/// A summary line that carries BOTH a task-item box token AND a managed-marker
+/// reference is a NEAR-MARKER: every scanner refuses the whole reading with
+/// `checklist_unparseable`, and ticking the nine managed boxes does not remove
+/// the line — so a lane that passes it through composes a body that can NEVER
+/// converge (arbsec/orchestraitor#799 R4). The line is rendered so it can no
+/// longer be a marker, while every character the model wrote stays readable.
+#[test]
+fn neutralise_summary_clears_a_near_marker_line() {
+    // The exact input the round-11 review drove: a TAB after the box, then a
+    // managed-marker delimiter.
+    let summary = "- [ ]\t<!-- orc:tests --> example";
+    let rendered = neutralise_summary(summary);
+    assert!(
+        !rendered.contains("<!--"),
+        "no marker delimiter may survive: {rendered}"
+    );
+    for name in managed_marker_names() {
+        assert!(
+            !rendered.contains(&name_reference(name)),
+            "no `{name}` name reference may survive: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("&lt;!--") && rendered.contains("orc&#58;tests"),
+        "the escape must be a character reference, not a deletion: {rendered}"
+    );
+    assert!(
+        rendered.contains("example") && rendered.contains("- [ ]"),
+        "the reviewer must still read the line the model wrote: {rendered}"
+    );
+    assert!(
+        !is_near_marker_line(&rendered),
+        "the rendered line must not be a near-marker: {rendered}"
+    );
+    assert_eq!(
+        neutralise_summary(&rendered),
+        rendered,
+        "neutralisation must be idempotent"
+    );
+
+    // A box token with NO managed reference is a PLAIN TASK: no scanner
+    // refuses it, so it is left byte-for-byte alone.
+    for plain in ["- [ ] plain task", "- [x] a done task", "- [ ] orc:unknown"] {
+        assert_eq!(
+            neutralise_summary(plain),
+            plain,
+            "plain task moved: {plain}"
+        );
+    }
+
+    // A CANONICAL marker is a real checklist item the reviewer can tick, so it
+    // is never rewritten: its refusal (if unticked) is remediable.
+    let canonical = "- [x] <!-- orc:issue --> Linked issue";
+    assert_eq!(neutralise_summary(canonical), canonical);
+
+    // A box token and a managed reference WITHOUT a delimiter is a near-marker
+    // too (the reference test is a plain `orc:NAME` substring search), so the
+    // name reference alone has to be neutralised.
+    let bare = neutralise_summary("- [ ] orc:threads unresolved");
+    assert!(
+        !is_near_marker_line(&bare),
+        "bare reference survived: {bare}"
+    );
+    assert!(bare.contains("orc&#58;threads"), "{bare}");
+}
+
 /// A model-authored summary that carries an INDENTED fence opener must never
 /// make the delivery PR unmergeable by construction (arbsec/orchestraitor#809:
 /// a 1-3-space opener is `checklist_unparseable`, and that condition is sticky).
@@ -340,6 +406,70 @@ async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
         body.ends_with("still the summary"),
         "the summary's tail must stay visible: {body}"
     );
+}
+
+/// A model-authored summary that carries a NEAR-MARKER line must never make the
+/// delivery PR permanently unconvergeable (arbsec/orchestraitor#799 R4). Every
+/// scanner refuses a body that carries a line with BOTH a task-item box token
+/// AND a managed-marker reference (`checklist_unparseable`), and NO author
+/// action clears it: ticking the nine managed boxes does not remove the line, so
+/// the PR would sit blocked forever with no remedy the reviewer can apply. The
+/// lane composed the body, so the lane owns the guarantee: the near-marker line
+/// is rendered as literal text and no managed marker survives outside the
+/// trusted block.
+///
+/// This drives the REAL `open_pr` with the exact input the review reported.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_clears_a_near_marker_in_the_summary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let summary = "## Summary\n\n- [ ]\t<!-- orc:tests --> example\n- [ ] plain task";
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/6\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.to_string(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    // The trusted block still leads, with exactly the nine managed markers.
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
+    // No line outside the trusted block is a NEAR-MARKER: that is the exact
+    // condition every scanner refuses with `checklist_unparseable`.
+    let summary_part = &body[body.find("## Summary").expect("the summary")..];
+    assert!(
+        !summary_part.lines().any(is_near_marker_line),
+        "a near-marker survived neutralisation: {body}"
+    );
+    // No line outside the trusted block opens an HTML block either.
+    assert!(
+        !summary_part
+            .lines()
+            .any(|line| line.trim_start_matches(' ').starts_with("<!--")),
+        "a line-start comment opener survived neutralisation: {body}"
+    );
+    // The plain task and the reported line are still readable.
+    assert!(body.contains("- [ ] plain task"), "{body}");
+    assert!(body.contains("&lt;!-- orc&#58;tests --> example"), "{body}");
+    assert!(body.ends_with("example\n- [ ] plain task"), "{body}");
 }
 
 /// The summary's LINE ENDINGS must be normalised before the neutraliser reads
@@ -456,6 +586,24 @@ fn delivery_checklist_matches_the_pr_template() {
         assert!(
             DELIVERY_PR_CHECKLIST.contains(line),
             "delivery checklist is missing the template line: {line}"
+        );
+    }
+}
+
+/// Drift guard: the CHECKLIST the lane composes and the NAME REFERENCES it
+/// neutralises come from the same copy. If a template line were added without a
+/// matching `orc:NAME`, the near-marker test would stop recognising it and an
+/// untrusted summary could make the delivery PR permanently unconvergeable
+/// (arbsec/orchestraitor#799 R4).
+#[test]
+fn neutraliser_knows_every_managed_marker_name() {
+    let derived: Vec<&str> = managed_marker_names().collect();
+    assert_eq!(derived.len(), 9, "derived names: {derived:?}");
+    let template = include_str!("../../../.github/PULL_REQUEST_TEMPLATE.md");
+    for name in &derived {
+        assert!(
+            template.contains(&format!("<!-- orc:{name} -->")),
+            "delivery derives a name the template does not carry: {name}"
         );
     }
 }

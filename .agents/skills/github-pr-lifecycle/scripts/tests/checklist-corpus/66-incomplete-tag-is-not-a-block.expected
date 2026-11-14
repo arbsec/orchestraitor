@@ -1,0 +1,6 @@
+# An INCOMPLETE tag is NOT a block. `<notatag nonsense` never closes its tag, so
+# it fails the type-7 complete-tag grammar, and `notatag` is not a type-6 block
+# tag. The line is ordinary text and the marker below it stays evidence — a
+# scanner that guessed an extent from "begins with `<`" would swallow it
+# (arbsec/orchestraitor#799 R1).
+marker_count=1 all_checked=false unparseable=false
