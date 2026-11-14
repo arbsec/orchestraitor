@@ -230,6 +230,15 @@ use orchestraitor_core::checklist_markers::MANAGED_MARKER_NAMES;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UnparseableConstruct {
+    /// A fence opener or an HTML construct at a container scope the scan cannot
+    /// model: CONTAINER-PREFIXED by a list marker (`-`, `*`, `+`, `N.`, `N)`) or
+    /// a blockquote marker (`>`) followed by whitespace, or INDENTED FOUR OR
+    /// MORE spaces (or led by a tab). In one reading its contents are examples
+    /// inside a list item; in the other it is literal indented code and the
+    /// contents are ordinary text. The reading is REFUSED rather than guessed
+    /// (arbsec/orchestraitor#799 R18). The remedies are: dedent the construct to
+    /// column 0, or put it in a column-0 fenced block.
+    ContainerScope,
     /// A fence OPENER indented 1-3 spaces: its container scope (top level, list
     /// item, block quote) cannot be determined without a container model
     /// (arbsec/orchestraitor#809). The remedy is to dedent the opener to
@@ -241,7 +250,8 @@ pub enum UnparseableConstruct {
     /// construct hides — so the reading is REFUSED rather than guessed, which is
     /// deliberately stricter than `CommonMark`; arbsec/orchestraitor#809 tracks
     /// real modelling. The remedies are: put the line inside a fenced code
-    /// block, indent it by 4 spaces (literal indented code), or remove it.
+    /// block, or remove it (indenting it by 4 spaces is itself a
+    /// container-scope refusal, arbsec/orchestraitor#799 R18).
     HtmlConstruct,
     /// A NEAR-MARKER: a line that presents a managed marker — a task-item box
     /// token plus an `orc:NAME` reference — but not in the canonical form, so
@@ -1353,6 +1363,7 @@ pub fn parse_checklist(body: &str) -> Checklist {
 /// publishes.
 fn to_construct(kind: checklist_markers::UnparseableKind) -> UnparseableConstruct {
     match kind {
+        checklist_markers::UnparseableKind::ContainerScope => UnparseableConstruct::ContainerScope,
         checklist_markers::UnparseableKind::IndentedFenceOpener => {
             UnparseableConstruct::IndentedFenceOpener
         }
@@ -2425,13 +2436,39 @@ mod tests {
             assert_eq!(body.marker_count, 1, "line {text:?}");
         }
 
-        // FOUR OR MORE leading spaces — or a leading tab — is literal indented
-        // code: it hides nothing, so it is not a refusal and the marker below is
-        // counted normally.
+        // FOUR OR MORE leading spaces — or a leading tab — is a CONTAINER-SCOPE
+        // construct now (arbsec/orchestraitor#799 R18): literal indented code
+        // cannot INTERRUPT a paragraph, so the same text can equally be inside a
+        // list item or a block quote, where it is a real HTML block that hides
+        // text. The two readings disagree, so the reading is refused.
         for text in ["    <div>", "\t<div>", "    <!--"] {
             let body = parse_checklist(&format!("{text}\n- [x] <!-- orc:tests --> v\n"));
-            assert!(!body.unparseable, "line {text:?} is literal indented code");
+            assert!(
+                body.unparseable,
+                "line {text:?} is a container-scope construct"
+            );
+            assert_eq!(body.unparseable_line, Some(1), "line {text:?}");
+            assert_eq!(
+                body.unparseable_construct,
+                Some(UnparseableConstruct::ContainerScope),
+                "line {text:?}"
+            );
+        }
+
+        // ORDINARY four-space prose carries no construct: it stays literal
+        // indented code and must NOT refuse a reading.
+        for text in [
+            "    ordinary indented prose",
+            "    a < b and c > d",
+            "    [x] plain task",
+        ] {
+            let body = parse_checklist(&format!("{text}\n- [x] <!-- orc:tests --> v\n"));
+            assert!(
+                !body.unparseable,
+                "line {text:?} is ordinary indented prose"
+            );
             assert_eq!(body.marker_count, 1, "line {text:?}");
+            assert!(body.all_checked, "line {text:?}");
         }
 
         // Inside a FENCED code region the line is inert: not a refusal.
@@ -2439,6 +2476,60 @@ mod tests {
         assert!(!fenced.unparseable);
         assert_eq!(fenced.marker_count, 1);
         assert!(fenced.all_checked);
+    }
+
+    /// A fence opener or an HTML construct at a CONTAINER SCOPE the scan cannot
+    /// model REFUSES the reading (arbsec/orchestraitor#799 R18).
+    ///
+    /// Two reviewers reproduced the same false pass in BOTH engines: a fence or
+    /// HTML block opened INSIDE a list item was not recognised, so a checked
+    /// example inside it counted as evidence and `all_checked` became true with
+    /// no real checklist. Two shapes are indistinguishable from top level here —
+    /// a CONTAINER-PREFIXED construct (list/blockquote marker + whitespace +
+    /// construct) and a construct indented four or more spaces — so the reading
+    /// is refused with the distinct `container_scope`. Ordinary 4-space PROSE
+    /// carries no construct and must still read normally.
+    #[test]
+    fn a_container_scope_construct_refuses_the_reading() {
+        for text in [
+            "- ~~~",
+            "* ~~~",
+            "+ ```",
+            "1. ~~~",
+            "2) ```",
+            "> ~~~",
+            "- <!--",
+            "> <pre>",
+            "    ```",
+            "    ~~~",
+            "    <pre>",
+            "\t~~~",
+        ] {
+            let body = parse_checklist(&format!("{text}\n  - [x] <!-- orc:tests --> example\n"));
+            assert!(body.unparseable, "line {text:?} must refuse the reading");
+            assert_eq!(body.unparseable_line, Some(1), "line {text:?}");
+            assert_eq!(
+                body.unparseable_construct,
+                Some(UnparseableConstruct::ContainerScope),
+                "line {text:?}"
+            );
+            assert!(
+                !body.all_checked,
+                "line {text:?} must never read as all checked"
+            );
+        }
+
+        // Column 0 stays MODELLED: a column-0 fence opens a region (its contents
+        // are examples, not evidence) and a column-0 `<` keeps the more specific
+        // `html_construct`.
+        let fenced = parse_checklist("~~~\n  - [x] <!-- orc:tests --> example\n~~~\n");
+        assert!(!fenced.unparseable);
+        assert_eq!(fenced.marker_count, 0);
+        let html = parse_checklist("<pre>\n- [x] <!-- orc:tests --> v\n");
+        assert_eq!(
+            html.unparseable_construct,
+            Some(UnparseableConstruct::HtmlConstruct)
+        );
     }
 
     /// The description is the text AFTER the delimiter, for a checked and an
@@ -2477,7 +2568,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 84;
+    const CORPUS_FLOOR: u32 = 94;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
@@ -2612,6 +2703,7 @@ mod tests {
             let actual_construct = parsed
                 .unparseable_construct
                 .map(|construct| match construct {
+                    UnparseableConstruct::ContainerScope => "container_scope",
                     UnparseableConstruct::IndentedFenceOpener => "indented_fence_opener",
                     UnparseableConstruct::HtmlConstruct => "html_construct",
                     UnparseableConstruct::NearMarker => "near_marker",
@@ -2719,13 +2811,21 @@ sample
         assert_eq!(dedented.unchecked_count, 1);
 
         // 0-space openers and 4+ space openers are unchanged: the former is a
-        // fence, the latter is indented code (literal text).
+        // fence, the latter is a CONTAINER-SCOPE construct the scan refuses
+        // (arbsec/orchestraitor#799 R18 — it is literal indented code at top
+        // level and a real region inside a list item, and the scan cannot tell).
         let top_level = parse_checklist("```\nx\n```\n- [x] <!-- orc:tests --> fine\n");
         assert!(!top_level.unparseable);
         assert!(top_level.all_checked);
         let literal = parse_checklist("    ```\n- [x] <!-- orc:tests --> fine\n");
-        assert!(!literal.unparseable);
-        assert!(literal.all_checked);
+        assert!(literal.unparseable);
+        assert_eq!(literal.unparseable_line, Some(1));
+        assert_eq!(
+            literal.unparseable_construct,
+            Some(UnparseableConstruct::ContainerScope)
+        );
+        assert_eq!(literal.marker_count, 1);
+        assert!(!literal.all_checked);
 
         // A CLOSED indented region does NOT clear the condition (the rule is
         // STICKY): a closer at a different container level ends the region

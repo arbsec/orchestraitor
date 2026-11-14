@@ -692,29 +692,30 @@ pr.status <N> -> {
                                     # block, a declaration, an inline span or a literal autolink,
                                     # and a wrong guess is a false pass — so it does not guess.
                                     # Three boundaries are normative:
-                                    #   1. FOUR OR MORE leading spaces (or a leading tab) is literal
-                                    #      indented code: it hides nothing, so it is NOT a refusal;
-                                    #   2. a line INSIDE a fenced code region is inert: NOT a
-                                    #      refusal;
-                                    #   3. a line that is JUST `<`, and any `<` that is not the
+                                    #   1. a line INSIDE a fenced code region is inert: NOT a refusal;
+                                    #   2. a line that is JUST `<`, and any `<` that is not the
                                     #      line's first non-whitespace character (`x < y`, a `<`
-                                    #      mid-line), is ordinary text: NOT a refusal.
+                                    #      mid-line), is ordinary text: NOT a refusal;
+                                    #   3. FOUR OR MORE leading spaces (or a leading tab) is NOT literal
+                                    #      code here: indented code cannot INTERRUPT a paragraph, so the
+                                    #      same lines are a real HTML block inside a list item; such a
+                                    #      line is refused as `container_scope` (below), never read as text.
                                     # This is deliberately STRICTER than `CommonMark`, where an
                                     # autolink (`<https://example.com>`) and inline HTML
                                     # (`<em>emphasis</em> prose`) are ordinary text:
                                     # arbsec/orchestraitor#809 tracks real HTML modelling. The ONE
-                                    # remedy set is: put the line inside a fenced code block, indent
-                                    # it by 4 spaces, or remove it. A marker line is never affected —
-                                    # its `<!--` is never the line's first content.
+                                    # remedy set is: put the line in a column-0 fenced code block,
+                                    # or remove it. A marker line is never affected — its `<!--` is
+                                    # never the line's first content.
                                     # Line endings are normalised ONCE before any scan (CommonMark
                                     # §2.1: a lone CR and CRLF both become LF), so a closer followed by a
                                     # CRLF-CRLF terminator closes in both engines. A fence line
                                     # carries at most THREE leading spaces; four or more (or a
-                                    # leading tab) is an indented code block, where fence
-                                    # characters are literal text and neither open nor close a
-                                    # region. A backtick fence's info string may not contain a
-                                    # backtick (```example``` is a closed inline span, not an
-                                    # opener); a tilde fence's info string may. A CLOSING fence
+                                    # leading tab) is a `container_scope` refusal (below) — the line
+                                    # opens no region and its contents are never evidence. A backtick
+                                    # fence's info string may not contain a backtick (` ```example``` `
+                                    # is a closed inline span, not an opener); a tilde fence's info
+                                    # string may. A CLOSING fence
                                     # may be followed ONLY by spaces or tabs (CommonMark 0.31);
                                     # a form feed or a vertical tab after the closing run is
                                     # CONTENT, so it leaves the region OPEN, in both engines
@@ -723,24 +724,36 @@ pr.status <N> -> {
                                     # leading tab) on a marker line is itself a refusal
                                     # (`indented_marker`, below); 0-3 spaces is accepted.
                                     # `unparseable` is true when the checklist reading is
-                                    # INDETERMINATE, which happens in FOUR cases, and
+                                    # INDETERMINATE, which happens in FIVE cases, and
                                     # `unparseable_line` is the 1-based line of the EARLIEST of
                                     # them (at one line the order below decides):
-                                    # (1) the body OPENS a fence indented 1-3 spaces
+                                    # (1) the body carries a FENCE OPENER or an HTML CONSTRUCT at a
+                                    # CONTAINER SCOPE the scan cannot model (`container_scope`): the
+                                    # construct is CONTAINER-PREFIXED — a list marker (`-`, `*`, `+`,
+                                    # `N.`, `N)`) or a blockquote marker (`>`), then whitespace, then
+                                    # the construct — or the line is INDENTED FOUR OR MORE spaces (or
+                                    # led by a tab). Inside a list item the construct's contents are
+                                    # EXAMPLES; at top level the same text is literal code and its
+                                    # contents are ordinary text; the two readings disagree, so the
+                                    # reading is refused. A 4-space line carrying NEITHER construct is
+                                    # ordinary prose and never refuses. Remedy: dedent the construct
+                                    # to column 0, or put it in a column-0 fenced block
+                                    # (arbsec/orchestraitor#799 R18);
+                                    # (2) the body OPENS a fence indented 1-3 spaces
                                     # (`unparseable_construct` = `indented_fence_opener`): the
                                     # opener's container scope cannot be determined without a
                                     # container model. STICKY — closing the region does not clear
                                     # it, because a closer can end the region earlier for the
                                     # renderer than for the scan, so a swallowed marker can still
                                     # be visible. Remedy: dedent the opener to column 0;
-                                    # (2) the body carries a RAW HTML CONSTRUCT — a line-start `<`
+                                    # (3) the body carries a RAW HTML CONSTRUCT — a line-start `<`
                                     # in the 0-3 space window, outside every fenced region
                                     # (`html_construct`): the scanner models no HTML, so it cannot
-                                    # tell what the line hides. Remedies: fence it, indent it by 4
-                                    # spaces, or remove it. A 4+-space (or tab-led) `<` is literal
-                                    # indented code and is NOT a refusal, and `<` anywhere else
-                                    # (`x < y`) is ordinary text;
-                                    # (3) the body carries a MANAGED MARKER — canonical OR a
+                                    # tell what the line hides. Remedies: put it in a column-0 fenced
+                                    # code block, or remove it; a 4+-space (or tab-led) `<` is
+                                    # `container_scope` (1) above, not literal code, and `<` anywhere
+                                    # else (`x < y`) is ordinary text;
+                                    # (4) the body carries a MANAGED MARKER — canonical OR a
                                     # near-marker — indented FOUR OR MORE spaces, or led by a TAB
                                     # (`indented_marker`): when such a line is not inside a list
                                     # item it renders as an INDENTED CODE BLOCK, where it is not a
@@ -755,14 +768,14 @@ pr.status <N> -> {
                                     # -->`): 0-3 leading spaces is still accepted, but dedenting
                                     # alone does not make a NEAR-MARKER parseable -- the canonical
                                     # form is required as well (arbsec/orchestraitor#802);
-                                    # (4) the body carries a NEAR-MARKER (`near_marker`): a line
+                                    # (5) the body carries a NEAR-MARKER (`near_marker`): a line
                                     # with a task-item box token AND an `orc:NAME` reference that
                                     # is not in the canonical form, so the gate cannot tell what it
                                     # asserts. Remedy: write the marker canonically.
                                     # In every case no checklist reading is trusted, `all_checked`
                                     # is false, and the verdict blocks with
                                     # `checklist_unparseable` (arbsec/orchestraitor#809,
-                                    # arbsec/orchestraitor#799 R1/R14, arbsec/orchestraitor#802).
+                                    # arbsec/orchestraitor#799 R1/R14/R18, arbsec/orchestraitor#802).
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

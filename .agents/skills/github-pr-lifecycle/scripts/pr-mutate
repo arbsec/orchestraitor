@@ -139,7 +139,7 @@ if [ "$ACTION" = "edit" ]; then
       # A value-taking LONG flag this wrapper does NOT handle (`gh pr edit
       # --help`, v2.104.0): keep the flag AND its operand, so the operand is
       # never re-read as one of ours. `=` forms carry no operand.
-      --add-assignee|--add-label|--add-project|--add-reviewer|--attach|--base|--milestone|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--repo|--title)
+      --add-assignee|--add-label|--add-project|--add-reviewer|--attach|--base|--milestone|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--title)
         PR_MUTATE_EDITED+=("$pr_mutate_arg")
         if [ "$pr_mutate_next_present" = true ]; then
           PR_MUTATE_EDITED+=("${REST[$((index + 1))]}")
@@ -147,12 +147,35 @@ if [ "$ACTION" = "edit" ]; then
         else
           index=$((index + 1))
         fi ;;
-      --add-assignee=*|--add-label=*|--add-project=*|--add-reviewer=*|--attach=*|--base=*|--milestone=*|--remove-assignee=*|--remove-label=*|--remove-project=*|--remove-reviewer=*|--repo=*|--title=*|--remove-milestone=*|--help=*)
+      --add-assignee=*|--add-label=*|--add-project=*|--add-reviewer=*|--attach=*|--base=*|--milestone=*|--remove-assignee=*|--remove-label=*|--remove-project=*|--remove-reviewer=*|--title=*|--remove-milestone=*|--help=*)
         PR_MUTATE_EDITED+=("$pr_mutate_arg"); index=$((index + 1)) ;;
+      # A REPOSITORY OVERRIDE must select the SAME repository for the body READ
+      # and the gh WRITE (arbsec/orchestraitor#799 R18). `orc_lib_parse_common`
+      # already resolves `-R`/`--repo`/`-R=`/`--repo=` into `$OPT_REPO` before
+      # this walk runs, so a spelling that reaches HERE is one the common parser
+      # could not see — it sits after `--`, where every token is positional. It
+      # is resolved into `$REPO` (below) instead of forwarded, because forwarding
+      # it would leave the reads on the resolved repo and the write on another.
+      --repo)
+        [ "$pr_mutate_next_present" = true ] || { echo "error: --repo requires OWNER/REPO" >&2; exit "$ORC_ERR_CONFIG"; }
+        PR_MUTATE_REPO_OVERRIDE="${REST[$((index + 1))]}"
+        index=$((index + 2)) ;;
+      --repo=*)
+        PR_MUTATE_REPO_OVERRIDE="${pr_mutate_arg#*=}"
+        index=$((index + 1)) ;;
       --*)
         # Any other LONG flag is boolean (`--remove-milestone`, `--help`) or
         # unknown: forwarded untouched, no operand consumed.
         PR_MUTATE_EDITED+=("$pr_mutate_arg"); index=$((index + 1)) ;;
+      # The short spelling of the same override (defensive: the common parser
+      # consumes it, so it should never reach here). Resolved, never forwarded.
+      -R)
+        [ "$pr_mutate_next_present" = true ] || { echo "error: -R requires OWNER/REPO" >&2; exit "$ORC_ERR_CONFIG"; }
+        PR_MUTATE_REPO_OVERRIDE="${REST[$((index + 1))]}"
+        index=$((index + 2)) ;;
+      -R=*)
+        PR_MUTATE_REPO_OVERRIDE="${pr_mutate_arg#*=}"
+        index=$((index + 1)) ;;
       -?*)
         # A SHORT token: pflag's rules decide what it means (the cluster
         # splitter), so `-bX`, `-FX` and a cluster carrying a body are all
@@ -223,6 +246,18 @@ if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ] && [ "$INJECT_CHECKLIST" !=
   exit "$ORC_ERR_CONFIG"
 fi
 
+# A repository override the common parser could not resolve (it sits after `--`)
+# was captured by the walk above. It is VALIDATED and then applied through
+# `OPT_REPO`, so the body READ, the reviewer gate's reads and the gh WRITE all
+# target the SAME repository — a forwarded override would leave the reads on one
+# repository and the write on another (arbsec/orchestraitor#799 R18).
+if [ -n "${PR_MUTATE_REPO_OVERRIDE:-}" ]; then
+  if ! [[ "$PR_MUTATE_REPO_OVERRIDE" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "error: repository override '$PR_MUTATE_REPO_OVERRIDE' is not OWNER/REPO" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  OPT_REPO="$PR_MUTATE_REPO_OVERRIDE"
+fi
 REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 [ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")
@@ -240,15 +275,29 @@ ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 # The nine markers land UNCHECKED (a checked box is a verified fact). A body
 # that already carries the checklist is left unchanged — the operation is
 # idempotent and never rewrites author content.
+#
+# CONCURRENCY BASELINE (arbsec/orchestraitor#799 R18): this is the ONE
+# read-modify-write path in the wrapper, so `updatedAt` is read in the SAME call
+# as the body and re-checked immediately before the write. There was no
+# baseline at all before: the body was read once and written unconditionally, so
+# another actor's edit between the read and the write was silently overwritten
+# with a composition of the OLDER body. The baseline now covers the ORIGINAL
+# read (it cannot be captured later, or it would bless the newer body as
+# "seen"), and a moved baseline refuses with exit 4 (`concurrent`). gh has no
+# conditional write, so the window between the re-read and the write remains —
+# it is narrowed to one round trip, not closed.
 if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
   if [ "$OPT_DRY_RUN" = true ]; then
     echo "[dry-run] would read PR #$PR's body, append the managed merge checklist, and set it (dry-run never reaches gh)" >&2
     exit "$ORC_OK"
   fi
-  PR_MUTATE_BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""')" || {
+  PR_MUTATE_BODY_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body,updatedAt \
+    --jq '{body: (.body // ""), updatedAt: (.updatedAt // "")}')" || {
     echo "error: cannot read PR #$PR body" >&2
     exit "$ORC_ERR_UNRECOVERABLE"
   }
+  PR_MUTATE_BODY="$(jq -r '.body' <<<"$PR_MUTATE_BODY_STATE")"
+  PR_MUTATE_BASELINE_UPDATED_AT="$(jq -r '.updatedAt' <<<"$PR_MUTATE_BODY_STATE")"
   PR_MUTATE_NEW_BODY="$(pr_mutate_ensure_body "$PR_MUTATE_BODY")"
   if [ "$PR_MUTATE_NEW_BODY" = "$PR_MUTATE_BODY" ]; then
     # Only the BODY update is skipped: the caller may have asked for other
@@ -357,6 +406,22 @@ if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh ${ARGS[*]}" >&2
   echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
   exit "$ORC_OK"
+fi
+
+# The concurrency baseline read with the body (`--inject-checklist` only) is
+# re-checked immediately before the write. A moved `updatedAt` means another
+# actor edited the PR after the body was read, so the composed body is a
+# composition of a STALE read: refuse (exit 4) instead of overwriting the newer
+# one. See the baseline comment above the read.
+if [ -n "${PR_MUTATE_BASELINE_UPDATED_AT:-}" ]; then
+  PR_MUTATE_CURRENT_UPDATED_AT="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json updatedAt --jq '.updatedAt // ""')" || {
+    echo "error: cannot re-read PR #$PR's updatedAt before the body write" >&2
+    exit "$ORC_ERR_UNRECOVERABLE"
+  }
+  if [ "$PR_MUTATE_CURRENT_UPDATED_AT" != "$PR_MUTATE_BASELINE_UPDATED_AT" ]; then
+    echo "error: concurrent edit detected: PR #$PR was updated after its body was read (updatedAt ${PR_MUTATE_BASELINE_UPDATED_AT:-<none>} -> ${PR_MUTATE_CURRENT_UPDATED_AT:-<none>}); refusing to overwrite the newer body — re-read and retry" >&2
+    exit "$ORC_ERR_CONCURRENT"
+  fi
 fi
 
 # Mutating call: service route or typed failure — never silent personal auth.

@@ -45,22 +45,30 @@
 //!
 //! # What makes a reading INDETERMINATE
 //!
-//! Four constructs, reported as [`UnparseableKind`]:
+//! Five constructs, reported as [`UnparseableKind`]:
 //!
-//! 1. [`UnparseableKind::IndentedFenceOpener`] — a fence OPENER indented 1-3
+//! 1. [`UnparseableKind::ContainerScope`] — a fence opener or an HTML construct
+//!    at a scope this scan cannot model: the line is CONTAINER-PREFIXED (its
+//!    first non-whitespace content is a list marker — `-`, `*`, `+`, `N.`, `N)`
+//!    — or a blockquote marker `>`, followed by whitespace and then the
+//!    construct), or it is INDENTED FOUR OR MORE spaces (or led by a tab),
+//!    where literal indented code and container-relative code are
+//!    indistinguishable and the two readings disagree about whether its contents
+//!    are evidence (arbsec/orchestraitor#799 R18).
+//! 2. [`UnparseableKind::IndentedFenceOpener`] — a fence OPENER indented 1-3
 //!    spaces. Its container (top level, list item, block quote) cannot be
 //!    determined without a container model, so the region this scan models can
 //!    swallow a genuine unchecked item. The condition is STICKY: a closer does
 //!    not clear it, because a closer at a different container level ends the
 //!    region EARLIER for a renderer than for this scan.
-//! 2. [`UnparseableKind::HtmlConstruct`] — a line outside every fenced region
+//! 3. [`UnparseableKind::HtmlConstruct`] — a line outside every fenced region
 //!    whose FIRST non-whitespace character is `<`, indented 0-3 spaces. HTML is
 //!    not modelled, so the scan cannot tell what such a line hides.
-//! 3. [`UnparseableKind::IndentedMarker`] — a managed marker or near-marker
+//! 4. [`UnparseableKind::IndentedMarker`] — a managed marker or near-marker
 //!    indented FOUR OR MORE spaces, or led by a tab. When it is not inside a
 //!    list item it renders as an INDENTED CODE BLOCK, where it is not a
 //!    checkbox, and nothing here can tell those apart (arbsec/orchestraitor#802).
-//! 4. [`UnparseableKind::NearMarker`] — see above.
+//! 5. [`UnparseableKind::NearMarker`] — see above.
 //!
 //! The markers inside a FENCED region are EXAMPLES, not evidence, and every
 //! line of such a region (opener, content and closer) is excluded.
@@ -100,12 +108,22 @@ pub struct CanonicalMarker {
 /// The construct that made a body's checklist reading INDETERMINATE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnparseableKind {
+    /// A fence opener or an HTML construct at a container scope this scan cannot
+    /// model: CONTAINER-PREFIXED (a list marker — `-`, `*`, `+`, `N.`, `N)` — or
+    /// a blockquote marker `>`, then whitespace, then the construct) or
+    /// INDENTED FOUR OR MORE spaces / led by a tab (literal indented code and
+    /// container-relative code read differently there, and only one reading
+    /// makes the region's contents examples). STICKY: the line is still scanned
+    /// as ordinary text, and the refusal is what stops a verdict being derived
+    /// from the count. Remedy: dedent the construct to column 0, or put it in a
+    /// column-0 fenced block.
+    ContainerScope,
     /// A fence OPENER indented 1-3 spaces. STICKY: closing the region does not
     /// clear it. Remedy: dedent the opener to column 0.
     IndentedFenceOpener,
     /// A raw HTML construct: a line-start `<` outside every fenced region,
-    /// indented 0-3 spaces. Remedy: fence it, indent it by 4 spaces, or remove
-    /// it.
+    /// indented 0-3 spaces. Remedy: put it in a column-0 fenced code block, or
+    /// remove it (indenting it by 4 spaces is itself a container-scope refusal).
     HtmlConstruct,
     /// A managed marker (or near-marker) indented 4+ spaces or led by a tab.
     /// Remedy: dedent the marker line to column 0 AND write it in the canonical
@@ -189,6 +207,30 @@ impl ScannedLine {
     pub fn is_indented_fence_opener(&self) -> bool {
         self.opens_fence.is_some_and(|opener| opener.indent > 0)
     }
+
+    /// True when this line carries a fence opener or an HTML construct at a
+    /// scope the scan cannot model: CONTAINER-PREFIXED (see
+    /// [`strip_container_prefix`]) or INDENTED FOUR OR MORE spaces / led by a
+    /// tab. Such a construct may sit inside a list item or a block quote, where
+    /// its contents are EXAMPLES, while the same text at top level is literal
+    /// indented code — the scanner cannot tell which, so the reading is refused
+    /// (arbsec/orchestraitor#799 R18).
+    ///
+    /// A line inside a fenced region is inert, and a 4-space line that carries
+    /// NEITHER a fence opener NOR an HTML construct stays ordinary indented
+    /// prose: indented prose must never refuse a reading.
+    #[must_use]
+    pub fn is_container_scope_construct(&self) -> bool {
+        if self.fenced {
+            return false;
+        }
+        let content = match strip_container_prefix(&self.text) {
+            Some(rest) => Some(rest),
+            None if self.indentation_too_deep => Some(self.text.trim_start_matches([' ', '\t'])),
+            None => None,
+        };
+        content.is_some_and(is_fence_or_html_construct)
+    }
 }
 
 /// The whole-body scan: every line, in order, and the sticky opener flag.
@@ -207,14 +249,17 @@ impl BodyScan {
     /// The EARLIEST construct that makes this body's reading indeterminate, or
     /// `None` when the reading is determinate.
     ///
-    /// At the same line the order is [`UnparseableKind`]'s own: a fence opener
-    /// first, then an HTML construct, then an indented marker, then a
-    /// near-marker — a line that is BOTH indented and a near-marker reports the
-    /// marker-indentation rule, because the indentation is what makes it render
-    /// as code.
+    /// At the same line the order is [`UnparseableKind`]'s own: a container-scope
+    /// construct first, then a fence opener, then an HTML construct, then an
+    /// indented marker, then a near-marker — a line that is BOTH indented and a
+    /// near-marker reports the marker-indentation rule, because the indentation is
+    /// what makes it render as code.
     #[must_use]
     pub fn first_unparseable(&self) -> Option<(u64, UnparseableKind)> {
         for line in &self.lines {
+            if line.is_container_scope_construct() {
+                return Some((line.number, UnparseableKind::ContainerScope));
+            }
             if line.is_indented_fence_opener() {
                 return Some((line.number, UnparseableKind::IndentedFenceOpener));
             }
@@ -375,6 +420,51 @@ pub fn fence_opener(line: &str) -> Option<(char, usize)> {
     } else {
         None
     }
+}
+
+/// The content of `line` after a CONTAINER PREFIX — a list marker (`-`, `*`, `+`,
+/// `N.`, `N)`) or a blockquote marker (`>`), followed by at least one space or
+/// tab — or `None` when the line has no such prefix.
+///
+/// The leading whitespace before the prefix is skipped: at most three spaces of
+/// it are legal `CommonMark` indentation (`fence_view`'s rule), and four or more
+/// is caught by the indentation rule instead, so the caller does not need to
+/// distinguish the two here. The `>` of a blockquote is the marker itself, so
+/// `>quote` (no space) is NOT a container prefix — it is ordinary text that
+/// happens to start with `>`.
+#[must_use]
+pub fn strip_container_prefix(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches([' ', '\t']);
+    if let Some(after) = rest.strip_prefix('>') {
+        return split_required_space(after);
+    }
+    if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
+        return split_required_space(after);
+    }
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let after_number = rest.get(digits..)?;
+        if let Some(after) = after_number.strip_prefix(['.', ')']) {
+            return split_required_space(after);
+        }
+    }
+    None
+}
+
+/// The content after a container marker: `Some` only when at least one space or
+/// tab separates the marker from it (`CommonMark` list and blockquote markers
+/// require that separation). The returned slice is trimmed of ALL leading spaces
+/// and tabs, so the caller tests the construct itself.
+fn split_required_space(after_marker: &str) -> Option<&str> {
+    let trimmed = after_marker.trim_start_matches([' ', '\t']);
+    (trimmed.len() < after_marker.len()).then_some(trimmed)
+}
+
+/// True when `content` (already trimmed of leading whitespace) is a fence OPENER
+/// or an HTML construct — the two constructs whose container scope matters.
+#[must_use]
+pub fn is_fence_or_html_construct(content: &str) -> bool {
+    fence_opener(content).is_some() || (content.len() > 1 && content.starts_with('<'))
 }
 
 /// True when `line` CLOSES the region opened by `(fence_char, fence_len)`: the

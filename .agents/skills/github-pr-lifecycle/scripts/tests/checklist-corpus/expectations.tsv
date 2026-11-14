@@ -67,7 +67,7 @@
 # a closer with an info string does not close the region.
 15-closer-with-info-string	0	false
 # F16: a 4-space-indented run is indented code, never an opener, so the marker counts.
-16-four-space-opener-is-text	1	true
+16-four-space-opener-is-container-scope	1	false	true	container_scope
 # F16: a 4-space-indented run is never a closer, so the enclosed marker stays hidden.
 # The case is RENAMED to say so (four CodeRabbit generations raised the same
 # "case 17 has an open fence" claim, and the rationale alone did not stop it):
@@ -89,7 +89,7 @@
 # modelled exactly as before, and 4+ spaces is literal indented code.
 18-three-space-opener-is-indeterminate	1	false	true	indented_fence_opener
 # a tab-indented run reaches the 4-column tab stop: literal text, so the marker counts.
-19-tab-indented-line-is-text	1	true
+19-tab-indented-opener-is-container-scope	1	false	true	container_scope
 # F17: ```example``` is a closed inline code span, not an opener, so the marker counts.
 20-inline-closed-span-is-not-an-opener	1	true
 # F17: a backtick in a backtick fence info string means NOT an opener, so the marker counts.
@@ -390,3 +390,23 @@
 # full description is asserted by BOTH engines (the shell suite and the Rust
 # `descriptions_are_the_text_after_the_delimiter` test).
 84-description-with-a-tab	2	false
+# arbsec/orchestraitor#799 R18: a fence opener or an HTML construct at a CONTAINER
+# SCOPE the scanner cannot model is INDETERMINATE (`container_scope`). Two reviewers
+# reproduced the same false pass in BOTH engines: a construct opened inside a list item
+# was not recognised, so a checked example inside it counted as evidence and
+# `all_checked` became true with no real checklist. The rule refuses (a) a
+# container-PREFIXED construct — list marker `-`/`*`/`+`/`N.`/`N)` or blockquote marker
+# `>`, then whitespace, then the construct — and (b) a construct indented 4+ spaces (or
+# led by a tab), where literal indented code and container-relative code read
+# differently. A 4-space line with NO construct stays ordinary indented prose (cases 93
+# and 94 are the controls): indented prose must never refuse a reading.
+85-container-prefixed-tilde-fence	1	false	true	container_scope
+86-container-prefixed-html-comment	1	false	true	container_scope
+87-container-relative-four-space-fence	1	false	true	container_scope
+88-container-relative-four-space-html	1	false	true	container_scope
+89-blockquote-fence	1	false	true	container_scope
+90-star-and-plus-prefixes	1	false	true	container_scope
+91-ordered-prefixes	1	false	true	container_scope
+92-four-space-fence-with-info-string	0	false	true	container_scope
+93-four-space-prose-control	1	true
+94-four-space-prose-in-list-control	1	true

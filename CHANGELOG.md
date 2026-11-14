@@ -13,20 +13,33 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
-- **`pr-create` no longer composes the managed checklist.** It is now a
-  transparent wrapper: every argument is forwarded to `gh pr create` verbatim,
-  in order, and nothing is inspected, rewritten or refused — the wrapper's own
-  bash re-implementation of `gh`'s flag grammar is gone, together with the
-  checklist injection it performed. **Consequence for callers: every PR created
-  through the wrapper needs one remediation command afterwards**,
+- **`pr-create` no longer composes the managed checklist, and there is no
+  create-time review gate.** It is a transparent wrapper: every argument is
+  forwarded to `gh pr create` verbatim, in order, and nothing is inspected,
+  rewritten or refused — the wrapper's own bash re-implementation of `gh`'s flag
+  grammar is gone, together with the checklist injection it performed. The
+  create-time review gate went with it: a wrapper that cannot see which base
+  `gh` will use cannot bind review evidence to that base, so **a PR may now be
+  created at any time; it cannot MERGE until a CLEAN review record exists for
+  its exact (head, base)**. `convergence-status` and `merge-gate` enforce
+  exactly that, by comparing the record's base OID with the PR's actual
+  `baseRefOid`. `--skip-review-gate` is still accepted, as a consumed no-op
+  kept for compatibility. **Consequence for callers: every PR created through
+  the wrapper needs one remediation command afterwards**,
   `pr-mutate edit <pr> --inject-checklist`, which the post-create note names
   (the PR number is parsed from the URL `gh` printed). Until that command runs,
-  the PR blocks on `checklist_markers_missing`. The same change removes a
-  gate-integrity hole: a caller token that merely LOOKED like a flag
-  (`--title '--base=release'`) could previously select the base the pre-PR
-  review gate validated against; the gate now takes its base from
-  `PR_CREATE_BASE_BRANCH`, then `branch.<current>.gh-merge-base`, then
-  `origin/HEAD`, and never from the caller's arguments.
+  the PR blocks on `checklist_markers_missing`.
+- **`pr-mutate` is safer around the body it edits.** Two behaviours are new and
+  consumer-visible. First, a `-R`/`--repo` override now governs **both** the
+  body read and the write, so an edit can never read one repository's PR and
+  write another's; a malformed override is refused before `gh` is called.
+  Second, `--inject-checklist` is a read-modify-write, and it now reads the
+  PR's body version in the same call as the body and re-checks it immediately
+  before the write: if another actor edited the PR in between, the command
+  exits `4` (`concurrent`) with an error naming the old and the new version and
+  writes nothing, instead of overwriting the newer body with a composition of
+  the older one. Honest limit: `gh` has no conditional write, so the window
+  between the re-check and the write is narrowed to one round trip, not closed.
 - **`orc pr status` / `pr.status`**: the §9.48 checklist verdict still FAILS
   CLOSED when the PR body's checklist reading is indeterminate, but the rule is
   now ONE rule instead of a hand-written Markdown parser. HTML is NOT MODELLED:
@@ -35,16 +48,25 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   is not read and the verdict blocks with the reason code
   `checklist_unparseable` (`checklist.unparseable`,
   `checklist.unparseable_line` and `checklist.unparseable_construct` =
-  `html_construct` in the JSON). Three boundaries are normative: four or more
-  leading spaces (or a leading tab) is literal indented code and hides nothing;
-  a line inside a fenced code region is inert; a line that is just `<`, and any
-  `<` that is not the line's first non-whitespace character (`x < y`), is
-  ordinary text. The remedies are: put the line inside a fenced code block,
-  indent it by 4 spaces, or remove it. This is deliberately STRICTER than
+  `html_construct` in the JSON). Three boundaries are normative: a line inside
+  a fenced code region is inert; a line that is just `<`, and any `<` that is
+  not the line's first non-whitespace character (`x < y`), is ordinary text;
+  and four or more leading spaces (or a leading tab) is NOT literal code — a
+  construct there is `container_scope` (below), because indented code cannot
+  interrupt a paragraph. The remedies are: put the line in a column-0 fenced
+  code block, or remove it. This is deliberately STRICTER than
   CommonMark — an autolink and inline HTML are ordinary text there — because a
   merge gate must not depend on a hand-rolled parser being spec-exact; real
-  modelling is tracked separately. Exactly FOUR constructs make the reading
+  modelling is tracked separately. Exactly FIVE constructs make the reading
   indeterminate, and `checklist.unparseable_construct` names which one:
+  `container_scope` (a fence opener or an HTML construct that is
+  CONTAINER-PREFIXED — the first non-whitespace content is a list marker `-`,
+  `*`, `+`, `N.` or `N)`, or a blockquote marker `>`, followed by whitespace,
+  then the construct — or indented four or more spaces / led by a tab: inside a
+  list item its contents are examples, at top level the same text is literal
+  code, so the reading is refused; a 4-space line that carries neither a fence
+  opener nor an HTML construct is ordinary prose and never refuses; dedent the
+  construct to column 0, or put it in a column-0 fenced block),
   `indented_fence_opener` (a fence opener indented 1-3 spaces; its one remedy is
   to dedent the opener to column 0, and closing the region does NOT clear the
   condition), `html_construct` (above), `indented_marker` (a managed marker OR a
@@ -84,8 +106,12 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   checklist-marker module the gate itself is built on) instead of a private copy
   of the rules, and it handles **every construct the engine refuses**, applying
   EVERY applicable remedy to a line rather than only the first: a line whose
-  first non-whitespace character is `<` (0-3 leading spaces) has that `<`
-  escaped to `&lt;`; a near-marker line is rendered as literal text (`<!--` ->
+  first non-whitespace content is `<` has that `<` escaped to `&lt;` at ANY
+  indentation, and after a list or blockquote marker — indented code cannot
+  interrupt a paragraph, so `Result:` followed by a four-space-indented `<!--`
+  used to leave an ACTIVE comment that hid text — and a fence opener at that
+  same container scope is dedented to column 0; a near-marker line is rendered
+  as literal text (`<!--` ->
   `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`); and an indented fence opener, or an
   indented **canonical** managed marker, is dedented to column 0 — the
   documented remedy, so the marker stays visible and counts as what it is. A

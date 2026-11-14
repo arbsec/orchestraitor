@@ -220,8 +220,9 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
 }
 
 /// The summary neutraliser, exactly: an indented fence opener is dedented to
-/// column 0, a line-start `<` has its `<` escaped, and nothing else moves.
-/// Idempotent, so a retried delivery composes the identical body.
+/// column 0, a line-start `<` has its `<` escaped AT ANY indentation
+/// (arbsec/orchestraitor#799 R18), and nothing else moves. Idempotent, so a
+/// retried delivery composes the identical body.
 ///
 /// The CLOSER inside a region keeps the bytes the model wrote (it is part of the
 /// example, and a closer may be indented 0-3 spaces, so an indented closer still
@@ -229,13 +230,16 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
 /// `indented_fence_opener` construct itself.
 #[test]
 fn neutralise_summary_dedents_openers_and_escapes_comments() {
-    // Four boundaries in one body: a 2-space backtick opener (dedented) with a
+    // Five boundaries in one body: a 2-space backtick opener (dedented) with a
     // fenced sample and its closer (byte-identical: the region is inert), a
-    // column-0 `<!--` (escaped), a TAB-led `<!--` (untouched: a tab is content,
-    // and a tab-led line is literal indented code), and a 4-space `<!--` /
-    // ` ``` ` (untouched: indented code, not a construct and not a fence).
+    // column-0 `<!--` (escaped), a TAB-led `<!--` (escaped: a tab reaches the
+    // 4-column stop, so it is `container_scope`, NOT literal code — R18), a
+    // 4-space `<!--` (escaped for the same reason), and a 4-space fence opener
+    // (DEDENTED: it is a `container_scope` construct, and column 0 is where the
+    // region opens for the scan; the closer below it stays as written).
     let summary = "- Example:\n  ```\n  sample\n  ```\n<!--\n  \t<!--\n    <!--\n    ```\n```\n";
-    let expected = "- Example:\n```\n  sample\n  ```\n&lt;!--\n  \t<!--\n    <!--\n    ```\n```\n";
+    let expected =
+        "- Example:\n```\n  sample\n  ```\n&lt;!--\n  \t&lt;!--\n    &lt;!--\n```\n```\n";
     assert_eq!(neutralise_summary(summary), expected);
     assert_eq!(
         neutralise_summary(&neutralise_summary(summary)),
@@ -469,25 +473,28 @@ async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
 
 /// A summary line that starts with `<` is ESCAPED, so an untrusted summary can
 /// never make its own composed body's checklist reading INDETERMINATE
-/// (arbsec/orchestraitor#799 R1) — and the two shapes arbsec/orchestraitor#810
-/// deferred are both closed by this one rule (arbsec/orchestraitor#799 R2):
+/// (arbsec/orchestraitor#799 R1) — and the shapes arbsec/orchestraitor#810
+/// deferred are all closed by this one rule:
 ///
 /// - an INDENTED HTML opener in a summary: 0-3 leading spaces is exactly the
 ///   scanner's refusal window, so it is escaped like a column-0 one;
 /// - an UNCLOSED HTML block (`<pre>` and no closer): no extent is modelled any
 ///   more, so the opener itself is the only thing to neutralise — the line is
-///   escaped and the summary's tail stays visible.
+///   escaped and the summary's tail stays visible;
+/// - a FOUR-SPACE-indented opener, and one led by a tab (arbsec/orchestraitor#799
+///   R18): indented code cannot interrupt a paragraph, so the construct is
+///   ACTIVE in the renderer and the engine refuses it as `container_scope`. It is
+///   escaped at ANY indentation — the indentation is not a safe harbour.
 ///
-/// The two CONTROLS prove the escape is surgical: a `<` MID-LINE (`x < y`) is
-/// untouched, and a 4-space-indented `<div>` is literal indented code, which no
-/// scanner refuses, so it is untouched too. This drives the REAL `open_pr`.
+/// The CONTROL proves the escape is surgical: a `<` MID-LINE (`x < y`) is
+/// untouched. This drives the REAL `open_pr`.
 #[cfg(unix)]
 #[tokio::test]
 async fn delivery_escapes_a_line_start_html_construct_in_the_summary() {
     use std::os::unix::fs::PermissionsExt;
 
     let summary = "Prose line\n<div>a block</div>\n  <div>indented</div>\n<pre>unclosed\nno closer\nx < y\n    <div>literal</div>\n";
-    let expected_summary = "Prose line\n&lt;div>a block</div>\n  &lt;div>indented</div>\n&lt;pre>unclosed\nno closer\nx < y\n    <div>literal</div>\n";
+    let expected_summary = "Prose line\n&lt;div>a block</div>\n  &lt;div>indented</div>\n&lt;pre>unclosed\nno closer\nx < y\n    &lt;div>literal</div>\n";
     let temp = tempfile::tempdir().unwrap();
     let capture = temp.path().join("body.txt");
     let orc_stub = temp.path().join("orc");
@@ -526,8 +533,12 @@ async fn delivery_escapes_a_line_start_html_construct_in_the_summary() {
         "a mid-line `<` is untouched: {body}"
     );
     assert!(
-        body.contains("    <div>literal</div>"),
-        "4-space-indented `<` is literal code and untouched: {body}"
+        body.contains("    &lt;div>literal</div>"),
+        "a 4-space-indented `<` is escaped too (R18): {body}"
+    );
+    assert!(
+        !body.contains("    <div>literal</div>"),
+        "no active indented construct may survive: {body}"
     );
 }
 
@@ -930,6 +941,81 @@ fn assert_escaped_line(label: &str, rendered: &str) {
         first.contains("orc&#58;"),
         "{label}: the name reference must be a character reference: {first:?}"
     );
+}
+
+#[test]
+fn an_indented_html_construct_is_escaped_at_any_indentation() {
+    // arbsec/orchestraitor#799 R18: the lane used to exempt a line indented 4+
+    // spaces, on the assumption that it is literal code. It is not: indented code
+    // cannot INTERRUPT a paragraph, so `Result:` followed by a 4-space-indented
+    // `<!--` leaves an ACTIVE comment that hides text from the reviewer. A
+    // container-prefixed construct (`- <!--`) has the same effect inside a list
+    // item. Both are `container_scope` to the engine now, and both must be
+    // escaped.
+    for (label, summary, expected) in [
+        (
+            "4-space-indented comment after prose",
+            "Result:\n    <!-- tests failed --> done\n",
+            "Result:\n    &lt;!-- tests failed --> done\n",
+        ),
+        (
+            "container-prefixed comment in a list item",
+            "- <!-- tests failed -->\n",
+            "- &lt;!-- tests failed -->\n",
+        ),
+        (
+            "tab-led comment",
+            "\t<!-- hidden -->\n",
+            "\t&lt;!-- hidden -->\n",
+        ),
+    ] {
+        let rendered = neutralise_summary(summary);
+        assert_eq!(rendered, expected, "{label}");
+        assert!(
+            !rendered.contains("<!--"),
+            "{label}: an active comment opener survived: {rendered:?}"
+        );
+        let composed = format!("{DELIVERY_PR_CHECKLIST}{rendered}");
+        let parsed = orchestraitor_mcp::pr_status::parse_checklist(&composed);
+        assert!(
+            !parsed.unparseable,
+            "{label}: the composed body must pass the engine, got {:?} on line {:?}",
+            parsed.unparseable_construct, parsed.unparseable_line
+        );
+        assert_eq!(parsed.marker_count, 9, "{label}: {composed}");
+    }
+}
+
+#[test]
+fn a_container_scope_fence_opener_is_dedented() {
+    // The `container_scope` remedy is "dedent the construct to column 0". Inside
+    // a list item the construct is real (its contents are examples), outside it
+    // the same text is literal code — the engine refuses both, so the lane moves
+    // the OPENER (never the model's content) to column 0, where the region opens
+    // exactly as the scan models it.
+    for (label, summary, expected) in [
+        (
+            "4-space-indented fence",
+            "    ~~~\n    code\n    ~~~\n",
+            "~~~\n    code\n~~~\n",
+        ),
+        (
+            "list-prefixed fence",
+            "- ~~~\n  - [x] <!-- orc:tests --> example\n- ~~~\n",
+            "~~~\n  - [x] <!-- orc:tests --> example\n~~~\n",
+        ),
+    ] {
+        let rendered = neutralise_summary(summary);
+        assert_eq!(rendered, expected, "{label}");
+        let composed = format!("{DELIVERY_PR_CHECKLIST}{rendered}");
+        let parsed = orchestraitor_mcp::pr_status::parse_checklist(&composed);
+        assert!(
+            !parsed.unparseable,
+            "{label}: the composed body must pass the engine, got {:?} on line {:?}",
+            parsed.unparseable_construct, parsed.unparseable_line
+        );
+        assert_eq!(parsed.marker_count, 9, "{label}: the example stays fenced");
+    }
 }
 
 /// The delivery lane may only compose bodies the ENGINE accepts

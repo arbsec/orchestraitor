@@ -229,7 +229,15 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 ///   documented remedy for `indented_fence_opener` (the region then opens on
 ///   that line, exactly as the scan models it);
 /// - a line-start `<` (a raw HTML construct) has its `<` escaped to `&lt;`,
-///   which renders the text the model wrote and removes the construct;
+///   which renders the text the model wrote and removes the construct — at ANY
+///   indentation, and after a container prefix (arbsec/orchestraitor#799 R18):
+///   indented code cannot interrupt a paragraph, so
+///   `Result:\n    <!-- tests failed -->` leaves an ACTIVE comment that hides
+///   text, and a container-prefixed construct is what the engine now reports as
+///   `container_scope`;
+/// - a FENCE OPENER at that same container scope is DEDENTED to column 0 (the
+///   `container_scope` remedy): the line's content is preserved and the region
+///   opens exactly where the scan models it;
 /// - a MANAGED MARKER (canonical or near-marker) indented 4+ spaces or led by a
 ///   tab is DEDENTED to column 0, the documented remedy for `indented_marker`
 ///   (arbsec/orchestraitor#802): the marker stays visible and counts as what it
@@ -251,7 +259,10 @@ fn neutralise_summary(summary: &str) -> String {
             // EVERY applicable remedy is applied, never just the first, in a
             // fixed order (arbsec/orchestraitor#799 R15/R17):
             //
-            //   1. the line-start `<` of a raw HTML construct;
+            //   1. the line-start `<` of a raw HTML construct — at ANY
+            //      indentation, and after a container prefix (R18), because an
+            //      indented construct is ACTIVE in the renderer; a FENCE OPENER
+            //      at that same scope is dedented for the same reason;
             //   2. an inline comment opener — but only where it is actually a
             //      comment (not inside literal indented code, not on a
             //      near-marker, whose own escape below covers every `<!--`, and
@@ -267,8 +278,14 @@ fn neutralise_summary(summary: &str) -> String {
             // hides the description text (`    - [x] <!-- orc:tests --> Result:
             // <!-- tests failed --> done` would show only `Result:  done`).
             // So the comment escape runs AGAIN after a dedent.
-            if line.is_html_construct() {
-                rendered = escape_line_start_html(&rendered);
+            if line.is_html_construct() || line.is_container_scope_construct() {
+                if line_starts_with_html_construct(&rendered) {
+                    rendered = escape_line_start_html(&rendered);
+                } else {
+                    // A fence opener at a scope the scanner cannot model
+                    // (`container_scope`): move the CONSTRUCT to column 0.
+                    rendered = dedent_construct(&rendered);
+                }
             }
             if !line.near_marker && !line.indentation_too_deep {
                 rendered = if line.canonical.is_some() {
@@ -338,14 +355,48 @@ fn escape_inline_comment_after_the_marker(line: &str) -> String {
 }
 
 /// Escapes the FIRST `<` of a line-start HTML construct to `&lt;`, leaving the
-/// rest of the line — and any indentation — exactly as written.
+/// rest of the line — and any indentation or container prefix — exactly as
+/// written.
+///
+/// "Line-start" means the first non-whitespace content of the line, at ANY
+/// indentation (arbsec/orchestraitor#799 R18), and after a list or blockquote
+/// marker when there is one: indented code cannot interrupt a paragraph, so
+/// `Result:\n    <!-- tests failed -->` leaves an ACTIVE comment that hides the
+/// text a reviewer needs.
 fn escape_line_start_html(line: &str) -> String {
-    let indent = line.chars().take_while(|c| *c == ' ').count();
+    // The offset of the construct's `<`: after a container prefix (`- `, `> `,
+    // `1. `) when there is one, else after the leading whitespace.
+    let offset = line.len()
+        - checklist_markers::strip_container_prefix(line)
+            .map_or_else(|| line.trim_start_matches([' ', '\t']).len(), str::len);
+    if !line.get(offset..).is_some_and(|rest| rest.starts_with('<')) {
+        return line.to_string();
+    }
     let mut escaped = String::with_capacity(line.len() + 3);
-    escaped.push_str(&line[..indent]);
+    escaped.push_str(&line[..offset]);
     escaped.push_str("&lt;");
-    escaped.push_str(line.get(indent + 1..).unwrap_or_default());
+    escaped.push_str(line.get(offset + 1..).unwrap_or_default());
     escaped
+}
+
+/// True when the line's FIRST non-whitespace content — after a container prefix
+/// when there is one — is `<` with something after it, at ANY indentation.
+fn line_starts_with_html_construct(line: &str) -> bool {
+    checklist_markers::strip_container_prefix(line).map_or_else(
+        || {
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            trimmed.len() > 1 && trimmed.starts_with('<')
+        },
+        |rest| rest.len() > 1 && rest.starts_with('<'),
+    )
+}
+
+/// Dedents the CONSTRUCT of a line to column 0: the content after a container
+/// prefix (`- `, `> `, `1. `) when there is one, else the line with its leading
+/// whitespace removed. The model's content is preserved byte for byte; only the
+/// container/indentation scope the scanner cannot model is dropped.
+fn dedent_construct(line: &str) -> String {
+    checklist_markers::strip_container_prefix(line).map_or_else(|| dedent(line), str::to_string)
 }
 /// The `orc:NAME` text a scanner looks for.
 fn name_reference(name: &str) -> String {

@@ -451,10 +451,34 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 /// indented code block rather than a checkbox whenever it is not inside a list
 /// item (arbsec/orchestraitor#802) — arbsec/orchestraitor#809 and
 /// arbsec/orchestraitor#799 R1.
+/// The construct is a CONTAINER-SCOPE construct (a fence opener or an HTML
+/// construct that is container-prefixed by a list/blockquote marker, or indented
+/// 4+ spaces — arbsec/orchestraitor#799 R18), a fence OPENER indented 1-3 spaces
+/// (CLOSED OR NOT — it may belong to a list item or a block quote), a RAW HTML
+/// CONSTRUCT (a line-start `<` outside every fenced region, which the scanner
+/// does not model), a NEAR-MARKER (a line that presents a managed marker but not
+/// in the canonical form, so the gate cannot tell what it asserts —
+/// arbsec/orchestraitor#799 R1), or a MANAGED MARKER indented 4+ spaces (or led
+/// by a tab), which is an indented code block rather than a checkbox whenever it
+/// is not inside a list item (arbsec/orchestraitor#802) —
+/// arbsec/orchestraitor#809 and arbsec/orchestraitor#799 R1.
 fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
     let line = checklist
         .unparseable_line
         .map_or_else(|| String::from("?"), |line| line.to_string());
+    if let Some(UnparseableConstruct::ContainerScope) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a fenced code opener or an HTML construct sits at a container scope the scanner cannot model on line {line} (it is prefixed by a list or blockquote marker, or indented 4 or more spaces), so its contents may be examples in one reading and evidence in the other; the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: dedent the construct to column 0, or put it in a column-0 fenced block"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
     if let Some(UnparseableConstruct::NearMarker) = checklist.unparseable_construct {
         writeln!(
             writer,
@@ -476,7 +500,7 @@ fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) 
         .into_diagnostic()?;
         writeln!(
             writer,
-            "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it"
+            "  fix: put it inside a column-0 fenced code block, or remove it (indenting it by 4 spaces no longer works: an indented construct is itself a container-scope refusal)"
         )
         .into_diagnostic()?;
         return Ok(());
@@ -634,5 +658,36 @@ mod tests {
             "plain text with spaces"
         );
         assert_eq!(sanitize_provider_text("café ✓"), "café ✓");
+    }
+
+    /// The operator view names EVERY construct the engine can report, including
+    /// `container_scope` (arbsec/orchestraitor#799 R18). Without its own arm the
+    /// construct falls through to the 1-3-space fence message, which would name
+    /// an unreachable scope and the wrong remedy.
+    #[test]
+    fn unparseable_container_scope_is_named_with_its_own_remedy() {
+        let checklist = Checklist {
+            items: Vec::new(),
+            marker_count: 0,
+            markers_present: false,
+            all_checked: false,
+            unchecked_count: 0,
+            unparseable: true,
+            unparseable_line: Some(6),
+            unparseable_construct: Some(UnparseableConstruct::ContainerScope),
+        };
+        let mut out = Vec::new();
+        write_unparseable_checklist(&mut out, &checklist).expect("write the operator view");
+        let text = String::from_utf8(out).expect("the view is UTF-8");
+        assert!(
+            text.contains("container scope the scanner cannot model"),
+            "{text}"
+        );
+        assert!(text.contains("line 6"), "{text}");
+        assert!(text.contains("dedent the construct to column 0"), "{text}");
+        assert!(
+            !text.contains("indented 1-3 spaces"),
+            "the fence message must not swallow container_scope: {text}"
+        );
     }
 }

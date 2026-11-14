@@ -403,7 +403,7 @@ ORC_LIB_CANONICAL_MARKER_RE="^[[:blank:]]*- [[](x|X|[ ])[]] <!-- orc:(${ORC_LIB_
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
 # every fenced region removed).
 #
-# ONE state machine, six modes: `orc_lib__fence_scan` owns the rules above,
+# ONE state machine, seven modes: `orc_lib__fence_scan` owns the rules above,
 # and every caller drives it. A second, separately written scanner is exactly
 # how the shell and Rust engines drifted before (arbsec/orchestraitor#788).
 orc_lib_strip_fenced_code() { orc_lib__fence_scan strip; }
@@ -429,6 +429,18 @@ orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
 # from the fence case so the verdict names the construct it refused on. Reads
 # the body on STDIN.
 orc_lib_html_construct_line() { orc_lib__fence_scan html-construct; }
+
+# The 1-based line number of the FIRST CONTAINER-SCOPE construct — a fence
+# opener or an HTML construct that is CONTAINER-PREFIXED (a list marker `-`,
+# `*`, `+`, `N.`, `N)` or a blockquote marker `>`, then whitespace, then the
+# construct) or INDENTED four or more spaces (or led by a tab) — or nothing at
+# all (arbsec/orchestraitor#799 R18). Inside a list item such a construct's
+# contents are EXAMPLES; at top level the same text is literal indented code and
+# its contents are ordinary text. The scanner has no container model, the two
+# readings disagree, so the reading is REFUSED (`unparseable_construct`
+# `container_scope`) rather than guessed. Ordinary 4-space prose carries no
+# construct and does NOT refuse. Reads the body on STDIN.
+orc_lib_container_scope_line() { orc_lib__fence_scan container-scope; }
 
 # The 1-based line number of the FIRST NEAR-MARKER — a line that is not the
 # canonical managed-marker form but carries BOTH a task-item box token (`[` +
@@ -467,7 +479,7 @@ orc_lib_normalize_line_endings() {
   LC_ALL=C awk '{ line = $0; gsub(/\r$/, "", line); gsub(/\r/, "\n", line); print line }'
 }
 
-# Usage: orc_lib__fence_scan <strip|state|indeterminate|html-construct|near-marker|indented-marker>  (stdin = body)
+# Usage: orc_lib__fence_scan <strip|state|indeterminate|container-scope|html-construct|near-marker|indented-marker>  (stdin = body)
 orc_lib__fence_scan() {
   orc_lib_normalize_line_endings |
   LC_ALL=C \
@@ -498,6 +510,51 @@ orc_lib__fence_scan() {
       n = 0
       while (substr(s, n + 1, 1) == c) n++
       return n
+    }
+    # The content after a CONTAINER MARKER, trimmed, or "" when the line carries
+    # no container prefix. The leading whitespace is skipped, then one list
+    # marker (`-`, `*`, `+`, `N.`, `N)`) or a blockquote marker (`>`) must be
+    # followed by at least one space or tab (see `required_space`). Skipping the
+    # leading whitespace is safe because four or more spaces is caught by the
+    # INDENTATION rule instead. A `>` with no space after it (`>quote`) is NOT a
+    # container prefix: it is ordinary text. `[[:blank:]]` is space+tab and
+    # nothing else, the same class the canonical marker regex uses.
+    function container_content(line,   rest, digits, c) {
+      rest = line
+      sub(/^[[:blank:]]+/, "", rest)
+      c = substr(rest, 1, 1)
+      if (c == ">") return required_space(substr(rest, 2))
+      if (c == "-" || c == "*" || c == "+") return required_space(substr(rest, 2))
+      digits = 0
+      while (substr(rest, digits + 1, 1) ~ /^[0-9]$/) digits++
+      if (digits > 0) {
+        c = substr(rest, digits + 1, 1)
+        if (c == "." || c == ")") return required_space(substr(rest, digits + 2))
+      }
+      return ""
+    }
+    # The content after a container marker, trimmed of ALL spaces and tabs, or ""
+    # when the marker is not separated from it by at least one space or tab
+    # (CommonMark requires that separation for a list item and a block quote).
+    function required_space(rest,   trimmed) {
+      trimmed = rest
+      sub(/^[[:blank:]]+/, "", trimmed)
+      if (length(trimmed) < length(rest)) return trimmed
+      return ""
+    }
+    # TRUE when the (trimmed) content is a fence OPENER or an HTML construct —
+    # the two constructs whose container scope matters (#799 R18). Same rules as
+    # `fence_opener` and the HTML-construct test below, applied to the content
+    # AFTER a container prefix.
+    function is_construct(content,   c, n) {
+      if (content == "") return 0
+      c = substr(content, 1, 1)
+      if (c == "<" && length(content) > 1) return 1
+      if (c == "`" || c == "~") {
+        n = run_length(content, c)
+        if (n >= 3 && !(c == "`" && index(substr(content, n + 1), "`") > 0)) return 1
+      }
+      return 0
     }
     # The CLOSING tail test. CommonMark 0.31: a closing code fence "may be
     # followed only by spaces or tabs, which are ignored."
@@ -589,6 +646,26 @@ orc_lib__fence_scan() {
         }
         next
       }
+      # A construct at a CONTAINER SCOPE the scanner cannot model (#799 R18) is
+      # REFUSED. A fence opener or an HTML construct that is CONTAINER-PREFIXED
+      # (a list marker — `-`, `*`, `+`, `N.`, `N)` — or a blockquote marker `>`,
+      # then whitespace, then the construct) or INDENTED four or more spaces (or
+      # led by a tab) may sit inside a list item, where its contents are
+      # EXAMPLES; the same text at top level is literal indented code, where they
+      # are ordinary text. The two readings disagree, so no checklist verdict is
+      # derived. The line is still scanned as ordinary text — the refusal, not a
+      # guess, is what stops the verdict. Ordinary 4-space PROSE carries no
+      # construct and never refuses. Dedent the construct to column 0, or put it
+      # in a column-0 fenced block.
+      if (container_scope_line == 0) {
+        if (is_construct(container_content($0))) {
+          container_scope_line = NR
+        } else if (s == "") {
+          deep = $0
+          sub(/^[[:blank:]]+/, "", deep)
+          if (is_construct(deep)) container_scope_line = NR
+        }
+      }
       # A RAW HTML CONSTRUCT is REFUSED, not modelled (#799 R1): a line OUTSIDE
       # every fenced region whose first non-whitespace character is `<` and
       # which carries something after it, indented 0-3 spaces. The scanner
@@ -649,6 +726,8 @@ orc_lib__fence_scan() {
         else print "closed"
       } else if (mode == "indeterminate" && indeterminate_line > 0) {
         print indeterminate_line
+      } else if (mode == "container-scope" && container_scope_line > 0) {
+        print container_scope_line
       } else if (mode == "html-construct" && html_construct_line > 0) {
         print html_construct_line
       } else if (mode == "indented-marker" && indented_marker_line > 0) {
@@ -717,14 +796,18 @@ orc_lib_checklist_markers() {
 # The same refusal applies to a RAW HTML CONSTRUCT (arbsec/orchestraitor#799 R1):
 # the scanner does not model HTML, so a body carrying a line-start `<` has an
 # INDETERMINATE checklist reading that no append can repair — the composed PR
-# could never converge. The error names the line and the three remedies that
-# work: put it in a fenced code block, indent it by 4 spaces, or remove it.
+# could never converge. The error names the remedies that work: put it in a
+# COLUMN-0 fenced code block, or remove it. Indenting it by four spaces no
+# longer works: a 4-space-indented construct is itself a CONTAINER-SCOPE
+# refusal (arbsec/orchestraitor#799 R18).
 #
 # EVERY construct that makes the reading indeterminate is refused here, through
 # the engine's own scan and its own selection (`orc_lib_first_unparseable_line`):
-# a STICKY 1-3-space fence OPENER (arbsec/orchestraitor#809 — closing the region
-# does NOT clear it), a RAW HTML CONSTRUCT (#799 R1), a MANAGED MARKER INDENTED
-# 4+ SPACES or tab-led (#802), and a NEAR-MARKER (#799 R1).
+# a CONTAINER-SCOPE construct (#799 R18: container-prefixed by a list or
+# blockquote marker, or indented 4+ spaces), a STICKY 1-3-space fence OPENER
+# (arbsec/orchestraitor#809 — closing the region does NOT clear it), a RAW HTML
+# CONSTRUCT (#799 R1), a MANAGED MARKER INDENTED 4+ SPACES or tab-led (#802),
+# and a NEAR-MARKER (#799 R1).
 #
 # They are validated BEFORE the `has_checklist` early return AND before any
 # append (arbsec/orchestraitor#799 R14). Two drifts made that necessary: a body
@@ -737,8 +820,8 @@ orc_lib_checklist_markers() {
 # (below): it is about where the appended markers would land.
 # The FIRST construct that makes a body's checklist reading INDETERMINATE, with
 # the line it sits on and its name — the SAME selection `reconcile-checklist`
-# makes (earliest line wins; at one line the order is fence opener, HTML
-# construct, indented marker, near-marker). Prints "<line>\t<name>", or nothing
+# makes (earliest line wins; at one line the order is container scope, fence
+# opener, HTML construct, indented marker, near-marker). Prints "<line>\t<name>", or nothing
 # at all when the reading is determinate.
 #
 # This is the single predicate every composition caller uses
@@ -751,6 +834,7 @@ orc_lib_checklist_markers() {
 orc_lib_first_unparseable_line() {
   local body="$1" candidate line name best_line="" best_name=""
   for candidate in \
+    "$(printf '%s\n' "$body" | orc_lib_container_scope_line):container_scope" \
     "$(printf '%s\n' "$body" | orc_lib_fence_unparseable_line):indented_fence_opener" \
     "$(printf '%s\n' "$body" | orc_lib_html_construct_line):html_construct" \
     "$(printf '%s\n' "$body" | orc_lib_indented_marker_line):indented_marker" \
@@ -769,7 +853,7 @@ orc_lib_first_unparseable_line() {
 orc_lib_ensure_checklist_markers() {
   local body="$1" root="${2:-}" fence_state="" fence_char="" fence_len="" fence_name=""
   local construct="" construct_line="" construct_name=""
-  # ALL FOUR refusals run BEFORE the `has_checklist` early return AND before any
+  # ALL FIVE refusals run BEFORE the `has_checklist` early return AND before any
   # append (arbsec/orchestraitor#799 R14): a body the engine would refuse must
   # never be composed, whether it already carries markers or is about to receive
   # them. The STICKY indented-fence-opener condition is part of this set — an
@@ -782,6 +866,11 @@ orc_lib_ensure_checklist_markers() {
     if [ -n "$construct_line" ]; then
       construct_name="${construct#*$'\t'}"
       case "$construct_name" in
+        container_scope)
+          echo "error: refusing to append the managed merge checklist: line $construct_line puts a fenced code opener or an HTML construct at a container scope the scanner cannot model (it is prefixed by a list or blockquote marker, or indented 4 or more spaces)" >&2
+          echo "  inside a list item such a construct's contents are examples and at top level they are ordinary text, so the scanner refuses every reading of the body (arbsec/orchestraitor#799 R18): nothing is appended and your body is not modified" >&2
+          echo "  fix: dedent the construct to column 0, or put it in a column-0 fenced block" >&2
+          ;;
         indented_fence_opener)
           echo "error: refusing to append the managed merge checklist: the body opens a fenced code block indented 1-3 spaces on line $construct_line, closed or not" >&2
           echo "  its container scope (top level, list item, block quote) cannot be determined, so the checklist scanner refuses every reading of the body (arbsec/orchestraitor#809): nothing is appended and your body is not modified" >&2
@@ -790,7 +879,7 @@ orc_lib_ensure_checklist_markers() {
         html_construct)
           echo "error: refusing to append the managed merge checklist: the PR body contains a raw HTML construct at line $construct_line (a line starting with '<')" >&2
           echo "  the checklist scanner does not model HTML, so it cannot tell what that construct hides and would refuse every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
-          echo "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it" >&2
+          echo "  fix: put it inside a column-0 fenced code block, or remove it (indenting it by 4 spaces no longer works: an indented construct is itself a container-scope refusal)" >&2
           ;;
         indented_marker)
           echo "error: refusing to append the managed merge checklist: a managed marker is indented too far at line $construct_line (4 or more spaces, or a leading tab)" >&2
@@ -928,10 +1017,15 @@ orc_lib_split_short_cluster() {
           ORC_LIB_CLUSTER_BODY_KIND=body-file
           ORC_LIB_CLUSTER_BODY_VALUE="$value" ;;
         *)
-          # An UNKNOWN letter is refused here too: `-z=FOO` used to return "no
-          # body, known" and be forwarded — the same hole the unknown-letter
-          # refusal closes elsewhere (arbsec/orchestraitor#799 R17).
-          case "$bool_letters" in
+          # Every OTHER known letter keeps its `=`-bound value as its own token:
+          # `-t=TITLE`, `-B=main`, `-m=Milestone` and `-R=owner/repo` are pflag's
+          # own spellings, and refusing them made the wrapper reject gh commands
+          # gh itself accepts (arbsec/orchestraitor#799 R18). Only `b`/`F` carry
+          # the body (handled above), so no other letter extracts one. An UNKNOWN
+          # letter is still refused here: `-z=FOO` used to return "no body,
+          # known" and be forwarded — the same hole the unknown-letter refusal
+          # closes elsewhere (arbsec/orchestraitor#799 R17).
+          case "$value_letters$bool_letters" in
             *"$letter"*) ORC_LIB_CLUSTER_BOOLS+=("-$letter=$value") ;;
             *) return 1 ;;
           esac ;;

@@ -917,7 +917,7 @@ fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
         "the operator view names the refused construct: {text}"
     );
     assert!(
-        text.contains("put it inside a fenced code block, indent it by 4 spaces, or remove it"),
+        text.contains("put it inside a column-0 fenced code block, or remove it"),
         "and offers remedies that work: {text}"
     );
     Ok(())

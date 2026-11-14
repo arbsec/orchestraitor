@@ -65,8 +65,8 @@ always blocks.
 
 A marker inside a fenced code region (3+ backticks or 3+ tildes) is an EXAMPLE,
 not a checklist item, and is excluded from the scan. A fence line carries at most
-three leading spaces (four or more, or a leading tab, is an indented code block
-where fence characters are literal text), and a backtick fence's info string may
+three leading spaces (four or more, or a leading tab, is a `container_scope`
+refusal — see below — never a silently-ignored opener), and a backtick fence's info string may
 not contain a backtick — ```` ```example``` ```` is a closed inline code span,
 not an opener — while a tilde fence's may. A CLOSING fence may be followed ONLY
 by spaces or tabs (CommonMark 0.31). A form feed or a vertical tab after the
@@ -85,14 +85,31 @@ block. A line whose FIRST non-whitespace character is `<`, with 0-3 leading
 spaces and outside every fenced code region, makes the reading INDETERMINATE:
 the checklist is not read, `all_checked` is false, and the verdict blocks with
 the distinct reason `checklist_unparseable` and `unparseable_construct:
-html_construct`. The boundaries: four or more leading spaces (or a leading tab)
-is literal indented code and hides nothing; a line inside a fenced region is
-inert; a line that is just `<`, and any `<` that is not the line's first
-non-whitespace character (`x < y`), is ordinary text. This is deliberately
-STRICTER than CommonMark (an autolink and inline HTML are ordinary text there);
-arbsec/orchestraitor#809 tracks real modelling. The remedies, all of which
-work: put the line inside a fenced code block, indent it by 4 spaces, or remove
-it.
+html_construct`. The boundaries: a line inside a fenced region is inert; a line
+that is just `<`, and any `<` that is not the line's first non-whitespace
+character (`x < y`), is ordinary text; four or more leading spaces, a leading
+tab, or a container marker in front of the construct is `container_scope` (see
+below), which refuses just as hard. This is deliberately STRICTER than
+CommonMark (an autolink and inline HTML are ordinary text there);
+arbsec/orchestraitor#809 tracks real modelling. The remedies, both of which
+work: put the line in a column-0 fenced code block, or remove it.
+
+A FENCE OPENER or an HTML CONSTRUCT at a CONTAINER SCOPE the scan cannot model
+is `container_scope` (arbsec/orchestraitor#799 R18). Two reviewers reproduced
+the same false pass in BOTH engines with the old rule: a construct opened inside
+a list item was not recognised, so a checked example inside it counted as
+evidence and `all_checked` became true with no real checklist. Two shapes are
+indistinguishable from top level: the construct is CONTAINER-PREFIXED — the
+line's first non-whitespace content is a list marker (`-`, `*`, `+`, `N.`, `N)`)
+or a blockquote marker (`>`), followed by whitespace, then the construct — or it
+is INDENTED four or more spaces (or led by a tab), where literal indented code
+(its contents are ordinary text) and container-relative code (its contents are
+examples inside the list item) read differently. The checklist is not read,
+`all_checked` is false, and the verdict blocks with `checklist_unparseable` and
+`unparseable_construct: container_scope`. A 4-space line that carries NEITHER a
+fence opener NOR an HTML construct is ordinary indented prose and never refuses
+a reading. The remedies, both of which work: dedent the construct to column 0,
+or put it in a column-0 fenced block.
 
 A FENCE OPENER indented 1-3 spaces has an INDETERMINATE container scope (it may
 belong to a list item or a block quote, and the scanner has no container model):
@@ -117,10 +134,13 @@ canonical form (`- [x] <!-- orc:NAME -->`): 0-3 leading spaces is still accepted
 alone does not make a near-marker parseable — `- [ ]\t<!-- orc:tests -->` stays a near-marker
 however far left it is moved.
 
-Each message names the construct it refused, and there are exactly four of them:
-`indented_fence_opener`, `html_construct`, `indented_marker` and `near_marker`. An
-HTML construct is never reported as a fence, a fence is never reported as HTML,
-and neither is ever reported as an indented marker.
+Each message names the construct it refused, and there are exactly five of them:
+`container_scope`, `indented_fence_opener`, `html_construct`, `indented_marker`
+and `near_marker`. An HTML construct is never reported as a fence, a fence is
+never reported as HTML, and neither is ever reported as an indented marker. At
+the SAME line the order is the list's: `container_scope` first, because a line
+that carries a construct at an unmodelled scope is refused for that reason even
+when the line is also something else.
 
 The `checklist.items[].description` field is the text AFTER the `-->` delimiter, for
 checked and unchecked items alike.

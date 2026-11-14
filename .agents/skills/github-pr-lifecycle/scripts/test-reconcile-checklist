@@ -6,8 +6,10 @@
 # that as green, and `merge-gate` merged a PR with no checklist evidence at all
 # — reproduced with the exact merged #767 body.
 #
-# Also pins the other half of the fix: the gate must stay SATISFIABLE (#683), so
-# `pr-create` appends the nine managed markers to a wholesale body, and the
+# Also pins the other half of the fix: the gate must stay SATISFIABLE (#683). The
+# composition duty lives in `pr-mutate` (`--inject-checklist` for a PR that
+# already exists, and its `--body`/`--body-file` routes for a body being set), not
+# in `pr-create`, which forwards gh's argv verbatim and composes nothing; and the
 # template/fallback copies cannot drift. A PR that ALREADY exists carries no
 # marker, so `pr-mutate --inject-checklist` is the one-command remediation path
 # for it.
@@ -48,7 +50,8 @@
 #       A line outside every fenced region whose FIRST non-whitespace character
 #       is `<`, indented 0-3 spaces, makes the reading INDETERMINATE
 #       (`checklist_unparseable`, `html_construct`) and the gate blocks; a
-#       4-space (or tab-led) line is literal code, a fenced line is inert, and a
+#       4-space (or tab-led) CONSTRUCT is `container_scope` (#799 R18), a plain
+#       4-space PROSE line is ordinary code, a fenced line is inert, and a
 #       mid-line `<` is ordinary text. A fence OPENER indented 1-3 spaces is
 #       INDETERMINATE scope too (#809 stays open for real container tracking)
 #   (f8) arbsec/orchestraitor#799 R1, the CANONICAL managed-marker form: a
@@ -63,17 +66,18 @@
 #   (f8b) arbsec/orchestraitor#799 R1, the refusal NAMES itself: the message says
 #       "raw HTML construct", never a fence, and offers only remedies that work;
 #       `merge-gate` stops at the blocked verdict and never reaches `gh pr merge`
-#   (f8d) creation REFUSES a body carrying a line-start `<` (exit 2, naming the
-#       line and the three remedies), because appending the checklist there
-#       would compose a PR that can never converge
+#   (f8d) the composition helper REFUSES a body carrying a line-start `<` or a
+#       container-scoped construct (exit 2, naming the line and its remedy),
+#       because appending the checklist there would compose a PR that can never
+#       converge
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
-#   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
-#       and `--body-file -`, and gives a bodyless PR the checklist too; a body
-#       that already carries markers is left verbatim, and `--body` +
-#       `--body-file` together are refused
+#   (h) `pr-create` composes NOTHING: it forwards gh's argv verbatim (pinned in
+#       (f13)), so there is no injection, no body spelling and no refusal for it
+#       to get wrong — the composition invariant is asserted through `pr-mutate`
+#       and the shared helper (f12), which is now the only composer
 #   (h2) gh's OWN body sources (`--fill`, `--fill-first`, `--fill-verbose`,
-#       `--template`, `--web`, `--editor`) are left alone: nothing is injected,
+#       `--template`, `--web`, `--editor`) are left alone: nothing is composed,
 #       no `--body` is passed, and the stderr note names
 #       `pr-mutate edit <pr> --inject-checklist` as the remediation
 #   (i) pr-mutate --inject-checklist remediates an EXISTING PR: it appends the
@@ -173,11 +177,39 @@ case "$1/${2:-}" in
       esac
       prev="$a"
     done
+    # Every read is logged, so a test can prove the body READ and the gh WRITE
+    # target the SAME repository (`--repo` is never inferred from cwd).
+    printf '%s\n' "$*" >> "${GH_VIEW_LOG:-/dev/null}"
+    # `updatedAt` is served from a SEQUENCE file when one is set, one line per
+    # updatedAt-carrying read: that is how a test moves the baseline between the
+    # `--inject-checklist` READ and its pre-write re-check (the concurrency guard).
+    updated_at="2026-01-01T00:00:00Z"
+    if [ -n "${UPDATED_AT_SEQUENCE:-}" ]; then
+      n_raw="$(cat "${UPDATED_AT_COUNTER:-/dev/null}" 2>/dev/null || echo 0)"
+      n=$(( ${n_raw:-0} + 1 ))
+      printf '%s' "$n" > "${UPDATED_AT_COUNTER:-/dev/null}"
+      line="$(sed -n "${n}p" "$UPDATED_AT_SEQUENCE")"
+      [ -z "$line" ] || updated_at="$line"
+    fi
     case "$json" in
       body)
         # With a --jq filter the caller wants the FILTERED value (the raw body
         # text for `.body // ""`), not the JSON envelope.
         if [ -n "$jq_expr" ]; then cat "$BODY_FIXTURE"; else jq -n --rawfile b "$BODY_FIXTURE" '{body:$b}'; fi ;;
+      body,updatedAt)
+        # ONE read for the body AND its baseline: a baseline captured later
+        # could bless a newer body as "seen".
+        if [ -n "$jq_expr" ]; then
+          jq -n --rawfile b "$BODY_FIXTURE" --arg u "$updated_at" '{body:$b, updatedAt:$u}' | jq -c "$jq_expr"
+        else
+          jq -n --rawfile b "$BODY_FIXTURE" --arg u "$updated_at" '{body:$b, updatedAt:$u}'
+        fi ;;
+      updatedAt)
+        if [ -n "$jq_expr" ]; then
+          jq -n --arg u "$updated_at" '{updatedAt:$u}' | jq -r "$jq_expr"
+        else
+          jq -n --arg u "$updated_at" '{updatedAt:$u}'
+        fi ;;
       baseRefOid) jq -n --arg b "$TEST_BASE" '{baseRefOid:$b}' ;;
       reviewDecision,baseRefOid,headRefOid,isDraft)
         jq -n --arg h "$TEST_HEAD" --arg b "$TEST_BASE" \
@@ -565,7 +597,7 @@ CORPUS_TSV="$CORPUS_DIR/expectations.tsv"
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=84
+CORPUS_FLOOR=94
 declare -A CORPUS_COUNT=() CORPUS_ALL=() CORPUS_UNPARSEABLE=() CORPUS_CONSTRUCT=()
 while IFS=$'\t' read -r row_case row_count row_all row_unparseable row_construct; do
   case "$row_case" in
@@ -817,7 +849,7 @@ run convergence-status 7 --repo test-org/repo
 assert 'f7: text mode names the raw HTML construct' 1 \
   "$(grep -cF "contains a raw HTML construct at line 10" <<<"$OUT")"
 assert 'f7: and offers only remedies that work' 1 \
-  "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' <<<"$OUT")"
+  "$(grep -cF 'put it inside a column-0 fenced code block, or remove it' <<<"$OUT")"
 # Every construct shape from the R1 probe list is the SAME refusal: the scanner
 # does not try to tell a comment from a tag from an autolink.
 for html_probe in '<pre></pre>' '<!-->' '<!--->' '<https://example.com>' \
@@ -854,11 +886,56 @@ for name in issue service-identity tests security docs rollback checks review th
 done
 export BODY_FIXTURE="$TMP/files/r1-indented-html.md"
 run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f7: a 4-space-indented <div> is literal text' false \
+# R18 reverses this boundary: a 4-space-indented HTML construct is CONTAINER
+# SCOPE. Literal indented code cannot INTERRUPT a paragraph, so the same line is
+# a real HTML block inside a list item, where it hides the nine markers below.
+assert 'f7: a 4-space-indented <div> is a container-scope construct' true \
   "$(jq -r .unparseable <<<"$OUT")"
-assert 'f7: and the nine markers are counted normally' 9 \
+assert 'f7: and it names container_scope' 'container_scope' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+assert 'f7: and the nine markers are still counted' 9 \
   "$(jq -r .marker_count <<<"$OUT")"
-assert 'f7: and they read as all checked' true "$(jq -r .all_checked <<<"$OUT")"
+assert 'f7: but they never read as all checked' false "$(jq -r .all_checked <<<"$OUT")"
+# The control: 4-space PROSE carries no construct, so it stays determinate.
+printf -- '    ordinary indented prose\n' > "$TMP/files/r1-indented-prose.md"
+for name in issue service-identity tests security docs rollback checks review threads; do
+  printf -- '- [x] <!-- orc:%s --> linked\n' "$name" >> "$TMP/files/r1-indented-prose.md"
+done
+export BODY_FIXTURE="$TMP/files/r1-indented-prose.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f7: 4-space indented PROSE is still ordinary text' false \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: and its nine markers read as all checked' true "$(jq -r .all_checked <<<"$OUT")"
+# R18: the FOUR reproduced false passes — a construct inside a list container, and
+# the container-relative 4-space forms. Each used to read `all_checked: true` with
+# no real checklist; now each is refused, blocks the gate, and NEVER reaches a
+# merge.
+for cs_shape in list-tilde list-comment list-relative-fence list-relative-html; do
+  case "$cs_shape" in
+    list-tilde)            first='- ~~~' ;;
+    list-comment)          first='- <!--' ;;
+    list-relative-fence)   first='    ~~~' ;;
+    list-relative-html)    first='    <pre>' ;;
+  esac
+  nine_ticked_plus "$first
+  - [x] <!-- orc:tests --> example inside the container" > "$TMP/files/r18-$cs_shape.md"
+  export BODY_FIXTURE="$TMP/files/r18-$cs_shape.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f7: $cs_shape refuses the reading" true "$(jq -r .unparseable <<<"$OUT")"
+  assert "f7: $cs_shape names container_scope" 'container_scope' \
+    "$(jq -r .unparseable_construct <<<"$OUT")"
+  assert "f7: $cs_shape is never all checked" false "$(jq -r .all_checked <<<"$OUT")"
+  assert "f7: $cs_shape counts the visible example honestly" 10 \
+    "$(jq -r .marker_count <<<"$OUT")"
+  run convergence-status 7 --repo test-org/repo --json
+  assert "f7: $cs_shape blocks convergence" 5 "$RC"
+  assert "f7: $cs_shape blocks on the unparseable checklist" '["checklist_unparseable"]' \
+    "$(jq -c .reasons <<<"$OUT")"
+  rm -f "$TMP/merge-argv.txt"
+  run merge-gate 7 --repo test-org/repo
+  assert "f7: $cs_shape blocks the merge" 5 "$RC"
+  assert "f7: $cs_shape never invokes gh pr merge" 0 "$(exists "$TMP/merge-argv.txt")"
+done
 printf -- '- [x] <!-- orc:issue --> linked\nx < y\n- [x] <!-- orc:tests --> tested\n' \
   > "$TMP/files/r1-midline.md"
 export BODY_FIXTURE="$TMP/files/r1-midline.md"
@@ -1017,8 +1094,8 @@ assert 'f8b: text mode names the raw HTML construct' 1 \
   "$(grep -cF "contains a raw HTML construct at line 10" <<<"$OUT")"
 assert 'f8b: and never calls it a fence' 0 \
   "$(grep -cF 'opens a fenced code block indented' <<<"$OUT")"
-assert 'f8b: and offers the three remedies that work' 1 \
-  "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' <<<"$OUT")"
+assert 'f8b: and offers the remedies that work' 1 \
+  "$(grep -cF 'put it inside a column-0 fenced code block, or remove it' <<<"$OUT")"
 
 # The gate-level outcome the merge path consumes: `merge-gate` must stop at the
 # blocked verdict and never construct a `gh pr merge` call.
@@ -1056,7 +1133,7 @@ export BODY_FIXTURE="$TMP/files/no-markers.md"
 # arbsec/orchestraitor#799 R1: with HTML unmodelled, a body carrying a line-start
 # `<` can NEVER be read — appending the checklist would compose a PR that blocks
 # forever with nothing the author can tick. Both creation routes refuse it
-# instead (exit 2), naming the line and the three remedies that work.
+# instead (exit 2), naming the line and the remedies that work.
 for html_body in '<div>' '<div>a block</div>' '  <div>' '<pre>' '<!--' '<?xml' \
   '<![CDATA[' '<https://example.com>'; do
   rm -f "$TMP/stderr"
@@ -1066,19 +1143,27 @@ for html_body in '<div>' '<div>a block</div>' '  <div>' '<pre>' '<!--' '<?xml' \
   assert "f8d: '$html_body' names line 1" 1 \
     "$(grep -cF 'raw HTML construct at line 1' "$TMP/stderr")"
   assert "f8d: '$html_body' offers the remedies that work" 1 \
-    "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' "$TMP/stderr")"
+    "$(grep -cF 'put it inside a column-0 fenced code block, or remove it' "$TMP/stderr")"
   assert "f8d: '$html_body' invents no closing tag" 0 \
     "$(grep -cF 'add a line carrying' "$TMP/stderr")"
 done
-# The controls: a 4-space-indented construct and a mid-line `<` are literal text,
-# so creation proceeds normally and the appended checklist is real evidence.
-for literal_body in '    <div>' 'x < y' '```'$'\n''<div>'$'\n''```'; do
+# The controls: 4-space PROSE, a mid-line `<` and a column-0 fenced block are
+# literal text, so creation proceeds normally and the appended checklist is real
+# evidence. R18 moved the 4-space INDENTED CONSTRUCT out of this list: it is a
+# container-scope refusal now (asserted just below), because indented code cannot
+# interrupt a paragraph and the same lines are a real HTML block in a list item.
+for literal_body in '    ordinary prose' 'x < y' '```'$'\n''<div>'$'\n''```'; do
   literal_ensured="$(ensure "$literal_body" "$TMP/repo" 2>"$TMP/stderr")"
   RC=$?
   assert "f8d: '$literal_body' is not refused" 0 "$RC"
   assert "f8d: '$literal_body' gains the nine markers" 9 \
     "$(grep -c -- '- \[ \] <!-- orc:' <<<"$literal_ensured")"
 done
+rm -f "$TMP/stderr"
+ensure '    <div>' "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f8d: a 4-space-indented construct is refused at creation (R18)' 2 "$RC"
+assert 'f8d: and it names the container scope' 1 \
+  "$(grep -cF 'container scope the scanner cannot model' "$TMP/stderr")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------
@@ -1122,10 +1207,10 @@ assert 'g: a fenced-only body keeps its own text' 1 \
   "$(grep -cF 'example only' <<<"$FENCED_ENSURED")"
 
 # --- (i) pr-mutate --inject-checklist: remediation for an EXISTING PR ----------
-# `pr-create` gives a NEW PR the managed checklist. A PR that ALREADY exists
-# carries none and would block forever — `--inject-checklist` is the
-# one-command remediation path: read the current body, append the managed
-# checklist, set the body.
+# `pr-create` composes nothing, so a created PR may carry no marker (pinned in
+# (f12)/(f13)). A PR that ALREADY exists carries none and would block forever —
+# `--inject-checklist` is the one-command remediation path: read the current
+# body, append the managed checklist, set the body.
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 rm -f "$TMP/edited-body.md"
 run pr-mutate edit 7 --repo test-org/repo --inject-checklist
@@ -1664,7 +1749,7 @@ printf -- '- [x] <!-- orc:issue --> linked\n- [ ]  <!-- orc:tests --> near\n' > 
 printf -- '- [x] <!-- orc:issue --> linked\n    - [x] <!-- orc:tests --> indented\n' > "$TMP/files/f10-indented.md"
 for shape in html near near-after-canonical indented; do
   case "$shape" in
-    html)                 want='raw HTML construct at line 2'; fix='put it inside a fenced code block, indent it by 4 spaces, or remove it' ;;
+    html)                 want='raw HTML construct at line 2'; fix='put it inside a column-0 fenced code block, or remove it' ;;
     near)                 want='near-marker at line 1'; fix='write the marker canonically' ;;
     near-after-canonical) want='near-marker at line 2'; fix='write the marker canonically' ;;
     indented)             want='indented too far at line 2'; fix='dedent the marker line to column 0' ;;
@@ -1763,13 +1848,15 @@ compose_invariant() { # compose_invariant <label> <composed body>
 F12_INDENTED_FENCE=$' ```\nexample\n ```\n'          # 1-space opener, CLOSES
 F12_THREE_SPACE_FENCE=$'   ```\nexample\n   ```\n'   # 3-space opener, CLOSES
 F12_HTML=$'- [x] <!-- orc:issue --> linked\n<div>a block</div>\n'
+F12_CONTAINER_SCOPE=$'- [x] <!-- orc:issue --> linked\n- ~~~\n  - [x] <!-- orc:tests --> example\n'
 F12_INDENTED_MARKER=$'- [x] <!-- orc:issue --> linked\n    - [x] <!-- orc:tests --> indented\n'
 F12_NEAR_MARKER=$'- [x] <!-- orc:issue --> linked\n- [ ]  <!-- orc:tests --> near\n'
-for seed_case in indented-fence three-space-fence html indented-marker near-marker; do
+for seed_case in indented-fence three-space-fence html container-scope indented-marker near-marker; do
   case "$seed_case" in
     indented-fence)      seed="$F12_INDENTED_FENCE";      want='opens a fenced code block indented 1-3 spaces on line 1' ;;
     three-space-fence)   seed="$F12_THREE_SPACE_FENCE";   want='opens a fenced code block indented 1-3 spaces on line 1' ;;
     html)                seed="$F12_HTML";                want='raw HTML construct at line 2' ;;
+    container-scope)     seed="$F12_CONTAINER_SCOPE";     want='container scope the scanner cannot model' ;;
     indented-marker)     seed="$F12_INDENTED_MARKER";     want='indented too far at line 2' ;;
     near-marker)         seed="$F12_NEAR_MARKER";         want='near-marker at line 2' ;;
   esac
@@ -1807,7 +1894,15 @@ compose_invariant 'plain summary' "$(ensure $'a plain summary\n' "$TMP/repo")"
 compose_invariant 'explicit empty body' "$(ensure '' "$TMP/repo")"
 compose_invariant 'already-checklisted body' "$(ensure $'- [x] <!-- orc:issue --> linked\n' "$TMP/repo")"
 compose_invariant 'column-0 closed fence' "$(ensure $'```\nexample\n```\n' "$TMP/repo")"
-compose_invariant '4-space-indented HTML is literal code' "$(ensure $'    <div>\n' "$TMP/repo")"
+# R18 reverses the old "4-space HTML is literal code" boundary: an indented HTML
+# construct is CONTAINER SCOPE, so the helper refuses it (exit 2) instead of
+# composing a body the gate would refuse on sight.
+rm -f "$TMP/stderr"
+ensure $'    <div>\n' "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f12: 4-space-indented HTML is refused at composition' 2 "$RC"
+assert 'f12: and it names the container scope' 1 \
+  "$(grep -cF 'container scope the scanner cannot model' "$TMP/stderr")"
+compose_invariant '4-space-indented PROSE is literal code' "$(ensure $'    ordinary prose\n' "$TMP/repo")"
 compose_invariant 'two-space-indented marker is accepted' \
   "$(ensure $'- [x] <!-- orc:issue --> linked\n  - [x] <!-- orc:tests --> nested\n' "$TMP/repo")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
@@ -1909,6 +2004,79 @@ for accepted in '-Rtest-org/repo' '-htTITLE'; do
   run pr-mutate edit 7 --repo test-org/repo "$accepted"
   assert "f13: pr-mutate accepts $accepted" 0 "$RC"
 done
+# R18: `=`-bound values for KNOWN non-body short flags are pflag's own spellings
+# and must be accepted. `-t=TITLE`, `-B=main`, `-m=Milestone` and `-R=owner/repo`
+# used to exit 2 because the splitter's `=` branch consulted only the BOOLEAN
+# letters after handling b/F — so the wrapper refused commands gh accepts.
+for accepted_eq in '-t=TITLE' '-B=main' '-m=Milestone'; do
+  rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+  run pr-mutate edit 7 --repo test-org/repo "$accepted_eq"
+  assert "f13: pr-mutate accepts $accepted_eq" 0 "$RC"
+  assert "f13: $accepted_eq is forwarded verbatim" 1 \
+    "$(grep -cxF -- "$accepted_eq" "$TMP/edited-argv.txt")"
+  assert "f13: $accepted_eq composes no body" 0 \
+    "$(grep -c 'orc:' "$TMP/edited-body.md" 2>/dev/null || true)"
+done
+# `-R=OWNER/REPO` is consumed by the COMMON parser (it is one of its four
+# spellings), so it is resolved into $REPO before any read: the write targets the
+# same repository the reads do, and the token is never forwarded a second time.
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt" "$TMP/gh-views.txt"
+export GH_VIEW_LOG="$TMP/gh-views.txt"
+run pr-mutate edit 7 --repo test-org/repo -R=other-org/other-repo --inject-checklist
+assert 'f13: pr-mutate accepts -R=OWNER/REPO' 0 "$RC"
+assert 'f13: -R= selects the override for the READ' 2 \
+  "$(grep -cF 'pr view 7 --repo other-org/other-repo' "$TMP/gh-views.txt")"
+assert 'f13: -R= selects the override for the WRITE' 1 \
+  "$(grep -cxF -- 'other-org/other-repo' "$TMP/edited-argv.txt")"
+assert 'f13: -R= is never forwarded as a token of its own' 0 \
+  "$(grep -c '^-R=' "$TMP/edited-argv.txt")"
+unset GH_VIEW_LOG
+# R18: a `=`-bound body spelling extracts the body (unchanged behaviour).
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo '-b=EQUALS_BODY'
+assert 'f13: pr-mutate -b=EQUALS_BODY exits 0' 0 "$RC"
+assert 'f13: -b=EQUALS_BODY carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+assert 'f13: -b=EQUALS_BODY keeps the supplied text' 1 \
+  "$(grep -cF 'EQUALS_BODY' "$TMP/edited-body.md")"
+# R18 (R5.1): a repository override that survives into REST (it sits after `--`,
+# where `orc_lib_parse_common` cannot see it) is RESOLVED into $REPO, never
+# forwarded: the body READ and the gh WRITE must target the same repository.
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt" "$TMP/gh-views.txt"
+export GH_VIEW_LOG="$TMP/gh-views.txt"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist -- --repo other-org/other-repo
+assert 'f13: a post-dashdash --repo override is resolved' 0 "$RC"
+assert 'f13: the body READ uses the override repository' 2 \
+  "$(grep -cF 'pr view 7 --repo other-org/other-repo' "$TMP/gh-views.txt")"
+assert 'f13: and no read uses the superseded repository' 0 \
+  "$(grep -cF 'test-org/repo' "$TMP/gh-views.txt")"
+assert 'f13: the WRITE uses the same repository exactly once' 1 \
+  "$(grep -cxF -- 'other-org/other-repo' "$TMP/edited-argv.txt")"
+assert 'f13: and the superseded repository is not in the write' 0 \
+  "$(grep -cF 'test-org/repo' "$TMP/edited-argv.txt")"
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo -- --repo nonsense
+assert 'f13: a malformed override is refused' 2 "$RC"
+assert 'f13: and it never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+unset GH_VIEW_LOG
+# R18 (R5.2): the `--inject-checklist` read-modify-write re-checks its baseline
+# (the `updatedAt` read WITH the body) immediately before the write. A body
+# updated between the read and the write is refused (exit 4) instead of being
+# overwritten with a composition of the STALE read.
+printf '%s\n' '2026-01-01T00:00:00Z' '2026-01-02T00:00:00Z' > "$TMP/updated-at.seq"
+export UPDATED_AT_SEQUENCE="$TMP/updated-at.seq" UPDATED_AT_COUNTER="$TMP/updated-at.count"
+rm -f "$TMP/updated-at.count" "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist
+assert 'f13: a body updated after the read is refused' 4 "$RC"
+assert 'f13: and the refusal names the concurrent edit' 1 \
+  "$(grep -cF 'concurrent edit detected' "$TMP/stderr")"
+assert 'f13: and it never overwrites the newer body' 0 "$(exists "$TMP/edited-body.md")"
+unset UPDATED_AT_SEQUENCE UPDATED_AT_COUNTER
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist
+assert 'f13: an unmoved baseline still writes the body' 0 "$RC"
+assert 'f13: and the written body carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 for refused in '-z=FOO' '-fz=FOO'; do
   rm -f "$TMP/edited-body.md"
   run pr-mutate edit 7 --repo test-org/repo "$refused"
