@@ -272,6 +272,10 @@
 62-html-type1-closes-on-opening-line	10	false	true	html_construct
 # RE-DERIVED (#799 R1): `<!-->` is a RAW HTML CONSTRUCT — REFUSED (`html_construct`).
 # The degenerate-terminator model is deleted; the marker below counts as text.
+# TWO REVIEW GENERATIONS asked whether the marker on line 2 is a rendered task: it is
+# NOT, and the concern cannot occur — the expectation is `1 false true html_construct`,
+# i.e. the reading is REFUSED, so `all_checked` is false and no verdict reads that marker
+# as evidence. The count is reported for the record only.
 63-html-comment-empty-terminator	1	false	true	html_construct
 # RE-DERIVED (#799 R1): an AUTOLINK is ordinary text in CommonMark, but this scanner
 # does not model HTML at all — a line-start `<` is REFUSED (`html_construct`). It is

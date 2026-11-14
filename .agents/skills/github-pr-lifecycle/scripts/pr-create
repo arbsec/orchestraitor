@@ -11,117 +11,42 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). THE RULE: the wrapper intervenes ONLY when the caller supplies a body, and it recognises only the four body spellings (--body X, --body=X, -b X, -b=X, -bX; --body-file X, --body-file=X, -F X, -F=X, -FX; gh v2.104.0 proves the attached short forms are real pflag syntax). A supplied body is validated through the shared composition helper (raw HTML construct, indented marker, near-marker and sticky indented-fence-opener refusals, exit 2) and forwarded with the nine managed checklist markers; an explicit EMPTY body (--body \"\" or --body=) is composed into the checklist-only body. EVERY other flag is forwarded untouched and never refused: gh's own body sources (--fill, --fill=true, -f, -f=true, --fill-first, --fill-verbose, --template, --web, --editor), -B (--base), the title, and anything gh grows later. With NO explicit body nothing is injected and no --body is passed: gh sources (or prompts for) the body itself, and the stderr note names 'pr-mutate edit <pr> --inject-checklist' as the remediation. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: pass any gh pr create arguments (--title, --body, --body-file, --fill, --base, ...). THE RULE: the wrapper does NOT interpret gh's argv. Every argument is forwarded to gh VERBATIM, in order, unchanged: nothing is inspected, rewritten, composed or refused, and gh validates its own flags. The only token this script recognises is its OWN --skip-review-gate (which gh does not have); a gh flag VALUE that is exactly that string is taken as the flag, which is the one residual ambiguity. CONSEQUENCE: pr-create does NOT compose the managed checklist any more — every PR it creates must be remediated with pr-mutate edit <pr> --inject-checklist, which the post-create note names (the PR number is parsed from the URL gh printed; when it cannot be parsed the note says so and uses a placeholder). A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The gate NEVER reads the base from the caller's arguments — a token that looks like a flag can be another flag's value, and a wrong base validates the wrong review evidence; it uses \$PR_CREATE_BASE_BRANCH (a wrapper-only override), then branch.<current>.gh-merge-base, then refs/remotes/origin/HEAD, and fails closed with exit 6 when none resolves."
   exit "$ORC_OK"
 fi
 
-# THE RULE (arbsec/orchestraitor#799 R15): the wrapper intervenes ONLY when the
-# caller supplied a body. This parser therefore recognises the FOUR body
-# spellings and nothing else; every other flag — gh's own body sources
-# (`--fill`, `--fill=true`, `-f`, `-f=true`, `--fill-first=…`,
-# `--fill-verbose=…`, `--template`, `--web`, `--editor`, `--editor=true`), the
-# base (`-B`), a title, anything gh grows later — travels in `REST` untouched
-# and is never inspected, refused or rewritten here. That is deliberate: three
-# rounds of hand-enumerating gh's flag grammar each missed a spelling (and one
-# round even refused a combination `gh` accepts), so the enumeration is gone.
+# THE RULE (arbsec/orchestraitor#799 R17): this wrapper does NOT INTERPRET
+# `gh`'s argv. It used to re-implement pflag's argument grammar in bash — the
+# body spellings, then the `=value` forms, then attached values, then short-flag
+# clusters — and every round moved the failure instead of fixing it, up to a
+# GATE-INTEGRITY bug: `--title '--base=release' --base main --body summary` made
+# the review gate select `release` (it read the caller's argv for `--base`) while
+# gh consumed that token as the TITLE and created the PR against `main`.
 #
-# The spellings we DO own, in every form pflag accepts (proved against the
-# installed `gh` v2.104.0: `-b FOO`, `-b=FOO`, `-bFOO`, `-F/tmp/x` all parse —
-# exit 0 — while an unknown shorthand `-zFOO` fails with "unknown shorthand
-# flag", so attached short values are real pflag syntax):
+# So the interpreter is GONE. This parser recognises exactly ONE token — our own
+# `--skip-review-gate`, which gh does not have — and copies EVERY other argument
+# into `REST` in order, byte for byte. No body handling, no cluster splitting, no
+# short-flag tables, no `--body`/`--body-file` handling, no refusals of gh's
+# combinations: gh validates its own argv.
 #
-#     --body X   --body=X   -b X   -b=X   -bX
-#     --body-file X   --body-file=X   -F X   -F=X   -FX
+# Consequence, stated plainly: **`pr-create` no longer composes the managed
+# checklist.** Every PR it creates must be remediated with
+# `pr-mutate edit <pr> --inject-checklist`, which the post-create note names.
+# That is a convenience regression accepted in exchange for deleting an
+# unbounded parser and closing the gate-integrity hole above.
 #
-# A body VALUE is required (`--body` with no following argument is an error),
-# but an EMPTY value is not: `--body ""` / `--body=` / `-b=` / `-b ""` supply an
-# explicit empty body. EXPLICITNESS is a property of the ARGUMENTS, never of the
-# value (`-n "$BODY"` cannot tell "supplied and empty" from "not supplied"),
-# which is why it has its own flag, set ONLY here.
-#
-# `--body-file` is read here rather than passed through, so the managed-checklist
-# injection applies to BOTH body routes; `-` reads STDIN (gh's convention) and a
-# path goes through the trusted-root guard used by `--body @file`.
-BODY=""
-BODY_FILE=""
-BODY_SET=false
-BODY_FILE_SET=false
+# The one residual ambiguity is deliberate and narrow: a gh flag VALUE that is
+# EXACTLY the string `--skip-review-gate` is taken as our flag. Any other value
+# (`--title '--base=release'`, `--body 'Summary'`, `-urgent`) is just a token and
+# is forwarded untouched.
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
-    --body)
-      # A VALUE IS REQUIRED; an EMPTY VALUE is an explicit empty body.
-      [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; BODY_SET=true
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body=*)
-      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; BODY_SET=true
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body-file)
-      [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; BODY_FILE_SET=true
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body-file=*)
-      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; BODY_FILE_SET=true
-      [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --*)
-      # Every other LONG flag is gh's to interpret: it is forwarded untouched.
-      REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    -?*)
-      # EVERY single-dash token is resolved with pflag's rules
-      # (orc_lib_split_short_cluster): a single flag, a flag with an attached
-      # value, or a CLUSTER (`-fbX` is `--fill --body X`). A cluster that
-      # carries a body is split here, so the body is validated and composed like
-      # any other; a cluster that carries NO body is forwarded VERBATIM, so the
-      # argv gh sees is exactly the argv the caller wrote.
-      if ! orc_lib_split_short_cluster "${ORC_LIB_EXTRA_ARGS[0]}" \
-        "$ORC_LIB_SHORT_VALUE_CREATE" "$ORC_LIB_SHORT_BOOL_CREATE"; then
-        echo "error: refusing to forward '${ORC_LIB_EXTRA_ARGS[0]}': its short flags cannot be resolved, and it could carry a body" >&2
-        echo "  gh accepts only the short flags this wrapper knows; an unresolved cluster is refused rather than forwarded unvalidated (arbsec/orchestraitor#799 R16)" >&2
-        echo "  fix: pass the flag in its long form (--body, --body-file, --fill, --draft, ...)" >&2
-        exit "$ORC_ERR_CONFIG"
-      fi
-      if [ "$ORC_LIB_CLUSTER_HAS_BODY" = true ]; then
-        orc_cluster_value="$ORC_LIB_CLUSTER_BODY_VALUE"
-        if [ "$ORC_LIB_CLUSTER_BODY_EXTERNAL" = true ]; then
-          [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: ${ORC_LIB_EXTRA_ARGS[0]} requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-          orc_cluster_value="${ORC_LIB_EXTRA_ARGS[1]}"
-          ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}")
-        else
-          ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
-        fi
-        case "$ORC_LIB_CLUSTER_BODY_KIND" in
-          body)
-            BODY="$(orc_lib_body_arg "--body" "$orc_cluster_value")"; BODY_SET=true ;;
-          body-file)
-            BODY_FILE="$orc_cluster_value"; BODY_FILE_SET=true
-            [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; } ;;
-        esac
-        # The boolean parts of the cluster keep their meaning and are forwarded
-        # as their own tokens.
-        if [ "${#ORC_LIB_CLUSTER_BOOLS[@]}" -gt 0 ]; then
-          REST+=("${ORC_LIB_CLUSTER_BOOLS[@]}")
-        fi
-      else
-        REST+=("${ORC_LIB_EXTRA_ARGS[0]}")
-        ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
-      fi ;;
-    *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1 ;;
+    *) REST+=("${ORC_LIB_EXTRA_ARGS[0]}") ;;
   esac
+  ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
 done
-
-if [ "$BODY_SET" = true ] && [ "$BODY_FILE_SET" = true ]; then
-  # This is about OUR body handling, not gh's flag grammar: two bodies cannot be
-  # composed into one, so the ambiguity is refused rather than guessed.
-  echo "error: --body and --body-file are mutually exclusive" >&2
-  exit "$ORC_ERR_CONFIG"
-fi
-BODY_EXPLICIT=false
-if [ "$BODY_SET" = true ] || [ "$BODY_FILE_SET" = true ]; then
-  BODY_EXPLICIT=true
-fi
 
 # --- Pre-PR local review gate ----------------------------------------------------
 # Before creating the PR, verify a recorded CLEAN local review generation exists
@@ -178,25 +103,23 @@ if [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
   echo "        base resolution and the review-record check are skipped with it" >&2
   echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
 else
+# THE BASE IS NEVER READ FROM THE CALLER'S ARGV (arbsec/orchestraitor#799 R17).
+# The gate used to scan the pass-through args for `--base`, which a caller
+# token could spoof: `--title '--base=release' --base main` made the gate
+# validate review evidence against `release` while gh consumed that token as the
+# TITLE and created the PR against `main` — a CLEAN record for the wrong base
+# could satisfy the gate. The three sources below are all outside the argv:
+#
+#   1. $PR_CREATE_BASE_BRANCH — an explicit WRAPPER-ONLY environment override
+#      (gh has no such variable, so no gh argv token can set it);
+#   2. `branch.<name>.gh-merge-base` — the repository's own configuration, which
+#      is also gh's documented precedence (a config value, never a token);
+#   3. `refs/remotes/origin/HEAD` — the repository's default branch.
+#
+# If none resolves, the gate FAILS CLOSED with a clear message (exit 6), naming
+# the override, rather than guessing from an argument. The head branch's `@{u}`
+# is never a substitute: a pushed feature branch tracks itself.
 PR_CREATE_TARGET_BASE="${PR_CREATE_BASE_BRANCH:-}"
-if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  # Resolve the effective `gh pr create` base from the pass-through args:
-  # an explicit --base <v> / --base=<v> wins (the gate must check the SAME
-  # diff the PR will propose); otherwise fall back to gh's own precedence —
-  # the branch's configured gh-merge-base, then the repo default branch.
-  # The head branch's @{u} is NEVER a substitute: a pushed feature branch
-  # tracks itself and would make the gate diff empty/wrong.
-  PR_CREATE_I=0
-  while [ "$PR_CREATE_I" -lt "${#REST[@]}" ]; do
-    case "${REST[$PR_CREATE_I]}" in
-      --base)
-        PR_CREATE_TARGET_BASE="${REST[$((PR_CREATE_I + 1))]:-}"; break ;;
-      --base=*)
-        PR_CREATE_TARGET_BASE="${REST[$PR_CREATE_I]#--base=}"; break ;;
-    esac
-    PR_CREATE_I=$((PR_CREATE_I + 1))
-  done
-fi
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
   PR_CREATE_TARGET_BASE="$(git config --get "branch.$(git rev-parse --abbrev-ref HEAD).gh-merge-base" 2>/dev/null)" || true
 fi
@@ -204,8 +127,10 @@ if [ -z "$PR_CREATE_TARGET_BASE" ]; then
   PR_CREATE_TARGET_BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" || true
 fi
 if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  echo "pre-review-gate: cannot resolve the target base branch (no --base, no gh-merge-base, no origin/HEAD) — pass --base explicitly" >&2
-  exit "$ORC_ERR_CONFIG"
+  echo "pre-review-gate: cannot resolve the target base branch from the repository (no PR_CREATE_BASE_BRANCH, no branch.<name>.gh-merge-base, no origin/HEAD)" >&2
+  echo "  the gate deliberately does NOT read --base (or any other caller argument): a token that looks like a flag can be another flag's value, and a wrong base silently validates the wrong review evidence (arbsec/orchestraitor#799 R17)" >&2
+  echo "  fix: set PR_CREATE_BASE_BRANCH=<branch>, or configure branch.<current>.gh-merge-base, or repair refs/remotes/origin/HEAD" >&2
+  exit 6
 fi
 # Normalize a possibly ref-qualified value to the branch name `gh pr create`
 # expects. The base COMMIT is then resolved from a fully-qualified remote ref
@@ -263,7 +188,7 @@ PR_CREATE_MERGE_BASE="$(git merge-base HEAD "$PR_CREATE_BASE_REF" 2>/dev/null)" 
 if [ -z "$PR_CREATE_MERGE_BASE" ]; then
   echo "pre-review-gate: HEAD $PR_CREATE_HEAD_SHA shares no history with '$PR_CREATE_BASE_REF' ($PR_CREATE_BASE_OID) — refusing instead of falling back to a local branch" >&2
   echo "  a stale or unrelated local branch named '$PR_CREATE_TARGET_BASE' is NOT used: this gate only ever reads '$PR_CREATE_BASE_REF'" >&2
-  echo "  check that '$PR_CREATE_TARGET_BASE' is the branch this work was cut from, and pass --base <branch> if not" >&2
+  echo "  check that '$PR_CREATE_TARGET_BASE' is the branch this work was cut from (set PR_CREATE_BASE_BRANCH to override)" >&2
   exit "$PR_CREATE_EXIT_BASE_UNRESOLVED"
 fi
 # The real-world #733 confusion, made visible: a local branch of the same name
@@ -310,58 +235,13 @@ fi
 fi # explicit --skip-review-gate (hoisted above base resolution)
 fi # SKILL_CASE gate wrapper
 
-# --- Managed-checklist injection (arbsec/orchestraitor#788) ---------------------
-# `convergence-status` FAILS CLOSED on a PR body with zero `<!-- orc:* -->`
-# markers (`checklist_markers_missing`, exit 5), so creation is the one place the
-# requirement can be kept satisfiable for a wholesale body — `--body`,
-# `--body-file`, or an automation-authored summary that never had the template
-# applied (#683: a fail-closed rule no caller can satisfy is worse than the bug).
-# The nine managed markers are appended UNCHECKED: checkboxes are verified facts,
-# ticked later with evidence — never pre-ticked here. A body that already carries
-# any marker keeps its CONTENT unchanged — the body is resolved through a command
-# substitution, so trailing newlines are normalised and nothing else is altered.
-#
-# THE RULE, second half: intervene only when a body was supplied.
-#
-#   - WITH an explicit body: validate it through the shared composition helper
-#     (all four refusals: raw HTML construct, indented marker, near-marker,
-#     sticky indented fence opener), compose the managed checklist into it, and
-#     forward it as `--body <composed>`. Every other flag the caller passed is
-#     forwarded UNTOUCHED — nothing is refused, not even a combination `gh`
-#     itself rejects (`--body x --template T` is gh's error to report: measured
-#     on gh v2.104.0, `--body x --web` and `--body x --editor` are ACCEPTED by
-#     gh, which is precisely why the wrapper must not second-guess them).
-#   - WITHOUT an explicit body: nothing is injected, `--body` is never passed,
-#     and every flag is forwarded untouched. `--fill`, `--fill=true`, `-f`,
-#     `-f=true`, `--fill-first=…`, `--fill-verbose=…`, `--template`, `--web`,
-#     `--editor`, `--editor=true` all behave exactly as `gh` defines them —
-#     gh sources the body itself (or prompts for it, or rejects the call in a
-#     non-interactive run: gh's decision, not ours).
-if [ "$BODY_FILE_SET" = true ]; then
-  # NOTE: an EMPTY body-file is not reachable — `orc_lib_read_body_file` refuses
-  # an empty file and empty STDIN by design ("@file is empty"), so the explicit
-  # empty body exists only in the inline form (`--body ""` / `--body=`).
-  BODY="$(orc_lib_read_body_file "--body-file" "$BODY_FILE")"
-fi
-PR_CREATE_BODY_ROOT="$(orc_lib_git_toplevel)"
-if [ "$BODY_EXPLICIT" = true ]; then
-  BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
-else
-  # TRUE for this path: gh sources (or prompts for) the body itself, so nothing
-  # is injected and no --body is passed. The remediation is the one-command
-  # path that KEEPS the checklist.
-  echo "NOTE: no explicit body was supplied (no --body/--body-file), so gh sources the PR body" >&2
-  echo "      itself: the managed merge checklist is NOT injected and no --body is passed." >&2
-  echo "      Add the checklist to the created PR afterwards (one command):" >&2
-  echo "        bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate edit <pr> --inject-checklist" >&2
-fi
-
+# --- argv: the caller's, verbatim -------------------------------------------------
+# Nothing is composed, injected, refused or rewritten. `gh` validates its own
+# argv; the wrapper only prepends the subcommand and the repository it resolved
+# through the service identity (`--repo` is idempotent when the caller passed it
+# too — gh accepts a repeated flag and takes the last one, which is exactly what
+# the caller wrote).
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
-# The composed body is always a NON-EMPTY string (the helper appends the nine
-# markers to an empty body), so `--body` is passed exactly when a body exists.
-if [ "$BODY_EXPLICIT" = true ]; then
-  ARGS+=(--body "$BODY")
-fi
 ARGS+=("${REST[@]}")
 
 if [ "$OPT_DRY_RUN" = true ]; then
@@ -388,6 +268,23 @@ else
   PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
 fi
 echo "Created PR: $PR_URL" >&2
+
+# The managed checklist is NOT composed here any more (arbsec/orchestraitor#799
+# R17), so every created PR owes one remediation command. The PR number is parsed
+# from the URL gh printed; when it cannot be parsed the note says so and uses a
+# placeholder rather than guessing a number.
+case "$PR_URL" in
+  */pull/*)
+    PR_URL_NUMBER="${PR_URL##*/}"
+    case "$PR_URL_NUMBER" in
+      ''|*[!0-9]*) PR_URL_NUMBER="" ;;
+    esac ;;
+  *) PR_URL_NUMBER="" ;;
+esac
+echo "next: bash $SCRIPT_DIR/pr-mutate edit ${PR_URL_NUMBER:-<the PR you just created>} --inject-checklist" >&2
+if [ -z "$PR_URL_NUMBER" ]; then
+  echo "      (the PR number could not be parsed from '$PR_URL' — replace <the PR you just created> with it)" >&2
+fi
 
 # --- Deterministic labeling chain (arbsec/orchestraitor#469) --------------------
 # A created PR MUST NOT depend on worker discretion for its labels: run

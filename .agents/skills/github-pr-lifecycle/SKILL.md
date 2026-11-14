@@ -332,17 +332,19 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   evidence, never a satisfied checklist (#788). There is NO
                   author-granted opt-out: the body cannot waive itself, so the
                   block stands until the body carries the markers (an exemption
-                  needs an authority the author lacks — #801). `pr-create`
-                  appends the nine template markers UNCHECKED to a supplied body
-                  that carries none, so tick them with evidence. It intervenes
-                  ONLY when you supply a body: with no explicit body it injects
-                  nothing, passes no `--body` and forwards every flag untouched
-                  (gh sources or prompts for the body itself), and the note names
-                  `pr-mutate edit <pr> --inject-checklist` as the remediation. It
-                  recognises only the four body spellings (`--body`/`-b` and
-                  `--body-file`/`-F`, in separated, `=`-joined and attached
-                  forms) and never refuses any other flag — whether a combination
-                  is legal is gh's decision, not ours. Every
+                  needs an authority the author lacks — #801). `pr-create` is a
+                  TRANSPARENT wrapper: it forwards every argument to `gh pr create`
+                  VERBATIM, in order, and composes NOTHING. It does not inspect,
+                  rewrite or refuse gh's flags, and it no longer injects the
+                  managed checklist: every PR it creates needs one remediation
+                  command afterwards, `pr-mutate edit <pr> --inject-checklist`,
+                  which its post-create note names (the PR number parsed from the
+                  URL gh printed). The only token it recognises is its own
+                  `--skip-review-gate`. Its pre-PR review gate NEVER takes the base
+                  from your arguments (a token that looks like a flag can be
+                  another flag's value): it uses `$PR_CREATE_BASE_BRANCH`, then
+                  `branch.<current>.gh-merge-base`, then `origin/HEAD`, and fails
+                  closed when none resolves. Every
                   `pr-mutate` body route carries the same invariant: `edit --body`
                   and `edit --body-file` append the markers when the supplied body
                   carries none, so replacing a PR body can never drop the
@@ -377,8 +379,10 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   4 spaces, or remove it. A fence opener indented 1-3 spaces
                   makes it INDETERMINATE too, closed or not; so does a managed
                   marker or near-marker indented 4+ spaces (or led by a tab),
-                  which renders as an indented code block — dedent it to column
-                  0. Whatever the cause, the verdict blocks with
+                  which renders as an indented code block — dedent it to column 0
+                  AND write it in the canonical form (`- [x] <!-- orc:NAME -->`),
+                  because dedenting alone does not make a near-marker parseable.
+                  Whatever the cause, the verdict blocks with
                   `checklist_unparseable` and names exactly one of the FOUR
                   constructs — `indented_fence_opener`, `html_construct`,
                   `indented_marker`, `near_marker` — together with its remedy

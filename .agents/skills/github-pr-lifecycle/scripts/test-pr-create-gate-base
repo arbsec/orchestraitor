@@ -207,14 +207,20 @@ clone_work "$TMP/d-remote.git" "$TMP/d-work"
 git -C "$TMP/d-work" branch main "$D_OLD"                # tempting local fallback
 D_HEAD="$(feature_commit "$TMP/d-work" feature)"
 write_record "$TMP/d-work" "$D_HEAD" "$D_OLD"
+# R17: the gate no longer reads the caller's `--base` (a caller token can be
+# another flag's value), so this fixture resolves its base from the REPOSITORY
+# default (`origin/HEAD` -> `dev`, which exists) and the caller's `--base main`
+# is forwarded to gh verbatim, unvalidated and ungated. The local `main`
+# fallback the old gate refused is now STRUCTURAL: no local branch is ever
+# consulted, whatever the caller wrote.
 gate "$TMP/d-work" --base main
-assert 'missing origin ref: distinct fail-closed exit 6' 6 "$RC"
-assert 'missing origin ref: names the fully-qualified ref it tried' 1 \
-  "$(count "$TMP/err" "cannot resolve the base branch 'main' from 'refs/remotes/origin/main'")"
-assert 'missing origin ref: names the stale-local-branch possibility' 1 \
-  "$(count "$TMP/err" "a stale or unrelated local branch named 'main' is NOT used")"
-assert 'missing origin ref: no pass message' 0 "$(count "$TMP/err" 'clean local review generation found')"
-assert 'missing origin ref: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
+assert 'missing origin ref: gate passes using the repository default (R17)' 0 "$RC"
+assert 'missing origin ref: the gate used origin/HEAD (dev), not the caller base' 1 \
+  "$(count "$TMP/err" "base $D_OLD = refs/remotes/origin/dev")"
+assert 'missing origin ref: the caller --base is forwarded to gh' 1 \
+  "$(count "$TMP/err" '--base main')"
+assert 'missing origin ref: no local-branch notice ever fires' 0 \
+  "$(count "$TMP/err" 'ignoring local branch')"
 
 # --- (e) no `origin` remote at all ---------------------------------------------
 echo "--- (e) no origin remote refuses ---"
@@ -227,8 +233,10 @@ write_record "$TMP/e-work" "$E_HEAD" "$E_TIP"
 git -C "$TMP/e-work" remote remove origin
 gate "$TMP/e-work" --base main
 assert 'no origin remote: distinct fail-closed exit 6' 6 "$RC"
-assert 'no origin remote: refusal names the fetch command' 1 \
-  "$(count "$TMP/err" 'run: git fetch origin main')"
+assert 'no origin remote: the refusal names its three non-argv sources' 1 \
+  "$(count "$TMP/err" 'no PR_CREATE_BASE_BRANCH, no branch.<name>.gh-merge-base, no origin/HEAD')"
+assert 'no origin remote: and says why it never reads a caller flag' 1 \
+  "$(count "$TMP/err" 'the gate deliberately does NOT read --base')"
 assert 'no origin remote: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
 
 # --- (f) unrelated history ------------------------------------------------------
@@ -320,13 +328,13 @@ assert 'no origin + explicit skip: dry-run reached gh pr create' 1 \
   "$(count "$TMP/err" '[dry-run] gh pr create')"
 gate "$TMP/j-work" --base main
 assert 'same fixture WITHOUT the flag: fail-closed exit 6' 6 "$RC"
-assert 'same fixture WITHOUT the flag: names the ref it tried' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/main'")"
+assert 'same fixture WITHOUT the flag: names the three non-argv sources' 1 \
+  "$(count "$TMP/err" 'no PR_CREATE_BASE_BRANCH, no branch.<name>.gh-merge-base, no origin/HEAD')"
 
 # --- (k) --base ref normalisation ---------------------------------------------
 # `refs/remotes/origin/`, `refs/heads/` and `origin/` prefixes are stripped
 # once, and the result is re-anchored under `refs/remotes/origin/`.
-echo "--- (k) --base ref normalisation ---"
+echo "--- (k) --base is a gh flag: forwarded verbatim, never a gate input ---"
 git init -q --bare -b main "$TMP/k-remote.git"
 make_seed "$TMP/k-seed" "$TMP/k-remote.git"
 advance_seed "$TMP/k-seed" 1
@@ -334,18 +342,47 @@ K_TIP="$(git -C "$TMP/k-seed" rev-parse HEAD)"
 clone_work "$TMP/k-remote.git" "$TMP/k-work"
 K_HEAD="$(feature_commit "$TMP/k-work" feature)"
 write_record "$TMP/k-work" "$K_HEAD" "$K_TIP"
-gate "$TMP/k-work" --base origin/main
-assert 'normalisation: origin/-prefixed base resolves (exit 0)' 0 "$RC"
-assert 'normalisation: origin/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
-gate "$TMP/k-work" --base refs/heads/main
-assert 'normalisation: refs/heads/-prefixed base resolves (exit 0)' 0 "$RC"
-assert 'normalisation: refs/heads/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
-gate "$TMP/k-work" --base origin/origin/main
-assert 'normalisation: double prefix fails closed (exit 6)' 6 "$RC"
-assert 'normalisation: double prefix names the doubled ref' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/origin/main'")"
+# R17: a caller `--base` is gh's flag and is forwarded VERBATIM, whatever its
+# shape — the gate no longer normalises (or even reads) it. The gate's base is
+# the repository default, which resolves to the same `main` here, so every case
+# passes and the gate reports the SAME base tip for all three.
+for k_base in '--base refs/remotes/origin/main' '--base refs/heads/main' \
+  '--base origin/origin/main'; do
+  gate "$TMP/k-work" $k_base
+  assert "normalisation: $k_base is forwarded and the gate passes" 0 "$RC"
+  assert "normalisation: $k_base never changes the gate's base" 1 \
+    "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
+  assert "normalisation: $k_base is forwarded to gh" 1 \
+    "$(count "$TMP/err" "$k_base")"
+done
+
+# --- (l) a caller token can NEVER pick the gate's base (R17) -------------------
+# The exact spoof that motivated the R17 rewrite: `--title '--base=release'` is
+# a VALUE, but the old gate scanned the argv for `--base=` and selected
+# `release`, validating review evidence against the wrong base while gh consumed
+# that token as the TITLE. Two things must hold now: the gate uses the
+# repository default, and every token (including the spoof) reaches gh verbatim.
+echo "--- (l) a --base-shaped title cannot influence the gate base ---"
+git init -q --bare -b main "$TMP/l-remote.git"
+make_seed "$TMP/l-seed" "$TMP/l-remote.git"
+git -C "$TMP/l-seed" branch release
+git -C "$TMP/l-seed" push -q "$TMP/l-remote.git" release
+advance_seed "$TMP/l-seed" 1
+L_TIP="$(git -C "$TMP/l-seed" rev-parse HEAD)"
+clone_work "$TMP/l-remote.git" "$TMP/l-work"
+L_HEAD="$(feature_commit "$TMP/l-work" feature)"
+write_record "$TMP/l-work" "$L_HEAD" "$L_TIP"
+gate "$TMP/l-work" --title '--base=release' --base main --body summary
+assert 'spoof: the gate runs against the repository default (exit 0)' 0 "$RC"
+assert 'spoof: the gate base is origin/main, never release' 1 \
+  "$(count "$TMP/err" "base $L_TIP = refs/remotes/origin/main")"
+# The token IS echoed in the dry-run argv (that is the point: forwarded verbatim),
+# so the assertion is about the BASE the gate resolved and fetched — never about
+# the string appearing at all.
+assert 'spoof: the gate never fetched a release ref' 0 \
+  "$(count "$TMP/err" 'refs/remotes/origin/release')"
+assert 'spoof: all four tokens reach gh verbatim, in order' 1 \
+  "$(count "$TMP/err" "--title --base=release --base main --body summary")"
 
 printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

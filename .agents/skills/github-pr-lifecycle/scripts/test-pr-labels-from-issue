@@ -990,7 +990,7 @@ echo "--- pr-create labeling chain ---"
 # (e) pr-create chains pr-labels then pr-labels-from-issue after creation.
 export PR_BODY="Closes #101" PR_LABELS="" ISSUE_101_LABELS="MVP,bug"
 : > "$GH_LOG"
-OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
+OUT="$(cd "$TMP/repo" && PR_CREATE_BASE_BRANCH=main scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
 assert 'pr-create exits 0' 0 "$RC"
 assert 'pr-create prints the PR URL' 'https://github.com/test-org/repo/pull/77' "$OUT"
 # pr-labels derives its labels from launch facts: with a service-identity
@@ -1051,7 +1051,7 @@ if [ -n "$j" ]; then printf '%s\n' "$out" | jq -r "$j"; exit $?; fi
 printf '%s\n' "$out"
 STUB
 chmod +x "$TMP/bin/gh"
-OUT="$(cd "$TMP/repo" && scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
+OUT="$(cd "$TMP/repo" && PR_CREATE_BASE_BRANCH=main scripts/pr-create --title "t" --body "Closes #101" --repo test-org/repo --base main 2>"$TMP/stderr")"; RC=$?
 assert 'labeling failure does not fail pr-create' 0 "$RC"
 assert 'PR URL still emitted on labeling failure' 'https://github.com/test-org/repo/pull/77' "$OUT"
 assert 'failure warnings name the PR' 2 "$(grep -cF 'PR #77' "$TMP/stderr")"

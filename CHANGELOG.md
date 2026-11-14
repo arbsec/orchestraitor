@@ -13,6 +13,20 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
+- **`pr-create` no longer composes the managed checklist.** It is now a
+  transparent wrapper: every argument is forwarded to `gh pr create` verbatim,
+  in order, and nothing is inspected, rewritten or refused — the wrapper's own
+  bash re-implementation of `gh`'s flag grammar is gone, together with the
+  checklist injection it performed. **Consequence for callers: every PR created
+  through the wrapper needs one remediation command afterwards**,
+  `pr-mutate edit <pr> --inject-checklist`, which the post-create note names
+  (the PR number is parsed from the URL `gh` printed). Until that command runs,
+  the PR blocks on `checklist_markers_missing`. The same change removes a
+  gate-integrity hole: a caller token that merely LOOKED like a flag
+  (`--title '--base=release'`) could previously select the base the pre-PR
+  review gate validated against; the gate now takes its base from
+  `PR_CREATE_BASE_BRANCH`, then `branch.<current>.gh-merge-base`, then
+  `origin/HEAD`, and never from the caller's arguments.
 - **`orc pr status` / `pr.status`**: the §9.48 checklist verdict still FAILS
   CLOSED when the PR body's checklist reading is indeterminate, but the rule is
   now ONE rule instead of a hand-written Markdown parser. HTML is NOT MODELLED:

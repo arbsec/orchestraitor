@@ -872,22 +872,15 @@ orc_lib_ensure_checklist_markers() {
 # gh v2.104.0 help output and re-probed letter by letter (a letter gh rejects
 # with "unknown shorthand flag" is not in the table):
 #
-#   gh pr create: -a/--assignee -B/--base -b/--body -F/--body-file -H/--head
-#                  -l/--label -m/--milestone -p/--project -r/--reviewer
-#                  -R/--repo -T/--template -t/--title   (value-taking)
-#                  -d/--draft -e/--editor -f/--fill -w/--web -h/--help (boolean)
-#   gh pr edit:   -B/--base -b/--body -F/--body-file -m/--milestone -t/--title
-#   gh pr ready:  -R/--repo
-#   gh pr close:  -R/--repo -c/--comment (value-taking), -d/--delete-branch
-#                  -h/--help (boolean)
-ORC_LIB_SHORT_VALUE_CREATE="aBbFHlmprRTt"
-ORC_LIB_SHORT_BOOL_CREATE="defhw"
-ORC_LIB_SHORT_VALUE_EDIT="BFbmt"
-ORC_LIB_SHORT_BOOL_EDIT=""
-ORC_LIB_SHORT_VALUE_READY="R"
-ORC_LIB_SHORT_BOOL_READY="h"
-ORC_LIB_SHORT_VALUE_CLOSE="cR"
-ORC_LIB_SHORT_BOOL_CLOSE="dh"
+# Only `pr-mutate` resolves short tokens now: `pr-create` forwards its argv
+# VERBATIM, in order (arbsec/orchestraitor#799 R17), so it needs no table.
+#
+# `gh pr edit` short flags (gh v2.104.0 `gh pr edit --help`):
+#   value-taking: -B/--base, -b/--body, -F/--body-file, -m/--milestone,
+#                 -t/--title, -R/--repo
+#   boolean:      -h/--help
+ORC_LIB_SHORT_VALUE_EDIT="BFbmtR"
+ORC_LIB_SHORT_BOOL_EDIT="h"
 
 # The result of splitting one short-flag token.
 #
@@ -896,6 +889,8 @@ ORC_LIB_SHORT_BOOL_CLOSE="dh"
 #   ORC_LIB_CLUSTER_BODY_VALUE   the value (empty when the value is external)
 #   ORC_LIB_CLUSTER_BODY_EXTERNAL true when the value is the NEXT argv element
 #   ORC_LIB_CLUSTER_BOOLS        the boolean parts, re-emitted as their own tokens
+#   ORC_LIB_CLUSTER_TAKES_NEXT_VALUE true when a value-taking letter takes the
+#                                NEXT argv element as its value (body or not)
 #
 # Usage: orc_lib_split_short_cluster <token> <value-letters> <bool-letters>
 # Returns 0 when the token was resolved, and 1 when a letter is unknown — the
@@ -911,6 +906,11 @@ orc_lib_split_short_cluster() {
   ORC_LIB_CLUSTER_BODY_VALUE=""
   ORC_LIB_CLUSTER_BODY_EXTERNAL=false
   ORC_LIB_CLUSTER_BOOLS=()
+  # True when the token ends on a VALUE-TAKING letter with nothing attached, so
+  # its value is the NEXT argv element — whether or not that letter is a body
+  # flag (`-t` takes the next element too, and the caller must skip that
+  # operand so it is never re-read as a wrapper flag).
+  ORC_LIB_CLUSTER_TAKES_NEXT_VALUE=false
   while [ "$index" -lt "$length" ]; do
     letter="${letters:$index:1}"
     rest="${letters:$((index + 1))}"
@@ -928,8 +928,12 @@ orc_lib_split_short_cluster() {
           ORC_LIB_CLUSTER_BODY_KIND=body-file
           ORC_LIB_CLUSTER_BODY_VALUE="$value" ;;
         *)
+          # An UNKNOWN letter is refused here too: `-z=FOO` used to return "no
+          # body, known" and be forwarded — the same hole the unknown-letter
+          # refusal closes elsewhere (arbsec/orchestraitor#799 R17).
           case "$bool_letters" in
             *"$letter"*) ORC_LIB_CLUSTER_BOOLS+=("-$letter=$value") ;;
+            *) return 1 ;;
           esac ;;
       esac
       return 0
@@ -955,6 +959,7 @@ orc_lib_split_short_cluster() {
         else
           ORC_LIB_CLUSTER_BODY_VALUE=""
           ORC_LIB_CLUSTER_BODY_EXTERNAL=true
+          ORC_LIB_CLUSTER_TAKES_NEXT_VALUE=true
         fi
         return 0 ;;
     esac

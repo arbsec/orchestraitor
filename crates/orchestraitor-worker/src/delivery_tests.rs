@@ -871,6 +871,67 @@ async fn delivery_leaves_fenced_constructs_byte_identical() {
     );
 }
 
+/// How the delivery lane must render one shape of summary line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Remedy {
+    /// DEDENT to column 0: the documented remedy for `indented_marker` and for
+    /// an indented fence opener.
+    Dedent,
+    /// Escape the delimiter and the name reference: the only remedy that clears
+    /// a near-marker.
+    Escape,
+    /// Inside a fenced region: the bytes must not move at all.
+    Fenced,
+}
+
+/// A fenced summary line must be delivered BYTE-IDENTICAL: the region is inert.
+fn assert_fenced_bytes_unchanged(label: &str, summary: &str, rendered: &str) {
+    assert_eq!(rendered, summary, "{label}: fenced bytes moved");
+}
+
+/// A dedented managed marker: at column 0, still canonical, and with no ACTIVE
+/// inline comment left in its description (the dedent can turn one active).
+fn assert_dedented_marker(label: &str, rendered: &str) {
+    let first = rendered.lines().next().unwrap_or_default();
+    assert!(
+        !first.starts_with(' ') && !first.starts_with('\t'),
+        "{label}: the marker line must be dedented to column 0: {rendered:?}"
+    );
+    assert!(
+        checklist_markers::parse_canonical_marker(first).is_some(),
+        "{label}: the dedented line must be the canonical marker: {first:?}"
+    );
+    let after_marker = first
+        .split_once("-->")
+        .map_or("", |(_, description)| description);
+    assert!(
+        !after_marker.contains("<!--"),
+        "{label}: an active inline comment survived the dedent: {first:?}"
+    );
+}
+
+/// An ESCAPED line: no longer a near-marker or a canonical marker, no line-start
+/// `<`, and with the managed name reference rendered as a character reference.
+fn assert_escaped_line(label: &str, rendered: &str) {
+    let first = rendered.lines().next().unwrap_or_default();
+    assert!(
+        !checklist_markers::is_near_marker(first),
+        "{label}: the rendered line must not be a near-marker: {first:?}"
+    );
+    assert!(
+        checklist_markers::parse_canonical_marker(first).is_none(),
+        "{label}: the rendered line must not be a canonical marker: {first:?}"
+    );
+    assert!(
+        !first.trim_start_matches(' ').starts_with('<'),
+        "{label}: a line-start `<` must be escaped: {first:?}"
+    );
+    assert!(
+        first.contains("orc&#58;"),
+        "{label}: the name reference must be a character reference: {first:?}"
+    );
+}
+
 /// The delivery lane may only compose bodies the ENGINE accepts
 /// (arbsec/orchestraitor#799 R14). The invariant is asserted directly — run the
 /// engine's own `parse_checklist` over the composed body and require
@@ -887,20 +948,7 @@ async fn delivery_leaves_fenced_constructs_byte_identical() {
 /// - every one of those INSIDE a fence, where the bytes must not move at all.
 #[test]
 fn delivery_composed_bodies_are_determinate() {
-    /// How the lane must render one shape.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Remedy {
-        /// DEDENT to column 0: the documented remedy for `indented_marker` and
-        /// for an indented fence opener.
-        Dedent,
-        /// Escape the delimiter and the name reference: the only remedy that
-        /// clears a near-marker.
-        Escape,
-        /// Inside a fenced region: the bytes must not move at all.
-        Fenced,
-    }
-
-    let cases: [(&str, &str, Remedy); 8] = [
+    let cases: [(&str, &str, Remedy); 9] = [
         (
             "4-space-indented canonical marker",
             "    - [x] <!-- orc:tests --> model asserted this\n",
@@ -944,45 +992,21 @@ fn delivery_composed_bodies_are_determinate() {
             "  <pre [\u{2713}] orc:review>\n",
             Remedy::Escape,
         ),
+        // A canonical marker indented 4+ spaces whose DESCRIPTION carries an
+        // inline comment: the dedent turns that comment ACTIVE, so the comment
+        // escape must run after the dedent (arbsec/orchestraitor#799 R17).
+        (
+            "4-space-indented canonical marker with an inline comment",
+            "    - [x] <!-- orc:tests --> Result: <!-- tests failed --> done\n",
+            Remedy::Dedent,
+        ),
     ];
     for (label, summary, remedy) in cases {
         let rendered = neutralise_summary(summary);
         match remedy {
-            Remedy::Fenced => {
-                assert_eq!(rendered, summary, "{label}: fenced bytes moved");
-            }
-            Remedy::Dedent => {
-                let first = rendered.lines().next().unwrap_or_default();
-                assert!(
-                    !first.starts_with(' ') && !first.starts_with('\t'),
-                    "{label}: the marker line must be dedented to column 0: {rendered:?}"
-                );
-                assert!(
-                    checklist_markers::parse_canonical_marker(first).is_some(),
-                    "{label}: the dedented line must be the canonical marker: {first:?}"
-                );
-            }
-            Remedy::Escape => {
-                let first = rendered.lines().next().unwrap_or_default();
-                assert!(
-                    !checklist_markers::is_near_marker(first),
-                    "{label}: the rendered line must not be a near-marker: {first:?}"
-                );
-                assert!(
-                    checklist_markers::parse_canonical_marker(first).is_none(),
-                    "{label}: the rendered line must not be a canonical marker: {first:?}"
-                );
-                // Every applicable remedy ran: a line-start `<` is escaped to
-                // `&lt;` and the managed name reference to `orc&#58;NAME`.
-                assert!(
-                    !first.trim_start_matches(' ').starts_with('<'),
-                    "{label}: a line-start `<` must be escaped: {first:?}"
-                );
-                assert!(
-                    first.contains("orc&#58;"),
-                    "{label}: the name reference must be a character reference: {first:?}"
-                );
-            }
+            Remedy::Fenced => assert_fenced_bytes_unchanged(label, summary, &rendered),
+            Remedy::Dedent => assert_dedented_marker(label, &rendered),
+            Remedy::Escape => assert_escaped_line(label, &rendered),
         }
         // THE invariant: the composed body passes the ENGINE's own reader.
         let composed = format!("{DELIVERY_PR_CHECKLIST}{rendered}");

@@ -576,13 +576,13 @@ grep -q '^orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr cr
   || fail "pr-create must take the labeling-chain service path: orc=[$(cat "$ORC_LOG")]"
 grep -q -- '--title t' "$ORC_LOG" \
   || fail "pr-create must pass the caller's --title through: orc=[$(cat "$ORC_LOG")]"
-# A marker-less body is given the managed checklist UNCHECKED (#788), so the
-# single logged argv spans lines: assert the routing prefix above, the injected
-# marker below, and that the caller's trailing flag still rides after it.
-grep -q '^- \[ \] <!-- orc:issue -->' "$ORC_LOG" \
-  || fail "pr-create must append the managed checklist to a marker-less body (#788): orc=[$(cat "$ORC_LOG")]"
+# R17: pr-create composes NOTHING — the caller's body reaches gh as the caller
+# wrote it, with the caller's trailing flag after it. The #788 satisfiability
+# duty moved to `pr-mutate edit <pr> --inject-checklist`.
+grep -q -- '--body b' "$ORC_LOG" \
+  || fail "pr-create must forward the caller's body verbatim: orc=[$(cat "$ORC_LOG")]"
 grep -q ' --draft$' "$ORC_LOG" \
-  || fail "pr-create must still pass --draft through after the injected body: orc=[$(cat "$ORC_LOG")]"
+  || fail "pr-create must still pass --draft through: orc=[$(cat "$ORC_LOG")]"
 if [ "$(grep -c '^gh:' "$GH_LOG")" -gt 1 ]; then
   fail "pr-create reached gh more than the one gh-env child call: $(cat "$GH_LOG")"
 fi
@@ -674,8 +674,8 @@ grep -q -- '--title t' "$ORC_LOG" \
 # A marker-less body is given the managed checklist UNCHECKED (#788), so the
 # single logged argv spans lines: the routing prefix above still holds, and the
 # injected marker rides on the following line.
-grep -q '^- \[ \] <!-- orc:issue -->' "$ORC_LOG" \
-  || fail "pr-create must append the managed checklist to a marker-less body (#788): orc=[$(cat "$ORC_LOG")]"
+grep -q -- '--body b' "$ORC_LOG" \
+  || fail "pr-create must forward the caller's body verbatim (R17): orc=[$(cat "$ORC_LOG")]"
 
 # --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.
 : > "$ORC_LOG"; : > "$GH_LOG"
@@ -736,19 +736,17 @@ arg_err_case() {
     "$WORK/rcnote" "$?"
   ) 2>&1
 }
-# R15: pr-create now parses ONLY the four body spellings (--body/-b and
-# --body-file/-F); every other flag, `--title` included, is forwarded untouched
-# and validated by `gh` itself. So the typed-argument-error contract covers the
-# body spellings the wrapper owns — and a trailing `--title` must merely not
-# crash (no nounset) and must still exit non-zero through the pre-PR gate path.
-for bad_args in "--body"; do
+# R17: pr-create owns NO gh flag parsing at all — a trailing flag with no value
+# is gh's (or the review gate's) complaint, never a typed wrapper error. The two
+# cases below pin "no bash nounset crash, and it still exits non-zero" for a
+# trailing --body and --title.
+for bad_args in "--body" "--title"; do
   : > "$ORC_LOG"; : > "$GH_LOG"
   OUT="$(arg_err_case "$PRCREATE" -R arbsec/orchestraitor "$bad_args")" || true
-  grep -q "error: $bad_args requires a" <<<"$OUT" || fail "pr-create trailing $bad_args must print the typed argument error: $OUT"
-  grep -q 'rc:2' "$GH_LOG" || fail "pr-create trailing $bad_args must exit 2 (config), got: $(cat "$GH_LOG")"
   if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
     fail "pr-create trailing $bad_args crashed with a bash nounset error: $OUT"
   fi
+  grep -q 'rc:2' "$GH_LOG" || fail "pr-create trailing $bad_args must exit non-zero (gate/gh decides), got: $(cat "$GH_LOG")"
 done
 : > "$ORC_LOG"; : > "$GH_LOG"
 OUT="$(arg_err_case "$PRCREATE" -R arbsec/orchestraitor --title)" || true

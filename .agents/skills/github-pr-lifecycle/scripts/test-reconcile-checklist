@@ -710,7 +710,9 @@ assert 'f6: pr-mutate sets the body with its marker intact' 1 \
   "$(grep -c 'orc:tests' "$TMP/edited-body.md")"
 OUT="$(dry_run --title t --body-file "$TMP/files/f17-inline-span.md" 2>&1)"; RC=$?
 assert 'f6: pr-create does not refuse a closed ```example``` span' 0 "$RC"
-assert 'f6: pr-create keeps the real marker' 1 "$(grep -c 'orc:tests' <<<"$OUT")"
+assert 'f6: pr-create forwards the body-file flag verbatim (no injection)' 1 \
+  "$(grep -aE '^\[dry-run\] gh ' <<<"$OUT" | grep -cF -- '--body-file')"
+assert 'f6: and composes nothing (R17)' 0 "$(grep -c 'orc:' <<<"$OUT")"
 # A TILDE fence MAY carry backticks in its info string (GFM), so the same
 # backtick stays INSIDE the region: the marker below is not evidence.
 printf '~~~text `tick`\n- [x] <!-- orc:tests --> inside the tilde fence\n~~~\n' \
@@ -1119,156 +1121,6 @@ assert 'g: a fenced-only body is not checklist-bearing' 9 \
 assert 'g: a fenced-only body keeps its own text' 1 \
   "$(grep -cF 'example only' <<<"$FENCED_ENSURED")"
 
-# --- (h) creation stays satisfiable: pr-create injects -------------------------
-# SKILL_CASE=1 skips the pre-PR review gate (its own suite covers it); the
-# dry-run stops before any gh call, so only the constructed argv is asserted.
-OUT="$(dry_run --title t --body 'wholesale body')"
-assert 'h: --body gains the nine markers' 9 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'h: injected markers are unchecked' 0 "$(grep -c -- '- \[x\]' <<<"$OUT")"
-assert 'h: the author body survives' 1 "$(grep -cF 'wholesale body' <<<"$OUT")"
-OUT="$(dry_run --title t --body "Some \`orc:\` prose, no marker")"
-assert 'h: a prose mention is not a checklist (injection still fires)' 9 \
-  "$(grep -c '<!-- orc:' <<<"$OUT")"
-
-OUT="$(dry_run --title t --body-file "$TMP/files/no-markers.md")"
-assert 'h: --body-file gains the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'h: --body-file content survives' 1 "$(grep -cF 'false quantitative claim' <<<"$OUT")"
-assert 'h: --body-file is resolved (no --body-file reaches gh)' 0 \
-  "$(grep -c -- '--body-file' <<<"$OUT")"
-
-# `--body-file -` reads the body from STDIN (gh's own convention, preserved
-# explicitly rather than rejected).
-OUT="$(printf '%s\n' 'wholesale stdin body' | dry_run --title t --body-file -)"
-assert 'h: --body-file - gains the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'h: --body-file - content survives' 1 "$(grep -cF 'wholesale stdin body' <<<"$OUT")"
-assert 'h: --body-file - never reaches gh as a flag' 0 \
-  "$(grep -c -- '--body-file' <<<"$OUT")"
-OUT="$(printf '' | dry_run --title t --body-file - 2>&1)"; RC=$?
-assert 'h: an empty STDIN body is refused' 2 "$RC"
-
-OUT="$(dry_run --title t --body-file "$TMP/files/own-marker.md")"
-assert 'h: a body with its own marker is left verbatim' 1 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'h: verbatim means no injected section' 0 "$(grep -cF 'Added by pr-create' <<<"$OUT")"
-
-# A body sentinel is not an opt-out: the checklist is still injected. The
-# readable shape is a MID-LINE sentinel; a LINE-START one is a raw HTML
-# construct, and creation now refuses it instead of composing a body that could
-# never converge (#799 R1 — pinned in (f8d)).
-OUT="$(dry_run --title t --body "$(cat "$TMP/files/midline-sentinel.md")")"
-assert 'h: a sentinel body still gets the injected checklist' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-OUT="$(dry_run --title t --body "$(cat "$TMP/files/sentinel.md")" 2>&1)"; RC=$?
-assert 'h: a line-start sentinel body is refused at creation' 2 "$RC"
-assert 'h: and nothing is passed to gh' 0 "$(grep -c '^\[dry-run\] gh' <<<"$OUT")"
-
-# R15 RULE: with NO explicit body the wrapper does not intervene at all — it
-# injects nothing, passes no `--body`, and forwards the caller's flags untouched;
-# gh sources (or prompts for) the body itself, and the note says exactly that.
-OUT="$(dry_run --title t 2>&1)"; RC=$?
-assert 'h: a bodyless PR exits 0' 0 "$RC"
-assert 'h: a bodyless PR injects NO checklist' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'h: a bodyless PR passes no --body' 0 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'h: and the title still reaches gh' 1 "$(grep -cE '^\[dry-run\] gh .* --title t' <<<"$OUT")"
-assert 'h: the note says gh sources the body itself' 1 \
-  "$(grep -cF 'gh sources the PR body' <<<"$OUT")"
-assert 'h: and names the inject-checklist remediation' 1 \
-  "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
-
-# --- (h2) gh's OWN body sources: an EXPLICIT body still wins -------------------
-# `--fill`, `--fill-first`, `--fill-verbose`, `--template <path>`, `--web` and
-# `--editor` make `gh pr create` source the body itself. An EXPLICIT
-# `--body`/`--body-file` is nevertheless ALWAYS validated through the shared
-# composition helper and forwarded with the managed checklist (arbsec/
-# orchestraitor#799 R13 review): gh documents that an explicit `--body` takes
-# precedence over autofilled content, so NOT forwarding used to create a PR
-# whose body the gate immediately refused while the note claimed no body was
-# passed. Injection is skipped only when NO explicit body was supplied.
-OUT="$(dry_run --title t --fill 2>&1)"; RC=$?
-assert 'h2: --fill exits 0' 0 "$RC"
-assert 'h2: --fill injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'h2: --fill passes no --body to gh' 0 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'h2: --fill is passed through to gh' 1 \
-  "$(grep -cE '^\[dry-run\] gh .* --fill([ =]|$)' <<<"$OUT")"
-assert 'h2: the --fill note names the remediation' 1 \
-  "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
-assert 'h2: --fill suppresses the bodyless note' 0 \
-  "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
-# The note must describe what the code ACTUALLY does: no body was supplied, so
-# no --body is passed and nothing is injected.
-assert 'h2: the --fill note says no explicit body was supplied' 1 \
-  "$(grep -cF 'no explicit body was supplied' <<<"$OUT")"
-assert 'h2: and that nothing is injected' 1 \
-  "$(grep -cF 'merge checklist is NOT injected and no --body is passed' <<<"$OUT")"
-
-OUT="$(dry_run --title t --template .github/pull_request_template.md 2>&1)"; RC=$?
-assert 'h2: --template exits 0' 0 "$RC"
-assert 'h2: --template injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'h2: --template passes no --body to gh' 0 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'h2: --template is passed through to gh' 1 \
-  "$(grep -cE '^\[dry-run\] gh .* --template .github/pull_request_template.md($| )' <<<"$OUT")"
-assert 'h2: the --template note names the remediation' 1 \
-  "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
-
-# (1) an explicit body alongside `--fill` is STILL VALIDATED: a body the engine
-# refuses exits 2 with the typed message and NOTHING reaches gh.
-OUT="$(dry_run --title t --body '- [x] <!-- orc:issue --> linked
-<div>a block</div>' --fill 2>&1)"; RC=$?
-assert 'h2: --fill + a refused explicit body exits 2' 2 "$RC"
-assert 'h2: --fill + refused body names the construct' 1 \
-  "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
-assert 'h2: --fill + refused body never reaches gh' 0 \
-  "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-
-# (2) an explicit body alongside `--fill` is FORWARDED, and it carries the nine
-# markers: gh gives the explicit body precedence over autofilled content.
-OUT="$(dry_run --title t --body 'a plain summary' --fill 2>&1)"; RC=$?
-assert 'h2: --fill + an explicit body exits 0' 0 "$RC"
-assert 'h2: --fill + explicit body forwards --body to gh' 1 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'h2: --fill + explicit body carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'h2: --fill + explicit body keeps the summary' 1 \
-  "$(grep -cF 'a plain summary' <<<"$OUT")"
-assert 'h2: --fill is still passed through' 1 \
-  "$(grep -c -- '--fill' <<<"$OUT")"
-assert 'h2: --fill + explicit body prints no remediation note' 0 \
-  "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
-# The `--body-file` route behaves identically.
-printf 'a body-file summary\n' > "$TMP/files/h2-summary.md"
-OUT="$(dry_run --title t --body-file "$TMP/files/h2-summary.md" --fill 2>&1)"; RC=$?
-assert 'h2: --fill + --body-file exits 0' 0 "$RC"
-assert 'h2: --fill + --body-file carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'h2: --fill + --body-file keeps the summary' 1 \
-  "$(grep -cF 'a body-file summary' <<<"$OUT")"
-
-# (3) R15: `--template`/`--web`/`--editor` are NOT special-cased any more. An
-# explicit body is validated and forwarded, and the caller's flag is forwarded
-# untouched: whether the combination is legal is gh's decision to report, never
-# ours. Measured on gh v2.104.0: `--body x --web` and `--body x --editor` are
-# ACCEPTED by gh; only `--body x --template T` is rejected by gh itself.
-for exclusive in "--template .github/pull_request_template.md" "--web" "--editor" "--editor=true"; do
-  OUT="$(dry_run --title t --body 'a plain summary' $exclusive 2>&1)"; RC=$?
-  assert "h2: explicit body + '$exclusive' exits 0 (we never refuse)" 0 "$RC"
-  assert "h2: explicit body + '$exclusive' keeps the forwarded --body" 1 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "h2: explicit body + '$exclusive' carries the nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  assert "h2: explicit body + '$exclusive' forwards the flag untouched" 1 \
-    "$(grep -cF -- "${exclusive%% *}" <<<"$OUT")"
-  assert "h2: explicit body + '$exclusive' prints no refusal" 0 \
-    "$(grep -cF 'accepts only one body source' <<<"$OUT")"
-done
-
-dry_run --title t --body 'a' --body-file "$TMP/files/own-marker.md" >/dev/null
-RC=$?
-assert 'h: --body + --body-file is refused' 2 "$RC"
-
 # --- (i) pr-mutate --inject-checklist: remediation for an EXISTING PR ----------
 # `pr-create` gives a NEW PR the managed checklist. A PR that ALREADY exists
 # carries none and would block forever — `--inject-checklist` is the
@@ -1559,11 +1411,14 @@ assert 'k: a ```<CRLF> closer IS a closer: the body still appends' 0 "$RC"
 assert 'k: the CRLF-tailed body gains the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 
-# `pr-create` shares the helper, so the same refusal applies at creation.
+# `pr-create` no longer composes a body at all (arbsec/orchestraitor#799 R17),
+# so it neither refuses nor repairs a body ending inside a fence: it forwards the
+# flag to gh verbatim and the body is whatever gh makes of it.
 OUT="$(dry_run --title t --body-file "$TMP/files/unclosed-backtick.md" 2>&1)"; RC=$?
-assert 'k: pr-create refuses a body ending inside a fence' 2 "$RC"
-assert 'k: the pr-create refusal names the fence' 1 \
-  "$(grep -cF 'unclosed code fence' <<<"$OUT")"
+assert 'k: pr-create does not refuse a body ending inside a fence (R17)' 0 "$RC"
+assert 'k: it forwards --body-file verbatim' 1 \
+  "$(grep -aE '^\[dry-run\] gh ' <<<"$OUT" | grep -cF -- '--body-file')"
+assert 'k: and composes nothing' 0 "$(grep -c 'orc:' <<<"$OUT")"
 
 # --- (k5) --inject-checklist skips ONLY the body update -----------------------
 # A body that already carries the checklist used to exit 0 before executing the
@@ -1608,13 +1463,12 @@ assert 'k: a supplied body keeps its content (trailing newlines normalised)' ide
 # Pinned end to end: extract the command pr-create prints, then run that exact
 # shape against a summary-only fixture and require a checklist-bearing body.
 OUT="$(dry_run --title t)"
-# R15: the note for a bodyless creation is the "gh sources the body" note, so
-# the route it names is the one-command remediation that KEEPS the checklist.
+# R17: there is no creation-time note any more (pr-create composes nothing), so
+# the route the post-create note names is the one-command remediation, and it is
+# asserted where that note is produced (the `next:` line, below).
 ADVICE_SHAPE='pr-mutate edit <pr> --inject-checklist'
-assert 'k: the bodyless note names the inject-checklist route' "$ADVICE_SHAPE" \
-  "$(grep -oF "$ADVICE_SHAPE" <<<"$OUT" | head -1)"
-assert 'k: the note says the checklist was NOT injected' 1 \
-  "$(grep -cF 'is NOT injected and no --body is passed' <<<"$OUT")"
+assert 'k: the remediation shape is the inject-checklist route' "$ADVICE_SHAPE" \
+  "$ADVICE_SHAPE"
 cat > "$TMP/files/advice-summary.md" <<'EOF'
 ## Summary
 
@@ -1822,13 +1676,10 @@ for shape in html near near-after-canonical indented; do
   assert "f10: $shape names what it refused" 1 "$(grep -cF "$want" "$TMP/stderr")"
   assert "f10: $shape offers a working remedy" 1 "$(grep -cF "$fix" "$TMP/stderr")"
   assert "f10: $shape appends nothing" 0 "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/stderr")"
-  # (2) pr-create, through its real body route
-  OUT="$(dry_run --title t --body "$(cat "$TMP/files/f10-$shape.md")" 2>&1)"; RC=$?
-  assert "f10: pr-create refuses $shape" 2 "$RC"
-  assert "f10: pr-create names what it refused for $shape" 1 "$(grep -cF "$want" <<<"$OUT")"
-  assert "f10: pr-create never reaches gh for $shape" 0 \
-    "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-  # (3) pr-mutate, through its real body route
+  # (2) pr-mutate, through its real body route. (`pr-create` is no longer a
+  # route for this: it forwards its argv verbatim and composes nothing —
+  # arbsec/orchestraitor#799 R17 — so the helper and pr-mutate are the only
+  # composition callers left.)
   rm -f "$TMP/edited-body.md"
   run pr-mutate edit 7 --repo test-org/repo --body "$(cat "$TMP/files/f10-$shape.md")"
   assert "f10: pr-mutate refuses $shape" 2 "$RC"
@@ -1928,13 +1779,8 @@ for seed_case in indented-fence three-space-fence html indented-marker near-mark
   assert "f12: $seed_case is refused by the helper" 2 "$RC"
   assert "f12: $seed_case names what it refused" 1 "$(grep -cF "$want" "$TMP/stderr")"
   assert "f12: $seed_case appends nothing" 0 "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/stderr")"
-  # (2) pr-create refuses it and never reaches gh
-  OUT="$(dry_run --title t --body "$seed" 2>&1)"; RC=$?
-  assert "f12: pr-create refuses $seed_case" 2 "$RC"
-  assert "f12: pr-create names $seed_case" 1 "$(grep -cF "$want" <<<"$OUT")"
-  assert "f12: pr-create never reaches gh for $seed_case" 0 \
-    "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-  # (3) pr-mutate refuses it and never reaches gh
+  # (2) pr-mutate refuses it and never reaches gh (`pr-create` composes nothing
+  # any more — arbsec/orchestraitor#799 R17)
   rm -f "$TMP/edited-body.md"
   run pr-mutate edit 7 --repo test-org/repo --body "$seed"
   assert "f12: pr-mutate refuses $seed_case" 2 "$RC"
@@ -1966,350 +1812,158 @@ compose_invariant 'two-space-indented marker is accepted' \
   "$(ensure $'- [x] <!-- orc:issue --> linked\n  - [x] <!-- orc:tests --> nested\n' "$TMP/repo")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
-# --- (f13) an EXPLICIT body is tracked by the ARGUMENTS, not by its value -------
-# `pr-create --body "" --fill` used to exit 2 ("--body requires a value") and
-# `--body= --fill` exited 0 while silently DROPPING the supplied body: the code
-# tested `-n "$BODY"`, which cannot tell "supplied and empty" from "not supplied".
-# Explicitness is now its own variable, set by the parser, and it drives the
-# conflict, the validation, the exclusive-source refusal, the note and forwarding.
-for empty_form in 'separated' 'joined'; do
-  if [ "$empty_form" = separated ]; then empty_args=(--body ""); else empty_args=(--body=); fi
-  # (a) no gh body source: the explicit empty body becomes the checklist-only
-  #     body and is FORWARDED; the bodyless note must NOT print.
-  OUT="$(dry_run --title t "${empty_args[@]}" 2>&1)"; RC=$?
-  assert "f13: [$empty_form] an explicit empty body exits 0" 0 "$RC"
-  assert "f13: [$empty_form] it is forwarded to gh" 1 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "f13: [$empty_form] it carries the nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  assert "f13: [$empty_form] the bodyless note does NOT print" 0 \
-    "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
-  # (b) alongside `--fill` the explicit empty body is validated and forwarded
-  #     (gh gives an explicit body precedence over autofill).
-  OUT="$(dry_run --title t "${empty_args[@]}" --fill 2>&1)"; RC=$?
-  assert "f13: [$empty_form] --fill + explicit empty body exits 0" 0 "$RC"
-  assert "f13: [$empty_form] --fill + explicit empty body forwards --body" 1 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "f13: [$empty_form] --fill + explicit empty body carries nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  assert "f13: [$empty_form] and prints no remediation note" 0 \
-    "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
-  # (c) R15: the gh body sources are NOT special-cased. An explicit (here: empty)
-  # body is validated and forwarded, and the caller's flag is forwarded untouched
-  # — whether gh accepts the combination is gh's error to report, not ours.
-  for exclusive in --template --web --editor; do
-    if [ "$exclusive" = --template ]; then extra=(--template .github/pull_request_template.md); else extra=("$exclusive"); fi
-    OUT="$(dry_run --title t "${empty_args[@]}" "${extra[@]}" 2>&1)"; RC=$?
-    assert "f13: [$empty_form] $exclusive + explicit empty body exits 0" 0 "$RC"
-    assert "f13: [$empty_form] $exclusive keeps the forwarded --body" 1 \
-      "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-    assert "f13: [$empty_form] $exclusive carries the nine markers" 9 \
-      "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-    assert "f13: [$empty_form] $exclusive is forwarded untouched" 1 \
-      "$(grep -cF -- "${exclusive%% *}" <<<"$OUT")"
-    assert "f13: [$empty_form] $exclusive prints no refusal" 0 \
-      "$(grep -cF 'accepts only one body source' <<<"$OUT")"
-  done
-done
-# An EMPTY body FILE is not reachable by design (the reader refuses it), so the
-# explicit empty body exists only in the inline form. Pinned through the real
-# route.
-printf '' > "$TMP/files/f13-empty.md"
-OUT="$(dry_run --title t --body-file "$TMP/files/f13-empty.md" 2>&1)"; RC=$?
-assert 'f13: an empty body-file is refused by the reader' 2 "$RC"
-assert 'f13: and the refusal says the file is empty' 1 \
-  "$(grep -cF 'is empty' <<<"$OUT")"
-assert 'f13: and nothing reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-# pr-mutate composes an explicit empty body the same way.
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo --body ""
-assert 'f13: pr-mutate sets an explicit empty body to the checklist-only body' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-
-# --- (f14) the SHORT body flags are the long ones (#811) ----------------------
-# `-b`, `-F` and `-f` are gh's short spellings (verified against the installed
-# `gh pr create --help`/`gh pr edit --help`, v2.104.0). `-B` is `--base` and is
-# deliberately NOT normalised. Before this, `pr-mutate edit 123 -b Summary`
-# replaced the body WITHOUT the managed checklist and `pr-create -b X` bypassed
-# composition validation entirely.
-OUT="$(dry_run --title t -b 'a short-form summary' 2>&1)"; RC=$?
-assert 'f14: pr-create -b exits 0' 0 "$RC"
-assert 'f14: pr-create -b carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'f14: pr-create -b keeps the summary' 1 "$(grep -cF 'a short-form summary' <<<"$OUT")"
-OUT="$(dry_run --title t -b 'a short-form summary' --fill 2>&1)"; RC=$?
-assert 'f14: pr-create -b + --fill forwards a body' 1 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'f14: pr-create -b + --fill carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-OUT="$(dry_run --title t -b '- [x] <!-- orc:issue --> linked
-<div>a block</div>' 2>&1)"; RC=$?
-assert 'f14: pr-create -b is VALIDATED (refused shape exits 2)' 2 "$RC"
-assert 'f14: and names the construct' 1 "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
-assert 'f14: and never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-OUT="$(dry_run --title t -b=joined-short-summary 2>&1)"; RC=$?
-assert 'f14: pr-create -b=<value> exits 0' 0 "$RC"
-assert 'f14: pr-create -b=<value> carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-printf 'a short body-file summary\n' > "$TMP/files/f14-summary.md"
-OUT="$(dry_run --title t -F "$TMP/files/f14-summary.md" 2>&1)"; RC=$?
-assert 'f14: pr-create -F exits 0' 0 "$RC"
-assert 'f14: pr-create -F carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-OUT="$(dry_run --title t "-F=$TMP/files/f14-summary.md" 2>&1)"; RC=$?
-assert 'f14: pr-create -F=<path> exits 0' 0 "$RC"
-assert 'f14: pr-create -F=<path> carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-# R15: `-f` is gh's own `--fill` shorthand and is forwarded UNTOUCHED (it is not
-# rewritten, and it is not a body source for us): with no explicit body nothing
-# is injected and no `--body` is passed.
-OUT="$(dry_run --title t -f 2>&1)"; RC=$?
-assert 'f14: pr-create -f exits 0' 0 "$RC"
-assert 'f14: pr-create -f passes no --body' 0 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'f14: pr-create -f injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'f14: pr-create -f is forwarded verbatim (not rewritten to --fill)' 1 \
-  "$(grep -cE '(^| )-f( |$)' <<<"$OUT")"
-assert 'f14: pr-create -f prints the no-explicit-body note' 1 \
-  "$(grep -cF 'gh sources the PR body' <<<"$OUT")"
-# `--fill=false` / `-f=false` are gh's own negations: forwarded, no body, no
-# injection. We no longer model whether they are a "body source" at all.
-for negated in '--fill=false' '-f=false'; do
-  OUT="$(dry_run --title t "$negated" 2>&1)"; RC=$?
-  assert "f14: $negated exits 0" 0 "$RC"
-  assert "f14: $negated injects nothing" 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-  assert "f14: $negated passes no --body" 0 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "f14: $negated is forwarded verbatim" 1 \
-    "$(grep -cF -- "$negated" <<<"$OUT")"
-  assert "f14: $negated prints the no-explicit-body note" 1 \
-    "$(grep -cF 'gh sources the PR body' <<<"$OUT")"
-done
-# `-B` is --base: forwarded untouched, and with no explicit body nothing is
-# injected (R15 removed the bodyless checklist injection).
-OUT="$(dry_run --title t -B main 2>&1)"; RC=$?
-assert 'f14: pr-create -B exits 0' 0 "$RC"
-assert 'f14: pr-create -B is passed through as --base' 1 "$(grep -cE ' -B main' <<<"$OUT")"
-assert 'f14: pr-create -B passes no --body' 0 \
-  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-assert 'f14: pr-create -B injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-assert 'f14: pr-create -B prints the no-explicit-body note' 1 \
-  "$(grep -cF 'gh sources the PR body' <<<"$OUT")"
-# pr-mutate: the #811 regression — the alias must carry the checklist.
-export BODY_FIXTURE="$TMP/files/no-markers.md"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo -b 'a short-form summary'
-assert 'f14: pr-mutate -b exits 0' 0 "$RC"
-assert 'f14: pr-mutate -b carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-assert 'f14: pr-mutate -b keeps the summary' 1 \
-  "$(grep -cF 'a short-form summary' "$TMP/edited-body.md")"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo -b=joined-short-summary
-assert 'f14: pr-mutate -b=<value> carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo -F "$TMP/files/f14-summary.md"
-assert 'f14: pr-mutate -F exits 0' 0 "$RC"
-assert 'f14: pr-mutate -F carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo "-F=$TMP/files/f14-summary.md"
-assert 'f14: pr-mutate -F=<path> carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo --inject-checklist -b x
-assert 'f14: --inject-checklist + -b is refused' 2 "$RC"
-assert 'f14: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
-rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo --inject-checklist -F "$TMP/files/f14-summary.md"
-assert 'f14: --inject-checklist + -F is refused' 2 "$RC"
-assert 'f14: and never reaches gh (file form)' 0 "$(exists "$TMP/edited-body.md")"
-export BODY_FIXTURE="$TMP/files/no-markers.md"
-
-# --- (f15) R15: intervene ONLY when a body is supplied -------------------------
-# The rule, end to end: with NO explicit body the wrapper injects nothing, passes
-# no `--body` and forwards every flag untouched (gh sources/prompts for the body
-# itself); with an explicit body it validates, composes and forwards that body,
-# and still forwards every other flag untouched. Nothing is ever refused on
-# gh's behalf. The table below pins all four columns for each flag: exit code,
-# the exact gh argv (via the dry-run line, counted once), whether nine markers
-# were injected, and whether the note matches the path.
-f15_run() { # f15_run <label> <expect-exit> <expect-markers> <expect-note: yes|no> <args...>
-  local label="$1" want_rc="$2" want_markers="$3" want_note="$4"; shift 4
-  OUT="$(dry_run --title t "$@" 2>&1)"; RC=$?
-  assert "f15: $label — exit $want_rc" "$want_rc" "$RC"
-  assert "f15: $label — $want_markers managed markers" "$want_markers" \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  assert "f15: $label — note matches the path ($want_note)" "$want_note" \
-    "$([ "$(grep -cF 'gh sources the PR body' <<<"$OUT")" -gt 0 ] && echo yes || echo no)"
+# --- (f13) R17: pr-create is a TRANSPARENT wrapper ------------------------------
+# arbsec/orchestraitor#799 R17 deleted pr-create's argv interpreter: it used to
+# re-implement pflag's grammar in bash (body spellings, `=` forms, attached
+# values, clusters) and each round moved the failure — up to a gate-integrity
+# bug where `--title '--base=release' --base main --body summary` made the
+# wrapper's OWN review gate select `release` while gh consumed that token as the
+# TITLE and created the PR against `main`.
+#
+# Now: every argument is forwarded to `gh pr create` VERBATIM, in order; nothing
+# is composed, injected, refused or rewritten; the base for the review gate is
+# never read from argv. Consequence: pr-create does NOT compose the managed
+# checklist, and the post-create note names the one remediation command.
+f13_forwarded() { # f13_forwarded <label> <args...> -> the dry-run gh argv
+  local label="$1"; shift
+  OUT="$(dry_run --repo test-org/repo "$@" 2>&1)"; RC=$?
+  FORWARDED="$(grep -aE '^\[dry-run\] gh ' <<<"$OUT" | head -1)"
 }
-# (a) NO explicit body: nothing injected, no --body, note says gh sources it, and
-# the caller's flag reaches gh VERBATIM.
-for flag_case in \
-  '--fill' '--fill=true' '-f' '-f=true' '--fill-first=true' '--fill-verbose=true' \
-  '--template .github/pull_request_template.md' '--web' '--editor' '--editor=true' '-B main'; do
-  # shellcheck disable=SC2086 # deliberate word splitting of the flag case
-  f15_run "no-body $flag_case" 0 0 yes $flag_case
-  assert "f15: no-body $flag_case — no --body to gh" 0 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  # A TOKEN match, not a substring: the note mentions `--body-file`, whose text
-  # contains `-f`, so a plain -F match would double-count.
-  assert "f15: no-body $flag_case — flag forwarded verbatim" 1 \
-    "$(grep -cE -- "(^|[[:space:]])${flag_case%% *}([[:space:]]|$)" <<<"$OUT")"
-done
-# (b) WITH an explicit body: validated, composed, forwarded; the other flag is
-# forwarded untouched and NEVER refused (gh owns the combination).
-for flag_case in '--fill=true' '--fill' '-f' '--editor' '--editor=true' '--web' \
-  '--template .github/pull_request_template.md'; do
-  # shellcheck disable=SC2086
-  f15_run "body+$flag_case" 0 9 no --body 'a plain summary' $flag_case
-  assert "f15: body+$flag_case — --body is forwarded" 1 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "f15: body+$flag_case — flag forwarded verbatim" 1 \
-    "$(grep -cE -- "(^|[[:space:]])${flag_case%% *}([[:space:]]|$)" <<<"$OUT")"
-  assert "f15: body+$flag_case — we never refuse the combination" 0 \
-    "$(grep -cF 'accepts only one body source' <<<"$OUT")"
-done
-# (c) Attached short values (pflag): validated and composed exactly like the
-# separated forms, and a REFUSED shape is refused through them too.
-OUT="$(dry_run --title t -battached-summary 2>&1)"; RC=$?
-assert 'f15: -bX exits 0' 0 "$RC"
-assert 'f15: -bX carries the nine markers' 9 "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'f15: -bX keeps the attached summary' 1 "$(grep -cF 'attached-summary' <<<"$OUT")"
-printf 'an attached body-file summary\n' > "$TMP/files/f15-attached.md"
-OUT="$(dry_run --title t "-F$TMP/files/f15-attached.md" 2>&1)"; RC=$?
-assert 'f15: -FX exits 0' 0 "$RC"
-assert 'f15: -FX carries the nine markers' 9 "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'f15: -FX keeps the file summary' 1 "$(grep -cF 'an attached body-file summary' <<<"$OUT")"
-OUT="$(dry_run --title t '-b- [x] <!-- orc:issue --> linked
-<div>a block</div>' 2>&1)"; RC=$?
-assert 'f15: -bX is VALIDATED (refused shape exits 2)' 2 "$RC"
-assert 'f15: -bX refusal names the construct' 1 "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
-assert 'f15: -bX refusal never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-# (d) An explicit body is never dropped and never forwarded unvalidated: every
-# body spelling that reaches the helper either composes nine markers or exits 2.
-for body_form in '--body' '-b'; do
-  OUT="$(dry_run --title t "$body_form" 'plain' 2>&1)"; RC=$?
-  assert "f15: $body_form plain exits 0" 0 "$RC"
-  assert "f15: $body_form plain composes nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  OUT="$(dry_run --title t "$body_form" '- [x] <!-- orc:issue --> linked
-<div>x</div>' 2>&1)"; RC=$?
-  assert "f15: $body_form refused shape exits 2" 2 "$RC"
-done
-# pr-mutate: the attached forms compose the checklist too (the #811 regression,
-# extended to pflag's attached syntax).
+# Every shape that used to be inspected, refused or rewritten: forwarded whole.
+f13_forwarded 'body spellings' --title t --body X
+assert 'f13: --body X exits 0' 0 "$RC"
+assert 'f13: --body X is forwarded verbatim' \
+  '[dry-run] gh pr create --repo test-org/repo --title t --body X' "$FORWARDED"
+assert 'f13: and nothing is injected' 0 "$(grep -c 'orc:' <<<"$OUT")"
+f13_forwarded 'separated short body' -b X
+assert 'f13: -b X exits 0' 0 "$RC"
+assert 'f13: -b X is forwarded verbatim' 1 "$(grep -cF -- '-b X' <<<"$FORWARDED")"
+assert 'f13: and nothing is injected' 0 "$(grep -c 'orc:' <<<"$OUT")"
+f13_forwarded 'attached dot spells' -bX --fill=true
+assert 'f13: -bX exits 0' 0 "$RC"
+assert 'f13: -bX and --fill=true are forwarded verbatim' 1 \
+  "$(grep -cF -- '-bX --fill=true' <<<"$FORWARDED")"
+assert 'f13: and nothing is injected' 0 "$(grep -c 'orc:' <<<"$OUT")"
+f13_forwarded 'cluster' -fbX
+assert 'f13: a cluster exits 0' 0 "$RC"
+assert 'f13: a cluster is forwarded verbatim' 1 "$(grep -cF -- '-fbX' <<<"$FORWARDED")"
+f13_forwarded 'out-of-root body file' -fF/etc/passwd
+assert 'f13: an out-of-root -fF<path> is NOT refused' 0 "$RC"
+assert 'f13: and it is forwarded verbatim' 1 "$(grep -cF -- '-fF/etc/passwd' <<<"$FORWARDED")"
+f13_forwarded 'unknown shorthand' -z=FOO
+assert 'f13: -z=FOO is NOT refused' 0 "$RC"
+assert 'f13: and it is forwarded verbatim' 1 "$(grep -cF -- '-z=FOO' <<<"$FORWARDED")"
+f13_forwarded 'flag-like title' --title '-urgent' --body 'Summary'
+assert 'f13: a flag-like VALUE exits 0' 0 "$RC"
+assert 'f13: and both are forwarded verbatim' \
+  "--title -urgent --body Summary" "$(sed -E 's/^\[dry-run\] gh pr create --repo [^ ]+ //' <<<"$FORWARDED")"
+f13_forwarded 'base in a title' --title '--base=release' --base main --body summary
+assert 'f13: a --base-looking title exits 0' 0 "$RC"
+assert 'f13: and all four tokens are forwarded, in order' \
+  "--title --base=release --base main --body summary" \
+  "$(sed -E 's/^\[dry-run\] gh pr create --repo [^ ]+ //' <<<"$FORWARDED")"
+f13_forwarded 'empty body spellings' --body= --body ''
+assert 'f13: empty body spellings exit 0' 0 "$RC"
+assert 'f13: and both are forwarded verbatim' 1 \
+  "$(grep -cE -- '--body= --body *$' <<<"$FORWARDED")"
+assert 'f13: no body spelling is ever refused' 0 "$(grep -cF 'requires a value' <<<"$OUT")"
+# `--skip-review-gate` is OUR flag (gh has none): recognised, never forwarded.
+OUT="$(dry_run --repo test-org/repo --skip-review-gate --title t 2>&1)"; RC=$?
+assert 'f13: --skip-review-gate exits 0' 0 "$RC"
+assert 'f13: --skip-review-gate is NOT forwarded to gh' 0 \
+  "$(grep -aE '^\[dry-run\] gh ' <<<"$OUT" | grep -cF -- '--skip-review-gate')"
+assert 'f13: and the caller flag after it survives' 1 \
+  "$(grep -aE '^\[dry-run\] gh ' <<<"$OUT" | grep -cF -- '--title t')"
+# The pr-mutate halves that used to live in (f14)/(f16): its own grammar is
+# intact, and the two R17 fixes are pinned.
+printf 'a short body-file summary\n' > "$TMP/files/f14-summary.md"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
-for mutate_form in '-battached-edit' "-F$TMP/files/f15-attached.md"; do
+for mutate_form in '-bMUTATE' "-F$TMP/files/f14-summary.md"; do
   rm -f "$TMP/edited-body.md"
   run pr-mutate edit 7 --repo test-org/repo "$mutate_form"
-  assert "f15: pr-mutate '$mutate_form' exits 0" 0 "$RC"
-  assert "f15: pr-mutate '$mutate_form' carries the nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
-done
-export BODY_FIXTURE="$TMP/files/no-markers.md"
-
-# --- (f16) a CLUSTERED short flag cannot carry a body past the wrapper ---------
-# arbsec/orchestraitor#799 R16: pflag (gh's parser) accepts a boolean shorthand
-# followed by a value-taking shorthand in ONE token, so `-fbX` is `--fill --body
-# X`, `-dbX` is `--draft --body X` and `-fF/path` is `--fill --body-file /path`
-# (proved against the installed gh v2.104.0: `gh pr create -fF/tmp/nothing`
-# prints "open /tmp/nothing: no such file or directory" — gh READ the path as
-# the body file). Such a token used to fall through to the pass-through branch
-# and reach gh UNVALIDATED, and `-F<path>` bypassed the trusted-root reader
-# entirely, so an out-of-root file could be published.
-#
-# The wrapper now resolves EVERY single-dash token with pflag's rules: a cluster
-# that carries a body is split (the body is composed and validated, the boolean
-# parts keep their meaning), a cluster that carries NO body is forwarded
-# VERBATIM, and a token whose letters cannot be resolved is REFUSED.
-#
-# `gh pr create` HAS the boolean shorthands (-d/--draft, -e/--editor,
-# -f/--fill, -w/--web), so a cluster can carry a body there. `gh pr edit` has
-# NO boolean shorthand at all (its shorts are -B -b -F -m -t), so for pr-mutate
-# the body-bearing forms are the attached ones (-bX, -FX) plus the
-# fail-closed refusal of an unresolvable token.
-for cluster_case in '-fbCLUSTER' '-dbCLUSTER' '-wbCLUSTER'; do
-  cluster_bool="$(printf '%s' "${cluster_case:0:2}" | tail -c1)"
-  OUT="$(dry_run --title t "$cluster_case" 2>&1)"; RC=$?
-  assert "f16: $cluster_case exits 0" 0 "$RC"
-  assert "f16: $cluster_case carries the nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-  assert "f16: $cluster_case forwards a composed --body" 1 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-  assert "f16: $cluster_case keeps the cluster's boolean part (-$cluster_bool)" 1 \
-    "$(grep -cE -- "(^|[[:space:]])-${cluster_bool}([[:space:]]|$)" <<<"$OUT")"
-  assert "f16: $cluster_case is never forwarded as one token" 0 \
-    "$(grep -cE -- "(^|[[:space:]])${cluster_case}([[:space:]]|$)" <<<"$OUT")"
-done
-# The cluster's body part must be VALIDATED like any other body.
-OUT="$(dry_run --title t '-fb- [x] <!-- orc:issue --> linked
-<div>a block</div>' 2>&1)"; RC=$?
-assert 'f16: a cluster body is VALIDATED (refused shape exits 2)' 2 "$RC"
-assert 'f16: and names the construct' 1 "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
-assert 'f16: and never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-# A cluster carrying a BODY FILE must go through the trusted-root reader: an
-# out-of-root path is refused and never reaches gh.
-for cluster_file in '-fF/etc/passwd' '-dF/etc/passwd' '-wF/etc/passwd'; do
-  OUT="$(dry_run --title t "$cluster_file" 2>&1)"; RC=$?
-  assert "f16: $cluster_file is refused (exit 2)" 2 "$RC"
-  assert "f16: $cluster_file names the trusted-root refusal" 1 \
-    "$(grep -cF 'outside the trusted roots' <<<"$OUT")"
-  assert "f16: $cluster_file never reaches gh" 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-done
-# A cluster with NO body is forwarded VERBATIM: the argv gh sees is the argv the
-# caller wrote (no rewriting, no refusal).
-for plain_cluster in '-Bmain' '-f' '-d' '-w' '-tTITLE' '-Hbranch'; do
-  OUT="$(dry_run --title t "$plain_cluster" 2>&1)"; RC=$?
-  assert "f16: $plain_cluster exits 0" 0 "$RC"
-  assert "f16: $plain_cluster is forwarded verbatim" 1 \
-    "$(grep -cE -- "(^|[[:space:]])${plain_cluster}([[:space:]]|$)" <<<"$OUT")"
-  assert "f16: $plain_cluster injects nothing" 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
-  assert "f16: $plain_cluster passes no --body" 0 \
-    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
-done
-# An UNRESOLVABLE cluster is refused, never forwarded: a flag gh grew yesterday
-# could be a body flag.
-OUT="$(dry_run --title t '-zFOO' 2>&1)"; RC=$?
-assert 'f16: an unresolved cluster is refused (exit 2)' 2 "$RC"
-assert 'f16: and the refusal names the reason' 1 \
-  "$(grep -cF 'its short flags cannot be resolved' <<<"$OUT")"
-assert 'f16: and it never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
-# The CONTROLS: the non-clustered forms keep working exactly as before.
-OUT="$(dry_run --title t '-bCONTROL' 2>&1)"; RC=$?
-assert 'f16: the -b control exits 0' 0 "$RC"
-assert 'f16: the -b control carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-printf 'a control body-file summary\n' > "$TMP/files/f16-control.md"
-OUT="$(dry_run --title t "-F$TMP/files/f16-control.md" 2>&1)"; RC=$?
-assert 'f16: the -F control exits 0' 0 "$RC"
-assert 'f16: the -F control carries the nine markers' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'f16: the -F control keeps the file summary' 1 \
-  "$(grep -cF 'a control body-file summary' <<<"$OUT")"
-# pr-mutate (gh pr edit): the attached body forms compose the checklist, an
-# out-of-root body file is refused by the trusted-root reader, and an
-# unresolvable token is refused.
-export BODY_FIXTURE="$TMP/files/no-markers.md"
-for mutate_form in '-bMUTATE' "-F$TMP/files/f16-control.md"; do
-  rm -f "$TMP/edited-body.md"
-  run pr-mutate edit 7 --repo test-org/repo "$mutate_form"
-  assert "f16: pr-mutate '$mutate_form' exits 0" 0 "$RC"
-  assert "f16: pr-mutate '$mutate_form' carries the nine markers" 9 \
+  assert "f13: pr-mutate '$mutate_form' exits 0" 0 "$RC"
+  assert "f13: pr-mutate '$mutate_form' carries the nine markers" 9 \
     "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 done
 rm -f "$TMP/edited-body.md"
 run pr-mutate edit 7 --repo test-org/repo '-F/etc/passwd'
-assert 'f16: pr-mutate refuses an out-of-root body file' 2 "$RC"
-assert 'f16: and names the trusted-root refusal' 1 \
+assert 'f13: pr-mutate refuses an out-of-root body file' 2 "$RC"
+assert 'f13: and names the trusted-root refusal' 1 \
   "$(grep -cF 'outside the trusted roots' "$TMP/stderr")"
-assert 'f16: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+# R17: an OPERAND of a value-taking flag pr-mutate does not handle is skipped,
+# so it is never re-read as a wrapper flag.
 rm -f "$TMP/edited-body.md"
-run pr-mutate edit 7 --repo test-org/repo '-zFOO'
-assert 'f16: pr-mutate refuses an unresolved cluster' 2 "$RC"
-assert 'f16: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+run pr-mutate edit 7 --repo test-org/repo -t -bSMOKE
+assert 'f13: pr-mutate -t -bSMOKE exits 0' 0 "$RC"
+assert 'f13: and the -t operand is NOT composed into a body' 0 \
+  "$(grep -c 'orc:' "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'f13: and the operand is forwarded as the title' 1 \
+  "$(grep -cxF -- '-bSMOKE' "$TMP/edited-argv.txt")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --title '-urgent'
+assert 'f13: pr-mutate --title "-urgent" exits 0' 0 "$RC"
+assert 'f13: and forwards the operand' 1 "$(grep -cxF -- '-urgent' "$TMP/edited-argv.txt")"
+assert 'f13: and composes no body' 0 "$(grep -c 'orc:' "$TMP/edited-body.md" 2>/dev/null || true)"
+for accepted in '-Rtest-org/repo' '-htTITLE'; do
+  rm -f "$TMP/edited-body.md"
+  run pr-mutate edit 7 --repo test-org/repo "$accepted"
+  assert "f13: pr-mutate accepts $accepted" 0 "$RC"
+done
+for refused in '-z=FOO' '-fz=FOO'; do
+  rm -f "$TMP/edited-body.md"
+  run pr-mutate edit 7 --repo test-org/repo "$refused"
+  assert "f13: pr-mutate refuses $refused" 2 "$RC"
+  assert "f13: and never reaches gh" 0 "$(exists "$TMP/edited-body.md")"
+done
 export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+
+# --- (f14) the post-create note names the one remediation (R17) ----------------
+# `pr-create` composes no checklist, so every PR it creates owes one command. The
+# note parses the PR number out of the URL gh printed, and says so when it cannot.
+mkdir -p "$TMP/f14-repo/scripts" "$TMP/f14-repo/.github" "$TMP/f14-bin"
+cp -L -- "$SCRIPT_DIR/pr-create" "$SCRIPT_DIR/_lib.sh" "$TMP/f14-repo/scripts/"
+cp -L -- "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$TMP/f14-repo/.github/"
+chmod +x "$TMP/f14-repo/scripts/"*
+cat > "$TMP/f14-bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  # The suite runs with ORC_GITHUB_APP_ENFORCEMENT=required and a stubbed config,
+  # so pr-create takes the LABELING-CHAIN route: run the gh child directly.
+  github/gh-env-pr-create-chain) shift 4; exec "$@" ;;
+  *) exit 0 ;;
+esac
+STUB
+cat > "$TMP/f14-bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$F14_URL"
+STUB
+chmod +x "$TMP/f14-bin/orc" "$TMP/f14-bin/gh"
+f14_create() { # f14_create <url> : runs the real create path, prints stdout+stderr
+  ( cd "$TMP/f14-repo" && F14_URL="$1" SKILL_CASE=1 \
+      ORC_BIN="$TMP/f14-bin/orc" GH_BIN="$TMP/f14-bin/gh" \
+      PATH="$TMP/f14-bin:/usr/bin:/bin" \
+      bash scripts/pr-create --repo test-org/repo --title t --body summary 2>&1 )
+}
+OUT="$(f14_create 'https://github.com/test-org/repo/pull/4242' )"; RC=$?
+assert 'f14: the create path exits 0' 0 "$RC"
+assert 'f14: the URL gh printed is passed through (both lines)' 2 \
+  "$(grep -cF 'https://github.com/test-org/repo/pull/4242' <<<"$OUT")"
+assert 'f14: and the note names the remediation with the right number' 1 \
+  "$(grep -cF "next: bash $TMP/f14-repo/scripts/pr-mutate edit 4242 --inject-checklist" <<<"$OUT")"
+assert 'f14: and no placeholder is used' 0 \
+  "$(grep -cF '<the PR you just created>' <<<"$OUT")"
+OUT="$(f14_create 'not-a-url')"; RC=$?
+assert 'f14: an unparseable URL still exits 0' 0 "$RC"
+assert 'f14: and the note says the number could not be parsed' 1 \
+  "$(grep -cF 'the PR number could not be parsed' <<<"$OUT")"
+assert 'f14: and it uses the placeholder' 1 \
+  "$(grep -cF 'edit <the PR you just created> --inject-checklist' <<<"$OUT")"
+assert 'f14: pr-create composes no checklist at all' 0 \
+  "$(grep -c 'orc:' <<<"$OUT")"
 
 printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

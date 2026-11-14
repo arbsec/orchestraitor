@@ -248,33 +248,28 @@ fn neutralise_summary(summary: &str) -> String {
         // the `indented_fence_opener` construct itself, and the region it opens
         // starts on that line for every scanner.
         if !line.fenced || line.opens_fence.is_some() {
-            // EVERY applicable remedy is applied, never just the first: one line
-            // can be BOTH a raw HTML construct and a near-marker (e.g.
-            // `<div [x] orc:tests>`), and escaping only the marker delimiter
-            // would leave the leading `<`, so the composed body would still be
-            // `html_construct` — permanently unconvergeable
-            // (arbsec/orchestraitor#799 R15). The order is fixed: the line-start
-            // `<` first, then the marker delimiter/name reference.
+            // EVERY applicable remedy is applied, never just the first, in a
+            // fixed order (arbsec/orchestraitor#799 R15/R17):
+            //
+            //   1. the line-start `<` of a raw HTML construct;
+            //   2. an inline comment opener — but only where it is actually a
+            //      comment (not inside literal indented code, not on a
+            //      near-marker, whose own escape below covers every `<!--`, and
+            //      not on a canonical marker's own delimiter);
+            //   3. the near-marker delimiter and name reference;
+            //   4. the DEDENT of an indented fence opener or an indented
+            //      canonical marker.
+            //
+            // Step 4 can make step 2 apply where it could not before: a
+            // canonical marker indented 4+ spaces is literal indented code, so
+            // its inline comment is visible there and step 2 skips it — but the
+            // dedent then turns the same `<!--` into an ACTIVE comment that
+            // hides the description text (`    - [x] <!-- orc:tests --> Result:
+            // <!-- tests failed --> done` would show only `Result:  done`).
+            // So the comment escape runs AGAIN after a dedent.
             if line.is_html_construct() {
                 rendered = escape_line_start_html(&rendered);
             }
-            // An INLINE HTML COMMENT (a `<!--` that is not the line's first
-            // construct) is hidden by the renderer: CommonMark allows inline
-            // comments, so `Result: <!-- tests failed --> done` shows the
-            // reviewer only `Result:  done` and the failure text disappears
-            // (arbsec/orchestraitor#799 R16, the case #814 tracks). The
-            // opener is escaped to `&lt;!--`, which renders as the text the
-            // model wrote.
-            //
-            // Three shapes are LEFT ALONE, deliberately:
-            //   - a NEAR-MARKER line: the escape below already replaces every
-            //     `<!--` on it (and the managed name reference with it);
-            //   - a CANONICAL marker's OWN delimiter: escaping it would turn a
-            //     real checklist item into a near-marker. A LATER `<!--` in the
-            //     description is still escaped;
-            //   - a line indented 4+ spaces (or led by a tab): that is literal
-            //     indented code, which the renderer shows as code, so the
-            //     comment is visible there and nothing is hidden.
             if !line.near_marker && !line.indentation_too_deep {
                 rendered = if line.canonical.is_some() {
                     escape_inline_comment_after_the_marker(&rendered)
@@ -292,10 +287,14 @@ fn neutralise_summary(summary: &str) -> String {
                 // for an indented CANONICAL marker (which stays a real checklist
                 // item, so it must stay visible). A near-marker is ESCAPED rather
                 // than dedented: dedenting it would leave the marker reference
-                // intact. `is_indented_marker()` (canonical OR near-marker) is
-                // deliberately not used here — the escape already cleared the
-                // near-marker case.
+                // intact.
                 rendered = dedent(&rendered);
+                if line.canonical.is_some() && !line.near_marker && line.indentation_too_deep {
+                    // The dedent made the description's comment ACTIVE: escape it
+                    // now (step 2 could not, because the line was literal
+                    // indented code at the time).
+                    rendered = escape_inline_comment_after_the_marker(&rendered);
+                }
             }
         }
         out.push_str(&rendered);
