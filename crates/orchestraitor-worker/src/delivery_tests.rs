@@ -196,9 +196,14 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
     // Nothing before the summary can be fenced by it: the trusted block carries
     // no fence opener, so every marker in it is scanned as evidence.
     let trusted = &body[..body.len() - summary.len()];
+    // The message must NEVER interpolate the composed body: `trusted` is built
+    // from UNTRUSTED model text, and code-scanning alert 8
+    // (`rust/cleartext-logging`) flags exactly that. Its length is enough to
+    // identify the slice without putting the body into a panic message.
     assert!(
         !trusted.contains("```") && !trusted.contains("~~~"),
-        "the trusted block must carry no fence opener: {trusted}"
+        "the trusted block ({} bytes) must carry no fence opener",
+        trusted.len()
     );
     // Nine trusted markers, ALL unchecked, and all of them ahead of the
     // summary's single checked marker.
@@ -217,21 +222,79 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
 /// The summary neutraliser, exactly: an indented fence opener is dedented to
 /// column 0, a line-start `<` has its `<` escaped, and nothing else moves.
 /// Idempotent, so a retried delivery composes the identical body.
+///
+/// The CLOSER inside a region keeps the bytes the model wrote (it is part of the
+/// example, and a closer may be indented 0-3 spaces, so an indented closer still
+/// closes): only the OPENER is transformed, because its indentation is the
+/// `indented_fence_opener` construct itself.
 #[test]
 fn neutralise_summary_dedents_openers_and_escapes_comments() {
-    // Four boundaries in one body: a 2-space backtick opener and its closer
-    // (dedented), a column-0 `<!--` (escaped), a TAB-led `<!--` (untouched: a
-    // tab is content, and a tab-led line is literal indented code), and a
-    // 4-space `<!--` / ` ``` ` (untouched: indented code, not a construct and
-    // not a fence).
+    // Four boundaries in one body: a 2-space backtick opener (dedented) with a
+    // fenced sample and its closer (byte-identical: the region is inert), a
+    // column-0 `<!--` (escaped), a TAB-led `<!--` (untouched: a tab is content,
+    // and a tab-led line is literal indented code), and a 4-space `<!--` /
+    // ` ``` ` (untouched: indented code, not a construct and not a fence).
     let summary = "- Example:\n  ```\n  sample\n  ```\n<!--\n  \t<!--\n    <!--\n    ```\n```\n";
-    let expected = "- Example:\n```\n  sample\n```\n&lt;!--\n  \t<!--\n    <!--\n    ```\n```\n";
+    let expected = "- Example:\n```\n  sample\n  ```\n&lt;!--\n  \t<!--\n    <!--\n    ```\n```\n";
     assert_eq!(neutralise_summary(summary), expected);
     assert_eq!(
         neutralise_summary(&neutralise_summary(summary)),
         expected,
         "neutralisation must be idempotent"
     );
+}
+
+/// A FENCED region is INERT, so the neutraliser leaves it byte-identical
+/// (arbsec/orchestraitor#799 R13 review): a fenced `<div>` is not an HTML
+/// construct and a fenced near-marker is not a near-marker, so transforming them
+/// would corrupt the example the model wrote. The SAME constructs OUTSIDE a
+/// fence are still neutralised, and an INDENTED opener is still dedented (that
+/// is the remedy for `indented_fence_opener`).
+#[test]
+fn neutralise_summary_leaves_fenced_content_byte_identical() {
+    let fenced_body = "\
+<div>fenced example</div>
+- [ ]\t<!-- orc:tests --> fenced near-marker";
+    let summary = format!(
+        "## Summary\n\n```\n{fenced_body}\n```\n\n<div>outside</div>\n- [ ]\t<!-- orc:tests --> outside\n"
+    );
+    let rendered = neutralise_summary(&summary);
+    // The fenced block survives byte-for-byte, including the `<` and the
+    // delimiter/name reference a scanner would otherwise refuse.
+    assert!(
+        rendered.contains(&format!("```\n{fenced_body}\n```\n")),
+        "fenced content must be byte-identical: {rendered}"
+    );
+    assert!(
+        rendered.contains("<!-- orc:tests --> fenced near-marker"),
+        "the fenced near-marker must keep its literal delimiter: {rendered}"
+    );
+    assert!(
+        rendered.contains("<div>fenced example</div>"),
+        "the fenced `<div>` must not be escaped: {rendered}"
+    );
+    // Outside the fence the same constructs ARE neutralised.
+    assert!(
+        rendered.contains("&lt;div>outside</div>"),
+        "a line-start `<` outside a fence is still escaped: {rendered}"
+    );
+    assert!(
+        rendered.contains("&lt;!-- orc&#58;tests --> outside"),
+        "a near-marker outside a fence is still neutralised: {rendered}"
+    );
+    // Idempotent: a retried delivery composes the identical body.
+    assert_eq!(
+        neutralise_summary(&rendered),
+        rendered,
+        "neutralisation must be idempotent"
+    );
+
+    // An INDENTED opener is dedented (its indentation is the refusal); the
+    // content it opens, and its closer, keep the bytes the model wrote.
+    let indented =
+        "  ```\n  <div>inside</div>\n  - [ ]\t<!-- orc:tests --> inside\n  ```\n<div>after</div>\n";
+    let expected = "```\n  <div>inside</div>\n  - [ ]\t<!-- orc:tests --> inside\n  ```\n&lt;div>after</div>\n";
+    assert_eq!(neutralise_summary(indented), expected);
 }
 
 /// A summary line that carries BOTH a task-item box token AND a managed-marker
@@ -339,18 +402,14 @@ async fn delivery_neutralises_an_indented_fence_opener_in_the_summary() {
     // The trusted block leads and carries the nine unchecked markers.
     assert!(body.starts_with("## Merge checklist"), "{body}");
     assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
-    // No indented fence opener survives anywhere in the composed body: that is
-    // what makes the checklist reading determinate.
+    // The OPENER is dedented to column 0 — that is what makes the checklist
+    // reading determinate — and the fenced sample and its closer keep the bytes
+    // the model wrote (content inside a region is inert to every scanner, and a
+    // closer may be indented 0-3 spaces, so an indented closer still closes).
     assert!(
-        !body.lines().any(|line| {
-            let indent = line.chars().take_while(|c| *c == ' ').count();
-            let rest = line.get(indent..).unwrap_or_default();
-            (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"))
-        }),
-        "an indented fence opener survived neutralisation: {body}"
+        body.contains("- Example:\n```\n  sample\n  ```\n"),
+        "{body}"
     );
-    // The summary survives, dedented, and its tail is still readable text.
-    assert!(body.contains("- Example:\n```\n  sample\n```\n"), "{body}");
     assert!(
         body.ends_with("- a real line after the fence"),
         "the summary must survive, after the checklist: {body}"
@@ -596,15 +655,12 @@ async fn delivery_neutralises_the_summary_regardless_of_its_line_endings() {
             9,
             "{flavour}: {body}"
         );
-        // No indented fence opener survives anywhere in the composed body: that
-        // is what makes the checklist reading determinate.
+        // The OPENER is dedented to column 0 (the determinate form); the fenced
+        // sample and its closer keep the bytes the model wrote, because content
+        // inside a region is inert to every scanner.
         assert!(
-            !body.lines().any(|line| {
-                let indent = line.chars().take_while(|c| *c == ' ').count();
-                let rest = line.get(indent..).unwrap_or_default();
-                (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"))
-            }),
-            "{flavour}: an indented fence opener survived neutralisation: {body}"
+            body.contains("- Example:\n```\n  sample\n  ```\n"),
+            "{flavour}: the opener must be dedented and the region left byte-identical: {body}"
         );
         // No line-start HTML comment survives either: the summary's tail must
         // stay visible to the reviewer.
@@ -693,4 +749,73 @@ fn reason_codes_are_static_and_log_safe() {
             "reason code '{reason}' is kebab-case only (log-safe)"
         );
     }
+}
+
+/// A model summary that FENCES its example must have that example delivered
+/// byte-identically (arbsec/orchestraitor#799 R13 review): content inside a
+/// fenced region is already inert to both scanners, so escaping a fenced `<div>`
+/// or a fenced near-marker only corrupts the text the model wrote. The SAME
+/// constructs outside the fence are still neutralised, so the composed body's
+/// checklist reading stays determinate. This drives the REAL `open_pr`.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_leaves_fenced_constructs_byte_identical() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fenced = "<div>fenced example</div>\n- [ ]\t<!-- orc:tests --> fenced near-marker";
+    let summary = format!(
+        "## Summary\n\n```\n{fenced}\n```\n\n<div>outside</div>\n- [ ]\t<!-- orc:tests --> outside\n"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/9\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.clone(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    // The trusted block still leads, with exactly the nine managed markers.
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
+    // The fenced example survives BYTE-IDENTICAL: the `<` is not escaped and the
+    // near-marker keeps its literal delimiter.
+    assert!(
+        body.contains(&format!("```\n{fenced}\n```\n")),
+        "the fenced example must be delivered unchanged: {body}"
+    );
+    // The constructs OUTSIDE the fence are still neutralised.
+    assert!(
+        body.contains("&lt;div>outside</div>"),
+        "a line-start `<` outside a fence is still escaped: {body}"
+    );
+    assert!(
+        body.contains("&lt;!-- orc&#58;tests --> outside"),
+        "a near-marker outside a fence is still neutralised: {body}"
+    );
+    // No line outside the fenced region is a near-marker, and none starts with
+    // `<`: that is what keeps the reading determinate.
+    let outside = body
+        .split("```\n")
+        .last()
+        .expect("the text after the fenced region");
+    assert!(
+        !outside.lines().skip(1).any(is_near_marker_line),
+        "a near-marker survived outside the fence: {body}"
+    );
 }

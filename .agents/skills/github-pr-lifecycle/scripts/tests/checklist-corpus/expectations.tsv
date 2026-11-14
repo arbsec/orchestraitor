@@ -15,8 +15,9 @@
 #                             the reading is determinate
 #   4. unparseable            `true` when the reading is REFUSED; omitted (and
 #                             therefore false) unless the case pins it
-#   5. unparseable_construct  `indented_fence_opener`, `html_construct` or
-#                             `near_marker`; present only with column 4
+#   5. unparseable_construct  `indented_fence_opener`, `html_construct`,
+#                             `indented_marker` or `near_marker`; present only
+#                             with column 4
 #
 # A case file with NO row fails BOTH suites, and a row with NO case file fails
 # both suites: a deleted case can never narrow the contract silently. The case
@@ -186,9 +187,10 @@
 # a list item or a block quote, and the scanner has no container model. While
 # that region is OPEN the scope is INDETERMINATE, so the reading is refused and
 # `all_checked` is false even though the only visible marker is ticked (the
-# verdict blocks with `checklist_unparseable`). The region never closes here,
-# which is exactly the case that stays indeterminate: a CLOSED indented region
-# has a known extent and is determinate (corpus case 18).
+# verdict blocks with `checklist_unparseable`). The region never closes in THIS
+# case, but closing is not what makes it indeterminate: the rule is STICKY, so a
+# region that DOES close is refused in exactly the same way (corpus case 18 pins
+# the 3-space closed shape, case 48 the 2-space one).
 47-unclosed-indented-opener-is-indeterminate	1	false	true	indented_fence_opener
 # The case a "closing clears the condition" rule gets WRONG. CommonMark ends the
 # fence at the end of the list item, so the `- [ ]` line is OUTSIDE the fence
@@ -302,10 +304,13 @@
 # summary can never converge. The lane therefore neutralises the line (see
 # `delivery_clears_a_near_marker_in_the_summary`); this case pins the reading of
 # the RAW summary that makes the neutralisation necessary.
-# The SAME lane has two further, narrower vectors that this round did NOT fix —
-# an indented HTML block opener, and an unclosed raw HTML block hiding the
-# summary's tail. Both block rather than pass, so they are tracked separately in
-# arbsec/orchestraitor#810 rather than widened into this PR.
+# The two further vectors this lane used to defer are BOTH closed by the
+# line-start `<` escape (arbsec/orchestraitor#810, now closed): an INDENTED HTML
+# opener sits in exactly the scanner's 0-3-space refusal window, so it is escaped
+# like a column-0 one, and no block extent is modelled any more, so an UNCLOSED
+# raw HTML block has nothing to extend — the opener line is the only thing to
+# neutralise. Pinned by `delivery_escapes_a_line_start_html_construct_in_the_summary`
+# (arbsec/orchestraitor#810, closed).
 73-near-marker-in-a-delivery-summary	0	false	true	near_marker
 # The DESCRIPTION of a managed marker is the text AFTER `-->`, for a checked and
 # an unchecked item alike. `reconcile-checklist --json` emitted the BOX character
@@ -318,3 +323,42 @@
 # RE-DERIVED (#799 R1): `<!--->` is a RAW HTML CONSTRUCT — REFUSED (`html_construct`).
 # The degenerate-terminator model is deleted; the marker below counts as text.
 75-html-comment-dash-terminator	1	false	true	html_construct
+# arbsec/orchestraitor#802, CONFIRMED BY EXECUTION: nine canonical ticked markers,
+# each preceded by FOUR spaces and with no surrounding list, render entirely as an
+# INDENTED CODE BLOCK — yet the gate used to report `marker_count=9,
+# all_checked=true` and the merge lane merged it. The canonical grammar's leading
+# `[ \t]*` cannot distinguish "marker inside a list item" (legitimate) from
+# "standalone indented code" (not evidence), and neither scanner has a container
+# model, so the reading is REFUSED (`indented_marker`) instead of guessed. The
+# markers still COUNT: `marker_count` is a pure function of the canonical grammar,
+# and the verdict blocks on the refusal, never on that count.
+76-nine-four-space-indented-markers	9	false	true	indented_marker
+# The same refusal does not depend on the body carrying nothing else: nine
+# 4-space-indented markers PLUS the nine canonical column-0 ones are still
+# indeterminate — the indented line is refused wherever it sits, and the count
+# (18) is not read.
+77-four-space-indented-plus-canonical	18	false	true	indented_marker
+# The inverse, and the legitimate case: 0-3 leading spaces is a marker nested in
+# a list item, so nine 2-space-indented ticked markers are ACCEPTED exactly as
+# before (`marker_count` 9, `all_checked` true).
+78-two-space-indented-markers	9	true
+# A TAB-led marker reaches the 4-column tab stop, so it is the same refusal as a
+# 4-space indent (`indented_marker`), and the line still counts as a canonical
+# marker. Never silently dropped: a body whose only marker is this one blocks on
+# the refusal, not on `checklist_markers_missing`.
+79-tab-led-marker	1	false	true	indented_marker
+# A NEAR-MARKER indented 4 spaces is indeterminate for BOTH reasons; the reported
+# construct is `indented_marker`, because the indentation is what makes it
+# render as code (the construct list resolves a same-line tie to the more
+# specific rule). The nine column-0 markers still count.
+80-four-space-indented-near-marker	9	false	true	indented_marker
+# arbsec/orchestraitor#799 R12, the LOCALE-INDEPENDENCE pin: a box token is `[` +
+# exactly ONE CHARACTER + `]`, and the shell decoder reads one UTF-8 sequence by
+# BYTE in the C locale while the Rust engine counts one `char`. `[✓] orc:review`
+# is therefore a NEAR-MARKER in BOTH engines on every machine — without this pin,
+# a box whose `C.UTF-8` probe failed read the three-byte `✓` as three characters
+# and let the line through as prose while Rust refused it (a false pass).
+81-unicode-box-token-without-a-comment	1	false	true	near_marker
+# The same pin with the delimiter present: `[✓]  <!-- orc:tests -->` is a
+# near-marker (non-canonical spacing) in both engines, in every locale.
+82-unicode-box-token-before-a-comment	1	false	true	near_marker

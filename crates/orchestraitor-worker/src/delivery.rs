@@ -213,9 +213,22 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 /// `<!--` survived neutralisation, and the composed PR then reported
 /// `checklist_unparseable` (permanently unconvergeable) or hid the summary's
 /// tail from the reviewer.
+///
+/// A FENCED region is tracked while the summary is walked, with the scanners'
+/// own rules (`summary_fence_view` / `summary_fence_opener` /
+/// `summary_fence_closes` mirror `scan_fences` in
+/// `crates/orchestraitor-mcp/src/pr_status.rs`): content inside a fence is
+/// already INERT to every marker scan, so transforming it would corrupt the
+/// example the model wrote — a fenced `<div>` is not an HTML construct and a
+/// fenced near-marker is not a near-marker. Such lines are emitted
+/// byte-identical. The OPENER line is still transformed (an indented opener is
+/// DEDENTED, which is the remedy for `indented_fence_opener`); the region it
+/// opens starts on the NEXT line, exactly as both scanners model it.
 fn neutralise_summary(summary: &str) -> String {
     let normalized = summary.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = String::with_capacity(normalized.len());
+    // The fence region the walk is currently inside: its character and run.
+    let mut fence: Option<(char, usize)> = None;
     for line in normalized.split_inclusive('\n') {
         // Keep the terminator out of the tests, then put it back: an opener is
         // recognised from the line's content alone.
@@ -223,6 +236,16 @@ fn neutralise_summary(summary: &str) -> String {
             Some(rest) => (rest, "\n"),
             None => (line, ""),
         };
+        // Inside a region: emit the bytes the model wrote and only watch for the
+        // closer. Nothing here can be a construct the scanners act on.
+        if let Some((fence_char, fence_len)) = fence {
+            if summary_fence_closes(content, fence_char, fence_len) {
+                fence = None;
+            }
+            out.push_str(content);
+            out.push_str(newline);
+            continue;
+        }
         let indent = content.chars().take_while(|c| *c == ' ').count();
         let rest = content.get(indent..).unwrap_or_default();
         let indented_opener =
@@ -249,10 +272,72 @@ fn neutralise_summary(summary: &str) -> String {
             // bytes the model wrote, so nothing is hidden from the reviewer.
             rendered = escape_marker_delimiters(&rendered);
         }
+        // The OPENER line is emitted transformed (above); the region it opens
+        // starts on the NEXT line, which is where every scanner's region begins
+        // after the opener. `content`, not `rendered`, is inspected: the
+        // dedent above never changes the fence character or its run length.
+        if let Some(opener) = summary_fence_opener(content) {
+            fence = Some(opener);
+        }
         out.push_str(&rendered);
         out.push_str(newline);
     }
     out
+}
+
+/// The part of `line` a fence may open or close at, or `None` when the line is
+/// indented too far to be a fence line: FOUR OR MORE leading spaces, or a TAB
+/// after 0-3 spaces (a tab reaches the 4-column tab stop), is an INDENTED code
+/// block, where fence characters are literal text. This mirrors
+/// `fence_line`/`fence_view` in the two scanners, so the lane and the scans
+/// agree on where a region starts and ends.
+fn summary_fence_view(line: &str) -> Option<(usize, &str)> {
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let rest = line.get(indent..)?;
+    if rest.starts_with('\t') {
+        return None;
+    }
+    Some((indent, rest))
+}
+
+/// The fence an OPENER line opens — `(character, run length)` — or `None`. The
+/// rules are the scanners' own: at most three leading spaces, THREE OR MORE
+/// backticks or tildes, and a backtick fence's info string may not contain a
+/// backtick (so ```example``` is a closed inline span, not an opener) while a
+/// tilde fence's may.
+fn summary_fence_opener(line: &str) -> Option<(char, usize)> {
+    let (_, trimmed) = summary_fence_view(line)?;
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let run = trimmed.chars().take_while(|c| *c == first).count();
+    let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
+    if run >= 3 && !info_has_backtick {
+        Some((first, run))
+    } else {
+        None
+    }
+}
+
+/// True when `line` CLOSES the region opened by `(fence_char, fence_len)`: the
+/// SAME character repeated at least as many times as the opener, followed by
+/// nothing but spaces or tabs (`CommonMark` 0.31: a closing fence "may be
+/// followed only by spaces or tabs, which are ignored"), after at most three
+/// leading spaces. A different fence character never closes the region.
+fn summary_fence_closes(line: &str, fence_char: char, fence_len: usize) -> bool {
+    let Some((_, trimmed)) = summary_fence_view(line) else {
+        return false;
+    };
+    if !trimmed.starts_with(fence_char) {
+        return false;
+    }
+    let run = trimmed.chars().take_while(|c| *c == fence_char).count();
+    let tail = trimmed.get(run..).unwrap_or_default();
+    run >= fence_len && tail.chars().all(|c| c == ' ' || c == '\t')
 }
 
 /// True when the line is a NEAR-MARKER: it carries a task-item BOX TOKEN (`[` +

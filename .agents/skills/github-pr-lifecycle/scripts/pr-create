@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). A body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers keeps its content unchanged (only trailing newlines are normalised). With no body at all the PR still gets the checklist, and a note on stderr says the body needs a summary. --body-file paths are resolved through the trusted-root guard (workspace or temp directory); '-' reads the body from STDIN. A body that ENDS inside an unclosed code fence is refused with exit 2 (appended markers would render as code and be hidden), so close the fence and rerun. gh's OWN body sources — --fill, --fill-first, --fill-verbose, --template, --web, --editor — are left alone: nothing is injected and no --body is passed for those routes, and a stderr note names 'pr-mutate edit <pr> --inject-checklist' as the remediation. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). A body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers keeps its content unchanged (only trailing newlines are normalised). With no body at all the PR still gets the checklist, and a note on stderr says the body needs a summary. --body-file paths are resolved through the trusted-root guard (workspace or temp directory); '-' reads the body from STDIN. A body that ENDS inside an unclosed code fence is refused with exit 2 (appended markers would render as code and be hidden), so close the fence and rerun. An explicit --body/--body-file is ALWAYS validated through the same composition helper (the HTML / indented-marker / near-marker / unclosed-fence refusals) and forwarded with the managed checklist, even alongside gh's additive autofill sources (--fill, --fill-first, --fill-verbose): gh documents that an explicit --body takes precedence over autofilled content. gh's EXCLUSIVE body sources (--template, --web, --editor) cannot be combined with an explicit body in gh itself, so that combination is refused (exit 2) instead of failing inside gh. Injection is skipped ONLY when no explicit body was supplied (e.g. --fill alone): gh then sources the body itself, no --body is passed, and a stderr note names 'pr-mutate edit <pr> --inject-checklist' as the remediation. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
   exit "$ORC_OK"
 fi
 
@@ -252,12 +252,29 @@ fi # SKILL_CASE gate wrapper
 # any marker keeps its CONTENT unchanged — the body is resolved through a command
 # substitution, so trailing newlines are normalised and nothing else is altered.
 #
-# gh's OWN body sources are left alone: `--fill`, `--fill-first`,
-# `--fill-verbose`, `--template <path>`, `--web` and `--editor` make `gh pr
-# create` source the body elsewhere, so injecting a body here would either be
-# overridden by gh or rejected as a conflicting combination. Nothing is injected
-# and no `--body` is passed for those routes; the note names the one-command
-# remediation (`pr-mutate edit <pr> --inject-checklist`) instead.
+# gh's OWN body sources (`--fill`, `--fill-first`, `--fill-verbose`, `--template
+# <path>`, `--web`, `--editor`) do NOT bypass the managed checklist when the
+# caller supplied a body EXPLICITLY (arbsec/orchestraitor#799 R13 review):
+#
+#   - an explicit `--body`/`--body-file` is ALWAYS resolved through the shared
+#     helper, so the same four refusals apply (a raw HTML construct, an
+#     indented marker, a near-marker, or a body that ends inside an unclosed
+#     fence) and the injected nine markers are forwarded with it. gh documents
+#     that an explicit `--body` takes precedence over autofilled content — "if
+#     the `--title` and/or `--body` are also provided alongside `--fill`, the
+#     values specified by `--title` and/or `--body` will take precedence and
+#     overwrite any autofilled content" — so forwarding is correct, and NOT
+#     forwarding used to create a PR whose body the gate immediately refused
+#     while the note claimed no body was passed.
+#   - `--template`, `--web` and `--editor` are gh's EXCLUSIVE body sources ("specify
+#     only one of `--body`, `--body-file`, `--editor`, or `--web`"; "`--template`
+#     is not supported when using `--body` or `--body-file`"). An explicit body
+#     alongside one of them can never produce a PR, so it is refused here, after
+#     the shared validation, instead of failing inside gh after the pre-PR review
+#     gate has already run. The caller's body is never silently dropped.
+#   - injection is skipped ONLY when NO explicit body was supplied: gh then
+#     sources the body itself and the note says exactly that, naming the
+#     one-command remediation (`pr-mutate edit <pr> --inject-checklist`).
 PR_CREATE_GH_BODY_SOURCE=""
 for PR_CREATE_ARG in "${REST[@]}"; do
   case "$PR_CREATE_ARG" in
@@ -271,12 +288,27 @@ if [ -n "$BODY_FILE" ]; then
   BODY="$(orc_lib_read_body_file "--body-file" "$BODY_FILE")"
 fi
 PR_CREATE_BODY_ROOT="$(orc_lib_git_toplevel)"
-if [ -n "$PR_CREATE_GH_BODY_SOURCE" ]; then
-  echo "NOTE: '$PR_CREATE_GH_BODY_SOURCE' makes gh source the PR body itself, so the managed" >&2
-  echo "      merge checklist is NOT injected and no --body is passed." >&2
+# The explicit body is validated and carries the checklist FIRST, whatever body
+# source gh was given: the refusals are about the body itself, not about where gh
+# would otherwise source one.
+if [ -n "$BODY" ]; then
+  BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
+  case "$PR_CREATE_GH_BODY_SOURCE" in
+    --template|--template=*|--web|--editor)
+      echo "error: --body/--body-file cannot be combined with '$PR_CREATE_GH_BODY_SOURCE': gh pr create accepts only one body source (--body, --body-file, --editor, --web), and '--template' is not supported with --body or --body-file" >&2
+      echo "  nothing was created: drop either the explicit body or '$PR_CREATE_GH_BODY_SOURCE' and rerun" >&2
+      exit "$ORC_ERR_CONFIG"
+      ;;
+  esac
+elif [ -n "$PR_CREATE_GH_BODY_SOURCE" ]; then
+  # No explicit body: gh sources the body itself, so there is nothing to validate
+  # and nothing to forward. The note describes exactly that and names the
+  # remediation.
+  echo "NOTE: '$PR_CREATE_GH_BODY_SOURCE' makes gh source the PR body itself and no --body was" >&2
+  echo "      supplied, so the managed merge checklist is NOT injected and no --body is passed." >&2
   echo "      Add the checklist to the created PR afterwards (one command):" >&2
   echo "        bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate edit <pr> --inject-checklist" >&2
-elif [ -z "$BODY" ]; then
+else
   # A bodyless PR can NEVER converge: the gate needs the managed checklist and
   # nothing else supplies it. Give the PR the checklist and say so loudly — the
   # body still needs a summary, which the author adds afterwards. The advice MUST
@@ -288,8 +320,11 @@ elif [ -z "$BODY" ]; then
   echo "      checklist whenever your summary carries none, so the body stays compliant):" >&2
   echo "        bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate edit <pr> --body-file <path>" >&2
 fi
-if [ -z "$PR_CREATE_GH_BODY_SOURCE" ]; then
-  BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
+
+# The body for a caller who supplied NOTHING still gets the checklist: the
+# bodyless route above only PRINTS the note, so injection happens here.
+if [ -z "$BODY" ] && [ -z "$PR_CREATE_GH_BODY_SOURCE" ]; then
+  BODY="$(orc_lib_ensure_checklist_markers "" "$PR_CREATE_BODY_ROOT")"
 fi
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")

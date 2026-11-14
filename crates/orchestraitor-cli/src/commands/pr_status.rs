@@ -444,9 +444,12 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 ///
 /// The construct is a fence OPENER indented 1-3 spaces (CLOSED OR NOT — it may
 /// belong to a list item or a block quote), a RAW HTML CONSTRUCT (a line-start
-/// `<` outside every fenced region, which the scanner does not model), or a
+/// `<` outside every fenced region, which the scanner does not model), a
 /// NEAR-MARKER (a line that presents a managed marker but not in the canonical
-/// form, so the gate cannot tell what it asserts) — arbsec/orchestraitor#809 and
+/// form, so the gate cannot tell what it asserts — arbsec/orchestraitor#799
+/// R1), or a MANAGED MARKER indented 4+ spaces (or led by a tab), which is an
+/// indented code block rather than a checkbox whenever it is not inside a list
+/// item (arbsec/orchestraitor#802) — arbsec/orchestraitor#809 and
 /// arbsec/orchestraitor#799 R1.
 fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
     let line = checklist
@@ -474,6 +477,19 @@ fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) 
         writeln!(
             writer,
             "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    if let Some(UnparseableConstruct::IndentedMarker) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a managed marker is indented too far at line {line} (4 or more spaces, or a leading tab); such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox, so the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted"
         )
         .into_diagnostic()?;
         return Ok(());

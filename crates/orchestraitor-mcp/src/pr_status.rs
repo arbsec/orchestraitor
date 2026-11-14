@@ -233,7 +233,7 @@ const MANAGED_MARKER_NAMES: [&str; 9] = [
 
 /// The construct that made a checklist reading INDETERMINATE.
 ///
-/// The verdict reason is the same for all three (`checklist_unparseable`), but
+/// The verdict reason is the same for all four (`checklist_unparseable`), but
 /// the explanatory message names the construct, so the reader knows WHICH rule
 /// refused the reading and what remedy applies.
 #[derive(
@@ -259,6 +259,15 @@ pub enum UnparseableConstruct {
     /// the gate cannot tell what the author asserted (arbsec/orchestraitor#799
     /// R1). The remedy is to write the marker canonically.
     NearMarker,
+    /// A MANAGED MARKER indented FOUR OR MORE spaces, or one led by a TAB
+    /// (arbsec/orchestraitor#802). When such a line is not inside a list item it
+    /// renders as an INDENTED CODE BLOCK, where it is not a checkbox at all, and
+    /// neither the canonical grammar (its leading `[ \t]*` class) nor this
+    /// scanner has a container model to tell that apart from a marker nested in
+    /// a list item. The reading is therefore REFUSED rather than guessed. The
+    /// remedy is to dedent the marker line to column 0 (0-3 leading spaces stays
+    /// accepted).
+    IndentedMarker,
 }
 
 /// Checklist reconciliation (reconcile-checklist semantics, verbatim).
@@ -279,13 +288,16 @@ pub struct Checklist {
     pub unchecked_count: u64,
     /// True when the body carries a RAW HTML CONSTRUCT (a line-start `<`
     /// outside every fenced region), opens a fenced code block indented 1-3
-    /// spaces, OR carries a NEAR-MARKER: the reading is indeterminate — the
-    /// container scope of the opener cannot be determined without a container
-    /// model, HTML is not modelled at all, and a near-marker asserts something
-    /// the canonical grammar cannot read — so NO checklist reading from this
-    /// body is trusted and the verdict blocks with `checklist_unparseable`
-    /// (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1). STICKY: a
-    /// closer does not clear it.
+    /// spaces, carries a NEAR-MARKER, or carries a MANAGED MARKER indented 4+
+    /// spaces (or led by a tab): the reading is indeterminate — the container
+    /// scope of the opener cannot be determined without a container model, HTML
+    /// is not modelled at all, a near-marker asserts something the canonical
+    /// grammar cannot read, and an indented marker is a code block rather than a
+    /// checkbox whenever it is not inside a list item — so NO checklist reading
+    /// from this body is trusted and the verdict blocks with
+    /// `checklist_unparseable` (arbsec/orchestraitor#809,
+    /// arbsec/orchestraitor#799 R1, arbsec/orchestraitor#802). STICKY: a closer
+    /// does not clear it.
     pub unparseable: bool,
     /// 1-based line number of the first such construct, or `None`.
     pub unparseable_line: Option<u64>,
@@ -1297,9 +1309,11 @@ fn gh_bucket(state: &str) -> String {
 ///
 /// A body whose checklist reading is INDETERMINATE — a fence OPENER indented
 /// 1-3 spaces, whether or not its region closes; a RAW HTML CONSTRUCT (a
-/// line-start `<`, which this scanner does not model); or a NEAR-MARKER — is
-/// never "all checked": the reading is refused rather than guessed
-/// (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1).
+/// line-start `<`, which this scanner does not model); a NEAR-MARKER; or a
+/// MANAGED MARKER indented 4+ spaces (or led by a tab), which is a code block
+/// rather than a checkbox whenever it is not inside a list item — is never "all
+/// checked": the reading is refused rather than guessed
+/// (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1, #802).
 fn parse_checklist(body: &str) -> Checklist {
     let scan = scan_fences(body);
     let mut items = Vec::new();
@@ -1324,6 +1338,7 @@ fn parse_checklist(body: &str) -> Checklist {
             UnparseableConstruct::IndentedFenceOpener,
         ),
         (scan.html_construct, UnparseableConstruct::HtmlConstruct),
+        (scan.indented_marker, UnparseableConstruct::IndentedMarker),
         (scan.near_marker, UnparseableConstruct::NearMarker),
     ] {
         let Some(line) = line else {
@@ -1470,6 +1485,14 @@ struct FenceScan {
     /// asserted (arbsec/orchestraitor#799 R1). Every checklist reading from
     /// the body is REFUSED rather than guessed.
     near_marker: Option<u64>,
+    /// 1-based line number of the first MANAGED MARKER indented too far: a
+    /// canonical managed marker, or a near-marker, indented FOUR OR MORE spaces
+    /// or led by a TAB (arbsec/orchestraitor#802). Such a line renders as an
+    /// INDENTED CODE BLOCK whenever it is not inside a list item, and neither
+    /// this scanner nor the canonical grammar has a container model to tell that
+    /// apart from a marker nested in a list item, so every checklist reading
+    /// from the body is REFUSED rather than guessed.
+    indented_marker: Option<u64>,
 }
 
 /// Removes every FENCED code region from the body and reports the constructs
@@ -1521,7 +1544,18 @@ struct FenceScan {
 ///   not one either; and a `<` anywhere else (`x < y`, `<` mid-line) is
 ///   ordinary text;
 /// - the same applies to a managed marker line: its `<!--` is never the line's
-///   first content, so a marker is never an HTML construct.
+///   first content, so a marker is never an HTML construct;
+/// - a MANAGED MARKER (canonical, or a NEAR-MARKER) indented FOUR OR MORE
+///   spaces, or led by a tab, is INDETERMINATE (arbsec/orchestraitor#802): when
+///   it is not inside a list item it renders as an INDENTED CODE BLOCK, where it
+///   is not a checkbox, and this scanner has no container model to tell that
+///   apart from a marker nested in a list item. The line number is recorded in
+///   [`FenceScan::indented_marker`] and the reading is REFUSED
+///   ([`UnparseableConstruct::IndentedMarker`]). 0-3 leading spaces stays
+///   accepted; the marker still COUNTS (`marker_count` is a pure function of the
+///   canonical grammar) — it is the reading that is refused, so no verdict is
+///   derived from that count. A marker inside a fenced region is inert, not a
+///   refusal. The remedy is to dedent the marker line to column 0.
 fn scan_fences(body: &str) -> FenceScan {
     let normalized = normalize_line_endings(body);
     let mut lines: Vec<(u64, String)> = Vec::new();
@@ -1530,6 +1564,7 @@ fn scan_fences(body: &str) -> FenceScan {
     let mut indented_opener = None;
     let mut html_construct = None;
     let mut near_marker = None;
+    let mut indented_marker = None;
     for (index, line) in normalized.lines().enumerate() {
         let candidate = fence_line(line);
         let line_number = u64::try_from(index + 1).ok();
@@ -1598,7 +1633,21 @@ fn scan_fences(body: &str) -> FenceScan {
         }
         // A VISIBLE line: it is evidence, and it may be a NEAR-MARKER — a line
         // that presents a managed marker but not in the canonical form, so the
-        // gate cannot tell what the author asserted (#799 R1).
+        // gate cannot tell what the author asserted (#799 R1). It may also be a
+        // MANAGED MARKER indented too far (#802): `fence_line` is `None` for
+        // FOUR OR MORE leading spaces, or for a tab after 0-3 spaces (a tab
+        // reaches the 4-column tab stop). Such a line renders as an INDENTED
+        // CODE BLOCK whenever it is not inside a list item, where it is not a
+        // checkbox, and this scanner has no container model to tell that apart
+        // from a marker nested in a list item — so the reading is REFUSED, never
+        // counted as evidence. 0-3 leading spaces stays accepted; a line inside
+        // a fenced region never reaches here (it is inert, not a refusal).
+        if indented_marker.is_none()
+            && fence_line(line).is_none()
+            && (parse_canonical_marker(line).is_some() || is_near_marker(line))
+        {
+            indented_marker = line_number;
+        }
         if near_marker.is_none() && is_near_marker(line) {
             near_marker = line_number;
         }
@@ -1611,6 +1660,7 @@ fn scan_fences(body: &str) -> FenceScan {
         indented_opener,
         html_construct,
         near_marker,
+        indented_marker,
     }
 }
 
@@ -2562,6 +2612,89 @@ mod tests {
         assert!(!sentinel_with_box.unparseable);
     }
 
+    /// A MANAGED MARKER indented FOUR OR MORE spaces — or led by a TAB — makes
+    /// the reading INDETERMINATE (arbsec/orchestraitor#802): when such a line is
+    /// not inside a list item it renders as an INDENTED CODE BLOCK, where it is
+    /// not a checkbox at all, and neither the canonical grammar (its leading
+    /// `[ \t]*` class) nor this scanner has a container model to tell that apart
+    /// from a marker nested in a list item. The confirmed repro is the first
+    /// case below: nine canonical ticked markers, each preceded by four spaces,
+    /// reported `marker_count=9, all_checked=true` and the merge lane merged it.
+    ///
+    /// The markers still COUNT — `marker_count` is a pure function of the
+    /// canonical grammar — and the verdict blocks on the refusal, so no decision
+    /// is derived from that count. 0-3 leading spaces stays ACCEPTED, and a
+    /// marker inside a fenced region is inert rather than a refusal.
+    #[test]
+    fn a_marker_indented_four_spaces_is_refused() {
+        let nine = |indent: &str| -> String {
+            MANAGED_MARKER_NAMES
+                .iter()
+                .map(|name| format!("{indent}- [x] <!-- orc:{name} --> d"))
+                .collect::<Vec<String>>()
+                .join("\n")
+                + "\n"
+        };
+
+        // The confirmed repro: nine 4-space-indented ticked markers, alone.
+        let parsed = parse_checklist(&nine("    "));
+        assert_eq!(parsed.marker_count, 9, "the grammar still counts them");
+        assert!(parsed.unparseable, "an indented code block is not evidence");
+        assert_eq!(parsed.unparseable_line, Some(1));
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+        assert!(
+            !parsed.all_checked,
+            "a refused reading is never all checked"
+        );
+
+        // Blocked next to nine DETERMINATE markers too: the indented line is
+        // refused wherever it sits.
+        let parsed = parse_checklist(&format!("{}{}", nine("    "), nine("")));
+        assert_eq!(parsed.marker_count, 18);
+        assert!(parsed.unparseable);
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+        assert!(!parsed.all_checked);
+
+        // 0-3 leading spaces is a marker nested in a list item: ACCEPTED, and
+        // unchanged.
+        let parsed = parse_checklist(&nine("  "));
+        assert_eq!(parsed.marker_count, 9);
+        assert!(parsed.all_checked);
+        assert!(!parsed.unparseable);
+
+        // A TAB reaches the 4-column tab stop, so it is the same refusal — and
+        // the line is still counted, never silently dropped.
+        let parsed = parse_checklist("\t- [x] <!-- orc:tests --> tab\n");
+        assert_eq!(parsed.marker_count, 1);
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+
+        // A NEAR-MARKER indented four spaces is indeterminate for BOTH reasons;
+        // the named construct is the more specific `indented_marker`, because
+        // the indentation is what makes the line render as code.
+        let parsed = parse_checklist(&format!("{}    - [x]  <!-- orc:tests --> near\n", nine("")));
+        assert_eq!(parsed.marker_count, 9);
+        assert_eq!(parsed.unparseable_line, Some(10));
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+
+        // A marker inside a FENCED region is inert, not a refusal: the fence
+        // already removes it from the scan.
+        let parsed = parse_checklist("```\n    - [x] <!-- orc:tests --> fenced\n```\n");
+        assert_eq!(parsed.marker_count, 0);
+        assert!(!parsed.unparseable);
+    }
+
     /// HTML IS NOT MODELLED: a line-start `<` REFUSES the reading
     /// (arbsec/orchestraitor#799 R1).
     ///
@@ -2661,7 +2794,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 75;
+    const CORPUS_FLOOR: u32 = 82;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
@@ -2799,6 +2932,7 @@ mod tests {
                     UnparseableConstruct::IndentedFenceOpener => "indented_fence_opener",
                     UnparseableConstruct::HtmlConstruct => "html_construct",
                     UnparseableConstruct::NearMarker => "near_marker",
+                    UnparseableConstruct::IndentedMarker => "indented_marker",
                 });
             if let Some(expected_construct) = expected_construct
                 && actual_construct != Some(expected_construct.as_str())

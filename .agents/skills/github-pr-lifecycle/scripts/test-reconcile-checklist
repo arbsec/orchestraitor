@@ -565,7 +565,7 @@ CORPUS_TSV="$CORPUS_DIR/expectations.tsv"
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=75
+CORPUS_FLOOR=82
 declare -A CORPUS_COUNT=() CORPUS_ALL=() CORPUS_UNPARSEABLE=() CORPUS_CONSTRUCT=()
 while IFS=$'\t' read -r row_case row_count row_all row_unparseable row_construct; do
   case "$row_case" in
@@ -1160,12 +1160,15 @@ assert 'h: a bodyless PR gains the nine markers' 9 \
 assert 'h: a bodyless PR says the body needs a summary' 1 \
   "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
 
-# --- (h2) gh's OWN body sources are left alone ---------------------------------
+# --- (h2) gh's OWN body sources: an EXPLICIT body still wins -------------------
 # `--fill`, `--fill-first`, `--fill-verbose`, `--template <path>`, `--web` and
-# `--editor` make `gh pr create` source the body elsewhere; injecting a body for
-# those routes would be overridden or rejected as a conflicting combination. So
-# nothing is injected and NO `--body` is passed, and the stderr note names the
-# documented one-command remediation (`pr-mutate edit <pr> --inject-checklist`).
+# `--editor` make `gh pr create` source the body itself. An EXPLICIT
+# `--body`/`--body-file` is nevertheless ALWAYS validated through the shared
+# composition helper and forwarded with the managed checklist (arbsec/
+# orchestraitor#799 R13 review): gh documents that an explicit `--body` takes
+# precedence over autofilled content, so NOT forwarding used to create a PR
+# whose body the gate immediately refused while the note claimed no body was
+# passed. Injection is skipped only when NO explicit body was supplied.
 OUT="$(dry_run --title t --fill 2>&1)"; RC=$?
 assert 'h2: --fill exits 0' 0 "$RC"
 assert 'h2: --fill injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
@@ -1177,6 +1180,12 @@ assert 'h2: the --fill note names the remediation' 1 \
   "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
 assert 'h2: --fill suppresses the bodyless note' 0 \
   "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
+# The note must describe what the code ACTUALLY does: no body was supplied, so
+# no --body is passed and nothing is injected.
+assert 'h2: the --fill note says no --body was supplied' 1 \
+  "$(grep -cF 'and no --body was' <<<"$OUT")"
+assert 'h2: and that nothing is injected' 1 \
+  "$(grep -cF 'merge checklist is NOT injected and no --body is passed.' <<<"$OUT")"
 
 OUT="$(dry_run --title t --template .github/pull_request_template.md 2>&1)"; RC=$?
 assert 'h2: --template exits 0' 0 "$RC"
@@ -1188,17 +1197,47 @@ assert 'h2: --template is passed through to gh' 1 \
 assert 'h2: the --template note names the remediation' 1 \
   "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
 
-# A body supplied ALONGSIDE a gh body source is still the caller's own: it is
-# passed through (gh owns the conflict), but nothing is injected and the note
-# still fires.
-OUT="$(dry_run --title t --body 'explicit body' --fill 2>&1)"; RC=$?
-assert 'h2: --fill with an explicit body exits 0' 0 "$RC"
-assert 'h2: --fill with an explicit body injects nothing' 0 \
+# (1) an explicit body alongside `--fill` is STILL VALIDATED: a body the engine
+# refuses exits 2 with the typed message and NOTHING reaches gh.
+OUT="$(dry_run --title t --body '- [x] <!-- orc:issue --> linked
+<div>a block</div>' --fill 2>&1)"; RC=$?
+assert 'h2: --fill + a refused explicit body exits 2' 2 "$RC"
+assert 'h2: --fill + refused body names the construct' 1 \
+  "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
+assert 'h2: --fill + refused body never reaches gh' 0 \
+  "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+
+# (2) an explicit body alongside `--fill` is FORWARDED, and it carries the nine
+# markers: gh gives the explicit body precedence over autofilled content.
+OUT="$(dry_run --title t --body 'a plain summary' --fill 2>&1)"; RC=$?
+assert 'h2: --fill + an explicit body exits 0' 0 "$RC"
+assert 'h2: --fill + explicit body forwards --body to gh' 1 \
+  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+assert 'h2: --fill + explicit body carries the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
-assert 'h2: --fill with an explicit body still passes that body' 1 \
-  "$(grep -cF 'explicit body' <<<"$OUT")"
-assert 'h2: --fill with an explicit body prints the note' 1 \
+assert 'h2: --fill + explicit body keeps the summary' 1 \
+  "$(grep -cF 'a plain summary' <<<"$OUT")"
+assert 'h2: --fill is still passed through' 1 \
+  "$(grep -c -- '--fill' <<<"$OUT")"
+assert 'h2: --fill + explicit body prints no remediation note' 0 \
   "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
+# The `--body-file` route behaves identically.
+printf 'a body-file summary\n' > "$TMP/files/h2-summary.md"
+OUT="$(dry_run --title t --body-file "$TMP/files/h2-summary.md" --fill 2>&1)"; RC=$?
+assert 'h2: --fill + --body-file exits 0' 0 "$RC"
+assert 'h2: --fill + --body-file carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'h2: --fill + --body-file keeps the summary' 1 \
+  "$(grep -cF 'a body-file summary' <<<"$OUT")"
+
+# (3) `--template`/`--web`/`--editor` are gh's EXCLUSIVE body sources: an
+# explicit body alongside one can never produce a PR, so it is refused here
+# (after validation) instead of failing inside gh after the review gate ran.
+OUT="$(dry_run --title t --body 'a plain summary' --template .github/pull_request_template.md 2>&1)"; RC=$?
+assert 'h2: --template + an explicit body is refused' 2 "$RC"
+assert 'h2: and the refusal names the exclusivity' 1 \
+  "$(grep -cF 'accepts only one body source' <<<"$OUT")"
+assert 'h2: and never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
 
 dry_run --title t --body 'a' --body-file "$TMP/files/own-marker.md" >/dev/null
 RC=$?
@@ -1605,6 +1644,203 @@ assert 'j: the sentinel log is unchanged' "$SENTINEL_LOG" "$SENTINEL_LOG_AFTER"
 CONTROL_TOPLEVEL="$(GIT_DIR="$SENTINEL/.git" GIT_WORK_TREE="$SENTINEL" \
   git -C "$HOSTILE" rev-parse --show-toplevel 2>/dev/null || true)"
 assert 'j: control: the ambient location does win over -C' "$SENTINEL" "$CONTROL_TOPLEVEL"
+
+# --- (f9) a MANAGED MARKER indented 4+ spaces is INDETERMINATE (#802) ----------
+# CONFIRMED BY EXECUTION: nine canonical ticked markers, each preceded by FOUR
+# spaces and with no surrounding list, render entirely as an INDENTED CODE
+# BLOCK — yet the gate used to report `marker_count=9, all_checked=true` and
+# `merge-gate` merged it. The canonical grammar's leading `[ \t]*` cannot tell
+# "marker inside a list item" (legitimate) from "standalone indented code" (not
+# evidence), and neither scanner has a container model, so the reading is
+# REFUSED (`indented_marker`) instead of counted. The markers still COUNT —
+# marker_count is a pure function of the canonical grammar — and the verdict
+# blocks on the refusal, never on that count.
+nine_indented() { # nine_indented <indent> -> the nine ticked markers at <indent>
+  local indent="$1" name
+  for name in issue service-identity tests security docs rollback checks review threads; do
+    printf '%s- [x] <!-- orc:%s --> checked with evidence\n' "$indent" "$name"
+  done
+}
+nine_indented '    ' > "$TMP/files/f9-four-space-nine.md"
+export BODY_FIXTURE="$TMP/files/f9-four-space-nine.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: nine 4-space-indented markers still count' 9 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: but the reading is REFUSED (#802)' true "$(jq -r .unparseable <<<"$OUT")"
+assert 'f9: and it names the line' 1 "$(jq -r .unparseable_line <<<"$OUT")"
+assert 'f9: and names indented_marker' 'indented_marker' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+assert 'f9: an indented code block is never all checked' false \
+  "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f9: so the gate BLOCKS it' 5 "$RC"
+assert 'f9: with the distinct unparseable reason' '["checklist_unparseable"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'f9: and the telemetry carries the refusal' true \
+  "$(jq -r .checklist_unparseable <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo
+assert 'f9: text mode names the indented marker' 1 \
+  "$(grep -cF 'a managed marker is indented too far at line 1' <<<"$OUT")"
+assert 'f9: and names a working remedy' 1 \
+  "$(grep -cF 'dedent the marker line to column 0' <<<"$OUT")"
+# It must never be reported as a fence or an HTML construct.
+assert 'f9: never a fence message' 0 "$(grep -cF 'opens a fenced code block' <<<"$OUT")"
+assert 'f9: never an HTML message' 0 "$(grep -cF 'raw HTML construct' <<<"$OUT")"
+rm -f "$TMP/merge-argv.txt"
+run merge-gate 7 --repo test-org/repo
+assert 'f9: merge-gate refuses the indented-marker body' 5 "$RC"
+assert 'f9: naming the checklist refusal' 1 \
+  "$(grep -cF 'checklist_unparseable' "$TMP/stderr")"
+assert 'f9: and it NEVER invokes gh pr merge' 0 "$(exists "$TMP/merge-argv.txt")"
+
+# The refusal does not depend on the body carrying NOTHING else.
+{ nine_indented '    '; nine_indented ''; } > "$TMP/files/f9-four-space-plus-canonical.md"
+export BODY_FIXTURE="$TMP/files/f9-four-space-plus-canonical.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: 4-space + canonical markers both count' 18 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: and the indented ones still refuse the reading' true \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f9: with indented_marker' 'indented_marker' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f9: the gate blocks that body too' 5 "$RC"
+
+# The legitimate case, unchanged: 0-3 leading spaces is a marker nested in a
+# list item.
+nine_indented '  ' > "$TMP/files/f9-two-space-nine.md"
+export BODY_FIXTURE="$TMP/files/f9-two-space-nine.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: nine 2-space-indented markers count' 9 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: and stay determinate' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f9: and read as all checked, as before' true "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f9: so the gate still converges on them' 0 "$RC"
+
+# A TAB reaches the 4-column tab stop: the same refusal, never a silent drop.
+printf '\t- [x] <!-- orc:tests --> tab-led marker\n' > "$TMP/files/f9-tab-led.md"
+export BODY_FIXTURE="$TMP/files/f9-tab-led.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: a tab-led marker still counts' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: but it is refused' true "$(jq -r .unparseable <<<"$OUT")"
+assert 'f9: as indented_marker' 'indented_marker' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f9: and it blocks with the refusal, not markers_missing' \
+  '["checklist_unparseable"]' "$(jq -c .reasons <<<"$OUT")"
+
+# A NEAR-MARKER indented 4 spaces is indeterminate for BOTH reasons; the
+# reported construct is the more specific `indented_marker`, because the
+# indentation is what makes the line render as code — never silently ignored.
+{ nine_indented ''; printf '    - [x]  <!-- orc:tests --> four-space-indented near-marker\n'; } \
+  > "$TMP/files/f9-indented-near-marker.md"
+export BODY_FIXTURE="$TMP/files/f9-indented-near-marker.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: a 4-space near-marker keeps the nine real markers' 9 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: and refuses the reading' true "$(jq -r .unparseable <<<"$OUT")"
+assert 'f9: naming indented_marker, not near_marker' 'indented_marker' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+assert 'f9: on the near-marker line' 10 "$(jq -r .unparseable_line <<<"$OUT")"
+# A marker inside a FENCED region is inert, not a refusal.
+printf '```\n    - [x] <!-- orc:tests --> fenced\n```\n' > "$TMP/files/f9-fenced-indented.md"
+export BODY_FIXTURE="$TMP/files/f9-fenced-indented.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f9: a fenced 4-space marker is inert' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f9: and not a refusal' false "$(jq -r .unparseable <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f10) composition refuses a body the engine will reject (#799 R12) --------
+# `pr-create`/`pr-mutate` used to exit 0 and compose a body that
+# `reconcile-checklist` then refuses: the HTML check ran only when the helper
+# was about to APPEND markers (it returns early for a body that already carries
+# one) and neither the near-marker rule nor #802's indented-marker rule was
+# validated at all. All three constructs are now validated BEFORE that early
+# return; the unclosed-fence refusal stays append-specific.
+printf -- '- [x] <!-- orc:issue --> linked\n<div>a block</div>\n' > "$TMP/files/f10-html.md"
+printf -- '- [ ]\t<!-- orc:tests --> near only\n' > "$TMP/files/f10-near.md"
+printf -- '- [x] <!-- orc:issue --> linked\n- [ ]  <!-- orc:tests --> near\n' > "$TMP/files/f10-near-after-canonical.md"
+printf -- '- [x] <!-- orc:issue --> linked\n    - [x] <!-- orc:tests --> indented\n' > "$TMP/files/f10-indented.md"
+for shape in html near near-after-canonical indented; do
+  case "$shape" in
+    html)                 want='raw HTML construct at line 2'; fix='put it inside a fenced code block, indent it by 4 spaces, or remove it' ;;
+    near)                 want='near-marker at line 1'; fix='write the marker canonically' ;;
+    near-after-canonical) want='near-marker at line 2'; fix='write the marker canonically' ;;
+    indented)             want='indented too far at line 2'; fix='dedent the marker line to column 0' ;;
+  esac
+  # (1) the shared helper itself
+  rm -f "$TMP/stderr"
+  ensure "$(cat "$TMP/files/f10-$shape.md")" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+  assert "f10: $shape is refused by the helper" 2 "$RC"
+  assert "f10: $shape names what it refused" 1 "$(grep -cF "$want" "$TMP/stderr")"
+  assert "f10: $shape offers a working remedy" 1 "$(grep -cF "$fix" "$TMP/stderr")"
+  assert "f10: $shape appends nothing" 0 "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/stderr")"
+  # (2) pr-create, through its real body route
+  OUT="$(dry_run --title t --body "$(cat "$TMP/files/f10-$shape.md")" 2>&1)"; RC=$?
+  assert "f10: pr-create refuses $shape" 2 "$RC"
+  assert "f10: pr-create names what it refused for $shape" 1 "$(grep -cF "$want" <<<"$OUT")"
+  assert "f10: pr-create never reaches gh for $shape" 0 \
+    "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+  # (3) pr-mutate, through its real body route
+  rm -f "$TMP/edited-body.md"
+  run pr-mutate edit 7 --repo test-org/repo --body "$(cat "$TMP/files/f10-$shape.md")"
+  assert "f10: pr-mutate refuses $shape" 2 "$RC"
+  assert "f10: pr-mutate names what it refused for $shape" 1 \
+    "$(grep -cF "$want" "$TMP/stderr")"
+  assert "f10: pr-mutate never reaches gh for $shape" 0 "$(exists "$TMP/edited-body.md")"
+done
+# The unclosed-fence refusal is APPEND-SPECIFIC: a body that already carries the
+# checklist is not refused for a fence it is not appending into (the fence is a
+# column-0 one, so it is not an indeterminate opener either).
+printf -- '- [x] <!-- orc:issue --> linked\n```\nunclosed\n' > "$TMP/files/f10-unclosed-fence.md"
+rm -f "$TMP/stderr"
+ensured="$(ensure "$(cat "$TMP/files/f10-unclosed-fence.md")" "$TMP/repo" 2>"$TMP/stderr")"; RC=$?
+assert 'f10: an already-checklisted body with an open fence is not refused' 0 "$RC"
+assert 'f10: and its content is set unchanged' 1 "$(grep -cF 'unclosed' <<<"$ensured")"
+# A body that carries NO checklist and ends in an unclosed fence IS refused.
+printf 'just prose\n```\nunclosed\n' > "$TMP/files/f10-append-into-fence.md"
+rm -f "$TMP/stderr"
+ensure "$(cat "$TMP/files/f10-append-into-fence.md")" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f10: appending into an unclosed fence is still refused' 2 "$RC"
+assert 'f10: and the error names the fence' 1 "$(grep -cF 'ends inside an unclosed code fence' "$TMP/stderr")"
+
+# --- (f11) the box-token rule is LOCALE-INDEPENDENT (#799 R12) -----------------
+# A box token is `[` + exactly ONE CHARACTER + `]`. The shell used to regex it
+# as one BYTE under a C locale, gated behind a functional `C.UTF-8` probe: on a
+# machine without that locale `[✓] orc:review` was three bytes for the shell and
+# one character for Rust, so the shell read a near-marker as prose (a false
+# pass) while Rust refused it. The scan now decodes one UTF-8 sequence by byte
+# and is pinned to the C locale, so the SAME body must produce the SAME verdict
+# in every ambient locale.
+printf -- '- [x] <!-- orc:review --> reviewed\n[\342\234\223] orc:review\n' \
+  > "$TMP/files/f11-unicode-bare.md"
+printf -- '- [x] <!-- orc:tests --> tested\n[\342\234\223]  <!-- orc:tests -->\n' \
+  > "$TMP/files/f11-unicode-delimiter.md"
+export BODY_FIXTURE="$TMP/files/f11-unicode-bare.md"
+for ambient_locale in C C.UTF-8 en_US.UTF-8; do
+  OUT="$(cd "$TMP/repo" && LC_ALL="$ambient_locale" \
+    bash scripts/reconcile-checklist 7 --repo test-org/repo --json 2>"$TMP/stderr")"; RC=$?
+  assert "f11: [$ambient_locale] the engine still exits 0" 0 "$RC"
+  assert "f11: [$ambient_locale] [✓] is a near-marker" true \
+    "$(jq -r .unparseable <<<"$OUT")"
+  assert "f11: [$ambient_locale] and names near_marker" 'near_marker' \
+    "$(jq -r .unparseable_construct <<<"$OUT")"
+  assert "f11: [$ambient_locale] and counts only the canonical marker" 1 \
+    "$(jq -r .marker_count <<<"$OUT")"
+done
+export BODY_FIXTURE="$TMP/files/f11-unicode-delimiter.md"
+for ambient_locale in C C.UTF-8 en_US.UTF-8; do
+  OUT="$(cd "$TMP/repo" && LC_ALL="$ambient_locale" \
+    bash scripts/reconcile-checklist 7 --repo test-org/repo --json 2>"$TMP/stderr")"; RC=$?
+  assert "f11: [$ambient_locale] the delimiter form is a near-marker" 'near_marker' \
+    "$(jq -r .unparseable_construct <<<"$OUT")"
+done
+# The scan's byte decoder is locale-independent BY CONSTRUCTION: the exported
+# scan reports the near-marker LINE even with the ambient locale forced to C, so
+# no probe and no ambient locale can change what it decides.
+assert 'f11: the scan decoder is locale-independent (C locale)' 1 \
+  "$(printf -- '- [x] <!-- orc:tests --> t\n[\342\234\223] orc:tests\n' \
+    | LC_ALL=C bash -c 'source "$1"; orc_lib_near_marker_line' _ "$SCRIPT_DIR/_lib.sh" \
+    | grep -c '^2$')"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
