@@ -97,7 +97,7 @@ uuid = { version = "1.23", features = ["v4", "serde"] }
 ed25519-dalek = "3.0.0"
 # RS256 JWT signing for the GitHub App service identity (issue #307); MIT license;
 # aws_lc_rs backend reuses the workspace-pinned aws-lc-rs (tech-stack.md §5.2).
-jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 # RFC 3339 `expires_at` parsing for minted GitHub installation tokens (issue #307).
 time = { version = "0.3.54", default-features = false, features = ["parsing", "std"] }
 
