@@ -58,7 +58,7 @@ done
 for check in review-threads reconcile-checklist; do
   cat > "$TMP/repo/scripts/$check" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' '{"unresolved_actionable":0,"all_checked":true,"unchecked":[]}'
+printf '%s\n' '{"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unparseable":false,"unchecked":[]}'
 STUB
 done
 
@@ -161,6 +161,51 @@ echo "--- (c) current copy: merge-gate reaches the merge call ---"
 run merge-gate 7 --repo test-org/repo
 assert 'current: merge-gate exits 0' 0 "$RC"
 assert 'current: merge command was issued once' 1 "$(count "$GH_LOG" 'pr merge')"
+
+# --- (c2) an INDETERMINATE checklist blocks the merge before any merge --------
+# arbsec/orchestraitor#799 R1: a body that carries a NEAR-MARKER (a line that
+# presents a managed marker but not in the canonical form) cannot be read, so
+# the verdict is not mergeable and `merge-gate` must stop BEFORE it constructs
+# a merge call.
+echo "--- (c2) current copy: an indeterminate checklist blocks the merge ---"
+cat > "$TMP/repo/scripts/reconcile-checklist" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"markers_present":true,"marker_count":9,"all_checked":true,"unparseable":true,"unparseable_line":10,"unparseable_construct":"near_marker","unchecked":[]}'
+STUB
+run merge-gate 7 --repo test-org/repo
+assert 'near-marker: merge-gate exits 5 (blocked)' 5 "$RC"
+assert 'near-marker: no merge command was issued' 0 "$(count "$GH_LOG" 'pr merge')"
+assert 'near-marker: the gate names the indeterminate reason' 1 \
+  "$(count "$TMP/stderr" 'checklist_unparseable')"
+cat > "$TMP/repo/scripts/reconcile-checklist" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unparseable":false,"unchecked":[]}'
+STUB
+
+# --- (c3) `reconcile-checklist` is NOT a guarded policy file ------------------
+# Two reviewers have now asked whether replacing `reconcile-checklist` above can
+# trip a STALE-POLICY refusal (the scenario would then never reach its
+# assertion). It cannot, and this pins WHY so a future change to either policy
+# list fails HERE instead of silently invalidating the (c2) scenario: the
+# provenance guard only covers the files each entry point passes to
+# `orc_lib_require_policy_current`.
+policy_list() { # policy_list <script> -> the basenames its provenance guard covers
+  awk '
+    /orc_lib_require_policy_current/ { incall = 1 }
+    incall { print; if ($0 !~ /\\$/) exit }
+  ' "$TMP/repo/scripts/$1" |
+    grep -oE '\$SCRIPT_DIR/[a-z-]+' | sed 's|.*\$SCRIPT_DIR/||' | sort
+}
+CONV_POLICY="$(policy_list convergence-status)"
+MERGE_POLICY="$(policy_list merge-gate)"
+assert 'policy: convergence-status guards pr-checks + itself' \
+  'convergence-status pr-checks' "$(tr '\n' ' ' <<<"$CONV_POLICY" | sed 's/ $//')"
+assert 'policy: merge-gate guards pr-checks + convergence-status + itself' \
+  'convergence-status merge-gate pr-checks' "$(tr '\n' ' ' <<<"$MERGE_POLICY" | sed 's/ $//')"
+assert 'policy: reconcile-checklist is NOT guarded by convergence-status' 0 \
+  "$(grep -c '^reconcile-checklist$' <<<"$CONV_POLICY")"
+assert 'policy: reconcile-checklist is NOT guarded by merge-gate' 0 \
+  "$(grep -c '^reconcile-checklist$' <<<"$MERGE_POLICY")"
 
 # --- fixture: branches carrying policy that is NOT the base's ------------------
 git -C "$TMP/repo" switch -q -c stale-classifier

@@ -52,35 +52,25 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 > to guard against regressions.
 
 ```text
-1. DRAFT          PRE-REVIEW GATE: before `pr-create` creates a PR, it
-                  verifies a recorded CLEAN local review generation exists
-                  for the exact (head, base) pair being proposed (a
+1. DRAFT          Nothing gates CREATION any more (#799 R18): a PR may be
+                  created at any time. There is NO create-time review gate,
+                  because `pr-create` forwards `gh`'s arguments verbatim and
+                  therefore cannot know which base `gh` will use — a gate that
+                  cannot bind to the base it is gating is worse than none.
+                  What gates is the MERGE: a CLEAN local review generation is
+                  required for the exact (head, base) pair being merged — a
                   `.orchestraitor/reviews` record whose head SHA matches the
-                  current HEAD and whose base OID matches the CURRENT TIP of
-                  `refs/remotes/origin/<base>`, fetched by the gate — the same
-                  OID `pr-review-agent` records as `- base OID:` and
-                  `convergence-status`/`merge-gate` compare to the PR's
-                  `baseRefOid`; never `git merge-base`, and never a local
-                  branch of the same name). Absent, stale, or non-clean
-                  evidence fails the create (typed exit 2:
-                  `pre-review-gate: ... run pr-review-local first`) — run
+                  current HEAD and whose base OID matches the PR's actual
+                  `baseRefOid` (the OID `pr-review-agent` records as
+                  `- base OID:`; `convergence-status` and `merge-gate` compare
+                  it, and never fall back to `git merge-base` or to a local
+                  branch of the same name). Produce that evidence with
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local`
-                  first, then re-run `pr-create`. A base that cannot be
-                  resolved from that fully-qualified remote ref (missing
-                  branch, unreachable `origin`, unrelated history) is a
-                  distinct fail-closed refusal (exit 6) that names the ref it
-                  tried and the remediation — it never falls back to a local
-                  branch. Escapes: an explicit `--skip-review-gate`
-                  overrides the gate — ONLY for docs-only PRs where
-                  CodeRabbit is not applicable, or an explicit owner
-                  directive — and it is evaluated BEFORE base resolution,
-                  so it skips base resolution and the review-record check
-                  together: an unreachable `origin` cannot veto an explicit
-                  operator decision (it still prints a loud notice and the
-                  PR still gets reviewed). The docs-only auto-skip (a diff
-                  vs base containing ONLY `*.md` files) is the other way
-                  round: it is INFERRED from the diff, so it still requires
-                  a resolvable base and can be refused with exit 6.
+                  and `pr-review-agent` before merging; a record for any other
+                  base is refused as `agent_review_not_clean_at_head`.
+                  `--skip-review-gate` is still accepted, as a consumed NO-OP:
+                  it skips nothing, and it never was the thing that let a PR
+                  merge.
                   Create the PR as DRAFT linked to the leaf issue
                   (`Closes #N` for full-scope landings, bare `Refs #N` for
                   partial landings) and spec
@@ -327,6 +317,81 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   `needs-human` state (spec `10-orchestrator.md` §9.24, §9.33.4) — NEVER silent approval.
                   Use `bash .agents/skills/github-pr-lifecycle/scripts/convergence-status`
                   to compute the verdict from checks + threads + checklist.
+                  A PR body with ZERO `<!-- orc:* -->` markers blocks with
+                  `checklist_markers_missing` — a marker-less body is MISSING
+                  evidence, never a satisfied checklist (#788). There is NO
+                  author-granted opt-out: the body cannot waive itself, so the
+                  block stands until the body carries the markers (an exemption
+                  needs an authority the author lacks — #801). `pr-create` is a
+                  TRANSPARENT wrapper: it forwards every argument to `gh pr create`
+                  VERBATIM, in order, and composes NOTHING. It does not inspect,
+                  rewrite or refuse gh's flags, and it no longer injects the
+                  managed checklist: every PR it creates needs one remediation
+                  command afterwards, `pr-mutate edit <pr> --inject-checklist`,
+                  which its post-create note names (the PR number parsed from the
+                  URL gh printed). The only token it recognises is its own
+                  `--skip-review-gate`, which is a consumed NO-OP kept for
+                  compatibility. There is NO create-time review gate: a wrapper
+                  that cannot see which base `gh` will use cannot bind review
+                  evidence to that base. **A PR may be created at any time; it
+                  cannot MERGE until a CLEAN review record exists for its exact
+                  (head, base)** — `convergence-status` and `merge-gate` compare
+                  the record's base OID with the PR's actual `baseRefOid`, and
+                  that is the binding gate. Every
+                  `pr-mutate` body route carries the same invariant: `edit --body`
+                  and `edit --body-file` append the markers when the supplied body
+                  carries none, so replacing a PR body can never drop the
+                  checklist (`--body-file` is read by the script and goes through
+                  the same trusted-root guard as `--body @file`; `-` reads STDIN).
+                  A supplied body that ENDS inside an unclosed code fence is
+                  refused with exit 2 — appended markers would render as code and
+                  be hidden from the scan — so close the fence and rerun. That
+                  refusal is APPEND-SPECIFIC: it fires only when markers must be
+                  appended, so a body that already carries the checklist is
+                  accepted as-is. The sticky indented-opener refusal is NOT
+                  append-specific — it refuses an already-checklisted body too.
+                  For a PR that ALREADY EXISTS whose body is already
+                  set, one command clears it:
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate
+                  edit <pr> --inject-checklist` reads the current body, appends
+                  the managed checklist and sets the body (when the body already
+                  carries it, only the body update is skipped — other edit flags
+                  in the same invocation still run). The exact fence and
+                  line-ending rules the scanners apply — indentation, info
+                  strings, closing tails, CRLF/CR normalisation, and the
+                  indeterminate-reading refusal — live in
+                  `references/pr-convergence.md` ("An indeterminate reading
+                  is REFUSED"). A marker after a closed fence counts. A managed
+                  marker has ONE canonical form — `- [BOX] <!-- orc:NAME -->`
+                  with exactly one ASCII space between every token — and a line
+                  that presents a managed marker but not in that form (a
+                  near-marker) is INDETERMINATE. HTML is NOT modelled: a line
+                  outside every fenced region whose first non-whitespace
+                  character is `<` (0-3 leading spaces) makes the reading
+                  INDETERMINATE — put it in a column-0 fenced code block, or
+                  remove it. So does a fence opener OR an HTML construct at a
+                  CONTAINER SCOPE the scan cannot model (`container_scope`):
+                  container-prefixed by a list marker (`-`, `*`, `+`, `N.`, `N)`)
+                  or a blockquote marker (`>`), followed by whitespace, then the
+                  construct — or indented 4+ spaces / led by a tab. Inside a list
+                  item its contents are examples and at top level the same text
+                  is literal code, so the reading is refused; a 4-space line
+                  carrying neither construct is ordinary prose and never refuses.
+                  Remedy: dedent the construct to column 0, or put it in a
+                  column-0 fenced block. A fence opener indented 1-3 spaces
+                  makes it INDETERMINATE too, closed or not; so does a managed
+                  marker or near-marker indented 4+ spaces (or led by a tab),
+                  which renders as an indented code block — dedent it to column 0
+                  AND write it in the canonical form (`- [x] <!-- orc:NAME -->`),
+                  because dedenting alone does not make a near-marker parseable.
+                  Whatever the cause, the verdict blocks with
+                  `checklist_unparseable` and names exactly one of the FIVE
+                  constructs — `container_scope`, `indented_fence_opener`,
+                  `html_construct`, `indented_marker`, `near_marker` — together
+                  with its remedy
+                  (the full rule set, with boundaries and remedies, is in
+                  `references/pr-convergence.md`, "An indeterminate reading is
+                  REFUSED").
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

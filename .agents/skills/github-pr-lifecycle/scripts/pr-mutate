@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... | ready <pr> | close <pr> [reason flags]."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set with its content unchanged; only trailing newlines are normalised), so replacing a PR body can never drop the checklist. --body-file is READ by the script and resolved through the trusted-root guard (workspace or temp directory; '-' reads the body from STDIN). A supplied body that ENDS inside an unclosed code fence is refused with exit 2 — appended markers would render as code and be hidden — so close the fence and rerun (append-specific: a body that already carries the checklist is set unchanged); the body is never reordered or repaired. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788). When the body already carries the checklist it skips only the body update and still executes any other edit flags."
   exit "$ORC_OK"
 fi
 
@@ -42,36 +42,282 @@ if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
 fi
 REST=("${REST[@]:1}")
 
-# `edit` has no meaningful effect without at least one edit flag; refuse the
-# no-op instead of letting gh error later with an ambiguous message.
-if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ]; then
-  echo "error: edit requires at least one edit flag (e.g. --add-reviewer <login>)" >&2
-  exit "$ORC_ERR_CONFIG"
+# Body-flow validation (issue #587): `edit --body <value>`/`--body-file <path>`
+# resolve `@file` expansion and refuse path-shaped values before the flag ever
+# reaches gh — never post a path string as PR content.
+#
+# `--inject-checklist` is the REMEDIATION path for a PR that ALREADY exists
+# and carries no managed marker (arbsec/orchestraitor#788): it reads the
+# PR's current body, appends the managed checklist, and sets the body. It is
+# extracted here (before the body-flow validation) so it never reaches gh as
+# an unknown flag.
+INJECT_CHECKLIST=0
+
+# Both body routes ALSO carry the managed checklist (arbsec/orchestraitor#788):
+# `pr-create` composes NOTHING (it forwards gh's argv verbatim), so this script
+# is the only composer: `--inject-checklist` remediates a PR whose body is
+# already set, and a plain `--body`/`--body-file` edit must not be able to UNDO
+# the checklist — a summary-only file would otherwise replace the whole body and
+# drop the PR back to `checklist_markers_missing`. The shared helper
+# `orc_lib_ensure_checklist_markers` appends the markers (one implementation, no
+# drift), and a
+# supplied body that already carries a marker is set with its CONTENT
+# unchanged — the routes resolve the body through a command substitution, so
+# trailing newlines are normalised and nothing else is altered: author content
+# is evidence, never something a helper edits.
+PR_MUTATE_BODY_ROOT=""
+pr_mutate_ensure_body() {
+  orc_lib_ensure_checklist_markers "$1" "$PR_MUTATE_BODY_ROOT"
+}
+# The gh short-flag table for THIS action: `gh pr edit` is the only action that
+# can carry a body, so it is the only one whose short tokens are resolved.
+# `gh pr ready` / `gh pr close` have no body flag at all, so their short tokens
+# cannot carry one and are forwarded verbatim.
+PR_MUTATE_SHORT_VALUE=""
+PR_MUTATE_SHORT_BOOL=""
+if [ "$ACTION" = "edit" ]; then
+  PR_MUTATE_SHORT_VALUE="$ORC_LIB_SHORT_VALUE_EDIT"
+  PR_MUTATE_SHORT_BOOL="$ORC_LIB_SHORT_BOOL_EDIT"
+fi
+if [ "$ACTION" = "edit" ]; then
+  PR_MUTATE_BODY_ROOT="$(orc_lib_git_toplevel)"
+  # ONE operand-aware walk. It does three things in a single pass, because all
+  # three depend on where the OPERANDS are:
+  #
+  #   1. extracts our own `--inject-checklist` (a token that is exactly it, and
+  #      NOT the operand of a value-taking flag);
+  #   2. handles the body routes (`--body`, `--body-file`, `-b`, `-F`, in every
+  #      pflag spelling) through the shared composition helper;
+  #   3. forwards everything else VERBATIM, including the OPERAND of a
+  #      value-taking flag this wrapper does not handle — `-t -bSMOKE` sets the
+  #      TITLE to "-bSMOKE", so the `-bSMOKE` operand must never be re-read as
+  #      a body flag (arbsec/orchestraitor#799 R17).
+  #
+  # The walk builds a NEW array: a short-flag cluster may carry a body, and the
+  # body becomes its own argv entry, so the original cannot be edited in place.
+  PR_MUTATE_EDITED=()
+  index=0
+  while [ "$index" -lt "${#REST[@]}" ]; do
+    pr_mutate_arg="${REST[$index]}"
+    pr_mutate_next_present=false
+    if [ "$((index + 1))" -lt "${#REST[@]}" ]; then
+      pr_mutate_next_present=true
+    fi
+    case "$pr_mutate_arg" in
+      --inject-checklist)
+        # OUR flag: a token that is exactly this string, in operand position.
+        INJECT_CHECKLIST=1
+        index=$((index + 1)) ;;
+      --body)
+        # A VALUE IS REQUIRED, an EMPTY VALUE IS NOT an error: `--body ""` is an
+        # explicit empty body (it becomes the checklist-only body).
+        [ "$pr_mutate_next_present" = true ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+        # RESOLVE FIRST, in its OWN assignment: `X="$(f "$(g)")"` takes the
+        # OUTER substitution's status, so `g`'s `exit 2` never trips `set -e`
+        # (#788 gen-3 review — both adversarial sources).
+        resolved="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"
+        PR_MUTATE_EDITED+=("--body" "$(pr_mutate_ensure_body "$resolved")")
+        index=$((index + 2)) ;;
+      --body=*)
+        resolved="$(orc_lib_body_arg "--body" "${pr_mutate_arg#*=}")"
+        PR_MUTATE_EDITED+=("--body=$(pr_mutate_ensure_body "$resolved")")
+        index=$((index + 1)) ;;
+      # `--body-file` is READ here, not forwarded: the checklist cannot be
+      # appended to a path gh expands on its own side. The file itself is never
+      # rewritten — the resolved content becomes an explicit `--body` value.
+      # The reader is `orc_lib_read_body_file`, NOT `cat`, so the trusted-root
+      # guard follows the read (#599): an out-of-root path is refused, symlinks
+      # are resolved on the FULL target, an empty body is refused, and `-` reads
+      # STDIN (#788 gen-3 review).
+      --body-file)
+        [ "$pr_mutate_next_present" = true ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$((index + 1))]}")"
+        PR_MUTATE_EDITED+=("--body" "$(pr_mutate_ensure_body "$resolved")")
+        index=$((index + 2)) ;;
+      --body-file=*)
+        resolved="$(orc_lib_read_body_file "--body-file" "${pr_mutate_arg#*=}")"
+        PR_MUTATE_EDITED+=("--body=$(pr_mutate_ensure_body "$resolved")")
+        index=$((index + 1)) ;;
+      # A value-taking LONG flag this wrapper does NOT handle (`gh pr edit
+      # --help`, v2.104.0): keep the flag AND its operand, so the operand is
+      # never re-read as one of ours. `=` forms carry no operand.
+      --add-assignee|--add-label|--add-project|--add-reviewer|--attach|--base|--milestone|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--title)
+        PR_MUTATE_EDITED+=("$pr_mutate_arg")
+        if [ "$pr_mutate_next_present" = true ]; then
+          PR_MUTATE_EDITED+=("${REST[$((index + 1))]}")
+          index=$((index + 2))
+        else
+          index=$((index + 1))
+        fi ;;
+      --add-assignee=*|--add-label=*|--add-project=*|--add-reviewer=*|--attach=*|--base=*|--milestone=*|--remove-assignee=*|--remove-label=*|--remove-project=*|--remove-reviewer=*|--title=*|--remove-milestone=*|--help=*)
+        PR_MUTATE_EDITED+=("$pr_mutate_arg"); index=$((index + 1)) ;;
+      # A REPOSITORY OVERRIDE must select the SAME repository for the body READ
+      # and the gh WRITE (arbsec/orchestraitor#799 R18). `orc_lib_parse_common`
+      # already resolves `-R`/`--repo`/`-R=`/`--repo=` into `$OPT_REPO` before
+      # this walk runs, so a spelling that reaches HERE is one the common parser
+      # could not see — it sits after `--`, where every token is positional. It
+      # is resolved into `$REPO` (below) instead of forwarded, because forwarding
+      # it would leave the reads on the resolved repo and the write on another.
+      --repo)
+        [ "$pr_mutate_next_present" = true ] || { echo "error: --repo requires OWNER/REPO" >&2; exit "$ORC_ERR_CONFIG"; }
+        PR_MUTATE_REPO_OVERRIDE="${REST[$((index + 1))]}"
+        index=$((index + 2)) ;;
+      --repo=*)
+        PR_MUTATE_REPO_OVERRIDE="${pr_mutate_arg#*=}"
+        index=$((index + 1)) ;;
+      --*)
+        # Any other LONG flag is boolean (`--remove-milestone`, `--help`) or
+        # unknown: forwarded untouched, no operand consumed.
+        PR_MUTATE_EDITED+=("$pr_mutate_arg"); index=$((index + 1)) ;;
+      # The short spelling of the same override (defensive: the common parser
+      # consumes it, so it should never reach here). Resolved, never forwarded.
+      -R)
+        [ "$pr_mutate_next_present" = true ] || { echo "error: -R requires OWNER/REPO" >&2; exit "$ORC_ERR_CONFIG"; }
+        PR_MUTATE_REPO_OVERRIDE="${REST[$((index + 1))]}"
+        index=$((index + 2)) ;;
+      -R=*)
+        PR_MUTATE_REPO_OVERRIDE="${pr_mutate_arg#*=}"
+        index=$((index + 1)) ;;
+      -?*)
+        # A SHORT token: pflag's rules decide what it means (the cluster
+        # splitter), so `-bX`, `-FX` and a cluster carrying a body are all
+        # handled, and a token whose letters cannot be resolved is REFUSED.
+        if ! orc_lib_split_short_cluster "$pr_mutate_arg" \
+          "$PR_MUTATE_SHORT_VALUE" "$PR_MUTATE_SHORT_BOOL"; then
+          echo "error: refusing to forward '$pr_mutate_arg': its short flags cannot be resolved, and it could carry a body" >&2
+          echo "  gh accepts only the short flags this wrapper knows; an unresolved token is refused rather than forwarded unvalidated (arbsec/orchestraitor#799 R16/R17)" >&2
+          echo "  fix: pass the flag in its long form (--body, --body-file, --title, --milestone, --base, --repo)" >&2
+          exit "$ORC_ERR_CONFIG"
+        fi
+        if [ "$ORC_LIB_CLUSTER_HAS_BODY" = true ]; then
+          orc_cluster_value="$ORC_LIB_CLUSTER_BODY_VALUE"
+          if [ "$ORC_LIB_CLUSTER_BODY_EXTERNAL" = true ]; then
+            [ "$pr_mutate_next_present" = true ] || { echo "error: $pr_mutate_arg requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+            orc_cluster_value="${REST[$((index + 1))]}"
+            index=$((index + 1))
+          fi
+          case "$ORC_LIB_CLUSTER_BODY_KIND" in
+            body)
+              resolved="$(orc_lib_body_arg "--body" "$orc_cluster_value")"
+              PR_MUTATE_EDITED+=("--body" "$(pr_mutate_ensure_body "$resolved")") ;;
+            body-file)
+              resolved="$(orc_lib_read_body_file "--body-file" "$orc_cluster_value")"
+              PR_MUTATE_EDITED+=("--body" "$(pr_mutate_ensure_body "$resolved")") ;;
+          esac
+          # The boolean parts of the cluster keep their meaning.
+          if [ "${#ORC_LIB_CLUSTER_BOOLS[@]}" -gt 0 ]; then
+            PR_MUTATE_EDITED+=("${ORC_LIB_CLUSTER_BOOLS[@]}")
+          fi
+        else
+          PR_MUTATE_EDITED+=("$pr_mutate_arg")
+          # `-t`, `-B`, `-R`, `-m` take the NEXT element as their value: keep
+          # that operand too, so it is never re-read as a wrapper flag.
+          if [ "$ORC_LIB_CLUSTER_TAKES_NEXT_VALUE" = true ] && [ "$pr_mutate_next_present" = true ]; then
+            PR_MUTATE_EDITED+=("${REST[$((index + 1))]}")
+            index=$((index + 1))
+          fi
+        fi
+        index=$((index + 1)) ;;
+      *) PR_MUTATE_EDITED+=("$pr_mutate_arg"); index=$((index + 1)) ;;
+    esac
+  done
+  REST=("${PR_MUTATE_EDITED[@]}")
 fi
 
-# Body-flow validation (issue #587): `edit --body <value>`/`--body-file <path>`
-# pass through to gh; resolve `@file` expansion and refuse path-shaped values
-# before the flag ever reaches gh — never post a path string as PR content.
-if [ "$ACTION" = "edit" ]; then
+# `--inject-checklist` SETS the body itself; combining it with an explicit
+# body is ambiguous (which body wins?) — refuse instead of guessing.
+if [ "$INJECT_CHECKLIST" = "1" ]; then
+  PR_MUTATE_BODY_CONFLICT=0
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     case "${REST[$index]}" in
-      --body)
-        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-        REST[$((index + 1))]="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"; index=$((index + 2)) ;;
-      --body=*) REST[$index]="--body=$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")"; index=$((index + 1)) ;;
-      --body-file)
-        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-        orc_lib_require_body_file "--body-file" "${REST[$((index + 1))]}"; index=$((index + 2)) ;;
-      --body-file=*) orc_lib_require_body_file "--body-file" "${REST[$index]#--body-file=}"; index=$((index + 1)) ;;
-      *) index=$((index + 1)) ;;
+      --body|--body=*|--body-file|--body-file=*) PR_MUTATE_BODY_CONFLICT=1 ;;
     esac
+    index=$((index + 1))
   done
+  if [ "$PR_MUTATE_BODY_CONFLICT" = "1" ]; then
+    echo "error: --inject-checklist cannot be combined with --body/--body-file — it sets the body itself (current body + the managed checklist)" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
 fi
 
+# `edit` has no meaningful effect without at least one edit flag; refuse the
+# no-op instead of letting gh error later with an ambiguous message.
+if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ] && [ "$INJECT_CHECKLIST" != "1" ]; then
+  echo "error: edit requires at least one edit flag (e.g. --add-reviewer <login>, or --inject-checklist)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
+# A repository override the common parser could not resolve (it sits after `--`)
+# was captured by the walk above. It is VALIDATED and then applied through
+# `OPT_REPO`, so the body READ, the reviewer gate's reads and the gh WRITE all
+# target the SAME repository — a forwarded override would leave the reads on one
+# repository and the write on another (arbsec/orchestraitor#799 R18).
+if [ -n "${PR_MUTATE_REPO_OVERRIDE:-}" ]; then
+  if ! [[ "$PR_MUTATE_REPO_OVERRIDE" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "error: repository override '$PR_MUTATE_REPO_OVERRIDE' is not OWNER/REPO" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+  OPT_REPO="$PR_MUTATE_REPO_OVERRIDE"
+fi
 REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 [ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")
+
+# --- Managed-checklist remediation for an ALREADY-OPEN PR (arbsec/orchestraitor#788) ---
+# `convergence-status` FAILS CLOSED on a body with zero `<!-- orc:* -->`
+# markers (`checklist_markers_missing`), and `pr-create` composes nothing, so a
+# created PR carries no marker until this script adds one. A PR that ALREADY
+# EXISTS (opened before the rule, or opened by a bot) has no such body and would
+# block forever — so this is the
+# one-command remediation path for a body that is ALREADY SET: read the current
+# body, append the managed checklist when it carries none, and set the body.
+# (A summary being supplied right now does not need this flag: the `--body`/
+# `--body-file` routes above carry the checklist themselves.)
+#
+# The nine markers land UNCHECKED (a checked box is a verified fact). A body
+# that already carries the checklist is left unchanged — the operation is
+# idempotent and never rewrites author content.
+#
+# CONCURRENCY BASELINE (arbsec/orchestraitor#799 R18): this is the ONE
+# read-modify-write path in the wrapper, so `updatedAt` is read in the SAME call
+# as the body and re-checked immediately before the write. There was no
+# baseline at all before: the body was read once and written unconditionally, so
+# another actor's edit between the read and the write was silently overwritten
+# with a composition of the OLDER body. The baseline now covers the ORIGINAL
+# read (it cannot be captured later, or it would bless the newer body as
+# "seen"), and a moved baseline refuses with exit 4 (`concurrent`). gh has no
+# conditional write, so the window between the re-read and the write remains —
+# it is narrowed to one round trip, not closed.
+if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
+  if [ "$OPT_DRY_RUN" = true ]; then
+    echo "[dry-run] would read PR #$PR's body, append the managed merge checklist, and set it (dry-run never reaches gh)" >&2
+    exit "$ORC_OK"
+  fi
+  PR_MUTATE_BODY_STATE="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body,updatedAt \
+    --jq '{body: (.body // ""), updatedAt: (.updatedAt // "")}')" || {
+    echo "error: cannot read PR #$PR body" >&2
+    exit "$ORC_ERR_UNRECOVERABLE"
+  }
+  PR_MUTATE_BODY="$(jq -r '.body' <<<"$PR_MUTATE_BODY_STATE")"
+  PR_MUTATE_BASELINE_UPDATED_AT="$(jq -r '.updatedAt' <<<"$PR_MUTATE_BODY_STATE")"
+  PR_MUTATE_NEW_BODY="$(pr_mutate_ensure_body "$PR_MUTATE_BODY")"
+  if [ "$PR_MUTATE_NEW_BODY" = "$PR_MUTATE_BODY" ]; then
+    # Only the BODY update is skipped: the caller may have asked for other
+    # mutations in the same invocation (`--add-label`, `--add-assignee`,
+    # `--add-reviewer`, …). Exiting here silently discarded them (#788 gen-3
+    # review, CodeRabbit minor) — a no-op must be a no-op for the BODY only.
+    echo "PR #$PR body already carries the managed merge checklist — body update skipped" >&2
+    if [ "${#REST[@]}" -eq 0 ]; then
+      echo "  (no other edit flag was given; nothing left to do)" >&2
+      exit "$ORC_OK"
+    fi
+    echo "  the remaining edit flags are still executed" >&2
+  else
+    ARGS+=(--body "$PR_MUTATE_NEW_BODY")
+    echo "NOTE: appending the managed merge checklist to PR #$PR's body (arbsec/orchestraitor#788)" >&2
+  fi
+fi
 
 # Reviewer-request gate (workflow policy "PR labeling and human attention"):
 # an `edit --add-reviewer` asks for human attention exactly like
@@ -163,6 +409,22 @@ if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh ${ARGS[*]}" >&2
   echo "[dry-run] (executed via 'orc github gh-env --' when github_app config is present)" >&2
   exit "$ORC_OK"
+fi
+
+# The concurrency baseline read with the body (`--inject-checklist` only) is
+# re-checked immediately before the write. A moved `updatedAt` means another
+# actor edited the PR after the body was read, so the composed body is a
+# composition of a STALE read: refuse (exit 4) instead of overwriting the newer
+# one. See the baseline comment above the read.
+if [ -n "${PR_MUTATE_BASELINE_UPDATED_AT:-}" ]; then
+  PR_MUTATE_CURRENT_UPDATED_AT="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json updatedAt --jq '.updatedAt // ""')" || {
+    echo "error: cannot re-read PR #$PR's updatedAt before the body write" >&2
+    exit "$ORC_ERR_UNRECOVERABLE"
+  }
+  if [ "$PR_MUTATE_CURRENT_UPDATED_AT" != "$PR_MUTATE_BASELINE_UPDATED_AT" ]; then
+    echo "error: concurrent edit detected: PR #$PR was updated after its body was read (updatedAt ${PR_MUTATE_BASELINE_UPDATED_AT:-<none>} -> ${PR_MUTATE_CURRENT_UPDATED_AT:-<none>}); refusing to overwrite the newer body — re-read and retry" >&2
+    exit "$ORC_ERR_CONCURRENT"
+  fi
 fi
 
 # Mutating call: service route or typed failure — never silent personal auth.

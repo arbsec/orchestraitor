@@ -17,7 +17,9 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 
 use crate::cli::{ConfigPaths, PrCommand, PrStatusArgs};
-use orchestraitor_mcp::pr_status::{Engine, PrStatus, PrStatusError, PrStatusTransport};
+use orchestraitor_mcp::pr_status::{
+    Checklist, Engine, PrStatus, PrStatusError, PrStatusTransport, UnparseableConstruct,
+};
 
 /// A miette `Diagnostic` wrapper around the shared [`PrStatusError`]. The
 /// mcp crate has no miette dependency (the shared engine is transport- and
@@ -436,6 +438,95 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 /// `orc chat pr-status` view (reasons, failing/pending checks, actionable
 /// threads, checklist delta) — one renderer so the two operator views
 /// cannot drift. Provider-supplied text is sanitized before writing.
+/// Renders the INDETERMINATE checklist state: the reading is refused, so the
+/// verdict blocks with `checklist_unparseable` — and the message names the
+/// construct and its one remedy.
+///
+/// The construct is a fence OPENER indented 1-3 spaces (CLOSED OR NOT — it may
+/// belong to a list item or a block quote), a RAW HTML CONSTRUCT (a line-start
+/// `<` outside every fenced region, which the scanner does not model), a
+/// NEAR-MARKER (a line that presents a managed marker but not in the canonical
+/// form, so the gate cannot tell what it asserts — arbsec/orchestraitor#799
+/// R1), or a MANAGED MARKER indented 4+ spaces (or led by a tab), which is an
+/// indented code block rather than a checkbox whenever it is not inside a list
+/// item (arbsec/orchestraitor#802) — arbsec/orchestraitor#809 and
+/// arbsec/orchestraitor#799 R1.
+/// The construct is a CONTAINER-SCOPE construct (a fence opener or an HTML
+/// construct that is container-prefixed by a list/blockquote marker, or indented
+/// 4+ spaces — arbsec/orchestraitor#799 R18), a fence OPENER indented 1-3 spaces
+/// (CLOSED OR NOT — it may belong to a list item or a block quote), a RAW HTML
+/// CONSTRUCT (a line-start `<` outside every fenced region, which the scanner
+/// does not model), a NEAR-MARKER (a line that presents a managed marker but not
+/// in the canonical form, so the gate cannot tell what it asserts —
+/// arbsec/orchestraitor#799 R1), or a MANAGED MARKER indented 4+ spaces (or led
+/// by a tab), which is an indented code block rather than a checkbox whenever it
+/// is not inside a list item (arbsec/orchestraitor#802) —
+/// arbsec/orchestraitor#809 and arbsec/orchestraitor#799 R1.
+fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
+    let line = checklist
+        .unparseable_line
+        .map_or_else(|| String::from("?"), |line| line.to_string());
+    if let Some(UnparseableConstruct::ContainerScope) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a fenced code opener or an HTML construct sits at a container scope the scanner cannot model on line {line} (it is prefixed by a list or blockquote marker, or indented 4 or more spaces), so its contents may be examples in one reading and evidence in the other; the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: dedent the construct to column 0, or put it in a column-0 fenced block"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    if let Some(UnparseableConstruct::NearMarker) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a near-marker on line {line}: the line presents a managed marker (a task-item box token plus an orc:NAME reference) but not in the canonical form, so the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    if let Some(UnparseableConstruct::HtmlConstruct) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — the PR body contains a raw HTML construct at line {line} (a line starting with '<'); the checklist scanner does not model HTML, so it cannot tell what that construct hides, and the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: put it inside a column-0 fenced code block, or remove it (indenting it by 4 spaces no longer works: an indented construct is itself a container-scope refusal)"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    if let Some(UnparseableConstruct::IndentedMarker) = checklist.unparseable_construct {
+        writeln!(
+            writer,
+            "checklist: UNPARSEABLE — a managed marker is indented too far at line {line} (4 or more spaces, or a leading tab); such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox, so the checklist is not read (checklist_unparseable)"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->) — 0-3 leading spaces is still accepted, but dedenting alone does not make a near-marker parseable"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    }
+    writeln!(
+        writer,
+        "checklist: UNPARSEABLE — a fenced code opener is indented 1-3 spaces (line {line}), closed or not; its container scope cannot be determined, so the checklist is not read (checklist_unparseable)"
+    )
+    .into_diagnostic()?;
+    writeln!(writer, "  fix: dedent the fence opener to column 0").into_diagnostic()?;
+    Ok(())
+}
+
 pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus) -> Result<()> {
     if verdict.convergence.reasons.is_empty() {
         writeln!(writer, "reasons: (none — all gates pass)").into_diagnostic()?;
@@ -484,24 +575,36 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
             }
         }
     }
-    if let Some(checklist) = &verdict.checklist
-        && !checklist.all_checked
-    {
-        writeln!(
-            writer,
-            "checklist: {} unchecked item(s)",
-            checklist.unchecked_count
-        )
-        .into_diagnostic()?;
-        for item in &checklist.items {
-            if !item.checked {
-                writeln!(
-                    writer,
-                    "  [ ] {}: {}",
-                    sanitize_provider_text(&item.marker),
-                    sanitize_provider_text(&item.description)
-                )
-                .into_diagnostic()?;
+    if let Some(checklist) = &verdict.checklist {
+        if checklist.unparseable {
+            write_unparseable_checklist(writer, checklist)?;
+        } else if !checklist.markers_present {
+            // A marker-less body is missing evidence, never a complete checklist
+            // (arbsec/orchestraitor#788) — name the state, not "0 unchecked".
+            // There is NO author-granted opt-out: the body cannot waive
+            // itself (arbsec/orchestraitor#801).
+            writeln!(
+                writer,
+                "checklist: no managed orc:* markers found (UNSUBSTANTIATED — checklist_markers_missing)"
+            )
+            .into_diagnostic()?;
+        } else if !checklist.all_checked {
+            writeln!(
+                writer,
+                "checklist: {} unchecked item(s)",
+                checklist.unchecked_count
+            )
+            .into_diagnostic()?;
+            for item in &checklist.items {
+                if !item.checked {
+                    writeln!(
+                        writer,
+                        "  [ ] {}: {}",
+                        sanitize_provider_text(&item.marker),
+                        sanitize_provider_text(&item.description)
+                    )
+                    .into_diagnostic()?;
+                }
             }
         }
     }
@@ -555,5 +658,36 @@ mod tests {
             "plain text with spaces"
         );
         assert_eq!(sanitize_provider_text("café ✓"), "café ✓");
+    }
+
+    /// The operator view names EVERY construct the engine can report, including
+    /// `container_scope` (arbsec/orchestraitor#799 R18). Without its own arm the
+    /// construct falls through to the 1-3-space fence message, which would name
+    /// an unreachable scope and the wrong remedy.
+    #[test]
+    fn unparseable_container_scope_is_named_with_its_own_remedy() {
+        let checklist = Checklist {
+            items: Vec::new(),
+            marker_count: 0,
+            markers_present: false,
+            all_checked: false,
+            unchecked_count: 0,
+            unparseable: true,
+            unparseable_line: Some(6),
+            unparseable_construct: Some(UnparseableConstruct::ContainerScope),
+        };
+        let mut out = Vec::new();
+        write_unparseable_checklist(&mut out, &checklist).expect("write the operator view");
+        let text = String::from_utf8(out).expect("the view is UTF-8");
+        assert!(
+            text.contains("container scope the scanner cannot model"),
+            "{text}"
+        );
+        assert!(text.contains("line 6"), "{text}");
+        assert!(text.contains("dedent the construct to column 0"), "{text}");
+        assert!(
+            !text.contains("indented 1-3 spaces"),
+            "the fence message must not swallow container_scope: {text}"
+        );
     }
 }

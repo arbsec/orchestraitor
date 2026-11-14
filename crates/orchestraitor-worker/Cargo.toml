@@ -38,6 +38,13 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 orchestraitor-testkit = { path = "../orchestraitor-testkit" }
+# orchestraitor-mcp (MIT OR Apache-2.0), TESTS ONLY: the delivery tests assert
+# that a body the lane composes passes the ENGINE's own `parse_checklist`
+# (`unparseable == false`) — the real invariant, instead of a list of
+# constructs the test would have to keep in step by hand
+# (arbsec/orchestraitor#799 R14). Production code deliberately does NOT depend
+# on the MCP gateway; it reads the shared grammar in orchestraitor-core.
+orchestraitor-mcp = { path = "../orchestraitor-mcp" }
 secrecy = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

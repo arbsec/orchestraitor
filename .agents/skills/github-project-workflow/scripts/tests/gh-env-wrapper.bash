@@ -568,8 +568,20 @@ EOF
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub required
 OUT="$(run_script "$PRCREATE" required -R arbsec/orchestraitor --title "t" --body "b" --draft 2>&1)" || true
-grep -qx 'orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b --draft' "$ORC_LOG" \
+# R17 note: pr-create forwards the caller's argv VERBATIM (no composition), so the
+# routing path, the title passthrough, the body value and the trailing flag are
+# each asserted exactly.
+grep -q '^orc:github gh-env-pr-create-chain arbsec/orchestraitor -- /.*/gh pr create --repo arbsec/orchestraitor ' "$ORC_LOG" \
   || fail "pr-create must take the labeling-chain service path: orc=[$(cat "$ORC_LOG")]"
+grep -q -- '--title t' "$ORC_LOG" \
+  || fail "pr-create must pass the caller's --title through: orc=[$(cat "$ORC_LOG")]"
+# R17: pr-create composes NOTHING — the caller's body reaches gh as the caller
+# wrote it, with the caller's trailing flag after it. The #788 satisfiability
+# duty moved to `pr-mutate edit <pr> --inject-checklist`.
+grep -qE -- '--body b( |$)' "$ORC_LOG" \
+  || fail "pr-create must forward the caller's body verbatim: orc=[$(cat "$ORC_LOG")]"
+grep -q ' --draft$' "$ORC_LOG" \
+  || fail "pr-create must still pass --draft through: orc=[$(cat "$ORC_LOG")]"
 if [ "$(grep -c '^gh:' "$GH_LOG")" -gt 1 ]; then
   fail "pr-create reached gh more than the one gh-env child call: $(cat "$GH_LOG")"
 fi
@@ -652,8 +664,17 @@ fi
 : > "$ORC_LOG"; : > "$GH_LOG"
 new_orc_stub ""
 OUT="$(run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
-grep -qx 'orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
+# R17: the caller's argv is forwarded verbatim; assert the routing path, the title
+# and the body value exactly.
+grep -q '^orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor ' "$ORC_LOG" \
   || fail "pr-create with resolved config must take the service path regardless of the pin: orc=[$(cat "$ORC_LOG")]"
+grep -q -- '--title t' "$ORC_LOG" \
+  || fail "pr-create must pass the caller's --title through regardless of the pin: orc=[$(cat "$ORC_LOG")]"
+# R17: the caller's argv is forwarded VERBATIM — no composition, so the whole
+# command is one line, and the body value must be EXACTLY `b` (a prefix test would
+# also accept `--body bigger`).
+grep -qE -- '--body b( |$)' "$ORC_LOG" \
+  || fail "pr-create must forward the caller's body verbatim (R17): orc=[$(cat "$ORC_LOG")]"
 
 # --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.
 : > "$ORC_LOG"; : > "$GH_LOG"
@@ -714,16 +735,29 @@ arg_err_case() {
     "$WORK/rcnote" "$?"
   ) 2>&1
 }
-for bad_args in \
-  "--title" \
-  "--body"; do
+# R17/R18: pr-create owns NO gh flag parsing at all, so a trailing flag with no
+# value is NOT a typed wrapper error any more: the token is forwarded VERBATIM and
+# the outcome is the callee's. (The old assertion demanded a literal `rc:2`, which
+# only the pre-R17 parser could produce — and after the create-time review gate was
+# deleted in R18 there is no checkout-dependent exit code left to confuse it: the
+# chain stub below answers rc:0 in every checkout shape, including a `--depth 1`
+# detached CI clone with no `origin/HEAD`.)
+#
+# The service-path stub is re-armed here because cases 18/19 removed it, so these
+# cases exercise the FORWARDING contract, not the enforcement gate.
+new_orc_stub required
+for bad_args in "--body" "--title"; do
   : > "$ORC_LOG"; : > "$GH_LOG"
   OUT="$(arg_err_case "$PRCREATE" -R arbsec/orchestraitor "$bad_args")" || true
-  grep -q "error: $bad_args requires a" <<<"$OUT" || fail "pr-create trailing $bad_args must print the typed argument error: $OUT"
-  grep -q 'rc:2' "$GH_LOG" || fail "pr-create trailing $bad_args must exit 2 (config), got: $(cat "$GH_LOG")"
   if grep -qE 'unbound variable|nounset' <<<"$OUT"; then
     fail "pr-create trailing $bad_args crashed with a bash nounset error: $OUT"
   fi
+  grep -qE -- 'error: .*requires a' <<<"$OUT" \
+    && fail "pr-create trailing $bad_args must NOT invent a wrapper argument error: $OUT"
+  grep -qE -- "${bad_args}\$" "$ORC_LOG" \
+    || fail "pr-create trailing $bad_args must reach the chain verbatim: orc=[$(cat "$ORC_LOG")]"
+  grep -qx 'rc:0' "$GH_LOG" \
+    || fail "pr-create trailing $bad_args must report the callee's exit code: $(cat "$GH_LOG")"
 done
 for spec in \
   "PRCOMMENT|--body" \

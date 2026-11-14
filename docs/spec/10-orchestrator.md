@@ -643,7 +643,139 @@ pr.status <N> -> {
     items: [ { id, is_resolved, is_outdated, path, line, authors, last_comment_excerpt } ]
   },                                 # actionable = !isResolved && !isOutdated (review-threads rule);
                                      # excerpts are size-capped (see below), never full bodies
-  checklist: { items: [ { marker, checked, description } ], all_checked, unchecked_count },
+  checklist: { items: [ { marker, checked, description } ],
+               marker_count, markers_present, all_checked, unchecked_count,
+               unparseable, unparseable_line, unparseable_construct },
+                                    # `all_checked` is true only when at least one marker exists AND
+                                    # every marker is checked: a marker-less body is MISSING evidence,
+                                    # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
+                                    # used to reach merge-gate as `mergeable: true`).
+                                    # There is NO author-granted opt-out: the body cannot waive
+                                    # itself, so a marker-less body always blocks with
+                                    # `checklist_markers_missing` (arbsec/orchestraitor#801).
+                                    # A managed marker has ONE CANONICAL form:
+                                    # `[ \t]*- [BOX] <!-- orc:NAME --> <description>`, where
+                                    # every separator is EXACTLY one ASCII space (between
+                                    # `-` and `[`, between `]` and `<!--`, and inside
+                                    # `<!-- orc:NAME -->`), `<BOX>` is exactly one of `x`,
+                                    # `X` or a single space, and `<NAME>` is one of the
+                                    # nine managed names. The grammar contains NO
+                                    # whitespace class: the managed-name reference is a
+                                    # plain substring search for `orc:NAME` and the
+                                    # canonical form is an exact ASCII comparison, so
+                                    # the two engines cannot disagree about it
+                                    # (arbsec/orchestraitor#799 R1).
+                                    # A line that is NOT canonical but carries BOTH a
+                                    # task-item box token (`[` + exactly one character
+                                    # + `]`) AND a reference to one of the nine
+                                    # managed names is a NEAR-MARKER: the author
+                                    # presented a managed marker and the gate cannot
+                                    # tell what they asserted, so the reading is
+                                    # REFUSED (`unparseable` is true,
+                                    # `unparseable_construct` = `near_marker`) and the
+                                    # verdict blocks with `checklist_unparseable`. A line
+                                    # that only mentions `orc:NAME` (prose) and a line
+                                    # that carries only a box token (a plain task) are
+                                    # NOT near-markers and never block.
+                                    # Markers inside a fenced code region (3+ backticks or
+                                    # 3+ tildes) are EXAMPLES, not checklist items: the whole region
+                                    # is excluded from the scan (arbsec/orchestraitor#788).
+                                    # HTML IS NOT MODELLED (arbsec/orchestraitor#799 R1). A merge
+                                    # gate must not depend on a hand-rolled Markdown parser being
+                                    # spec-exact, so the scanner applies the repo's rule for a
+                                    # construct it cannot model — REFUSE and BLOCK. A line whose
+                                    # FIRST non-whitespace character is `<`, with 0-3 leading spaces
+                                    # and OUTSIDE every fenced region, makes the checklist reading
+                                    # INDETERMINATE (`unparseable_construct` = `html_construct`) and
+                                    # every verdict blocks with `checklist_unparseable`. The scanner
+                                    # cannot tell whether such a line opens a comment, a raw-text
+                                    # block, a declaration, an inline span or a literal autolink,
+                                    # and a wrong guess is a false pass — so it does not guess.
+                                    # Three boundaries are normative:
+                                    #   1. a line INSIDE a fenced code region is inert: NOT a refusal;
+                                    #   2. a line that is JUST `<`, and any `<` that is not the
+                                    #      line's first non-whitespace character (`x < y`, a `<`
+                                    #      mid-line), is ordinary text: NOT a refusal;
+                                    #   3. FOUR OR MORE leading spaces (or a leading tab) is NOT literal
+                                    #      code here: indented code cannot INTERRUPT a paragraph, so the
+                                    #      same lines are a real HTML block inside a list item; such a
+                                    #      line is refused as `container_scope` (below), never read as text.
+                                    # This is deliberately STRICTER than `CommonMark`, where an
+                                    # autolink (`<https://example.com>`) and inline HTML
+                                    # (`<em>emphasis</em> prose`) are ordinary text:
+                                    # arbsec/orchestraitor#809 tracks real HTML modelling. The ONE
+                                    # remedy set is: put the line in a column-0 fenced code block,
+                                    # or remove it. A marker line is never affected — its `<!--` is
+                                    # never the line's first content.
+                                    # Line endings are normalised ONCE before any scan (CommonMark
+                                    # §2.1: a lone CR and CRLF both become LF), so a closer followed by a
+                                    # CRLF-CRLF terminator closes in both engines. A fence line
+                                    # carries at most THREE leading spaces; four or more (or a
+                                    # leading tab) is a `container_scope` refusal (below) — the line
+                                    # opens no region and its contents are never evidence. A backtick
+                                    # fence's info string may not contain a backtick (` ```example``` `
+                                    # is a closed inline span, not an opener); a tilde fence's info
+                                    # string may. A CLOSING fence
+                                    # may be followed ONLY by spaces or tabs (CommonMark 0.31);
+                                    # a form feed or a vertical tab after the closing run is
+                                    # CONTENT, so it leaves the region OPEN, in both engines
+                                    # (arbsec/orchestraitor#799 F18). Only a space or a tab
+                                    # indents a checklist item, and FOUR OR MORE spaces (or a
+                                    # leading tab) on a marker line is itself a refusal
+                                    # (`indented_marker`, below); 0-3 spaces is accepted.
+                                    # `unparseable` is true when the checklist reading is
+                                    # INDETERMINATE, which happens in FIVE cases, and
+                                    # `unparseable_line` is the 1-based line of the EARLIEST of
+                                    # them (at one line the order below decides):
+                                    # (1) the body carries a FENCE OPENER or an HTML CONSTRUCT at a
+                                    # CONTAINER SCOPE the scan cannot model (`container_scope`): the
+                                    # construct is CONTAINER-PREFIXED — a list marker (`-`, `*`, `+`,
+                                    # `N.`, `N)`) or a blockquote marker (`>`), then whitespace, then
+                                    # the construct — or the line is INDENTED FOUR OR MORE spaces (or
+                                    # led by a tab). Inside a list item the construct's contents are
+                                    # EXAMPLES; at top level the same text is literal code and its
+                                    # contents are ordinary text; the two readings disagree, so the
+                                    # reading is refused. A 4-space line carrying NEITHER construct is
+                                    # ordinary prose and never refuses. Remedy: dedent the construct
+                                    # to column 0, or put it in a column-0 fenced block
+                                    # (arbsec/orchestraitor#799 R18);
+                                    # (2) the body OPENS a fence indented 1-3 spaces
+                                    # (`unparseable_construct` = `indented_fence_opener`): the
+                                    # opener's container scope cannot be determined without a
+                                    # container model. STICKY — closing the region does not clear
+                                    # it, because a closer can end the region earlier for the
+                                    # renderer than for the scan, so a swallowed marker can still
+                                    # be visible. Remedy: dedent the opener to column 0;
+                                    # (3) the body carries a RAW HTML CONSTRUCT — a line-start `<`
+                                    # in the 0-3 space window, outside every fenced region
+                                    # (`html_construct`): the scanner models no HTML, so it cannot
+                                    # tell what the line hides. Remedies: put it in a column-0 fenced
+                                    # code block, or remove it; a 4+-space (or tab-led) `<` is
+                                    # `container_scope` (1) above, not literal code, and `<` anywhere
+                                    # else (`x < y`) is ordinary text;
+                                    # (4) the body carries a MANAGED MARKER — canonical OR a
+                                    # near-marker — indented FOUR OR MORE spaces, or led by a TAB
+                                    # (`indented_marker`): when such a line is not inside a list
+                                    # item it renders as an INDENTED CODE BLOCK, where it is not a
+                                    # checkbox, and neither the canonical grammar nor the scan has
+                                    # a container model to tell that apart from a marker nested in
+                                    # a list item. 0-3 leading spaces stays ACCEPTED, and a marker
+                                    # inside a FENCED region is inert (an example, not a refusal).
+                                    # The marker still COUNTS (`marker_count` is a pure function of
+                                    # the canonical grammar) but NO VERDICT uses that count: the
+                                    # reading is refused. Remedy: dedent the marker line to column
+                                    # 0 AND write it in the canonical form (`- [x] <!-- orc:NAME
+                                    # -->`): 0-3 leading spaces is still accepted, but dedenting
+                                    # alone does not make a NEAR-MARKER parseable -- the canonical
+                                    # form is required as well (arbsec/orchestraitor#802);
+                                    # (5) the body carries a NEAR-MARKER (`near_marker`): a line
+                                    # with a task-item box token AND an `orc:NAME` reference that
+                                    # is not in the canonical form, so the gate cannot tell what it
+                                    # asserts. Remedy: write the marker canonically.
+                                    # In every case no checklist reading is trusted, `all_checked`
+                                    # is false, and the verdict blocks with
+                                    # `checklist_unparseable` (arbsec/orchestraitor#809,
+                                    # arbsec/orchestraitor#799 R1/R14/R18, arbsec/orchestraitor#802).
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly
@@ -651,7 +783,9 @@ pr.status <N> -> {
     mergeable: bool,
     reasons: [ string ]              # stable machine codes: agent_review_not_clean_at_head,
                                      # checks_not_passing, checks_pending, unresolved_threads(n),
-                                     # unchecked_items(n), review_required, is_draft — the same
+                                     # unchecked_items(n), checklist_markers_missing,
+                                     # checklist_unparseable,
+                                     # review_required, is_draft — the same
                                      # code set convergence-status emits today, extended only
                                      # additively (merge_state is NOT a reason source; see the
                                      # schema note above)

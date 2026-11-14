@@ -15,6 +15,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -147,7 +148,7 @@ fn threads_one_actionable() -> String {
 fn body_with_unchecked_item() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded\n- [ ] <!-- orc:docs --> docs updated",
+            "body": "- [x] <!-- orc:issue --> evidence recorded\n- [ ] <!-- orc:docs --> docs updated",
         }}}
     })
     .to_string()
@@ -156,7 +157,45 @@ fn body_with_unchecked_item() -> String {
 fn body_all_checked() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
-            "body": "- [x] <!-- orc:convergence --> evidence recorded",
+            "body": "- [x] <!-- orc:issue --> evidence recorded",
+        }}}
+    })
+    .to_string()
+}
+
+/// A body whose fenced scope is INDETERMINATE: the opener is indented two
+/// spaces, so it may belong to the list item above it or to the top level, and
+/// the region swallows a genuine UNCHECKED item (arbsec/orchestraitor#809).
+fn body_with_indented_fence() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "- [x] <!-- orc:issue --> evidence recorded\n- Example:\n  ```\n  sample\n\n- [ ] <!-- orc:docs --> docs updated",
+        }}}
+    })
+    .to_string()
+}
+
+/// A body carrying an inline code span with a comment token, then a VISIBLE
+/// unchecked item (arbsec/orchestraitor#799 gen-9). Only a line-START `<` is a
+/// refused raw HTML construct, so the span's token is literal text and changes
+/// nothing. When the scan treated ANY `<!--` as a comment opener, it hid the
+/// unchecked item and the verdict reported `all_checked: true` with no reasons
+/// — the fail-open defect this fixture pins end to end.
+fn body_with_inline_code_comment_token() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "- [x] <!-- orc:issue --> linked\n\n`<!--`\n\n- [ ] <!-- orc:tests --> not tested",
+        }}}
+    })
+    .to_string()
+}
+
+/// A body with NO managed marker at all — the #788 vacuous-pass shape
+/// (observed on the merged PR #767 body).
+fn body_no_markers() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "Summary of the change.\n\n| script | note |\n|---|---|\n| reconcile-checklist | parses markers |",
         }}}
     })
     .to_string()
@@ -266,53 +305,87 @@ fn write_project_config(temp: &tempfile::TempDir) -> miette::Result<()> {
     .into_diagnostic()
 }
 
+/// Runs `git` inside `repo` with the ambient git LOCATION scrubbed.
+///
+/// `git -C <dir>` does NOT isolate the git location: a hook-exported
+/// `GIT_DIR`/`GIT_WORK_TREE` wins over `-C`, so an inherited location would
+/// redirect the fixture's commits into the caller's real repository.
+/// `GIT_INDEX_FILE` has the same effect on the index. The scrub is applied
+/// AFTER `overrides`, so it always wins — `overrides` exist to SIMULATE a
+/// hostile ambient location in the regression test, never to defeat the
+/// scrub.
+///
+/// Every call's exit status is asserted — a silently failed fixture step must
+/// fail the test, not poison later assertions.
+fn git_in(
+    repo: &std::path::Path,
+    overrides: &[(&str, &str)],
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command.args(["-C", &repo.display().to_string()]).args(args);
+    for (name, value) in overrides {
+        command.env(name, value);
+    }
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(variable);
+    }
+    let output = command.output().into_diagnostic()?;
+    if !output.status.success() {
+        return Err(miette::miette!(
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(output)
+}
+
 /// Initializes a git repo in the temp dir with the fixture remote, so
 /// `--repo` default resolution and the review-record root resolve there.
 fn write_git_repo(temp: &tempfile::TempDir) -> miette::Result<String> {
+    write_git_repo_with_env(temp, &[])
+}
+
+/// The same fixture, but the fixture's git calls carry `overrides` in the
+/// CHILD environment. The regression test uses it to simulate a hook-exported
+/// `GIT_DIR`/`GIT_WORK_TREE`; the scrub inside [`git_in`] always wins, so the
+/// overrides never redirect the fixture's own commits.
+fn write_git_repo_with_env(
+    temp: &tempfile::TempDir,
+    overrides: &[(&str, &str)],
+) -> miette::Result<String> {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
     let repo_str = repo.display().to_string();
-    // Scrub the ambient GIT_* location variables (the production code does
-    // the same): a hook-exported GIT_DIR/GIT_WORK_TREE would redirect the
-    // fixture commits into the caller's real repository. Every call's exit
-    // status is asserted — a silently failed fixture step must fail the
-    // test, not poison later assertions.
-    let git = |args: &[&str]| -> miette::Result<()> {
-        let mut command = Command::new("git");
-        command.args(["-C", &repo_str]).args(args);
-        for variable in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_COMMON_DIR",
-            "GIT_NAMESPACE",
-        ] {
-            command.env_remove(variable);
-        }
-        let output = command.output().into_diagnostic()?;
-        if !output.status.success() {
-            return Err(miette::miette!(
-                "fixture git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        Ok(())
-    };
-    git(&["init", "-q"])?;
-    git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/arbsec/orchestraitor.git",
-    ])?;
-    git(&["config", "user.email", "test@example.com"])?;
-    git(&["config", "user.name", "test"])?;
+    git_in(&repo, overrides, &["init", "-q"])?;
+    git_in(
+        &repo,
+        overrides,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/arbsec/orchestraitor.git",
+        ],
+    )?;
+    git_in(
+        &repo,
+        overrides,
+        &["config", "user.email", "test@example.com"],
+    )?;
+    git_in(&repo, overrides, &["config", "user.name", "test"])?;
     fs::write(repo.join("README.md"), "fixture\n").into_diagnostic()?;
-    git(&["add", "."])?;
-    git(&["commit", "-q", "-m", "fixture"])?;
+    git_in(&repo, overrides, &["add", "."])?;
+    git_in(&repo, overrides, &["commit", "-q", "-m", "fixture"])?;
     Ok(repo_str)
 }
 
@@ -561,6 +634,430 @@ fn pr_status_blocked_pr_is_a_successful_read_exit_zero() -> miette::Result<()> {
         "reason codes must match convergence-status's vocabulary in order: {rendered:?}"
     );
     let _ = rendered;
+    Ok(())
+}
+
+#[test]
+fn pr_status_marker_less_body_blocks_with_checklist_markers_missing() -> miette::Result<()> {
+    // #788: every other gate is green, and the body carries NO managed marker.
+    // This used to be `mergeable: true` (jq's `all()` over an empty array is
+    // true), which merge-gate accepted — the vacuous pass observed on PR #767.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_no_markers(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_markers_missing"]),
+        "a missing checklist must never be reported as unchecked_items(0)"
+    );
+    assert_eq!(verdict["checklist"]["marker_count"], 0);
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(verdict["checklist"]["all_checked"], false);
+    assert_eq!(verdict["checklist"]["unchecked_count"], 0);
+    assert!(
+        verdict["checklist"].get("waived").is_none(),
+        "there is no author-granted opt-out: the checklist object carries no waiver field"
+    );
+
+    // The one-pager names the state instead of rendering "0 unchecked item(s)".
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(
+        text.contains("no managed orc:* markers found (UNSUBSTANTIATED"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_indented_fence_blocks_with_checklist_unparseable() -> miette::Result<()> {
+    // #809 (fail closed): a fence OPENER indented 1-3 spaces may belong to a
+    // list item or a block quote, and the scanner has no container model. The
+    // region it models swallows a genuine unchecked item, so the reading is
+    // REFUSED with a distinct reason instead of guessed — it used to report
+    // `all_checked: true` and converge.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_with_indented_fence(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_unparseable"]),
+        "an indeterminate fenced scope is its own reason, never markers_missing or all-checked"
+    );
+    assert_eq!(verdict["checklist"]["unparseable"], true);
+    assert_eq!(verdict["checklist"]["unparseable_line"], 3);
+    assert_eq!(
+        verdict["checklist"]["all_checked"], false,
+        "an indeterminate scan is never 'all checked'"
+    );
+
+    // The one-pager names the construct and the fix.
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(text.starts_with("BLOCKED:"), "{text}");
+    assert!(text.contains("UNPARSEABLE"), "{text}");
+    assert!(text.contains("indented 1-3 spaces"), "{text}");
+    assert!(
+        text.contains("fix: dedent the fence opener to column 0"),
+        "{text}"
+    );
+    // The remedy must be one that WORKS: closing the region never clears the
+    // (sticky) indeterminate condition, so no message may offer it.
+    assert!(!text.contains("or close it"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn pr_status_inline_code_comment_token_keeps_the_item_visible() -> miette::Result<()> {
+    // End-to-end regression for the fail-open defect: nine markers ticked would
+    // be fine — here ONE is ticked and one is visibly unticked behind an inline
+    // code span carrying `<!--`. The verdict must BLOCK on the item count, so
+    // `merge-gate` never reaches `gh pr merge`.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_with_inline_code_comment_token(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["unchecked_items(1)"]),
+        "the visible unticked item behind an inline code token is evidence"
+    );
+    assert_eq!(verdict["checklist"]["unparseable"], false, "{verdict}");
+    assert_eq!(verdict["checklist"]["marker_count"], 2, "{verdict}");
+    assert_eq!(
+        verdict["checklist"]["all_checked"], false,
+        "a visible unticked item must never read as all-checked"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
+    // #788 revision: the `<!-- orc:none -->` waiver was REMOVED — a PR author
+    // cannot grant themselves the exemption (arbsec/orchestraitor#801). A body
+    // that carries the sentinel and no marker still blocks.
+    //
+    // #799 R1: on its own line the sentinel is also a raw HTML construct, so
+    // the block reason is `checklist_unparseable` (`html_construct`) instead of
+    // `checklist_markers_missing`. Stricter, and still no waiver.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "body": "Machine-authored summary.\n\n<!-- orc:none --> delivery summary only\n",
+            }}}
+        })
+        .to_string(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_unparseable"]),
+        "a body sentinel must never waive the marker requirement"
+    );
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(verdict["checklist"]["all_checked"], false);
+    assert_eq!(verdict["checklist"]["unparseable"], true, "{verdict}");
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(
+        text.starts_with("BLOCKED:"),
+        "a marker-less body with a sentinel still blocks: {text}"
+    );
+    assert!(
+        text.contains("checklist: UNPARSEABLE — the PR body contains a raw HTML construct"),
+        "the operator view names the refused construct: {text}"
+    );
+    assert!(
+        text.contains("put it inside a column-0 fenced code block, or remove it"),
+        "and offers remedies that work: {text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_fenced_marker_is_not_a_checklist_item() -> miette::Result<()> {
+    // #788: a marker inside a fenced code region is an EXAMPLE, not evidence.
+    // The body below shows the checklist shape and carries no real item.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "body": "Here is the shape:\n\n```markdown\n- [x] <!-- orc:issue --> example only\n```\n",
+            }}}
+        })
+        .to_string(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["checklist"]["marker_count"], 0, "{verdict}");
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_markers_missing"]),
+        "a fenced example must never satisfy the checklist gate"
+    );
+    Ok(())
+}
+
+#[test]
+fn fixture_git_ignores_an_ambient_git_location() -> miette::Result<()> {
+    // F1 regression: a hook-exported GIT_DIR/GIT_WORK_TREE must never
+    // redirect the fixture's own git calls. `git -C <dir>` does NOT isolate
+    // the git location — the location wins over `-C` — so without the scrub
+    // the fixture's `git add .` / `git commit` would stage and commit the
+    // CALLER's working tree.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let sentinel = temp.path().join("sentinel");
+    fs::create_dir_all(&sentinel).into_diagnostic()?;
+    git_in(&sentinel, &[], &["init", "-q"])?;
+    git_in(
+        &sentinel,
+        &[],
+        &["config", "user.email", "sentinel@example.com"],
+    )?;
+    git_in(&sentinel, &[], &["config", "user.name", "sentinel"])?;
+    fs::write(sentinel.join("README.md"), "sentinel\n").into_diagnostic()?;
+    git_in(&sentinel, &[], &["add", "."])?;
+    git_in(&sentinel, &[], &["commit", "-q", "-m", "sentinel"])?;
+    let sentinel_head =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["rev-parse", "HEAD"])?.stdout)
+            .trim()
+            .to_string();
+
+    // The hostile location: GIT_DIR/GIT_WORK_TREE point at the sentinel.
+    let sentinel_git_dir = sentinel.join(".git").display().to_string();
+    let sentinel_work_tree = sentinel.display().to_string();
+    let repo = write_git_repo_with_env(
+        &temp,
+        &[
+            ("GIT_DIR", sentinel_git_dir.as_str()),
+            ("GIT_WORK_TREE", sentinel_work_tree.as_str()),
+        ],
+    )?;
+
+    // The fixture repo carries ONLY its own commit — nothing leaked in from
+    // the sentinel, and the sentinel's own commit is not the fixture's.
+    let fixture_head =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["rev-parse", "HEAD"])?.stdout)
+            .trim()
+            .to_string();
+    assert_ne!(
+        fixture_head, sentinel_head,
+        "the fixture's commit landed in the sentinel repository"
+    );
+    let fixture_log =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["log", "--format=%s"])?.stdout)
+            .to_string();
+    assert_eq!(fixture_log.trim(), "fixture", "{fixture_log}");
+    let fixture_status =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["status", "--porcelain"])?.stdout)
+            .to_string();
+    assert!(fixture_status.trim().is_empty(), "{fixture_status}");
+
+    // The sentinel repository is untouched: one commit, a clean work tree, and
+    // no file from the fixture.
+    let sentinel_log =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["log", "--format=%s"])?.stdout)
+            .to_string();
+    assert_eq!(
+        sentinel_log.trim(),
+        "sentinel",
+        "the sentinel repository gained a commit: {sentinel_log}"
+    );
+    let sentinel_status =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["status", "--porcelain"])?.stdout)
+            .to_string();
+    assert!(
+        sentinel_status.trim().is_empty(),
+        "the sentinel work tree was modified: {sentinel_status}"
+    );
+    let sentinel_files: Vec<String> = std::fs::read_dir(&sentinel)
+        .into_diagnostic()?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+        })
+        .collect();
+    assert!(
+        !sentinel_files.iter().any(|name| name == "repo"),
+        "the fixture repo was created inside the sentinel: {sentinel_files:?}"
+    );
     Ok(())
 }
 

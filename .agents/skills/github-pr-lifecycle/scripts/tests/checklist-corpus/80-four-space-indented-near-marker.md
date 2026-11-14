@@ -1,0 +1,10 @@
+- [x] <!-- orc:issue --> checked with evidence
+- [x] <!-- orc:service-identity --> checked with evidence
+- [x] <!-- orc:tests --> checked with evidence
+- [x] <!-- orc:security --> checked with evidence
+- [x] <!-- orc:docs --> checked with evidence
+- [x] <!-- orc:rollback --> checked with evidence
+- [x] <!-- orc:checks --> checked with evidence
+- [x] <!-- orc:review --> checked with evidence
+- [x] <!-- orc:threads --> checked with evidence
+    - [x]  <!-- orc:tests --> four-space-indented near-marker

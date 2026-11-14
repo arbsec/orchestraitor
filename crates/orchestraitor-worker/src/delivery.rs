@@ -7,6 +7,7 @@
 //! itself.
 
 use async_trait::async_trait;
+use orchestraitor_core::checklist_markers;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -113,6 +114,310 @@ pub const DELIVERY_ORC_BIN_MISSING: &str = "delivery-orc-bin-missing";
 /// child is killed and reported typed — never blocks the run (review
 /// gen-3 minor).
 const ORC_CHILD_TIMEOUT_SECS: u64 = 300;
+
+/// The managed PR checklist (`.github/PULL_REQUEST_TEMPLATE.md`'s nine
+/// `<!-- orc:* -->` markers, UNCHECKED) placed at the TOP of every delivery PR
+/// body, AHEAD of the model-authored summary.
+///
+/// `convergence-status` FAILS CLOSED on a body with no managed marker
+/// (`checklist_markers_missing`, arbsec/orchestraitor#788), and a delivery body
+/// is the model-authored run summary — it never had the template applied, so
+/// without this the loop's own PRs would be unmergeable by construction (#683:
+/// a fail-closed rule no caller can satisfy is worse than the bug). The markers
+/// land UNCHECKED because a checked box is a verified fact: the reviewing agent
+/// ticks them with evidence. They are added unconditionally, never "only
+/// when the summary carries none" — untrusted model output must not decide
+/// whether the gate applies to itself (spec `40-arbitraitor-integration.md`
+/// §6.1).
+///
+/// It comes FIRST because the summary is untrusted: a summary that leaves a
+/// code fence OPEN would enclose anything appended after it, and every scanner
+/// (`strip_fenced_code`, the shell fence engine) drops fenced regions as
+/// examples — so a summary carrying one ticked marker plus an unclosed fence
+/// could certify the gate for itself (review gen-3 HIGH). No fence in trusted
+/// text can reach the markers placed ahead of untrusted text. The drift guard in
+/// `delivery_tests` asserts these lines match the template.
+const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
+- [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n\
+- [ ] <!-- orc:service-identity --> All GitHub writes (PR creation, comments, review posts, merges, commits) attributed to arbsec-agent — no personal-account (@mekwall) writes (owner mandate; .agents/project/orchestraitor-workflow.md \"GitHub service identity\")\n\
+- [ ] <!-- orc:tests --> Tests are added or updated\n\
+- [ ] <!-- orc:security --> Security impact is reviewed\n\
+- [ ] <!-- orc:docs --> Human-facing documentation is updated, or not required with justification\n\
+- [ ] <!-- orc:rollback --> Rollback or recovery behavior is verified where applicable\n\
+- [ ] <!-- orc:checks --> All required and non-optional checks pass\n\
+- [ ] <!-- orc:review --> All noteworthy findings are resolved\n\
+- [ ] <!-- orc:threads --> All actionable review threads are resolved\n\
+\n";
+
+/// Neutralises the constructs an UNTRUSTED model summary could use to make the
+/// composed PR body **INDETERMINATE** or to hide content from a reviewer.
+///
+/// The checklist gate refuses a body that carries a fence OPENER indented 1-3
+/// spaces (`checklist_unparseable`, arbsec/orchestraitor#809), and that
+/// condition is STICKY: it is not cleared when the region closes, because a
+/// closer at a different container level ends the region earlier for the
+/// renderer than for the scanner. A model summary that legitimately contains a
+/// nested code fence (```` ``` ```` inside a list item, say) would therefore
+/// make every delivery PR unmergeable by construction — and the summary is
+/// untrusted content the LANE composed, so the lane owns that guarantee.
+///
+/// Three transformations, all minimal and all idempotent:
+///
+/// - a line indented 1-3 SPACES whose next characters are 3+ backticks or 3+
+///   tildes is **dedented to column 0**. That is exactly the remedy the gate's
+///   own message names, and it makes the opener a determinate column-0 fence.
+///   The test is a strict SUPERSET of the scanner's opener rule (which also
+///   rejects a backtick in a backtick fence's info string), so no indented
+///   opener can survive; dedenting a line that was not an opener renders the
+///   same either way;
+/// - a line whose first non-whitespace character is `<` (at most 3 leading
+///   spaces, and no leading tab) has that `<` escaped to `&lt;`, so it renders
+///   as the literal text the model wrote. This is the SAME escape the lane
+///   already applied to a line-start `<!--`, widened to the whole class
+///   (arbsec/orchestraitor#799 R2): the checklist scanner does not model HTML
+///   and REFUSES any body carrying a line-start `<` (`checklist_unparseable`,
+///   `html_construct`), so without the escape an honest summary line like
+///   `<div>` — or an indented `<div>`, or an unclosed `<pre>` — would make its
+///   own delivery PR unconvergeable forever. Escaping keeps every byte the
+///   model wrote VISIBLE; only the ability to open a region is removed. A line
+///   indented 4+ spaces (or led by a tab) is literal indented code, which the
+///   scanner never refuses, so it is left untouched, and so is a `<` anywhere
+///   but line-start (`x < y`);
+/// - a line that carries BOTH a task-item box token (`[` + exactly one
+///   character + `]`) AND a reference to one of the nine managed marker names
+///   is a **NEAR-MARKER** to every scanner: the gate cannot tell whether the
+///   model meant to assert a managed item, so it REFUSES the whole reading with
+///   `checklist_unparseable` — permanently, because ticking the nine boxes does
+///   not remove the line (arbsec/orchestraitor#799 R4, the denial-of-progress
+///   vector). The lane therefore renders it so it can no longer be a marker:
+///   the `<` of its `<!--` becomes `&lt;` (no delimiter) and the `:` of every
+///   `orc:NAME` reference becomes `&#58;` (no name reference). Both are
+///   character references, so the reviewer still reads exactly the text the
+///   model wrote; only the ability to BE a managed marker is removed. A summary
+///   line with a box token and NO managed reference (`- [ ] plain task`) is a
+///   PLAIN TASK, which no scanner refuses, so it is left untouched.
+///
+/// After this, the summary CANNOT make the composed body's checklist reading
+/// indeterminate: the indented opener is dedented, the line-start `<` is
+/// escaped and the near-marker loses its delimiters. What it can still do is
+/// open a COLUMN-0 FENCE, which is determinate and renders the summary's own
+/// tail as code — visible to a reviewer, and it can never enclose the trusted
+/// checklist, which leads the body. (A column-0 fence is also the only region
+/// the summary can open at all.)
+///
+/// The summary's LINE ENDINGS are normalised first (`CommonMark` §2.1) by the
+/// SHARED scan, exactly as both engines normalise them, so a summary that uses
+/// lone-CR line endings is seen as the same LINES the scanners will see.
+///
+/// Every decision below comes from `orchestraitor_core::checklist_markers` —
+/// the same scan the engine (`parse_checklist`) is built on — and never from a
+/// local `trim_start`/`starts_with` reimplementation. That is the whole point:
+/// this function used to classify a marker indented four spaces as CANONICAL
+/// (its own `trim_start` test) and leave it in the composed body, where the
+/// engine then reported `indented_marker` and the PR was permanently
+/// unconvergeable (arbsec/orchestraitor#799 R14).
+///
+/// The remedies, in the order they are applied to one line:
+///
+/// - a line inside a FENCED region is emitted BYTE-IDENTICAL: content there is
+///   already inert to every scanner, so transforming it would corrupt the
+///   example the model wrote;
+/// - a NEAR-MARKER loses its delimiter and name reference (`&lt;!--`,
+///   `orc&#58;NAME`), whether or not it is also indented — escaping is the
+///   stronger remedy and the only one that clears a near-marker;
+/// - an INDENTED (1-3 space) FENCE OPENER is DEDENTED to column 0, the
+///   documented remedy for `indented_fence_opener` (the region then opens on
+///   that line, exactly as the scan models it);
+/// - a line-start `<` (a raw HTML construct) has its `<` escaped to `&lt;`,
+///   which renders the text the model wrote and removes the construct — at ANY
+///   indentation, and after a container prefix (arbsec/orchestraitor#799 R18):
+///   indented code cannot interrupt a paragraph, so
+///   `Result:\n    <!-- tests failed -->` leaves an ACTIVE comment that hides
+///   text, and a container-prefixed construct is what the engine now reports as
+///   `container_scope`;
+/// - a FENCE OPENER at that same container scope is DEDENTED to column 0 (the
+///   `container_scope` remedy): the line's content is preserved and the region
+///   opens exactly where the scan models it;
+/// - a MANAGED MARKER (canonical or near-marker) indented 4+ spaces or led by a
+///   tab is DEDENTED to column 0, the documented remedy for `indented_marker`
+///   (arbsec/orchestraitor#802): the marker stays visible and counts as what it
+///   is, instead of being deleted or escaped away.
+///
+/// After this the composed body passes the engine with `unparseable == false`
+/// for any summary that opens no fence of its own; the delivery tests assert
+/// that with the engine's own `parse_checklist`.
+fn neutralise_summary(summary: &str) -> String {
+    let scan = checklist_markers::scan_body(summary);
+    let mut out = String::with_capacity(summary.len());
+    for line in &scan.lines {
+        let mut rendered = line.text.clone();
+        // A line INSIDE a fenced region — content or closer — is byte-identical.
+        // The OPENER is the boundary and is still transformed: its indentation is
+        // the `indented_fence_opener` construct itself, and the region it opens
+        // starts on that line for every scanner.
+        if !line.fenced || line.opens_fence.is_some() {
+            // EVERY applicable remedy is applied, never just the first, in a
+            // fixed order (arbsec/orchestraitor#799 R15/R17):
+            //
+            //   1. the line-start `<` of a raw HTML construct — at ANY
+            //      indentation, and after a container prefix (R18), because an
+            //      indented construct is ACTIVE in the renderer; a FENCE OPENER
+            //      at that same scope is dedented for the same reason;
+            //   2. an inline comment opener — but only where it is actually a
+            //      comment (not inside literal indented code, not on a
+            //      near-marker, whose own escape below covers every `<!--`, and
+            //      not on a canonical marker's own delimiter);
+            //   3. the near-marker delimiter and name reference;
+            //   4. the DEDENT of an indented fence opener or an indented
+            //      canonical marker.
+            //
+            // Step 4 can make step 2 apply where it could not before: a
+            // canonical marker indented 4+ spaces is literal indented code, so
+            // its inline comment is visible there and step 2 skips it — but the
+            // dedent then turns the same `<!--` into an ACTIVE comment that
+            // hides the description text (`    - [x] <!-- orc:tests --> Result:
+            // <!-- tests failed --> done` would show only `Result:  done`).
+            // So the comment escape runs AGAIN after a dedent.
+            if line.is_html_construct() || line.is_container_scope_construct() {
+                if line_starts_with_html_construct(&rendered) {
+                    rendered = escape_line_start_html(&rendered);
+                } else {
+                    // A fence opener at a scope the scanner cannot model
+                    // (`container_scope`): move the CONSTRUCT to column 0.
+                    rendered = dedent_construct(&rendered);
+                }
+            }
+            if !line.near_marker && !line.indentation_too_deep {
+                rendered = if line.canonical.is_some() {
+                    escape_inline_comment_after_the_marker(&rendered)
+                } else {
+                    escape_inline_comment(&rendered)
+                };
+            }
+            if line.near_marker {
+                rendered = escape_marker_delimiters(&rendered);
+            }
+            if line.is_indented_fence_opener()
+                || (line.canonical.is_some() && line.indentation_too_deep)
+            {
+                // DEDENT is the documented remedy for an indented fence opener and
+                // for an indented CANONICAL marker (which stays a real checklist
+                // item, so it must stay visible). A near-marker is ESCAPED rather
+                // than dedented: dedenting it would leave the marker reference
+                // intact.
+                rendered = dedent(&rendered);
+                if line.canonical.is_some() && !line.near_marker && line.indentation_too_deep {
+                    // The dedent made the description's comment ACTIVE: escape it
+                    // now (step 2 could not, because the line was literal
+                    // indented code at the time).
+                    rendered = escape_inline_comment_after_the_marker(&rendered);
+                }
+            }
+        }
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    // `str::lines` drops the terminator of the LAST line, so a body that does not
+    // end with a newline must not gain one: keep the composed shape faithful.
+    if !summary.is_empty() && !checklist_markers::normalize_line_endings(summary).ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Removes the leading indentation of `line` (spaces and tabs only), which is
+/// the documented remedy for an indented fence opener and for an indented
+/// managed marker.
+fn dedent(line: &str) -> String {
+    line.trim_start_matches([' ', '\t']).to_string()
+}
+
+/// Escapes every INLINE HTML COMMENT opener (`<!--`) in the line to `&lt;!--`,
+/// so the text the model wrote stays visible to the reviewer instead of being
+/// swallowed by the renderer's inline-comment handling. Idempotent: the escaped
+/// form contains no `<!--`.
+fn escape_inline_comment(line: &str) -> String {
+    line.replace("<!--", "&lt;!--")
+}
+
+/// Escapes every inline comment opener EXCEPT the first one, which is the
+/// managed marker's own delimiter: escaping that would turn a real checklist
+/// item into a near-marker. A later `<!--` in the description is still hidden
+/// by the renderer, so it is still escaped.
+fn escape_inline_comment_after_the_marker(line: &str) -> String {
+    match line.find("<!--") {
+        Some(index) => {
+            let (head, tail) = line.split_at(index + "<!--".len());
+            format!("{head}{}", escape_inline_comment(tail))
+        }
+        None => line.to_string(),
+    }
+}
+
+/// Escapes the FIRST `<` of a line-start HTML construct to `&lt;`, leaving the
+/// rest of the line — and any indentation or container prefix — exactly as
+/// written.
+///
+/// "Line-start" means the first non-whitespace content of the line, at ANY
+/// indentation (arbsec/orchestraitor#799 R18), and after a list or blockquote
+/// marker when there is one: indented code cannot interrupt a paragraph, so
+/// `Result:\n    <!-- tests failed -->` leaves an ACTIVE comment that hides the
+/// text a reviewer needs.
+fn escape_line_start_html(line: &str) -> String {
+    // The offset of the construct's `<`: after a container prefix (`- `, `> `,
+    // `1. `) when there is one, else after the leading whitespace.
+    let offset = line.len()
+        - checklist_markers::strip_container_prefix(line)
+            .map_or_else(|| line.trim_start_matches([' ', '\t']).len(), str::len);
+    if !line.get(offset..).is_some_and(|rest| rest.starts_with('<')) {
+        return line.to_string();
+    }
+    let mut escaped = String::with_capacity(line.len() + 3);
+    escaped.push_str(&line[..offset]);
+    escaped.push_str("&lt;");
+    escaped.push_str(line.get(offset + 1..).unwrap_or_default());
+    escaped
+}
+
+/// True when the line's FIRST non-whitespace content — after a container prefix
+/// when there is one — is `<` with something after it, at ANY indentation.
+fn line_starts_with_html_construct(line: &str) -> bool {
+    checklist_markers::strip_container_prefix(line).map_or_else(
+        || {
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            trimmed.len() > 1 && trimmed.starts_with('<')
+        },
+        |rest| rest.len() > 1 && rest.starts_with('<'),
+    )
+}
+
+/// Dedents the CONSTRUCT of a line to column 0: the content after a container
+/// prefix (`- `, `> `, `1. `) when there is one, else the line with its leading
+/// whitespace removed. The model's content is preserved byte for byte; only the
+/// container/indentation scope the scanner cannot model is dropped.
+fn dedent_construct(line: &str) -> String {
+    checklist_markers::strip_container_prefix(line).map_or_else(|| dedent(line), str::to_string)
+}
+/// The `orc:NAME` text a scanner looks for.
+fn name_reference(name: &str) -> String {
+    format!("orc:{name}")
+}
+
+/// Renders a near-marker line so it can no longer present a managed marker,
+/// while keeping every character readable: `<!--` becomes `&lt;!--` and
+/// `orc:NAME` becomes `orc&#58;NAME`. Both are character references, so the
+/// reviewer reads the text the model wrote and no delimiter survives for a
+/// scanner to find. Idempotent: the escaped forms contain neither needle.
+///
+/// The name list is the SHARED grammar's (`MANAGED_MARKER_NAMES`), so a name
+/// added to the template can never be missed here.
+fn escape_marker_delimiters(line: &str) -> String {
+    let mut escaped = line.replace("<!--", "&lt;!--");
+    for name in checklist_markers::MANAGED_MARKER_NAMES {
+        escaped = escaped.replace(&name_reference(name), &format!("orc&#58;{name}"));
+    }
+    escaped
+}
 
 /// Real delivery sink (issue #656): hands a completed run's committed
 /// worktree state to `orc github push-branch` (the App-signed landing
@@ -252,6 +557,23 @@ impl PushBranchDeliverySink {
         request: &DeliveryRequest,
     ) -> Result<String, &'static str> {
         let title = format!("feat(loop): task {task}", task = request.task_id);
+        // The managed checklist rides the body and comes FIRST: the summary is
+        // UNTRUSTED model output (spec `40-arbitraitor-integration.md` §6.1) and
+        // may leave a code fence open. Appended after it, the trusted markers
+        // would land INSIDE that fence, where every scanner strips them as an
+        // example — a summary with one ticked marker plus an unclosed fence
+        // would then pass the merge gate on its own (see DELIVERY_PR_CHECKLIST).
+        //
+        // The summary is also NEUTRALISED before it is composed (see
+        // [`neutralise_summary`]): an indented fence opener in it would make the
+        // composed body INDETERMINATE (`checklist_unparseable`) and a line-start
+        // `<!--` would hide the rest of the summary from the reviewer. The
+        // trusted block is composed here, never derived from the summary, so it
+        // can never be reordered behind a region the summary creates.
+        let body = format!(
+            "{DELIVERY_PR_CHECKLIST}{}",
+            neutralise_summary(&request.summary)
+        );
         let mut pr = tokio::process::Command::new(&self.orc_bin);
         pr.current_dir(worktree).args([
             "github",
@@ -270,7 +592,7 @@ impl PushBranchDeliverySink {
             "--title",
             &title,
             "--body",
-            &request.summary,
+            &body,
         ]);
         pr.kill_on_drop(true);
         let pr_output = tokio::time::timeout(

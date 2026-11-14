@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod checklist_markers;
 pub mod config;
 pub mod error;
 pub mod github_app;

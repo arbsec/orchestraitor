@@ -1,69 +1,36 @@
 #!/usr/bin/env bash
-# Regression tests for the pre-PR review gate's BASE RESOLUTION
-# (arbsec/orchestraitor#733): a fail-open defect in our own merge-gate tooling.
+# Regression tests for WHERE the review gate lives (arbsec/orchestraitor#733,
+# rewired by arbsec/orchestraitor#799 R18).
 #
-# The gate used to compute its base with `git merge-base <bare-branch> HEAD`.
-# Git resolves a bare name to `refs/heads/main` BEFORE
-# `refs/remotes/origin/main`, and every worktree shares the checkout's ref
-# database — so a long-lived stale local `main` (an ancestor of both
-# `origin/main` and `HEAD`, hence plausible) silently became the gate's base.
-# Two directions of damage:
-#   - false FAILURE: a current worktree with a valid CLEAN record for the real
-#     base is refused, which is why `--skip-review-gate` became routine;
-#   - false PASS: a stale CLEAN record keyed to the stale base satisfies the
-#     gate for a diff that was never reviewed against the PR's real base.
+# History: this file used to test the CREATE-time gate's base resolution — a
+# fail-open defect where a stale local `main` became the gate's base. That gate
+# is now DELETED, because `pr-create` no longer parses the caller's argv (R17) and
+# therefore cannot know which base `gh` will use: `pr-create --base release`
+# creates against `release` while a create-time gate could only validate evidence
+# for the repository default, so evidence for `main` would authorise a `release`
+# PR. A gate that cannot bind to the base it is gating is worse than no gate.
 #
-# The gate now resolves `refs/remotes/origin/<base>` after fetching that ref
-# (fully qualified, so rev-parse precedence cannot pick a local branch) and
-# compares review records against that remote tip — the same OID
-# `pr-review-agent` writes as `- base OID:` and `convergence-status` /
-# `merge-gate` compare to the PR's `baseRefOid`. An unresolvable base is a
-# typed refusal (exit 6), never a local-branch fallback.
+# What replaces it — and what this suite now asserts:
+#   (a) NO create-time gate: a PR is created with no review record at all, in
+#       EVERY checkout shape (normal worktree, no `origin` remote, a `--depth 1`
+#       detached clone with no `origin/HEAD`) — the shapes whose differing exit
+#       code made the old suite fail only in CI;
+#   (b) `--skip-review-gate` is a NO-OP for compatibility: consumed, never
+#       forwarded to gh, and changes nothing;
+#   (c) a caller `--base` is forwarded VERBATIM and cannot influence anything —
+#       there is no create-time gate to influence;
+#   (d) the gate that DOES bind is the MERGE-time one: `convergence-status`
+#       refuses a CLEAN record whose `- base OID:` differs from the PR's actual
+#       `baseRefOid`, so a wrong-base record can never merge.
 #
-# Hermetic: fixtures are local `git init --bare` repositories reached over a
-# file path (git's local transport — no network, no credentials), the gate is
-# driven through the real `pr-create` script in `--dry-run` (it resolves the
-# base and the review record, then stops before calling `gh`), and a `gh` stub
-# on PATH logs any call so "refused before creating a PR" is asserted, not
-# assumed.
-#
-# Covers:
-#   (a) stale local `main` present -> the REMOTE tip is the base (the exact bug)
-#   (b) a CLEAN record keyed to the stale local tip does NOT pass (fail-open)
-#   (c) no local `main` at all -> still resolves the remote tip
-#   (d) origin base ref missing/unfetchable -> typed refusal, exit 6, no
-#       local-branch fallback even when a local branch would satisfy the record
-#   (e) no `origin` remote at all -> typed refusal, exit 6
-#   (f) HEAD shares no history with the base ref -> typed refusal, exit 6
-#   (g) a stale CACHED `origin/main` is refreshed: the fetch, not the cached
-#       remote-tracking ref, decides
-#   (h) `--skip-review-gate` still works when the base resolves
-#   (i) the docs-only auto-skip still diffs from the fork point
-#   (j) `--skip-review-gate` is evaluated BEFORE base resolution: with no
-#       `origin` it still reaches creation (exit 0), while the same fixture
-#       without the flag stays fail-closed (exit 6) (#735 review)
-#   (k) `--base` ref normalisation: `origin/`, `refs/heads/` and
-#       `refs/remotes/origin/` resolve to the same remote tip; a doubled prefix
-#       fails closed instead of resolving somewhere unexpected
+# Hermetic: local `git init` fixtures, stubbed `gh`/`orc`/`pr-checks`/
+# `review-threads`/`reconcile-checklist` on PATH; no network, no credentials.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/harness"
 GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
-
-# gh stub: the gate must never reach PR creation on a refusal, and --dry-run
-# must never call gh at all. Any call is recorded and fails loudly.
-cat > "$TMP/bin/gh" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$GH_LOG"
-echo "stub: unexpected gh invocation: $*" >&2
-exit 99
-STUB
-chmod +x "$TMP/bin/gh"
-export GH_LOG="$TMP/gh.log"
-: > "$GH_LOG"
-export PATH="$TMP/bin:/usr/bin:/bin"
 
 PASS=0; FAIL=0
 assert() {
@@ -72,280 +39,181 @@ assert() {
 }
 count() { grep -cF -- "$2" "$1" 2>/dev/null || true; }
 
-# --- fixture helpers ------------------------------------------------------------
-# Each scenario gets its own bare `origin`, seed repo and work repo so a failure
-# in one cannot mask another.
+# The scripts are driven from a copy OUTSIDE every fixture repo: files inside the
+# work tree would otherwise be picked up by the fixtures' own `git add -A`.
+cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" "$SCRIPT_DIR/convergence-status" "$TMP/harness/"
 
-make_seed() { # <dir> <bare-origin> : one "base" commit on main, pushed
-  git init -q -b main "$1"
-  git -C "$1" remote add origin "$2"
-  printf 'base\n' > "$1/file.txt"
-  git -C "$1" add -A
-  git -C "$1" "${GIT_ID[@]}" commit -q -m base
-  git -C "$1" push -q origin main
+# gh stub: records every call; `pr view` answers the two reads convergence-status
+# makes. `pr create` prints a URL (pr-create only ever reaches it in --dry-run
+# here, so a real invocation would be a defect).
+cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$1/${2:-}" in
+  auth/status) exit 0 ;;
+  pr/view)
+    json=""
+    for a in "$@"; do case "$prev" in --json) json="$a" ;; esac; prev="$a"; done
+    case "$json" in
+      baseRefOid) jq -n --arg b "$TEST_BASE" '{baseRefOid:$b}' ;;
+      reviewDecision,baseRefOid,headRefOid,isDraft)
+        jq -n --arg h "$TEST_HEAD" --arg b "$TEST_BASE" \
+          '{reviewDecision:"APPROVED",baseRefOid:$b,headRefOid:$h,isDraft:false}' ;;
+      *) echo "unexpected gh pr view --json '$json'" >&2; exit 1 ;;
+    esac ;;
+  pr/create) printf 'https://example.invalid/pull/7\n' ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+STUB
+cat > "$TMP/bin/orc" <<'STUB'
+#!/usr/bin/env bash
+case "$1/${2:-}" in
+  config/validate) exit 0 ;;
+  config/get) echo stub ;;
+  github/gh-env) shift 3; exec "$@" ;;
+  github/gh-env-pr-create-chain) shift 4; exec "$@" ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$TMP/bin/gh" "$TMP/bin/orc"
+export PATH="$TMP/bin:/usr/bin:/bin"
+export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
+export GH_LOG="$TMP/gh.log"
+export ORC_GITHUB_APP_ENFORCEMENT=required
+: > "$GH_LOG"
+# convergence-status's other sub-checks are stubbed here; their own suites cover
+# them. This suite only needs the REVIEW-RECORD leg.
+cat > "$TMP/bin/pr-checks" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"all_passed":true,"any_pending":false}'
+STUB
+cat > "$TMP/bin/review-threads" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"unresolved_actionable":0}'
+STUB
+cat > "$TMP/bin/reconcile-checklist" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"markers_present":true,"marker_count":9,"all_checked":true,"unparseable":false,"unchecked":[]}'
+STUB
+chmod +x "$TMP/bin/pr-checks" "$TMP/bin/review-threads" "$TMP/bin/reconcile-checklist"
+
+# --- (a) NO create-time gate, in EVERY checkout shape ---------------------------
+# The three shapes are the ones whose differing gate exit code made the old suite
+# green locally and red in CI: a normal worktree WITH `origin/HEAD`, a repo with
+# NO `origin` remote, and a `--depth 1` detached clone with no `origin/HEAD`.
+make_repo() { # <dir> [with-origin]
+  local dir="$1" with_origin="${2:-yes}"
+  git init -q -b main "$dir"
+  printf 'base\n' > "$dir/file.txt"
+  git -C "$dir" add -A
+  git -C "$dir" "${GIT_ID[@]}" commit -q -m base
+  if [ "$with_origin" = yes ]; then
+    git init -q --bare "$dir-origin.git"
+    git -C "$dir" remote add origin "$dir-origin.git"
+    git -C "$dir" push -q origin main
+    git -C "$dir" fetch -q origin
+    git -C "$dir" remote set-head origin main
+  fi
+}
+create_in() { # create_in <dir> [extra args...] : pr-create --dry-run, output captured
+  local dir="$1"; shift
+  ( cd "$dir" && bash "$TMP/harness/pr-create" --title t --body b \
+      --repo test-org/repo --dry-run "$@" ) 2>&1
 }
 
-advance_seed() { # <dir> <n> : one commit on main, pushed (moves origin/main)
-  printf 'advance %s\n' "$2" >> "$1/file.txt"
-  git -C "$1" "${GIT_ID[@]}" commit -q -am "advance $2"
-  git -C "$1" push -q origin main
+# (a1) a normal worktree: created, no gate message, no record needed.
+make_repo "$TMP/a1" yes
+: > "$GH_LOG"
+OUT="$(create_in "$TMP/a1")"; RC=$?
+assert 'normal worktree: pr-create exits 0 with NO review record' 0 "$RC"
+case "$OUT" in *pre-review-gate*) GATE_MSG=yes ;; *) GATE_MSG=no ;; esac
+assert 'normal worktree: no gate text on stderr' no "$GATE_MSG"
+case "$OUT" in *'[dry-run] gh pr create'*) REACHED=yes ;; *) REACHED=no ;; esac
+assert 'normal worktree: the create command is prepared' yes "$REACHED"
+
+# (a2) NO `origin` remote at all: the old gate exited 6 here.
+make_repo "$TMP/a2" no
+OUT="$(create_in "$TMP/a2")"; RC=$?
+assert 'no origin remote: pr-create still exits 0' 0 "$RC"
+case "$OUT" in *'cannot resolve'*) RESOLVE_MSG=yes ;; *) RESOLVE_MSG=no ;; esac
+assert 'no origin remote: no base-resolution refusal' no "$RESOLVE_MSG"
+
+# (a3) a --depth 1 detached clone with no `origin/HEAD` (the CI shape).
+git clone -q --depth 1 "file://$TMP/a2" "$TMP/a3" 2>/dev/null || cp -a "$TMP/a2" "$TMP/a3"
+( cd "$TMP/a3" && git checkout -q --detach HEAD 2>/dev/null && git remote set-head origin -d 2>/dev/null ) || true
+OUT="$(create_in "$TMP/a3")"; RC=$?
+assert 'CI shape (shallow, detached, no origin/HEAD): pr-create exits 0' 0 "$RC"
+assert 'CI shape: no gate message' 0 "$(grep -c 'pre-review-gate' <<<"$OUT" || true)"
+
+# --- (b) --skip-review-gate is a NO-OP ------------------------------------------
+: > "$GH_LOG"
+OUT="$(create_in "$TMP/a1" --skip-review-gate)"; RC=$?
+assert 'skip flag: still exits 0' 0 "$RC"
+case "$OUT" in *--skip-review-gate*) FORWARDED=yes ;; *) FORWARDED=no ;; esac
+assert 'skip flag: consumed, never forwarded to gh' no "$FORWARDED"
+assert 'skip flag: no gate notice either' 0 "$(grep -c 'SKIPPED via --skip-review-gate' <<<"$OUT" || true)"
+
+# --- (c) a caller --base is forwarded verbatim and gates nothing ----------------
+OUT="$(create_in "$TMP/a1" --base release)"
+case "$OUT" in *'pr create --repo test-org/repo --title t --body b --base release'*)
+  BASE_FWD=yes ;; *) BASE_FWD=no ;; esac
+assert 'caller --base: forwarded verbatim, in the caller order' yes "$BASE_FWD"
+assert 'caller --base: no base-resolution text anywhere' 0 "$(grep -c 'refs/remotes/origin' <<<"$OUT" || true)"
+
+# --- (d) the gate that BINDS is the MERGE-time one ------------------------------
+# convergence-status requires the CLEAN record's `- base OID:` to equal the PR's
+# ACTUAL baseRefOid. A record for a different base must NOT pass — that is what
+# makes a wrong-base PR unmergeable now that creation is ungated.
+#
+# The scripts live INSIDE the fixture repo and are committed into the base, because
+# convergence-status refuses to run policy that is not the trusted base's copy
+# (`orc_lib_require_policy_current`): a copy outside a checkout is refused (exit 6)
+# before any verdict, which is a different assertion than the one this section makes.
+make_repo "$TMP/d1" yes
+D_REPO_SCRIPTS="$TMP/d1/.agents/skills/github-pr-lifecycle/scripts"
+mkdir -p "$D_REPO_SCRIPTS"
+cp -L -- "$TMP/harness/_lib.sh" "$TMP/harness/convergence-status" "$D_REPO_SCRIPTS/"
+cp -L -- "$TMP/bin/pr-checks" "$TMP/bin/review-threads" "$TMP/bin/reconcile-checklist" "$D_REPO_SCRIPTS/"
+git -C "$TMP/d1" add -A
+git -C "$TMP/d1" "${GIT_ID[@]}" commit -q -m 'fixture: review policy at the base'
+D_HEAD="$(git -C "$TMP/d1" rev-parse HEAD)"
+git -C "$TMP/d1" checkout -q -b feature
+printf 'feature\n' > "$TMP/d1/feature.txt"
+git -C "$TMP/d1" add -A
+git -C "$TMP/d1" "${GIT_ID[@]}" commit -q -m feature
+TEST_HEAD="$(git -C "$TMP/d1" rev-parse HEAD)"
+TEST_BASE="$D_HEAD"
+export TEST_HEAD TEST_BASE
+# Sanity: the fixture must exercise the guard, not a refusal — the committed policy
+# copy and the running copy are the same bytes.
+assert 'merge-time fixture: the running policy is the base copy' \
+  "$(git -C "$TMP/d1" rev-parse "HEAD:.agents/skills/github-pr-lifecycle/scripts/convergence-status")" \
+  "$(git -C "$TMP/d1" hash-object -- "$D_REPO_SCRIPTS/convergence-status")"
+mkdir -p "$TMP/d1/.orchestraitor/reviews"
+write_record() { # <base-oid>
+  cat > "$TMP/d1/.orchestraitor/reviews/7-$(git -C "$TMP/d1" rev-parse --short=7 "$TEST_HEAD").md" <<EOF
+# Agent review record: PR #7 @ $(git -C "$TMP/d1" rev-parse --short=7 "$TEST_HEAD")
+
+- verdict: CLEAN
+- reviewer-agent: test
+- head SHA: $TEST_HEAD
+- base OID: $1
+- findings: 0
+EOF
 }
-
-# The gate is driven from a copy OUTSIDE every fixture repo: script files
-# inside the work tree would otherwise be picked up by the fixtures' own
-# `git add -A` and pollute the changed-path set (the docs-only skip reads it).
-cp -L -- "$SCRIPT_DIR/_lib.sh" "$SCRIPT_DIR/pr-create" "$TMP/harness/"
-
-clone_work() { # <bare-origin> <dir>
-  git clone -q "$1" "$2"
+run_conv() {
+  ( cd "$TMP/d1" && bash "$D_REPO_SCRIPTS/convergence-status" 7 --repo test-org/repo --json )
 }
+# (d1) a record for the WRONG base (the pre-fork commit) is refused.
+write_record "$(git -C "$TMP/d1" rev-parse "$D_HEAD^")"
+OUT="$(run_conv)"; RC=$?
+assert 'merge-time: a wrong-base record BLOCKS convergence' 5 "$RC"
+assert 'merge-time: and the reason is the review record' 1 \
+  "$(grep -c 'agent_review_not_clean_at_head' <<<"$OUT")"
+# (d2) the same record with the RIGHT base passes.
+write_record "$TEST_BASE"
+OUT="$(run_conv)"; RC=$?
+assert 'merge-time: the right-base record converges' 0 "$RC"
 
-feature_commit() { # <work-dir> <branch> : non-.md change so the gate is not docs-only
-  git -C "$1" switch -q -c "$2"
-  printf 'feature\n' > "$1/FEATURE.txt"
-  git -C "$1" add -A
-  git -C "$1" "${GIT_ID[@]}" commit -q -m feature
-  git -C "$1" rev-parse HEAD
-}
-
-# The real producer's header (pr-review-agent): the gate greps these lines.
-write_record() { # <work-dir> <head-sha> <base-oid>
-  mkdir -p "$1/.orchestraitor/reviews"
-  rm -f "$1"/.orchestraitor/reviews/*.md
-  {
-    echo "# Agent review record: PR #77 @ $(git -C "$1" rev-parse --short=7 "$2")"
-    echo
-    echo "- verdict: CLEAN"
-    echo "- reviewer-agent: test"
-    echo "- head SHA: $2"
-    echo "- base OID: $3"
-    echo "- findings: 0"
-    echo
-    echo "No findings."
-  } > "$1/.orchestraitor/reviews/77-$(git -C "$1" rev-parse --short=7 "$2").md"
-}
-
-# gate <work-dir> [extra pr-create args...] : runs the real gate in --dry-run.
-# Sets RC and leaves stderr in $TMP/err, stdout in $TMP/out.
-gate() {
-  local repo="$1"; shift
-  : > "$GH_LOG"
-  ( cd "$repo" && bash "$TMP/harness/pr-create" --title t --body "b" \
-      --repo test-org/repo --dry-run "$@" ) > "$TMP/out" 2> "$TMP/err"
-  RC=$?
-  ERR="$(cat "$TMP/err")"
-}
-
-# --- (a) stale local `main` present --------------------------------------------
-# refs/heads/main is an OLD commit that is an ancestor of both origin/main and
-# HEAD — exactly the shape that made the old gate report a plausible wrong base.
-echo "--- (a) stale local main is never the base ---"
-git init -q --bare -b main "$TMP/a-remote.git"
-make_seed "$TMP/a-seed" "$TMP/a-remote.git"
-A_OLD="$(git -C "$TMP/a-seed" rev-parse HEAD)"
-advance_seed "$TMP/a-seed" 1
-advance_seed "$TMP/a-seed" 2
-A_TIP="$(git -C "$TMP/a-seed" rev-parse HEAD)"
-clone_work "$TMP/a-remote.git" "$TMP/a-work"
-A_HEAD="$(feature_commit "$TMP/a-work" feature)"
-git -C "$TMP/a-work" branch -f main "$A_OLD"          # the stale local main
-write_record "$TMP/a-work" "$A_HEAD" "$A_TIP"
-[ "$(git -C "$TMP/a-work" rev-parse refs/heads/main)" = "$A_OLD" ] ||
-  { echo "fixture error: local main is not stale" >&2; exit 1; }
-[ "$(git -C "$TMP/a-work" rev-parse refs/remotes/origin/main)" = "$A_TIP" ] ||
-  { echo "fixture error: origin/main is not the remote tip" >&2; exit 1; }
-gate "$TMP/a-work" --base main
-assert 'stale local main: gate passes against the remote base tip' 0 "$RC"
-assert 'stale local main: base reported is the remote tip' 1 \
-  "$(count "$TMP/err" "base $A_TIP = refs/remotes/origin/main")"
-assert 'stale local main: the ignored local branch is named' 1 \
-  "$(count "$TMP/err" "ignoring local branch 'main' at $A_OLD")"
-assert 'stale local main: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
-
-# --- (b) a record keyed to the stale local tip must NOT pass -------------------
-# The fail-open direction: under the old resolver this record (merge-base with
-# the stale local main) matched and the gate allowed PR creation for a diff
-# that was never reviewed against the real base.
-echo "--- (b) a CLEAN record keyed to the stale local tip is refused ---"
-write_record "$TMP/a-work" "$A_HEAD" "$A_OLD"
-gate "$TMP/a-work" --base main
-assert 'stale-tip record: refused (not a clean generation for this base)' 2 "$RC"
-assert 'stale-tip record: refusal names the remote true base' 1 \
-  "$(count "$TMP/err" "(base $A_TIP = refs/remotes/origin/main)")"
-assert 'stale-tip record: no pass message' 0 "$(count "$TMP/err" 'clean local review generation found')"
-assert 'stale-tip record: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
-
-# --- (c) no local `main` at all ------------------------------------------------
-echo "--- (c) no local main branch ---"
-git init -q --bare -b main "$TMP/c-remote.git"
-make_seed "$TMP/c-seed" "$TMP/c-remote.git"
-advance_seed "$TMP/c-seed" 1
-C_TIP="$(git -C "$TMP/c-seed" rev-parse HEAD)"
-clone_work "$TMP/c-remote.git" "$TMP/c-work"
-C_HEAD="$(feature_commit "$TMP/c-work" feature)"
-git -C "$TMP/c-work" branch -D main >/dev/null
-write_record "$TMP/c-work" "$C_HEAD" "$C_TIP"
-gate "$TMP/c-work" --base main
-assert 'no local main: gate passes against the remote base tip' 0 "$RC"
-assert 'no local main: base reported is the remote tip' 1 \
-  "$(count "$TMP/err" "base $C_TIP = refs/remotes/origin/main")"
-assert 'no local main: no stale-branch notice' 0 "$(count "$TMP/err" 'ignoring local branch')"
-
-# --- (d) origin lacks the base ref: refuse, never fall back to the local one ---
-# The local `main` here WOULD satisfy the old resolver and the record below, so
-# this asserts the forbidden effect did not happen: no fallback, no PR.
-echo "--- (d) missing origin base ref refuses (local fallback forbidden) ---"
-git init -q --bare -b dev "$TMP/d-remote.git"
-git init -q -b main "$TMP/d-seed"
-printf 'base\n' > "$TMP/d-seed/file.txt"
-git -C "$TMP/d-seed" add -A
-git -C "$TMP/d-seed" "${GIT_ID[@]}" commit -q -m base
-D_OLD="$(git -C "$TMP/d-seed" rev-parse HEAD)"
-git -C "$TMP/d-seed" remote add origin "$TMP/d-remote.git"
-git -C "$TMP/d-seed" push -q origin HEAD:refs/heads/dev   # no `main` on origin
-clone_work "$TMP/d-remote.git" "$TMP/d-work"
-git -C "$TMP/d-work" branch main "$D_OLD"                # tempting local fallback
-D_HEAD="$(feature_commit "$TMP/d-work" feature)"
-write_record "$TMP/d-work" "$D_HEAD" "$D_OLD"
-gate "$TMP/d-work" --base main
-assert 'missing origin ref: distinct fail-closed exit 6' 6 "$RC"
-assert 'missing origin ref: names the fully-qualified ref it tried' 1 \
-  "$(count "$TMP/err" "cannot resolve the base branch 'main' from 'refs/remotes/origin/main'")"
-assert 'missing origin ref: names the stale-local-branch possibility' 1 \
-  "$(count "$TMP/err" "a stale or unrelated local branch named 'main' is NOT used")"
-assert 'missing origin ref: no pass message' 0 "$(count "$TMP/err" 'clean local review generation found')"
-assert 'missing origin ref: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
-
-# --- (e) no `origin` remote at all ---------------------------------------------
-echo "--- (e) no origin remote refuses ---"
-git init -q --bare -b main "$TMP/e-remote.git"
-make_seed "$TMP/e-seed" "$TMP/e-remote.git"
-E_TIP="$(git -C "$TMP/e-seed" rev-parse HEAD)"
-clone_work "$TMP/e-remote.git" "$TMP/e-work"
-E_HEAD="$(feature_commit "$TMP/e-work" feature)"
-write_record "$TMP/e-work" "$E_HEAD" "$E_TIP"
-git -C "$TMP/e-work" remote remove origin
-gate "$TMP/e-work" --base main
-assert 'no origin remote: distinct fail-closed exit 6' 6 "$RC"
-assert 'no origin remote: refusal names the fetch command' 1 \
-  "$(count "$TMP/err" 'run: git fetch origin main')"
-assert 'no origin remote: no PR was created' 0 "$(count "$GH_LOG" 'pr create')"
-
-# --- (f) unrelated history ------------------------------------------------------
-echo "--- (f) unrelated history refuses ---"
-git init -q --bare -b main "$TMP/f-remote.git"
-make_seed "$TMP/f-seed" "$TMP/f-remote.git"
-advance_seed "$TMP/f-seed" 1
-clone_work "$TMP/f-remote.git" "$TMP/f-work"
-git -C "$TMP/f-work" switch -q --orphan feature
-printf 'unrelated\n' > "$TMP/f-work/FEATURE.txt"
-git -C "$TMP/f-work" add -A
-git -C "$TMP/f-work" "${GIT_ID[@]}" commit -q -m unrelated
-F_HEAD="$(git -C "$TMP/f-work" rev-parse HEAD)"
-write_record "$TMP/f-work" "$F_HEAD" "$(git -C "$TMP/f-seed" rev-parse HEAD)"
-gate "$TMP/f-work" --base main
-assert 'unrelated history: distinct fail-closed exit 6' 6 "$RC"
-assert 'unrelated history: refusal says no shared history' 1 \
-  "$(count "$TMP/err" "shares no history with 'refs/remotes/origin/main'")"
-
-# --- (g) the fetch, not the cached remote-tracking ref, decides -----------------
-# A stale CACHED origin/main must never be trusted silently: the record names
-# the current remote tip, which only a fresh fetch makes visible here.
-echo "--- (g) a stale cached origin/main is refreshed before comparing ---"
-git init -q --bare -b main "$TMP/g-remote.git"
-make_seed "$TMP/g-seed" "$TMP/g-remote.git"
-clone_work "$TMP/g-remote.git" "$TMP/g-work"
-advance_seed "$TMP/g-seed" 1
-git -C "$TMP/g-work" fetch -q origin                      # work sees advance 1
-G_CACHED="$(git -C "$TMP/g-work" rev-parse refs/remotes/origin/main)"
-G_HEAD="$(feature_commit "$TMP/g-work" feature)"
-advance_seed "$TMP/g-seed" 2                              # remote main moves on
-G_TIP="$(git -C "$TMP/g-seed" rev-parse HEAD)"
-# The cached ref is stale by construction: this repo fetched the FIRST advance
-# only, and the remote has moved once more since. No rewind is needed — the
-# fetch under test, not the cached ref, must supply the base.
-git -C "$TMP/g-work" branch -f main "$G_CACHED"           # stale local main
-write_record "$TMP/g-work" "$G_HEAD" "$G_TIP"
-[ "$G_CACHED" != "$G_TIP" ] || { echo "fixture error: cache is not stale" >&2; exit 1; }
-gate "$TMP/g-work" --base main
-assert 'stale cached remote ref: gate passes after fetching' 0 "$RC"
-assert 'stale cached remote ref: base is the freshly fetched tip' 1 \
-  "$(count "$TMP/err" "base $G_TIP = refs/remotes/origin/main")"
-assert 'stale cached remote ref: the stale local main is named' 1 \
-  "$(count "$TMP/err" "ignoring local branch 'main' at $G_CACHED")"
-
-# --- (h) --skip-review-gate stays a clean escape when the base resolves --------
-echo "--- (h) --skip-review-gate still works ---"
-git init -q --bare -b main "$TMP/h-remote.git"
-make_seed "$TMP/h-seed" "$TMP/h-remote.git"
-clone_work "$TMP/h-remote.git" "$TMP/h-work"
-feature_commit "$TMP/h-work" feature >/dev/null
-gate "$TMP/h-work" --base main --skip-review-gate
-assert 'skip flag: exits 0 with no review record' 0 "$RC"
-assert 'skip flag: prints the loud notice' 1 \
-  "$(count "$TMP/err" 'pre-PR local review gate SKIPPED via --skip-review-gate')"
-
-# --- (i) docs-only auto-skip still diffs from the fork point -------------------
-# The base tip has moved past the fork point; diffing tip..HEAD would drag the
-# base's own (non-.md) commits into the changed-path set and lose the skip.
-echo "--- (i) docs-only auto-skip uses the merge base, not the base tip ---"
-git init -q --bare -b main "$TMP/i-remote.git"
-make_seed "$TMP/i-seed" "$TMP/i-remote.git"
-clone_work "$TMP/i-remote.git" "$TMP/i-work"
-git -C "$TMP/i-work" switch -q -c feature
-printf 'doc\n' > "$TMP/i-work/DOC.md"
-git -C "$TMP/i-work" add -A
-git -C "$TMP/i-work" "${GIT_ID[@]}" commit -q -m doc
-advance_seed "$TMP/i-seed" 1          # non-.md change on the base after the fork
-gate "$TMP/i-work" --base main
-assert 'docs-only: gate skipped for a *.md-only diff' 0 "$RC"
-assert 'docs-only: skip message printed' 1 "$(count "$TMP/err" 'docs-only diff')"
-
-# --- (j) an explicit skip is evaluated BEFORE base resolution ------------------
-# #735 review finding: the fail-closed fetch must not veto the operator's
-# explicit decision. Same fixture, both directions.
-echo "--- (j) --skip-review-gate bypasses base resolution (no origin) ---"
-git init -q --bare -b main "$TMP/j-remote.git"
-make_seed "$TMP/j-seed" "$TMP/j-remote.git"
-clone_work "$TMP/j-remote.git" "$TMP/j-work"
-feature_commit "$TMP/j-work" feature >/dev/null
-git -C "$TMP/j-work" remote remove origin
-gate "$TMP/j-work" --base main --skip-review-gate
-assert 'no origin + explicit skip: still reaches creation (exit 0)' 0 "$RC"
-assert 'no origin + explicit skip: no base-resolution refusal' 0 \
-  "$(count "$TMP/err" 'cannot resolve the base branch')"
-assert 'no origin + explicit skip: notice names the skip' 1 \
-  "$(count "$TMP/err" 'pre-PR local review gate SKIPPED via --skip-review-gate')"
-assert 'no origin + explicit skip: dry-run reached gh pr create' 1 \
-  "$(count "$TMP/err" '[dry-run] gh pr create')"
-gate "$TMP/j-work" --base main
-assert 'same fixture WITHOUT the flag: fail-closed exit 6' 6 "$RC"
-assert 'same fixture WITHOUT the flag: names the ref it tried' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/main'")"
-
-# --- (k) --base ref normalisation ---------------------------------------------
-# `refs/remotes/origin/`, `refs/heads/` and `origin/` prefixes are stripped
-# once, and the result is re-anchored under `refs/remotes/origin/`.
-echo "--- (k) --base ref normalisation ---"
-git init -q --bare -b main "$TMP/k-remote.git"
-make_seed "$TMP/k-seed" "$TMP/k-remote.git"
-advance_seed "$TMP/k-seed" 1
-K_TIP="$(git -C "$TMP/k-seed" rev-parse HEAD)"
-clone_work "$TMP/k-remote.git" "$TMP/k-work"
-K_HEAD="$(feature_commit "$TMP/k-work" feature)"
-write_record "$TMP/k-work" "$K_HEAD" "$K_TIP"
-gate "$TMP/k-work" --base origin/main
-assert 'normalisation: origin/-prefixed base resolves (exit 0)' 0 "$RC"
-assert 'normalisation: origin/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
-gate "$TMP/k-work" --base refs/heads/main
-assert 'normalisation: refs/heads/-prefixed base resolves (exit 0)' 0 "$RC"
-assert 'normalisation: refs/heads/-prefixed base is the remote tip' 1 \
-  "$(count "$TMP/err" "base $K_TIP = refs/remotes/origin/main")"
-gate "$TMP/k-work" --base origin/origin/main
-assert 'normalisation: double prefix fails closed (exit 6)' 6 "$RC"
-assert 'normalisation: double prefix names the doubled ref' 1 \
-  "$(count "$TMP/err" "from 'refs/remotes/origin/origin/main'")"
-
-printf '\n=== stub-run: %s passed, %s failed ===\n' "$PASS" "$FAIL"
+printf '\n=== gate-base: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

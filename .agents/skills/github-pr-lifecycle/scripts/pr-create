@@ -11,221 +11,71 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or pass through any gh pr create flags after --). A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: pass any gh pr create arguments (--title, --body, --body-file, --fill, --base, ...). THE RULE: the wrapper does NOT interpret gh's argv. Every argument is forwarded to gh VERBATIM, in order, unchanged: nothing is inspected, rewritten, composed or refused, and gh validates its own flags. The only token this script recognises is its OWN --skip-review-gate (which gh does not have), kept as a NO-OP for compatibility; a gh flag VALUE that is exactly that string is taken as the flag, which is the one residual ambiguity. CONSEQUENCE: pr-create does NOT compose the managed checklist any more, and there is NO create-time review gate — a PR can be created at any time, but it cannot MERGE until a CLEAN review record exists for its exact (head, base): convergence-status and merge-gate require a record whose base OID equals the PR's actual baseRefOid, which is the gate that can bind. Every PR created through this wrapper needs one remediation command afterwards: pr-mutate edit <pr> --inject-checklist, which the post-create note names (the PR number is parsed from the URL gh printed; when it cannot be parsed the note says so and uses a placeholder)."
   exit "$ORC_OK"
 fi
 
-# Extract --title/--body from extra args (body may span several words); the
-# remaining args are passed through to `gh pr create` verbatim (e.g. --draft,
-# --base, --head, --reviewer, --, --body-file).
-TITLE=""
-BODY=""
+# THE RULE (arbsec/orchestraitor#799 R17): this wrapper does NOT INTERPRET
+# `gh`'s argv. It used to re-implement pflag's argument grammar in bash — the
+# body spellings, then the `=value` forms, then attached values, then short-flag
+# clusters — and every round moved the failure instead of fixing it, up to a
+# GATE-INTEGRITY bug: `--title '--base=release' --base main --body summary` made
+# the review gate select `release` (it read the caller's argv for `--base`) while
+# gh consumed that token as the TITLE and created the PR against `main`.
+#
+# So the interpreter is GONE. This parser recognises exactly ONE token — our own
+# `--skip-review-gate`, which gh does not have — and copies EVERY other argument
+# into `REST` in order, byte for byte. No body handling, no cluster splitting, no
+# short-flag tables, no `--body`/`--body-file` handling, no refusals of gh's
+# combinations: gh validates its own argv.
+#
+# Consequence, stated plainly: **`pr-create` no longer composes the managed
+# checklist.** Every PR it creates must be remediated with
+# `pr-mutate edit <pr> --inject-checklist`, which the post-create note names.
+# That is a convenience regression accepted in exchange for deleting an
+# unbounded parser and closing the gate-integrity hole above.
+#
+# The one residual ambiguity is deliberate and narrow: a gh flag VALUE that is
+# EXACTLY the string `--skip-review-gate` is taken as our flag. Any other value
+# (`--title '--base=release'`, `--body 'Summary'`, `-urgent`) is just a token and
+# is forwarded untouched.
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
-    --title)
-      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --title requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-      TITLE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --title=*) TITLE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body)
-      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body=*)  BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    # KEPT AS A NO-OP: the create-time review gate was deleted (R18), so this
+    # flag has nothing left to skip. It is still CONSUMED (never forwarded to
+    # gh, which would reject it) so existing callers keep working.
+    --skip-review-gate) : ;;
+    *) REST+=("${ORC_LIB_EXTRA_ARGS[0]}") ;;
   esac
+  ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
 done
 
-# --- Pre-PR local review gate ----------------------------------------------------
-# Before creating the PR, verify a recorded CLEAN local review generation exists
-# for the CURRENT (head, base) pair, where base is the freshly fetched remote
-# base tip (`refs/remotes/origin/<base>`) — the same OID the record producers
-# write as `- base OID:` (#733). The gate runs BEFORE any PR creation: a
-# refusal here leaves no partial PR behind. Besides that one `git fetch` of the
-# base branch it reads only local state (git + .orchestraitor/reviews/) and
-# never depends on the orc gh-env chain route.
+# --- The review gate lives at MERGE time, not here -------------------------------
+# arbsec/orchestraitor#799 R18 deleted the create-time review gate. It could not be
+# CORRECT: `pr-create` no longer parses the caller's argv (R17), so it cannot know
+# which base `gh` will use — `pr-create --base release` creates against `release`
+# while a create-time gate could only validate evidence for the repository's
+# default base, so evidence for `main` would authorise a `release` PR. A gate that
+# cannot bind to the base it is gating is worse than no gate.
 #
-# Escapes:
-#   --skip-review-gate  explicit override (docs-only PRs where CodeRabbit is
-#                       not applicable, or an explicit owner directive) —
-#                       prints a loud notice and proceeds. It is evaluated
-#                       BEFORE base resolution and skips it along with the
-#                       record check: an explicit decision must not be vetoed
-#                       by an unreachable origin. Never silently proceeds —
-#                       the notice says the PR is unreviewed.
-#   docs-only diff      automatic skip when `git diff --name-only
-#                       <merge-base>..HEAD` contains only *.md files. This one
-#                       still NEEDS a resolvable base: it is inferred from the
-#                       diff, not decided by the operator.
+# The binding gate is the MERGE-time one: `convergence-status` and `merge-gate`
+# require a CLEAN record whose `- base OID:` equals the PR's ACTUAL `baseRefOid`
+# (read from GitHub), and whose head SHA equals the current head. A PR can
+# therefore be created at any time; it cannot MERGE until a CLEAN record exists
+# for its exact (head, base).
 #
-# A gate failure is exit 2 (ORC_ERR_CONFIG, the script's config/state error
-# class) with a typed message naming the exact remediation command. A base that
-# cannot be resolved from the remote ref is a distinct refusal: exit 6
-# (PR_CREATE_EXIT_BASE_UNRESOLVED) — never a local-branch fallback and never a
-# silent empty merge-base (#733). The gate has NO env-var bypass: the
-# SKILL_CASE harness contract below is scoped to the gh-env-wrapper test suite
-# only.
-# SKILL_CASE=1 (the gh-env-wrapper harness contract) disables the gate
-# ENTIRELY — including base resolution — before any git probing: the harness
-# drives pr-create from a SHALLOW checkout (no origin/HEAD symref, no
-# origin/main ref, no review-record fixture) and asserts the labeling-chain
-# service route itself, so base resolution would fail there for reasons the
-# chain test does not exercise.
-if [ -z "${SKILL_CASE:-}" ]; then
-PR_CREATE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_REPO_ROOT=""
-if [ -z "$PR_CREATE_REPO_ROOT" ]; then
-  echo "error: pr-create requires running from the target git checkout" >&2
-  exit "$ORC_ERR_CONFIG"
-fi
-PR_CREATE_HEAD_SHA="$(git rev-parse HEAD)"
-# Explicit operator override, evaluated BEFORE any base resolution: the
-# operator has already made the decision, so an unreachable or unresolvable
-# base must not veto it (#735 review — the fail-closed fetch had made
-# `--skip-review-gate` itself fail in exactly the environment where the escape
-# hatch is needed). Base resolution, the docs-only inference and the
-# review-record check are all skipped together with it.
-# The docs-only auto-skip below is deliberately NOT hoisted: it is INFERRED
-# from the diff, and inferring it requires a resolvable base.
-if [ "${PR_CREATE_EXPLICIT_SKIP:-0}" = "1" ]; then
-  echo "NOTICE: pre-PR local review gate SKIPPED via --skip-review-gate (per owner directive or docs-only policy)" >&2
-  echo "        base resolution and the review-record check are skipped with it" >&2
-  echo "        this PR has NO recorded CLEAN review generation — CodeRabbit must still review it" >&2
-else
-PR_CREATE_TARGET_BASE="${PR_CREATE_BASE_BRANCH:-}"
-if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  # Resolve the effective `gh pr create` base from the pass-through args:
-  # an explicit --base <v> / --base=<v> wins (the gate must check the SAME
-  # diff the PR will propose); otherwise fall back to gh's own precedence —
-  # the branch's configured gh-merge-base, then the repo default branch.
-  # The head branch's @{u} is NEVER a substitute: a pushed feature branch
-  # tracks itself and would make the gate diff empty/wrong.
-  PR_CREATE_I=0
-  while [ "$PR_CREATE_I" -lt "${#REST[@]}" ]; do
-    case "${REST[$PR_CREATE_I]}" in
-      --base)
-        PR_CREATE_TARGET_BASE="${REST[$((PR_CREATE_I + 1))]:-}"; break ;;
-      --base=*)
-        PR_CREATE_TARGET_BASE="${REST[$PR_CREATE_I]#--base=}"; break ;;
-    esac
-    PR_CREATE_I=$((PR_CREATE_I + 1))
-  done
-fi
-if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  PR_CREATE_TARGET_BASE="$(git config --get "branch.$(git rev-parse --abbrev-ref HEAD).gh-merge-base" 2>/dev/null)" || true
-fi
-if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  PR_CREATE_TARGET_BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')" || true
-fi
-if [ -z "$PR_CREATE_TARGET_BASE" ]; then
-  echo "pre-review-gate: cannot resolve the target base branch (no --base, no gh-merge-base, no origin/HEAD) — pass --base explicitly" >&2
-  exit "$ORC_ERR_CONFIG"
-fi
-# Normalize a possibly ref-qualified value to the branch name `gh pr create`
-# expects. The base COMMIT is then resolved from a fully-qualified remote ref
-# below, never from this bare name.
-case "$PR_CREATE_TARGET_BASE" in
-  refs/remotes/origin/*) PR_CREATE_TARGET_BASE="${PR_CREATE_TARGET_BASE#refs/remotes/origin/}" ;;
-  refs/heads/*)          PR_CREATE_TARGET_BASE="${PR_CREATE_TARGET_BASE#refs/heads/}" ;;
-  origin/*)              PR_CREATE_TARGET_BASE="${PR_CREATE_TARGET_BASE#origin/}" ;;
-esac
+# `--skip-review-gate` is kept as a NO-OP for callers that still pass it (the
+# flag is consumed, never forwarded to gh, and has nothing left to skip).
 
-# --- Base resolution (fail closed; arbsec/orchestraitor#733) ---------------------
-# PR_CREATE_BASE_OID is the CURRENT TIP of the remote base branch, which is the
-# same quantity the review-record producers write and the merge gates compare:
-# `pr-review-agent` records the PR's `baseRefOid` (`- base OID:`), and
-# `convergence-status` / `merge-gate` require that record to equal the PR's
-# current `baseRefOid`. `gh pr view --json baseRefOid` is the authoritative
-# source but does not exist yet — this gate runs BEFORE the PR — so the freshly
-# fetched remote tip is the only correct local quantity, and it is exactly what
-# GitHub will report as `baseRefOid` for the PR about to be created.
-# The comparison used to be `git merge-base <bare-base> HEAD`, which disagreed
-# with the producers by construction AND resolved the bare name to
-# `refs/heads/<base>` first (git rev-parse prefers a local branch over
-# `refs/remotes/origin/<base>`): a checkout's long-lived local `main` is
-# routinely stale, is an ancestor of both `origin/main` and `HEAD`, and so
-# yielded a plausible-but-wrong base OID. Refuse rather than guess.
-PR_CREATE_EXIT_BASE_UNRESOLVED=6   # distinct from ORC_ERR_CONFIG (review record missing)
-PR_CREATE_BASE_REF="refs/remotes/origin/$PR_CREATE_TARGET_BASE"
-# Bound the fetch: against a blackholed remote it would otherwise hang until
-# the OS TCP timeout. Portable per-transport config (no `timeout`, which is
-# GNU coreutils and absent on a stock macOS); ignored by non-HTTP transports.
-set +e
-PR_CREATE_FETCH_ERR="$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 \
-  fetch --quiet --no-tags origin "+refs/heads/$PR_CREATE_TARGET_BASE:$PR_CREATE_BASE_REF" 2>&1)"
-PR_CREATE_FETCH_RC=$?
-set -e
-PR_CREATE_BASE_OID=""
-if [ "$PR_CREATE_FETCH_RC" -eq 0 ]; then
-  PR_CREATE_BASE_OID="$(git rev-parse --verify --quiet "$PR_CREATE_BASE_REF^{commit}")" || PR_CREATE_BASE_OID=""
-fi
-if [ -z "$PR_CREATE_BASE_OID" ]; then
-  # Redact any userinfo a credentialized remote URL could carry before echoing
-  # git's own first error line (errors never contain secrets).
-  PR_CREATE_FETCH_MSG="$(printf '%s\n' "$PR_CREATE_FETCH_ERR" |
-    sed -E 's#(://)[^/@[:space:]]*@#\1***@#g' | sed -n 1p)"
-  echo "pre-review-gate: cannot resolve the base branch '$PR_CREATE_TARGET_BASE' from '$PR_CREATE_BASE_REF' (git fetch exit $PR_CREATE_FETCH_RC) — refusing instead of falling back to a local branch" >&2
-  [ -n "$PR_CREATE_FETCH_MSG" ] && echo "  git: $PR_CREATE_FETCH_MSG" >&2
-  echo "  run: git fetch origin $PR_CREATE_TARGET_BASE   (and check that 'origin' is configured and reachable)" >&2
-  echo "  a stale or unrelated local branch named '$PR_CREATE_TARGET_BASE' is NOT used: this gate only ever reads '$PR_CREATE_BASE_REF'" >&2
-  exit "$PR_CREATE_EXIT_BASE_UNRESOLVED"
-fi
-# Fork point, used ONLY for the docs-only diff: what THIS branch changes is
-# merge-base(base tip, HEAD)..HEAD. Diffing base-tip..HEAD instead would also
-# show (in reverse) every commit the base gained since the branch was cut.
-PR_CREATE_MERGE_BASE="$(git merge-base HEAD "$PR_CREATE_BASE_REF" 2>/dev/null)" || PR_CREATE_MERGE_BASE=""
-if [ -z "$PR_CREATE_MERGE_BASE" ]; then
-  echo "pre-review-gate: HEAD $PR_CREATE_HEAD_SHA shares no history with '$PR_CREATE_BASE_REF' ($PR_CREATE_BASE_OID) — refusing instead of falling back to a local branch" >&2
-  echo "  a stale or unrelated local branch named '$PR_CREATE_TARGET_BASE' is NOT used: this gate only ever reads '$PR_CREATE_BASE_REF'" >&2
-  echo "  check that '$PR_CREATE_TARGET_BASE' is the branch this work was cut from, and pass --base <branch> if not" >&2
-  exit "$PR_CREATE_EXIT_BASE_UNRESOLVED"
-fi
-# The real-world #733 confusion, made visible: a local branch of the same name
-# exists but is not what the gate used.
-PR_CREATE_LOCAL_OID="$(git rev-parse --verify --quiet "refs/heads/$PR_CREATE_TARGET_BASE^{commit}")" || PR_CREATE_LOCAL_OID=""
-if [ -n "$PR_CREATE_LOCAL_OID" ] && [ "$PR_CREATE_LOCAL_OID" != "$PR_CREATE_BASE_OID" ]; then
-  echo "pre-review-gate: ignoring local branch '$PR_CREATE_TARGET_BASE' at $PR_CREATE_LOCAL_OID — using $PR_CREATE_BASE_REF at $PR_CREATE_BASE_OID" >&2
-fi
 
-# Docs-only auto-skip: every changed path vs the merge-base ends in .md.
-# (An empty diff — no changes vs the merge-base — still reaches the gate:
-# a no-diff PR has nothing for CodeRabbit to review, but also nothing to
-# refuse; treat it like docs-only so a stray empty PR can still be opened.)
-if [ "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | wc -l)" -gt 0 ] &&
-   [ -z "$(git diff --name-only "$PR_CREATE_MERGE_BASE"..HEAD -- | grep -v '\.md$')" ]; then
-  echo "pre-review-gate: docs-only diff (only *.md changed vs $PR_CREATE_TARGET_BASE) — local review gate skipped" >&2
-  SKIP_REVIEW_GATE=1
-fi
-
-if [ "${SKIP_REVIEW_GATE:-0}" != "1" ]; then
-  # Only the docs-only inference can set SKIP_REVIEW_GATE here: the explicit
-  # --skip-review-gate flag was hoisted above base resolution.
-  PR_CREATE_GATE_RECORD=""
-  for PR_CREATE_CANDIDATE in "$PR_CREATE_REPO_ROOT"/.orchestraitor/reviews/*-"$(git rev-parse --short=7 HEAD)".md; do
-    [ -f "$PR_CREATE_CANDIDATE" ] || continue
-    # Compare against PR_CREATE_BASE_OID (the remote base tip), which is what
-    # `pr-review-agent` writes as `- base OID:` and what `convergence-status` /
-    # `merge-gate` compare to the PR's `baseRefOid` — not the fork point.
-    if grep -q "^- verdict: CLEAN$" "$PR_CREATE_CANDIDATE" &&
-       grep -q "^- head SHA: $PR_CREATE_HEAD_SHA$" "$PR_CREATE_CANDIDATE" &&
-       grep -q "^- base OID: $PR_CREATE_BASE_OID$" "$PR_CREATE_CANDIDATE"; then
-      PR_CREATE_GATE_RECORD="$PR_CREATE_CANDIDATE"
-      break
-    fi
-  done
-  if [ -z "$PR_CREATE_GATE_RECORD" ]; then
-    echo "pre-review-gate: no clean local review generation at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_BASE_OID = $PR_CREATE_BASE_REF) — run pr-review-local first" >&2
-    echo "  (gate reads CLEAN records from $PR_CREATE_REPO_ROOT/.orchestraitor/reviews/; a stale or wrong-pair record does not pass)" >&2
-    echo "  bash .agents/skills/github-pr-lifecycle/scripts/pr-review-local" >&2
-    exit "$ORC_ERR_CONFIG"
-  fi
-  echo "pre-review-gate: clean local review generation found at HEAD $PR_CREATE_HEAD_SHA (base $PR_CREATE_BASE_OID = $PR_CREATE_BASE_REF)" >&2
-fi
-fi # explicit --skip-review-gate (hoisted above base resolution)
-fi # SKILL_CASE gate wrapper
-
+# --- argv: the caller's, verbatim -------------------------------------------------
+# Nothing is composed, injected, refused or rewritten. `gh` validates its own
+# argv; the wrapper only prepends the subcommand and the repository it resolved
+# through the service identity (`--repo` is idempotent when the caller passed it
+# too — gh accepts a repeated flag and takes the last one, which is exactly what
+# the caller wrote).
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
-[ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
-[ -n "$BODY" ] && ARGS+=(--body "$BODY")
 ARGS+=("${REST[@]}")
 
 if [ "$OPT_DRY_RUN" = true ]; then
@@ -252,6 +102,23 @@ else
   PR_URL="$(orc_lib_run_or_dry_run ARGS gh)"
 fi
 echo "Created PR: $PR_URL" >&2
+
+# The managed checklist is NOT composed here any more (arbsec/orchestraitor#799
+# R17), so every created PR owes one remediation command. The PR number is parsed
+# from the URL gh printed; when it cannot be parsed the note says so and uses a
+# placeholder rather than guessing a number.
+case "$PR_URL" in
+  */pull/*)
+    PR_URL_NUMBER="${PR_URL##*/}"
+    case "$PR_URL_NUMBER" in
+      ''|*[!0-9]*) PR_URL_NUMBER="" ;;
+    esac ;;
+  *) PR_URL_NUMBER="" ;;
+esac
+echo "next: bash $SCRIPT_DIR/pr-mutate edit ${PR_URL_NUMBER:-<the PR you just created>} --inject-checklist" >&2
+if [ -z "$PR_URL_NUMBER" ]; then
+  echo "      (the PR number could not be parsed from '$PR_URL' — replace <the PR you just created> with it)" >&2
+fi
 
 # --- Deterministic labeling chain (arbsec/orchestraitor#469) --------------------
 # A created PR MUST NOT depend on worker discretion for its labels: run

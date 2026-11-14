@@ -18,6 +18,7 @@
 //! BLOCKING — callers on async runtimes wrap [`Engine::aggregate`] in
 //! `tokio::task::spawn_blocking`.
 
+use orchestraitor_core::checklist_markers;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -211,15 +212,97 @@ pub struct ThreadItem {
     pub last_comment_excerpt: Option<String>,
 }
 
+// The nine MANAGED marker names live in the SHARED grammar
+// (`orchestraitor_core::checklist_markers`), which the engine and the delivery
+// lane both read: a per-crate copy is exactly what drifted twice
+// (arbsec/orchestraitor#799 R14). The engine's own code never needs the array
+// directly (the scan reports names), but its tests pin it to the template.
+#[cfg(test)]
+use orchestraitor_core::checklist_markers::MANAGED_MARKER_NAMES;
+
+/// The construct that made a checklist reading INDETERMINATE.
+///
+/// The verdict reason is the same for all four (`checklist_unparseable`), but
+/// the explanatory message names the construct, so the reader knows WHICH rule
+/// refused the reading and what remedy applies.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UnparseableConstruct {
+    /// A fence opener or an HTML construct at a container scope the scan cannot
+    /// model: CONTAINER-PREFIXED by a list marker (`-`, `*`, `+`, `N.`, `N)`) or
+    /// a blockquote marker (`>`) followed by whitespace, or INDENTED FOUR OR
+    /// MORE spaces (or led by a tab). In one reading its contents are examples
+    /// inside a list item; in the other it is literal indented code and the
+    /// contents are ordinary text. The reading is REFUSED rather than guessed
+    /// (arbsec/orchestraitor#799 R18). The remedies are: dedent the construct to
+    /// column 0, or put it in a column-0 fenced block.
+    ContainerScope,
+    /// A fence OPENER indented 1-3 spaces: its container scope (top level, list
+    /// item, block quote) cannot be determined without a container model
+    /// (arbsec/orchestraitor#809). The remedy is to dedent the opener to
+    /// column 0.
+    IndentedFenceOpener,
+    /// A RAW HTML CONSTRUCT: a line outside every fenced code region whose first
+    /// non-whitespace character is `<`, indented 0-3 spaces (arbsec/orchestraitor#799
+    /// R1). The scanner does NOT model HTML — it cannot tell what such a
+    /// construct hides — so the reading is REFUSED rather than guessed, which is
+    /// deliberately stricter than `CommonMark`; arbsec/orchestraitor#809 tracks
+    /// real modelling. The remedies are: put the line inside a fenced code
+    /// block, or remove it (indenting it by 4 spaces is itself a
+    /// container-scope refusal, arbsec/orchestraitor#799 R18).
+    HtmlConstruct,
+    /// A NEAR-MARKER: a line that presents a managed marker — a task-item box
+    /// token plus an `orc:NAME` reference — but not in the canonical form, so
+    /// the gate cannot tell what the author asserted (arbsec/orchestraitor#799
+    /// R1). The remedy is to write the marker canonically.
+    NearMarker,
+    /// A MANAGED MARKER indented FOUR OR MORE spaces, or one led by a TAB
+    /// (arbsec/orchestraitor#802). When such a line is not inside a list item it
+    /// renders as an INDENTED CODE BLOCK, where it is not a checkbox at all, and
+    /// neither the canonical grammar (its leading `[ \t]*` class) nor this
+    /// scanner has a container model to tell that apart from a marker nested in
+    /// a list item. The reading is therefore REFUSED rather than guessed. The
+    /// remedy is to dedent the marker line to column 0 AND write it in the
+    /// canonical form (`- [x] <!-- orc:NAME -->`): 0-3 leading spaces stays
+    /// accepted, but dedenting alone does not make a near-marker parseable.
+    IndentedMarker,
+}
+
 /// Checklist reconciliation (reconcile-checklist semantics, verbatim).
 #[derive(Debug, Clone, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct Checklist {
     /// Items with their orc markers.
     pub items: Vec<ChecklistItem>,
-    /// Vacuously true when no markers exist.
+    /// Number of managed markers parsed from the body.
+    pub marker_count: u64,
+    /// Whether the body carried at least one managed marker.
+    pub markers_present: bool,
+    /// True only when at least one marker exists AND every marker is checked.
+    /// A marker-less body is MISSING evidence, never "all checked" (arbsec/orchestraitor#788),
+    /// and a body whose checklist reading is indeterminate is never "all checked"
+    /// either (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1).
     pub all_checked: bool,
     /// Count of unchecked items.
     pub unchecked_count: u64,
+    /// True when the body carries a RAW HTML CONSTRUCT (a line-start `<`
+    /// outside every fenced region), opens a fenced code block indented 1-3
+    /// spaces, carries a NEAR-MARKER, or carries a MANAGED MARKER indented 4+
+    /// spaces (or led by a tab): the reading is indeterminate — the container
+    /// scope of the opener cannot be determined without a container model, HTML
+    /// is not modelled at all, a near-marker asserts something the canonical
+    /// grammar cannot read, and an indented marker is a code block rather than a
+    /// checkbox whenever it is not inside a list item — so NO checklist reading
+    /// from this body is trusted and the verdict blocks with
+    /// `checklist_unparseable` (arbsec/orchestraitor#809,
+    /// arbsec/orchestraitor#799 R1, arbsec/orchestraitor#802). STICKY: a closer
+    /// does not clear it.
+    pub unparseable: bool,
+    /// 1-based line number of the first such construct, or `None`.
+    pub unparseable_line: Option<u64>,
+    /// WHICH construct made the reading indeterminate, or `None`.
+    pub unparseable_construct: Option<UnparseableConstruct>,
 }
 
 /// One managed checklist item.
@@ -852,10 +935,23 @@ fn assemble_verdict(
             threads.unresolved_actionable
         ));
     }
-    if let Some(checklist) = &checklist
-        && !checklist.all_checked
-    {
-        reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
+    if let Some(checklist) = &checklist {
+        // Three DISTINCT checklist failures (arbsec/orchestraitor#788, #809): a
+        // body with no managed markers is missing evidence, a marker-bearing
+        // body with unticked boxes is the item-count reason, and a body whose
+        // fenced scope is INDETERMINATE (a fence opener indented 1-3 spaces) is
+        // unreadable — the scanner cannot say what is code, so it refuses
+        // rather than guessing. There is NO author-granted opt-out: a
+        // marker-less body always blocks, because the author cannot grant
+        // themselves the exemption (an exemption needs an authority they lack —
+        // arbsec/orchestraitor#801).
+        if checklist.unparseable {
+            reasons.push("checklist_unparseable".to_string());
+        } else if !checklist.markers_present {
+            reasons.push("checklist_markers_missing".to_string());
+        } else if !checklist.all_checked {
+            reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
+        }
     }
     apply_review_state_gates(
         initial,
@@ -1178,54 +1274,102 @@ fn gh_bucket(state: &str) -> String {
 }
 
 /// Parses the PR body for `<!-- orc:MARKER -->` checklist lines
-/// (reconcile-checklist's grep pattern, verbatim):
+/// (reconcile-checklist's canonical form, verbatim):
 /// `- [ ] <!-- orc:XXX --> description` / `- [x] <!-- orc:XXX --> description`.
-/// A body with zero markers is a legitimate empty checklist (`all_checked`
-/// is vacuously true).
-fn parse_checklist(body: &str) -> Checklist {
+///
+/// A managed marker has ONE CANONICAL form:
+///
+/// ```text
+/// [ \t]*- [BOX] <!-- orc:NAME --> <description>
+/// ```
+///
+/// - the indent is SPACES and TABS and nothing else;
+/// - every separator is EXACTLY ONE ASCII SPACE: between `-` and `[`, between
+///   `]` and `<!--`, and inside `<!-- orc:NAME -->`;
+/// - `<BOX>` is exactly one of `x`, `X` or a single SPACE;
+/// - `<NAME>` is one of [`MANAGED_MARKER_NAMES`].
+///
+/// A line that is not canonical but carries BOTH a task-item BOX TOKEN (`[` +
+/// exactly one character + `]`) AND a reference to one of the nine managed
+/// names (`orc:NAME`) is a NEAR-MARKER: the author presented a managed marker
+/// and the gate cannot tell what they asserted, so the reading is
+/// INDETERMINATE — `unparseable` is true and the verdict blocks with
+/// `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that only
+/// mentions `orc:NAME` (prose) and a line that carries only a box token (a
+/// plain task) are NOT near-markers and never block.
+///
+/// Markers inside a FENCED code region are EXAMPLES, not evidence: they are
+/// excluded before the scan (see
+/// [`orchestraitor_core::checklist_markers::scan_body`]).
+///
+/// A body with zero markers is an EMPTY checklist and, per
+/// arbsec/orchestraitor#788, MISSING evidence: `markers_present` is false and
+/// `all_checked` is false (an empty `all()` used to make it vacuously true and
+/// merge a PR with no checklist evidence at all). There is NO author-granted
+/// opt-out.
+///
+/// A body whose checklist reading is INDETERMINATE — a fence OPENER indented
+/// 1-3 spaces, whether or not its region closes; a RAW HTML CONSTRUCT (a
+/// line-start `<`, which this scanner does not model); a NEAR-MARKER; or a
+/// MANAGED MARKER indented 4+ spaces (or led by a tab), which is a code block
+/// rather than a checkbox whenever it is not inside a list item — is never "all
+/// checked": the reading is refused rather than guessed
+/// (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1, #802).
+///
+/// `must_use`: a dropped verdict is a silent gate, so the reading must be
+/// consumed by the caller.
+#[must_use]
+pub fn parse_checklist(body: &str) -> Checklist {
+    // ONE scan, shared with every other caller: the grammar, the fence rules and
+    // the four refusal constructs live in `orchestraitor_core::checklist_markers`
+    // (arbsec/orchestraitor#799 R14). This function only maps the scan onto the
+    // typed verdict the gate publishes, so no caller can drift from the engine.
+    let scan = checklist_markers::scan_body(body);
     let mut items = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("- [") else {
+    for line in scan.visible() {
+        let Some(marker) = &line.canonical else {
             continue;
         };
-        let Some((checked_char, after_box)) = rest.split_once(']') else {
-            continue;
-        };
-        if checked_char.len() != 1 || !(checked_char == "x" || checked_char == " ") {
-            continue;
-        }
-        let after_box = after_box.trim_start();
-        let Some(rest) = after_box.strip_prefix("<!--") else {
-            continue;
-        };
-        let Some((marker, after_marker)) = rest.split_once("-->") else {
-            continue;
-        };
-        let marker = marker.trim();
-        if marker.is_empty()
-            || !marker.starts_with("orc:")
-            || !marker["orc:".len()..]
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            continue;
-        }
-        let marker = marker["orc:".len()..].to_string();
-        let description = after_marker.trim().to_string();
         items.push(ChecklistItem {
-            marker,
-            checked: checked_char == "x",
-            description,
+            marker: marker.name.to_string(),
+            checked: marker.checked,
+            description: marker.description.clone(),
         });
     }
+    let marker_count = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    let markers_present = !items.is_empty();
     let unchecked_count =
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
-    let all_checked = items.iter().all(|item| item.checked);
+    // An indeterminate reading is never "all checked": the shared scan refuses it
+    // (fail closed), naming the EARLIEST construct.
+    let first_unparseable = scan.first_unparseable();
+    let unparseable_line = first_unparseable.map(|(line, _)| line);
+    let unparseable_construct = first_unparseable.map(|(_, kind)| to_construct(kind));
+    let unparseable = first_unparseable.is_some();
+    let all_checked = !unparseable && markers_present && items.iter().all(|item| item.checked);
     Checklist {
         items,
+        marker_count,
+        markers_present,
         all_checked,
         unchecked_count,
+        unparseable,
+        unparseable_line,
+        unparseable_construct,
+    }
+}
+
+/// Maps the shared scan's construct onto the typed verdict this module
+/// publishes.
+fn to_construct(kind: checklist_markers::UnparseableKind) -> UnparseableConstruct {
+    match kind {
+        checklist_markers::UnparseableKind::ContainerScope => UnparseableConstruct::ContainerScope,
+        checklist_markers::UnparseableKind::IndentedFenceOpener => {
+            UnparseableConstruct::IndentedFenceOpener
+        }
+        checklist_markers::UnparseableKind::HtmlConstruct => UnparseableConstruct::HtmlConstruct,
+        checklist_markers::UnparseableKind::IndentedMarker => UnparseableConstruct::IndentedMarker,
+        checklist_markers::UnparseableKind::NearMarker => UnparseableConstruct::NearMarker,
     }
 }
 
@@ -1748,27 +1892,1015 @@ mod tests {
 
     #[test]
     fn checklist_parses_markers_checked_and_descriptions() {
+        // A managed marker names one of the NINE managed items — a custom name
+        // is not a managed marker (arbsec/orchestraitor#799 R1).
         let checklist = parse_checklist(
-            "- [x] <!-- orc:convergence --> evidence recorded\n\
+            "- [x] <!-- orc:issue --> evidence recorded\n\
              - [ ] <!-- orc:docs --> docs updated\n\
              - plain bullet\n\
-             - [x] <!-- orc:weird-marker_1 --> trailing\n",
+             - [x] <!-- orc:tests --> trailing\n",
         );
         assert_eq!(checklist.items.len(), 3);
         assert!(checklist.items[0].checked);
-        assert_eq!(checklist.items[0].marker, "convergence");
+        assert_eq!(checklist.items[0].marker, "issue");
         assert_eq!(checklist.items[0].description, "evidence recorded");
         assert!(!checklist.items[1].checked);
         assert_eq!(checklist.items[1].marker, "docs");
         assert!(!checklist.all_checked);
         assert_eq!(checklist.unchecked_count, 1);
-        assert_eq!(checklist.items[2].marker, "weird-marker_1");
+        assert_eq!(checklist.items[2].marker, "tests");
+        // A CUSTOM name is neither a marker nor a near-marker: it names no
+        // managed item, so it is prose like any other.
+        let custom = parse_checklist("- [x] <!-- orc:convergence --> evidence recorded\n");
+        assert!(custom.items.is_empty(), "{:?}", custom.items);
+        assert!(!custom.unparseable);
+        assert!(!custom.markers_present);
     }
 
     #[test]
-    fn empty_body_is_a_vacuously_checked_empty_checklist() {
+    fn marker_less_body_is_missing_not_all_checked() {
+        // arbsec/orchestraitor#788: an empty `all()` used to report a
+        // marker-less body as fully checked, which reached merge-gate's
+        // `.mergeable` and merged a PR with no checklist evidence at all.
         let checklist = parse_checklist("Just a custom PR body with no markers.");
         assert!(checklist.items.is_empty());
+        assert_eq!(checklist.marker_count, 0);
+        assert!(!checklist.markers_present);
+        assert!(!checklist.all_checked);
+        assert_eq!(checklist.unchecked_count, 0);
+    }
+
+    #[test]
+    fn marker_count_and_markers_present_track_the_parsed_items() {
+        let checklist = parse_checklist(
+            "- [x] <!-- orc:issue --> linked\n\
+             - [x] <!-- orc:tests --> tested\n",
+        );
+        assert_eq!(checklist.marker_count, 2);
+        assert!(checklist.markers_present);
+        assert!(checklist.all_checked);
+    }
+
+    #[test]
+    fn a_body_sentinel_is_not_an_opt_out() {
+        // arbsec/orchestraitor#788 revision: the `<!-- orc:none -->` waiver was
+        // REMOVED — an author cannot grant themselves the exemption. A body
+        // that carries the sentinel and no marker is still MISSING evidence.
+        //
+        // arbsec/orchestraitor#799 R1: on its own LINE the sentinel is also a
+        // raw HTML construct, so the reading is REFUSED (`html_construct`).
+        // Stricter, and still no waiver.
+        for body in [
+            "A body.\n\n<!-- orc:none -->\n",
+            "A body.\n\n<!-- orc:none --> machine-authored delivery summary\n",
+        ] {
+            let sentinel = parse_checklist(body);
+            assert!(!sentinel.markers_present, "the sentinel is not a marker");
+            assert!(!sentinel.all_checked);
+            assert_eq!(sentinel.marker_count, 0);
+            assert!(sentinel.unparseable, "a line-start sentinel is refused");
+            assert_eq!(
+                sentinel.unparseable_construct,
+                Some(UnparseableConstruct::HtmlConstruct)
+            );
+        }
+
+        // MID-LINE the sentinel is inert prose: no refusal, no evidence, no
+        // waiver.
+        let midline = parse_checklist("A body.\nnote: <!-- orc:none --> is inert prose\n");
+        assert!(!midline.markers_present);
+        assert!(!midline.all_checked);
+        assert!(!midline.unparseable);
+    }
+
+    #[test]
+    fn a_sentinel_never_masks_a_partially_checked_checklist() {
+        // MID-LINE sentinel: the readable shape, where the real item count
+        // decides the verdict.
+        let checklist = parse_checklist(
+            "note: <!-- orc:none --> sneaky waiver\n\
+             - [x] <!-- orc:issue --> linked\n\
+             - [ ] <!-- orc:tests --> tested\n",
+        );
+        assert!(checklist.markers_present);
+        assert_eq!(checklist.marker_count, 2);
+        assert!(!checklist.all_checked);
+        assert_eq!(checklist.unchecked_count, 1);
+        assert!(!checklist.unparseable);
+
+        // LINE-START sentinel: refused outright, so the unticked box can never
+        // be laundered into a pass by the sentinel either.
+        let line_start = parse_checklist(
+            "<!-- orc:none --> sneaky waiver\n- [x] <!-- orc:issue --> linked\n- [ ] <!-- orc:tests --> tested\n",
+        );
+        assert_eq!(line_start.marker_count, 2);
+        assert!(!line_start.all_checked);
+        assert!(line_start.unparseable);
+    }
+
+    #[test]
+    fn checkbox_characters_are_case_insensitive_and_exactly_three() {
+        // arbsec/orchestraitor#788 review finding: the shell regex accepted
+        // ANY single character in the box while the Rust parser accepted only
+        // `x` and a space. Both engines now accept exactly `x`, `X` and a
+        // space: `x`/`X` are checked, a space is unchecked, and any other
+        // character is not a checklist line at all.
+        let upper = parse_checklist("- [X] <!-- orc:tests --> tested\n");
+        assert_eq!(upper.marker_count, 1);
+        assert!(upper.items[0].checked, "`X` is a checked box");
+        assert!(upper.all_checked);
+
+        let space = parse_checklist("- [ ] <!-- orc:tests --> untested\n");
+        assert_eq!(space.marker_count, 1);
+        assert!(!space.items[0].checked, "a space is an unchecked box");
+
+        let nonsense = parse_checklist("- [q] <!-- orc:tests --> nonsense box\n");
+        assert_eq!(nonsense.marker_count, 0, "a nonsense box is not an item");
+        assert!(!nonsense.markers_present);
+        assert!(!nonsense.all_checked);
+    }
+
+    #[test]
+    fn fenced_code_is_not_checklist_state() {
+        // A marker inside a fenced code region is an EXAMPLE, not evidence:
+        // both engines exclude the fenced region before scanning.
+        let fenced = parse_checklist(
+            "Here is the shape:\n\
+             ```markdown\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ```\n\
+             \n\
+             No real checklist here.\n",
+        );
+        assert_eq!(fenced.marker_count, 0);
+        assert!(!fenced.markers_present);
+        assert!(!fenced.all_checked);
+
+        let tilde_fenced = parse_checklist(
+            "~~~text\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ~~~\n",
+        );
+        assert_eq!(tilde_fenced.marker_count, 0);
+
+        // A marker AFTER a closed fence IS a marker.
+        let after = parse_checklist(
+            "```\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ```\n\
+             - [x] <!-- orc:tests --> real item\n",
+        );
+        assert_eq!(after.marker_count, 1);
+        assert_eq!(after.items[0].marker, "tests");
+        assert!(after.all_checked);
+    }
+
+    #[test]
+    fn an_unclosed_fence_runs_to_the_end_of_the_body() {
+        let body = parse_checklist(
+            "```\n\
+             - [x] <!-- orc:issue --> example only\n\
+             - [x] <!-- orc:tests --> also example\n",
+        );
+        assert_eq!(body.marker_count, 0);
+        assert!(!body.markers_present);
+    }
+
+    /// The delivery lane's PR body: the nine TRUSTED markers lead, the untrusted
+    /// model summary follows (arbsec/orchestraitor#788 gen-3 review).
+    ///
+    /// The summary is adversarial — a checked managed marker plus a code fence
+    /// that never closes. Appended BEFORE the checklist, all nine markers land
+    /// inside that fence, `strip_fenced_code` drops them, and the parse returns
+    /// the summary's single checked marker: `markers_present: true`,
+    /// `unchecked_count: 0`, `all_checked: true` — a merge gate satisfied by
+    /// untrusted model output alone. Leading with the trusted block keeps every
+    /// one of the nine markers unscanned-by-fence, all unticked.
+    #[test]
+    fn untrusted_summary_cannot_enclose_the_delivery_checklist() {
+        let summary = "- [x] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n```\nunclosed\n";
+        let trusted = "## Merge checklist\n\n\
+             - [ ] <!-- orc:issue --> Linked issue and specification requirements are satisfied\n\
+             - [ ] <!-- orc:service-identity --> All GitHub writes attributed to arbsec-agent\n\
+             - [ ] <!-- orc:tests --> Tests are added or updated\n\
+             - [ ] <!-- orc:security --> Security impact is reviewed\n\
+             - [ ] <!-- orc:docs --> Human-facing documentation is updated\n\
+             - [ ] <!-- orc:rollback --> Rollback or recovery behavior is verified\n\
+             - [ ] <!-- orc:checks --> All required and non-optional checks pass\n\
+             - [ ] <!-- orc:review --> All noteworthy findings are resolved\n\
+             - [ ] <!-- orc:threads --> All actionable review threads are resolved\n\
+             \n";
+
+        // The delivered order: trusted block first.
+        let delivered = parse_checklist(&format!("{trusted}{summary}"));
+        assert_eq!(
+            delivered.marker_count, 10,
+            "nine trusted + the summary's one"
+        );
+        assert!(delivered.markers_present);
+        assert_eq!(delivered.unchecked_count, 9, "no trusted box is ticked");
+        assert!(
+            !delivered.all_checked,
+            "nine unchecked trusted markers must block the gate"
+        );
+        let trusted_items: Vec<_> = delivered
+            .items
+            .iter()
+            .filter(|item| !item.checked)
+            .map(|item| item.marker.as_str())
+            .collect();
+        assert_eq!(
+            trusted_items,
+            [
+                "issue",
+                "service-identity",
+                "tests",
+                "security",
+                "docs",
+                "rollback",
+                "checks",
+                "review",
+                "threads",
+            ]
+        );
+
+        // The defect this ordering removes: the same two pieces the other way
+        // round let the summary certify itself.
+        let bypassed = parse_checklist(&format!("{summary}{trusted}"));
+        assert_eq!(
+            bypassed.marker_count, 1,
+            "the fence swallowed the checklist"
+        );
+        assert!(bypassed.markers_present);
+        assert_eq!(bypassed.unchecked_count, 0);
+        assert!(
+            bypassed.all_checked,
+            "the old ordering is exactly the bypass: reproduce it here so the regression is visible"
+        );
+    }
+
+    #[test]
+    fn a_different_fence_character_never_closes_a_region() {
+        // The opener is a backtick fence; a tilde line does not close it.
+        let body = parse_checklist(
+            "```\n\
+             ~~~\n\
+             - [x] <!-- orc:issue --> still inside the fence\n\
+             ```\n\
+             - [x] <!-- orc:tests --> real item\n",
+        );
+        assert_eq!(body.marker_count, 1);
+        assert_eq!(body.items[0].marker, "tests");
+    }
+
+    /// The nine managed marker names are the SINGLE list: the Rust copy must
+    /// equal the names in `.github/PULL_REQUEST_TEMPLATE.md` AND the names in
+    /// the `_lib.sh` fallback (which the shell suite's drift guard asserts
+    /// equals the template verbatim). Neither engine may carry a second copy.
+    #[test]
+    fn managed_marker_names_match_the_template() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let template = std::fs::read_to_string(root.join(".github/PULL_REQUEST_TEMPLATE.md"))
+            .expect("the PR template");
+        let lib = std::fs::read_to_string(
+            root.join(".agents/skills/github-pr-lifecycle/scripts/_lib.sh"),
+        )
+        .expect("the shared helper");
+        let names = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|line| {
+                    let rest = line.split("<!-- orc:").nth(1)?;
+                    let name = rest.split(" -->").next()?;
+                    if name.is_empty()
+                        || !name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
+                        return None;
+                    }
+                    Some(name.to_string())
+                })
+                .collect()
+        };
+        let template_names = names(&template);
+        assert_eq!(
+            template_names,
+            MANAGED_MARKER_NAMES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<String>>(),
+            "the Rust managed-marker names must equal the template's"
+        );
+        let lib_names = {
+            // Only the FALLBACK constant carries the list; the file's own
+            // comments mention `<!-- orc:NAME -->` as examples.
+            let start = lib
+                .find("ORC_LIB_CHECKLIST_FALLBACK='")
+                .expect("the fallback constant");
+            let rest = &lib[start + "ORC_LIB_CHECKLIST_FALLBACK='".len()..];
+            let end = rest.find("'\n").expect("the end of the fallback constant");
+            names(&rest[..end])
+        };
+        assert_eq!(
+            lib_names, template_names,
+            "the _lib.sh fallback must carry the same managed names as the template"
+        );
+    }
+
+    /// The CANONICAL managed-marker form, and the NEAR-MARKER rule that
+    /// refuses everything else (arbsec/orchestraitor#799 R1).
+    ///
+    /// The canonical form is `[ \t]*- [BOX] <!-- orc:NAME -->` where every
+    /// separator is EXACTLY one ASCII space, `<BOX>` is `x`, `X` or a single
+    /// space, and `<NAME>` is one of the nine managed names. A line that is not
+    /// canonical but carries BOTH a task-item box token and an `orc:NAME`
+    /// reference is a NEAR-MARKER: the gate cannot tell what the author
+    /// asserted, so the reading is REFUSED (`unparseable`).
+    #[test]
+    fn a_managed_marker_has_one_canonical_form_and_near_markers_are_refused() {
+        // The canonical form is counted and ticked.
+        let canonical = parse_checklist("- [x] <!-- orc:issue --> x\n");
+        assert_eq!(canonical.marker_count, 1);
+        assert!(canonical.items[0].checked);
+        assert_eq!(canonical.items[0].marker, "issue");
+        assert_eq!(canonical.items[0].description, "x");
+        assert!(!canonical.unparseable);
+        assert!(canonical.all_checked);
+
+        // Every near-marker form: not canonical, but a box token AND an
+        // `orc:NAME` reference. Each is refused, with the construct named.
+        let near_markers = [
+            // A NO-BREAK SPACE after the box.
+            "- [ ]\u{a0}<!-- orc:security --> visible unchecked\n",
+            // An EM SPACE after the box.
+            "- [ ]\u{2003}<!-- orc:security --> visible unchecked\n",
+            // A NARROW NO-BREAK SPACE after the box.
+            "- [ ]\u{202f}<!-- orc:security --> visible unchecked\n",
+            // A NO-BREAK SPACE right after `<!--`.
+            "- [ ] <!--\u{a0}orc:security --> visible unchecked\n",
+            // A NO-BREAK SPACE right before `-->`.
+            "- [ ] <!-- orc:security\u{a0}--> visible unchecked\n",
+            // A TAB after the box.
+            "- [ ]\t<!-- orc:tests --> visible unchecked\n",
+            // TWO spaces after the box.
+            "- [ ]  <!-- orc:tests --> visible unchecked\n",
+            // A box character that is not `x`, `X` or a space.
+            "- [y] <!-- orc:tests --> a nonsense box\n",
+            // A managed marker behind a block-quote prefix.
+            "> - [ ] <!-- orc:tests --> quoted task\n",
+        ];
+        for body in near_markers {
+            let parsed = parse_checklist(body);
+            assert!(
+                parsed.unparseable,
+                "a near-marker must be refused: {body:?} -> {:?}",
+                parsed.items
+            );
+            assert_eq!(
+                parsed.unparseable_construct,
+                Some(UnparseableConstruct::NearMarker),
+                "{body:?}"
+            );
+            assert!(!parsed.all_checked, "{body:?}");
+            assert_eq!(parsed.marker_count, 0, "{body:?}");
+        }
+
+        // PROSE that mentions a managed name (no box token) is not a
+        // near-marker: it must never block.
+        let prose = parse_checklist(
+            "The managed markers look like `<!-- orc:issue -->` and name one of the nine items.\n",
+        );
+        assert_eq!(prose.marker_count, 0);
+        assert!(!prose.unparseable);
+
+        // A PLAIN TASK (a box token, no managed name) is not a near-marker
+        // either.
+        let plain = parse_checklist("- [ ] plain task\n");
+        assert_eq!(plain.marker_count, 0);
+        assert!(!plain.unparseable);
+
+        // NO opt-out: `orc:none` is not one of the nine managed names, so a
+        // body carrying only that sentinel has NO checklist evidence — and it
+        // is not a NEAR-MARKER either (it names no managed marker), so it never
+        // blocks as one. On its own line it is a raw HTML construct instead
+        // (#799 R1), which is a different refusal.
+        let sentinel = parse_checklist("<!-- orc:none -->\n");
+        assert_eq!(sentinel.marker_count, 0);
+        assert!(!sentinel.markers_present);
+        assert_eq!(
+            sentinel.unparseable_construct,
+            Some(UnparseableConstruct::HtmlConstruct)
+        );
+        // A BOX TOKEN plus `orc:none` is still not a near-marker: `none` is not
+        // one of the nine managed names.
+        let sentinel_with_box = parse_checklist("- [x] <!-- orc:none -->\n");
+        assert_eq!(sentinel_with_box.marker_count, 0);
+        assert!(!sentinel_with_box.unparseable);
+    }
+
+    /// A MANAGED MARKER indented FOUR OR MORE spaces — or led by a TAB — makes
+    /// the reading INDETERMINATE (arbsec/orchestraitor#802): when such a line is
+    /// not inside a list item it renders as an INDENTED CODE BLOCK, where it is
+    /// not a checkbox at all, and neither the canonical grammar (its leading
+    /// `[ \t]*` class) nor this scanner has a container model to tell that apart
+    /// from a marker nested in a list item. The confirmed repro is the first
+    /// case below: nine canonical ticked markers, each preceded by four spaces,
+    /// reported `marker_count=9, all_checked=true` and the merge lane merged it.
+    ///
+    /// The markers still COUNT — `marker_count` is a pure function of the
+    /// canonical grammar — and the verdict blocks on the refusal, so no decision
+    /// is derived from that count. 0-3 leading spaces stays ACCEPTED, and a
+    /// marker inside a fenced region is inert rather than a refusal.
+    #[test]
+    fn a_marker_indented_four_spaces_is_refused() {
+        let nine = |indent: &str| -> String {
+            MANAGED_MARKER_NAMES
+                .iter()
+                .map(|name| format!("{indent}- [x] <!-- orc:{name} --> d"))
+                .collect::<Vec<String>>()
+                .join("\n")
+                + "\n"
+        };
+
+        // The confirmed repro: nine 4-space-indented ticked markers, alone.
+        let parsed = parse_checklist(&nine("    "));
+        assert_eq!(parsed.marker_count, 9, "the grammar still counts them");
+        assert!(parsed.unparseable, "an indented code block is not evidence");
+        assert_eq!(parsed.unparseable_line, Some(1));
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+        assert!(
+            !parsed.all_checked,
+            "a refused reading is never all checked"
+        );
+
+        // Blocked next to nine DETERMINATE markers too: the indented line is
+        // refused wherever it sits.
+        let parsed = parse_checklist(&format!("{}{}", nine("    "), nine("")));
+        assert_eq!(parsed.marker_count, 18);
+        assert!(parsed.unparseable);
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+        assert!(!parsed.all_checked);
+
+        // 0-3 leading spaces is a marker nested in a list item: ACCEPTED, and
+        // unchanged.
+        let parsed = parse_checklist(&nine("  "));
+        assert_eq!(parsed.marker_count, 9);
+        assert!(parsed.all_checked);
+        assert!(!parsed.unparseable);
+
+        // A TAB reaches the 4-column tab stop, so it is the same refusal — and
+        // the line is still counted, never silently dropped.
+        let parsed = parse_checklist("\t- [x] <!-- orc:tests --> tab\n");
+        assert_eq!(parsed.marker_count, 1);
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+
+        // A NEAR-MARKER indented four spaces is indeterminate for BOTH reasons;
+        // the named construct is the more specific `indented_marker`, because
+        // the indentation is what makes the line render as code.
+        let parsed = parse_checklist(&format!("{}    - [x]  <!-- orc:tests --> near\n", nine("")));
+        assert_eq!(parsed.marker_count, 9);
+        assert_eq!(parsed.unparseable_line, Some(10));
+        assert_eq!(
+            parsed.unparseable_construct,
+            Some(UnparseableConstruct::IndentedMarker)
+        );
+
+        // A marker inside a FENCED region is inert, not a refusal: the fence
+        // already removes it from the scan.
+        let parsed = parse_checklist("```\n    - [x] <!-- orc:tests --> fenced\n```\n");
+        assert_eq!(parsed.marker_count, 0);
+        assert!(!parsed.unparseable);
+    }
+
+    /// HTML IS NOT MODELLED: a line-start `<` REFUSES the reading
+    /// (arbsec/orchestraitor#799 R1).
+    ///
+    /// A merge gate must not depend on a hand-rolled Markdown parser being
+    /// spec-exact, so the scanner applies the repo's rule for a construct it
+    /// cannot model — refuse and block. A line whose FIRST non-whitespace
+    /// character is `<`, indented 0-3 spaces and outside every fenced region,
+    /// makes the reading indeterminate: `unparseable` is true, `all_checked` is
+    /// false, and every verdict blocks with `checklist_unparseable` and
+    /// `unparseable_construct: html_construct`. This is deliberately STRICTER
+    /// than `CommonMark` (an autolink and inline HTML are ordinary text there);
+    /// arbsec/orchestraitor#809 tracks real modelling.
+    #[test]
+    fn a_line_start_html_construct_refuses_the_reading() {
+        // Every one of these hid (or could hide) a marker under SOME markdown
+        // model, so none may be guessed at.
+        for text in [
+            "<pre></pre>",
+            "<!-->",
+            "<!--->",
+            "<!-- orc:none -->",
+            "<https://example.com>",
+            "<em>emphasis</em> prose",
+            "<notatag nonsense",
+            "<span>",
+            "<span//>",
+            "<div>",
+            "</div>",
+            "<?xml",
+            "<![CDATA[",
+            "   <div>",
+        ] {
+            let body = parse_checklist(&format!("{text}\n- [ ] <!-- orc:tests --> v\n"));
+            assert!(body.unparseable, "line {text:?} must refuse the reading");
+            assert_eq!(body.unparseable_line, Some(1), "line {text:?}");
+            assert_eq!(
+                body.unparseable_construct,
+                Some(UnparseableConstruct::HtmlConstruct),
+                "line {text:?}"
+            );
+            assert!(
+                !body.all_checked,
+                "line {text:?} must never read as all checked"
+            );
+        }
+
+        // A `<` that is NOT the line's first non-whitespace character is
+        // ordinary text — `x < y`, `<` mid-line, a marker's own `<!--` — and so
+        // is a line that is JUST `<`: there is no construct there to hide.
+        for text in ["x < y", "<", "prose <div> prose", "- [x] <!-- orc:x --> f"] {
+            let body = parse_checklist(&format!("{text}\n- [x] <!-- orc:tests --> v\n"));
+            assert!(!body.unparseable, "line {text:?} is ordinary text");
+            assert_eq!(body.marker_count, 1, "line {text:?}");
+        }
+
+        // FOUR OR MORE leading spaces — or a leading tab — is a CONTAINER-SCOPE
+        // construct now (arbsec/orchestraitor#799 R18): literal indented code
+        // cannot INTERRUPT a paragraph, so the same text can equally be inside a
+        // list item or a block quote, where it is a real HTML block that hides
+        // text. The two readings disagree, so the reading is refused.
+        for text in ["    <div>", "\t<div>", "    <!--"] {
+            let body = parse_checklist(&format!("{text}\n- [x] <!-- orc:tests --> v\n"));
+            assert!(
+                body.unparseable,
+                "line {text:?} is a container-scope construct"
+            );
+            assert_eq!(body.unparseable_line, Some(1), "line {text:?}");
+            assert_eq!(
+                body.unparseable_construct,
+                Some(UnparseableConstruct::ContainerScope),
+                "line {text:?}"
+            );
+        }
+
+        // ORDINARY four-space prose carries no construct: it stays literal
+        // indented code and must NOT refuse a reading.
+        for text in [
+            "    ordinary indented prose",
+            "    a < b and c > d",
+            "    [x] plain task",
+        ] {
+            let body = parse_checklist(&format!("{text}\n- [x] <!-- orc:tests --> v\n"));
+            assert!(
+                !body.unparseable,
+                "line {text:?} is ordinary indented prose"
+            );
+            assert_eq!(body.marker_count, 1, "line {text:?}");
+            assert!(body.all_checked, "line {text:?}");
+        }
+
+        // Inside a FENCED code region the line is inert: not a refusal.
+        let fenced = parse_checklist("```\n<div>\n```\n- [x] <!-- orc:tests --> v\n");
+        assert!(!fenced.unparseable);
+        assert_eq!(fenced.marker_count, 1);
+        assert!(fenced.all_checked);
+    }
+
+    /// A fence opener or an HTML construct at a CONTAINER SCOPE the scan cannot
+    /// model REFUSES the reading (arbsec/orchestraitor#799 R18).
+    ///
+    /// Two reviewers reproduced the same false pass in BOTH engines: a fence or
+    /// HTML block opened INSIDE a list item was not recognised, so a checked
+    /// example inside it counted as evidence and `all_checked` became true with
+    /// no real checklist. Two shapes are indistinguishable from top level here —
+    /// a CONTAINER-PREFIXED construct (list/blockquote marker + whitespace +
+    /// construct) and a construct indented four or more spaces — so the reading
+    /// is refused with the distinct `container_scope`. Ordinary 4-space PROSE
+    /// carries no construct and must still read normally.
+    #[test]
+    fn a_container_scope_construct_refuses_the_reading() {
+        for text in [
+            "- ~~~",
+            "* ~~~",
+            "+ ```",
+            "1. ~~~",
+            "2) ```",
+            "> ~~~",
+            "- <!--",
+            "> <pre>",
+            "    ```",
+            "    ~~~",
+            "    <pre>",
+            "\t~~~",
+        ] {
+            let body = parse_checklist(&format!("{text}\n  - [x] <!-- orc:tests --> example\n"));
+            assert!(body.unparseable, "line {text:?} must refuse the reading");
+            assert_eq!(body.unparseable_line, Some(1), "line {text:?}");
+            assert_eq!(
+                body.unparseable_construct,
+                Some(UnparseableConstruct::ContainerScope),
+                "line {text:?}"
+            );
+            assert!(
+                !body.all_checked,
+                "line {text:?} must never read as all checked"
+            );
+        }
+
+        // Column 0 stays MODELLED: a column-0 fence opens a region (its contents
+        // are examples, not evidence) and a column-0 `<` keeps the more specific
+        // `html_construct`.
+        let fenced = parse_checklist("~~~\n  - [x] <!-- orc:tests --> example\n~~~\n");
+        assert!(!fenced.unparseable);
+        assert_eq!(fenced.marker_count, 0);
+        let html = parse_checklist("<pre>\n- [x] <!-- orc:tests --> v\n");
+        assert_eq!(
+            html.unparseable_construct,
+            Some(UnparseableConstruct::HtmlConstruct)
+        );
+    }
+
+    /// The description is the text AFTER the delimiter, for a checked and an
+    /// unchecked item alike (arbsec/orchestraitor#799 R2): the shell engine used
+    /// to emit the BOX character here while this engine returned the text.
+    #[test]
+    fn descriptions_are_the_text_after_the_delimiter() {
+        let body =
+            parse_checklist("- [x] <!-- orc:issue --> alpha\n- [ ] <!-- orc:tests --> beta\n");
+        assert_eq!(body.marker_count, 2);
+        assert_eq!(body.items[0].marker, "issue");
+        assert!(body.items[0].checked);
+        assert_eq!(body.items[0].description, "alpha");
+        assert_eq!(body.items[1].marker, "tests");
+        assert!(!body.items[1].checked);
+        assert_eq!(body.items[1].description, "beta");
+
+        // The empty description stays empty, and spaces/tabs are trimmed from
+        // both ends only (never a Unicode whitespace class).
+        let empty =
+            parse_checklist("- [ ] <!-- orc:tests -->\n- [x] <!-- orc:issue -->  \tgamma\t \n");
+        assert_eq!(empty.items[0].description, "");
+        assert_eq!(empty.items[1].description, "gamma");
+
+        // An INTERNAL tab is part of the description and must survive
+        // (arbsec/orchestraitor#799 R16): the shell engine used to pass items
+        // through a tab-delimited intermediate, so its field split truncated
+        // `alpha<TAB>beta` to `alpha` while this engine returned the full
+        // text. The shell suite asserts the same value for corpus case 84.
+        let tabbed = parse_checklist("- [x] <!-- orc:issue --> alpha\tbeta\n");
+        assert_eq!(tabbed.items[0].description, "alpha\tbeta");
+    }
+
+    /// The EXACT size of the shared corpus. A deleted case must FAIL, so this
+    /// is a floor that is also a ceiling: bump it whenever a case is added and
+    /// never lower it to make a red suite green. `CORPUS_FLOOR` in
+    /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
+    /// carries the same number; keep the two in step.
+    const CORPUS_FLOOR: u32 = 94;
+
+    /// The SHARED cross-engine verdict corpus
+    /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
+    ///
+    /// Every case is a PR body (`<nn>-<slug>.md`) plus the verdict both engines
+    /// must derive from it, recorded in ONE `expectations.tsv` row keyed by the
+    /// file stem: `case`, `marker_count`, `all_checked`, and — only when the
+    /// case pins them — `unparseable` and `unparseable_construct`. The shell
+    /// suite (`scripts/test-reconcile-checklist`) reads the SAME table through
+    /// `reconcile-checklist`, so the corpus is the CONTRACT between the two
+    /// implementations: the fence scanner drifted between them three review
+    /// rounds in a row (arbsec/orchestraitor#799 F16/F17), and a divergence in
+    /// EITHER engine now fails CI.
+    ///
+    /// Three failure modes are pinned here, not just a value mismatch: a case
+    /// file with NO row fails, a row with NO case file fails, and the case count
+    /// must equal [`CORPUS_FLOOR`] exactly — a deleted case must FAIL.
+    #[test]
+    fn checklist_corpus_matches_both_engines() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus");
+        let (cases, mismatches) = compare_corpus(&dir);
+        assert_eq!(
+            cases, CORPUS_FLOOR,
+            "corpus is {CORPUS_FLOOR} cases: a deleted case must fail, and an added case must raise CORPUS_FLOOR in this test AND in test-reconcile-checklist"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "the Rust engine disagrees with the shared corpus:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// One row of `expectations.tsv`: `(marker_count, all_checked,
+    /// unparseable, unparseable_construct)`, keyed by case stem.
+    type Expectations = std::collections::BTreeMap<String, (u64, bool, bool, Option<String>)>;
+
+    /// Parses `expectations.tsv`: `#` comment and blank lines skipped, five
+    /// TAB-separated columns, columns 4-5 optional. Returns the map plus every
+    /// malformed line as a mismatch (a broken table must fail, not silently
+    /// shrink the corpus).
+    fn read_expectations(dir: &std::path::Path) -> (Expectations, Vec<String>) {
+        let table = std::fs::read_to_string(dir.join("expectations.tsv")).expect("expectations");
+        let mut expectations = Expectations::new();
+        let mut malformed = Vec::new();
+        for line in table.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let columns: Vec<&str> = line.split('\t').collect();
+            if columns.len() < 3 {
+                malformed.push(format!("too few columns: {line}"));
+                continue;
+            }
+            let Some(marker_count) = columns[1].parse::<u64>().ok() else {
+                malformed.push(format!("marker_count is not a number: {line}"));
+                continue;
+            };
+            let all_checked = match columns[2] {
+                "true" => true,
+                "false" => false,
+                other => {
+                    malformed.push(format!("all_checked is not true/false: {other}"));
+                    continue;
+                }
+            };
+            // `unparseable` defaults to false and `unparseable_construct` to
+            // "no construct": a case states them only when they are the rule it
+            // pins.
+            let unparseable = columns.get(3).is_some_and(|value| *value == "true");
+            let construct = columns
+                .get(4)
+                .filter(|value| !value.is_empty())
+                .map(|value| (*value).to_string());
+            expectations.insert(
+                columns[0].to_string(),
+                (marker_count, all_checked, unparseable, construct),
+            );
+        }
+        (expectations, malformed)
+    }
+
+    /// Compares every row against the engine, in both directions: a case file
+    /// with no row and a row with no case file are BOTH mismatches. Returns
+    /// `(case_count, mismatches)`.
+    fn compare_corpus(dir: &std::path::Path) -> (u32, Vec<String>) {
+        let (expectations, mut mismatches) = read_expectations(dir);
+        let mut cases = 0_u32;
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(dir).expect("corpus directory") {
+            let path = entry.expect("corpus entry").path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                mismatches.push(format!("{}: unreadable file stem", path.display()));
+                continue;
+            };
+            let Some((expected_count, expected_all, expected_unparseable, expected_construct)) =
+                expectations.get(stem)
+            else {
+                mismatches.push(format!(
+                    "{}: no expectations.tsv row for this case (a case with no row must fail)",
+                    path.display()
+                ));
+                continue;
+            };
+            seen.insert(stem.to_string());
+            let body = std::fs::read_to_string(&path).expect("corpus body");
+            let parsed = parse_checklist(&body);
+            if parsed.marker_count != *expected_count {
+                mismatches.push(format!(
+                    "{}: marker_count actual={} expected={expected_count}",
+                    path.display(),
+                    parsed.marker_count
+                ));
+            }
+            if parsed.all_checked != *expected_all {
+                mismatches.push(format!(
+                    "{}: all_checked actual={} expected={expected_all}",
+                    path.display(),
+                    parsed.all_checked
+                ));
+            }
+            if parsed.unparseable != *expected_unparseable {
+                mismatches.push(format!(
+                    "{}: unparseable actual={} expected={expected_unparseable}",
+                    path.display(),
+                    parsed.unparseable
+                ));
+            }
+            let actual_construct = parsed
+                .unparseable_construct
+                .map(|construct| match construct {
+                    UnparseableConstruct::ContainerScope => "container_scope",
+                    UnparseableConstruct::IndentedFenceOpener => "indented_fence_opener",
+                    UnparseableConstruct::HtmlConstruct => "html_construct",
+                    UnparseableConstruct::NearMarker => "near_marker",
+                    UnparseableConstruct::IndentedMarker => "indented_marker",
+                });
+            if let Some(expected_construct) = expected_construct
+                && actual_construct != Some(expected_construct.as_str())
+            {
+                mismatches.push(format!(
+                    "{}: unparseable_construct actual={actual_construct:?} expected={expected_construct:?}",
+                    path.display()
+                ));
+            }
+            cases += 1;
+        }
+        for orphan in expectations.keys() {
+            if !seen.contains(orphan) {
+                mismatches.push(format!(
+                    "expectations.tsv row `{orphan}` has NO case file (a deleted case must fail)"
+                ));
+            }
+        }
+        (cases, mismatches)
+    }
+
+    /// A form feed is neither leading fence INDENTATION nor a legal closing
+    /// tail (arbsec/orchestraitor#799 F18).
+    ///
+    /// `CommonMark` 0.31 allows 0-3 SPACES before a fence, and a closing fence
+    /// "may be followed only by spaces or tabs, which are ignored." Rust's
+    /// `char::is_ascii_whitespace` admits `\f`, so the earlier implementation
+    /// closed a region the renderer keeps open — the shell and Rust engines
+    /// disagreed. Both halves are pinned here and by corpus cases 37 (a form
+    /// feed after the closer) and 38 (a vertical-tab-led opener).
+    #[test]
+    fn a_form_feed_is_neither_fence_indentation_nor_a_closing_tail() {
+        // A \f-led fence line opens nothing: the marker below is a real item.
+        let opener = parse_checklist("\u{c}```\n- [x] <!-- orc:tests --> real item\n");
+        assert_eq!(opener.marker_count, 1, "a form feed is content, not indent");
+        assert_eq!(opener.items[0].marker, "tests");
+
+        // The closing-tail boundary table: only spaces and tabs are ignored
+        // after the closing run. Every other character is CONTENT, so the
+        // region stays OPEN and the checked marker behind it is an example (0
+        // items). A carriage return is no longer a special case at all: the body
+        // is normalised to LF first (see `normalize_line_endings`).
+        for (tail, expected) in [
+            ("", 1_u64),
+            ("   ", 1),
+            ("\t", 1),
+            ("\r", 1),
+            ("\u{c}", 0),
+            ("\u{b}", 0),
+        ] {
+            let body = parse_checklist(&format!(
+                "```\n- [x] <!-- orc:issue --> example only\n```{tail}\n- [x] <!-- orc:tests --> behind the closer\n"
+            ));
+            assert_eq!(
+                body.marker_count, expected,
+                "closer tail {tail:?} must yield {expected} marker(s)"
+            );
+        }
+    }
+
+    /// A fence OPENER indented 1-3 spaces is INDETERMINATE scope
+    /// (arbsec/orchestraitor#809): it may belong to a list item or a block
+    /// quote, and the scanner has no container model, so the reading is REFUSED
+    /// rather than guessed — `all_checked` is false and `unparseable` names the
+    /// opener's line.
+    #[test]
+    fn an_indented_fence_opener_is_refused_not_guessed_809() {
+        let list_item = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+  ```
+  sample
+
+- [ ] <!-- orc:tests --> not tested
+",
+        );
+        assert!(
+            list_item.unparseable,
+            "a 2-space-indented opener is indeterminate scope"
+        );
+        assert_eq!(list_item.unparseable_line, Some(3));
+        assert!(
+            !list_item.all_checked,
+            "an indeterminate scan is never 'all checked'"
+        );
+
+        // The same body with the fence DEDENTED to column 0 is determinate, and
+        // the visible unchecked item blocks on its own count.
+        let dedented = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+```
+sample
+```
+- [ ] <!-- orc:tests --> not tested
+",
+        );
+        assert!(!dedented.unparseable);
+        assert_eq!(dedented.marker_count, 2);
+        assert!(!dedented.all_checked);
+        assert_eq!(dedented.unchecked_count, 1);
+
+        // 0-space openers and 4+ space openers are unchanged: the former is a
+        // fence, the latter is a CONTAINER-SCOPE construct the scan refuses
+        // (arbsec/orchestraitor#799 R18 — it is literal indented code at top
+        // level and a real region inside a list item, and the scan cannot tell).
+        let top_level = parse_checklist("```\nx\n```\n- [x] <!-- orc:tests --> fine\n");
+        assert!(!top_level.unparseable);
+        assert!(top_level.all_checked);
+        let literal = parse_checklist("    ```\n- [x] <!-- orc:tests --> fine\n");
+        assert!(literal.unparseable);
+        assert_eq!(literal.unparseable_line, Some(1));
+        assert_eq!(
+            literal.unparseable_construct,
+            Some(UnparseableConstruct::ContainerScope)
+        );
+        assert_eq!(literal.marker_count, 1);
+        assert!(!literal.all_checked);
+
+        // A CLOSED indented region does NOT clear the condition (the rule is
+        // STICKY): a closer at a different container level ends the region
+        // EARLIER for the renderer than for this scanner, so the scanner can
+        // swallow a marker a human still sees. `CommonMark` ends this fence with
+        // the list item, so the unticked item is VISIBLE — a "closing clears"
+        // rule reported it as no evidence at all.
+        let closed = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+  ```
+  sample
+- [ ] <!-- orc:tests --> not tested
+  ```
+",
+        );
+        assert!(
+            closed.unparseable,
+            "a CLOSED 1-3-space opener is still indeterminate (sticky)"
+        );
+        assert_eq!(closed.unparseable_line, Some(3));
+        assert_eq!(
+            closed.marker_count, 1,
+            "the scanner's region swallows the visible item — which is exactly why the reading is refused"
+        );
+        assert!(!closed.all_checked, "the sticky condition must block");
+    }
+
+    /// `CommonMark` §2.1 line endings: CRLF and a lone CR are both line endings
+    /// and are normalised to LF ONCE, before any scan. A closing fence followed
+    /// by a CRLF-CRLF terminator closes (the first CR ends the fence line, the
+    /// CRLF ends an empty line), which is the case the two engines used to
+    /// disagree on (arbsec/orchestraitor#799 gen-7).
+    #[test]
+    fn line_endings_are_normalised_once_before_the_scan() {
+        let cr_crlf = parse_checklist(
+            "```\r\r\n- [x] <!-- orc:issue --> example only\r\r\n```\r\r\n- [x] <!-- orc:tests --> real item\r\r\n",
+        );
+        assert_eq!(cr_crlf.marker_count, 1, "```\\r\\r\\n closes the fence");
+        assert!(cr_crlf.all_checked);
+
+        let lone_cr = parse_checklist(
+            "```\r- [x] <!-- orc:issue --> example only\r```\r- [x] <!-- orc:tests --> real item\r",
+        );
+        assert_eq!(
+            lone_cr.marker_count, 1,
+            "a lone CR is a line ending, so the fence closes"
+        );
+        assert!(lone_cr.all_checked);
+
+        // A form feed or a vertical tab is CONTENT after the run, so the region
+        // stays OPEN in both engines (no normalisation of those characters).
+        let form_feed = parse_checklist("```\u{c}x\n```\u{c}\n- [x] <!-- orc:tests --> x\n");
+        assert_eq!(form_feed.marker_count, 0);
+        let vertical_tab = parse_checklist("```\u{b}\n- [x] <!-- orc:tests --> x\n");
+        assert_eq!(vertical_tab.marker_count, 0);
+    }
+
+    #[test]
+    fn one_ticked_marker_satisfies_the_gate_today() {
+        // DOCUMENTED GAP — arbsec/orchestraitor#800 (deferred from #788).
+        //
+        // The gate asserts that every marker the body CARRIES is checked; it
+        // does NOT assert that the body carries the managed marker SET. A body
+        // with exactly ONE ticked marker therefore reports `all_checked: true`
+        // and produces no checklist reason, so the other eight managed markers
+        // are silently absent.
+        //
+        // This is PRE-EXISTING (the base gate at 1297cb07 had the same
+        // property) and independently testable, so it is tracked in its own
+        // issue rather than folded into the #788 bug-fix. This test exists so
+        // the gap is VISIBLE and cannot be mistaken for intended behaviour.
+        let checklist = parse_checklist("- [x] <!-- orc:issue --> linked\n");
+        assert_eq!(checklist.marker_count, 1);
+        assert!(checklist.markers_present);
         assert!(checklist.all_checked);
         assert_eq!(checklist.unchecked_count, 0);
     }

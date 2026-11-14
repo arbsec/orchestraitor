@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. A managed marker has ONE canonical form: '- [x] <!-- orc:NAME -->' with exactly one ASCII space between every token, a box of x, X or a single space, and one of the nine managed names. A line that is not canonical but carries BOTH a task-item box token and an orc:NAME reference is a NEAR-MARKER: the gate cannot tell what it asserts, so it is reported unparseable (all_checked false) and the verdict blocks with checklist_unparseable. Markers inside a fenced code region are examples, not checklist items. HTML is NOT MODELLED: a line outside every fenced code region whose FIRST non-whitespace character is '<', indented 0-3 spaces, is reported unparseable with unparseable_construct html_construct and the verdict blocks with checklist_unparseable — put it inside a column-0 fenced code block, or remove it (indenting it by 4 spaces no longer works: an indented construct is itself container_scope). This is deliberately stricter than CommonMark; arbsec/orchestraitor#809 tracks real modelling. A fenced code opener or an HTML construct that is CONTAINER-PREFIXED (a list marker - , * , + , N. , N) or a blockquote marker > , then whitespace, then the construct) or INDENTED 4 or more spaces is reported unparseable with unparseable_construct container_scope: inside a list item its contents are examples, at top level the same text is literal indented code, and the scanner cannot tell which, so dedent the construct to column 0 or put it in a column-0 fenced block. Ordinary 4-space prose carries no construct and is NOT refused. A fence OPENER indented 1-3 spaces is also reported unparseable, closed or not: its container scope cannot be determined, so dedent it to column 0. A MANAGED MARKER (canonical or near-marker) indented 4 or more spaces, or led by a tab, is reported unparseable with unparseable_construct indented_marker — such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox (arbsec/orchestraitor#802) — so dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->); 0-3 leading spaces stays accepted, but dedenting alone does not make a near-marker parseable."
   exit "$ORC_OK"
 fi
 
@@ -31,37 +31,175 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
 # Extract each checklist line with its orc marker.
 # Pattern: - [ ] <!-- orc:XXX --> description  OR  - [x] <!-- orc:XXX --> description
-# A body with zero markers is legitimate (custom PR bodies): grep matches nothing
-# and would abort under pipefail, so guard it — empty means an empty checklist
-# (all_checked is vacuously true).
-RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
-  CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
-  MARKER="$(echo "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
-  DESC="$(echo "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
-  printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
-done)"
+#
+# A managed marker has ONE CANONICAL form: `[ \t]*- [BOX] <!-- orc:NAME -->`
+# where every separator is EXACTLY ONE ASCII SPACE, `<BOX>` is `x`, `X` or a
+# single space, and `<NAME>` is one of the nine managed names
+# (`ORC_LIB_CANONICAL_MARKER_RE`, derived from the single managed list). A line
+# that is not canonical but carries BOTH a task-item box token (`[` + exactly
+# one character + `]`) AND a reference to one of the nine managed names is a
+# NEAR-MARKER: the author presented a managed marker and the gate cannot tell
+# what they asserted, so the reading is INDETERMINATE and the verdict blocks
+# with `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that only
+# mentions `orc:NAME` (prose) or carries only a box token (a plain task) is not
+# a near-marker and is ignored — prose must never block.
+#
+# A body with zero markers is legitimate to PARSE (custom PR bodies; #394 keeps
+# "an empty parse is an empty list"), so grep matching nothing is guarded under
+# pipefail — empty means an empty checklist. An empty checklist is NOT a
+# satisfied one (#788): the derived state below keeps "no markers" distinguishable
+# from "all markers checked", and `convergence-status` blocks the former with
+# `checklist_markers_missing` instead of reading it as a vacuous pass.
+# There is NO author-granted opt-out: a body with no marker is missing
+# evidence and always fails closed (an exemption may only come from an
+# authority the author does not hold — arbsec/orchestraitor#801).
+#
+# Fenced code regions are EXAMPLES, not evidence: a marker inside one is not a
+# checklist item. `orc_lib_strip_fenced_code` (in _lib.sh) removes them; the Rust
+# engine applies the same rule, so creation and reconciliation agree on what a
+# marker is. HTML is NOT modelled: see the refusal below.
+SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
+# Five constructs make the reading INDETERMINATE, and each is reported with
+# the line it sits on:
+#
+#   - a CONTAINER-SCOPE construct (arbsec/orchestraitor#799 R18): a fence opener
+#     or an HTML construct that is CONTAINER-PREFIXED (a list marker `-`, `*`,
+#     `+`, `N.`, `N)` or a blockquote marker `>`, then whitespace, then the
+#     construct) or INDENTED 4 or more spaces. Inside a list item its contents
+#     are EXAMPLES; at top level the same text is literal indented code and its
+#     contents are ordinary text. The scanner has no container model and the two
+#     readings disagree, so the reading is REFUSED (`container_scope`). Ordinary
+#     4-space PROSE carries no construct and never refuses. The remedy is to
+#     dedent the construct to column 0, or put it in a column-0 fenced block;
+#   - a fence OPENER indented 1-3 spaces may sit inside a list item or a block
+#     quote, and the scanner has no container model. The region it models can
+#     swallow a genuine unchecked item, so the reading is INDETERMINATE and
+#     `all_checked` must never be true for it (arbsec/orchestraitor#809). The
+#     condition is STICKY: it is NOT cleared when the region closes, because a
+#     closer can end the region EARLIER for the renderer than for this scanner
+#     — a marker swallowed by the scanner's region can then still be VISIBLE
+#     to a human, and reading such a body as "all checked" is the false pass
+#     this rule exists to stop. The remedy is to DEDENT the opener to column 0;
+#   - a NEAR-MARKER (arbsec/orchestraitor#799 R1): the author presented a
+#     managed marker whose form the gate cannot read, so the gate must not
+#     guess what they asserted. The remedy is to write the marker in the
+#     canonical form;
+#   - a RAW HTML CONSTRUCT (arbsec/orchestraitor#799 R1): a line OUTSIDE every
+#     fenced region whose first non-whitespace character is `<`, indented 0-3
+#     spaces. HTML is not modelled — the scanner cannot tell whether the line
+#     opens a comment, a raw-text block, a declaration or nothing at all — so
+#     the reading is REFUSED rather than guessed. This is deliberately STRICTER
+#     than CommonMark; arbsec/orchestraitor#809 tracks real modelling. The
+#     remedies are: put the line in a column-0 fenced code block, or remove it
+#     (indenting it by 4 spaces no longer works: a 4-space-indented construct is
+#     itself a `container_scope` refusal, arbsec/orchestraitor#799 R18);
+#   - a MANAGED MARKER indented 4+ spaces, or led by a tab
+#     (arbsec/orchestraitor#802): it renders as an INDENTED CODE BLOCK whenever
+#     it is not inside a list item, where it is not a checkbox, and neither the
+#     canonical grammar nor this scanner has a container model to tell that
+#     apart from a marker nested in a list item. The reading is REFUSED
+#     (`indented_marker`) rather than counted as evidence. 0-3 leading spaces
+#     stays accepted, and the marker still COUNTS (`marker_count` is a pure
+#     function of the canonical grammar) — it is the reading that is refused, so
+#     no verdict is derived from that count. The remedy is to dedent the marker
+#     line to column 0.
+#
+# The EARLIEST of the five wins: each makes the reading undecidable.
+CONTAINER_SCOPE_LINE="$(printf '%s\n' "$BODY" | orc_lib_container_scope_line)"
+INDENTED_OPENER_LINE="$(printf '%s\n' "$BODY" | orc_lib_fence_unparseable_line)"
+HTML_CONSTRUCT_LINE="$(printf '%s\n' "$BODY" | orc_lib_html_construct_line)"
+INDENTED_MARKER_LINE="$(printf '%s\n' "$BODY" | orc_lib_indented_marker_line)"
+NEAR_MARKER_LINE="$(printf '%s\n' "$BODY" | orc_lib_near_marker_line)"
+UNPARSEABLE_LINE=""
+UNPARSEABLE_CONSTRUCT=""
+# The EARLIEST construct wins: every one of them makes the reading undecidable,
+# so the message names the first line the author has to look at. At the SAME
+# line the earlier entry in this list wins, which is why a near-marker indented
+# 4+ spaces (both constructs report that line) is reported as the more specific
+# `indented_marker`: the indentation is what makes it render as code.
+for candidate in "$CONTAINER_SCOPE_LINE:container_scope" \
+                 "$INDENTED_OPENER_LINE:indented_fence_opener" \
+                 "$HTML_CONSTRUCT_LINE:html_construct" \
+                 "$INDENTED_MARKER_LINE:indented_marker" \
+                 "$NEAR_MARKER_LINE:near_marker"; do
+  candidate_line="${candidate%%:*}"
+  candidate_construct="${candidate#*:}"
+  [ -n "$candidate_line" ] || continue
+  if [ -z "$UNPARSEABLE_LINE" ] || [ "$candidate_line" -lt "$UNPARSEABLE_LINE" ]; then
+    UNPARSEABLE_LINE="$candidate_line"
+    UNPARSEABLE_CONSTRUCT="$candidate_construct"
+  fi
+done
+# Every item is built as JSON with `jq --arg`, NOT as a tab-delimited record:
+# a tab-delimited intermediate cannot carry a DESCRIPTION that contains a tab
+# (the field split truncated `alpha<TAB>beta` to `alpha`, while the Rust engine
+# returns the full text — arbsec/orchestraitor#799 R16). `jq --arg` passes the
+# value as a STRING, so no byte of the body can collide with the encoding.
+RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -P "$ORC_LIB_CANONICAL_MARKER_RE" || true; } | while IFS= read -r line; do
+  CHECKED="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]].*/\1/p')"
+  MARKER="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:([A-Za-z0-9_-]+) -->.*/\2/p')"
+  # The DESCRIPTION is group 2 — everything after `-->`. Group 1 is the BOX
+  # character, and emitting it here reported `description: "x"` / `""` instead
+  # of the text the Rust engine returns (arbsec/orchestraitor#799 R2).
+  DESC="$(printf '%s\n' "$line" | sed -nE 's/^[[:blank:]]*- [[]([xX ])[]] <!-- orc:[A-Za-z0-9_-]+ -->(.*)$/\2/p' | sed -E 's/^[[:blank:]]+//; s/[[:blank:]]+$//')"
+  jq -cn --arg marker "$MARKER" --arg checked "$CHECKED" --arg description "$DESC" \
+    '{marker: $marker, checked: ($checked == "x" or $checked == "X"), description: $description}'
+done | jq -s '.')"
 
 if [ "$OPT_JSON" = true ]; then
-  echo "$RESULT" | jq -R -s '
-    split("\n") | map(select(length > 0)) |
-    map(split("\t")) | map({
-      marker: .[0],
-      checked: (.[1] == "x"),
-      description: .[2]
-    }) | {
-      items: .,
-      all_checked: all(.[]; .checked == true),
-      unchecked: map(select(.checked == false))
+  # `items` is already the item array (built with `jq --arg` above), so the
+  # verdict is a plain mapping of it.
+  jq -n --argjson items "$RESULT" --arg unparseable_line "$UNPARSEABLE_LINE" \
+    --arg unparseable_construct "$UNPARSEABLE_CONSTRUCT" '
+    ($unparseable_line != "") as $indeterminate |
+    $items as $items |
+    {
+      items: $items,
+      marker_count: ($items | length),
+      markers_present: ($items | length > 0),
+      all_checked: (($indeterminate | not) and ($items | length > 0) and all($items[]; .checked == true)),
+      unparseable: $indeterminate,
+      unparseable_line: (if $indeterminate then ($unparseable_line | tonumber) else null end),
+      unparseable_construct: (if $indeterminate then $unparseable_construct else null end),
+      unchecked: [$items[] | select(.checked == false)]
     }
   '
 else
   echo "PR checklist reconciliation:"
-  echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
-    [ -z "$marker" ] && continue
-    if [ "$checked" = "x" ]; then
-      echo "  [x] $marker: $desc"
-    else
-      echo "  [ ] $marker: $desc"
-    fi
-  done
+  if [ -n "$UNPARSEABLE_LINE" ]; then
+    case "$UNPARSEABLE_CONSTRUCT" in
+      container_scope)
+        echo "  (UNPARSEABLE: a fenced code opener or an HTML construct sits at a container scope this scanner cannot model on line $UNPARSEABLE_LINE"
+        echo "   (it is prefixed by a list or blockquote marker, or indented 4 or more spaces), so its contents may be examples in one reading"
+        echo "   and evidence in the other, and no checklist reading is trusted)"
+        echo "   fix: dedent the construct to column 0, or put it in a column-0 fenced block"
+        ;;
+      near_marker)
+        echo "  (UNPARSEABLE: line $UNPARSEABLE_LINE presents a managed marker that is NOT in the canonical form;"
+        echo "   it carries a task-item box token and an orc:NAME reference, so the gate cannot tell what it asserts)"
+        echo "   fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token"
+        ;;
+      html_construct)
+        echo "  (UNPARSEABLE: the PR body contains a raw HTML construct at line $UNPARSEABLE_LINE (a line starting with '<');"
+        echo "   the checklist scanner does not model HTML, so it cannot tell what that construct hides, and no checklist reading is trusted)"
+        echo "   fix: put it inside a column-0 fenced code block, or remove it (indenting it by 4 spaces no longer works: an indented construct is itself container_scope)"
+        ;;
+      indented_marker)
+        echo "  (UNPARSEABLE: a managed marker is indented too far at line $UNPARSEABLE_LINE (4 or more spaces, or a leading tab);"
+        echo "   such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox, so no checklist reading is trusted)"
+        echo "   fix: dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->) — 0-3 leading spaces is still accepted, but dedenting alone does not make a near-marker parseable"
+        ;;
+      *)
+        echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE, closed or not;"
+        echo "   its container scope (top level, list item, block quote) cannot be determined, so no checklist reading is trusted)"
+        echo "   fix: dedent the fence opener to column 0"
+        ;;
+    esac
+  fi
+  if [ "$(jq -r 'length' <<<"$RESULT")" = "0" ]; then
+    echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"
+  else
+    jq -r '.[] | "  [" + (if .checked then "x" else " " end) + "] " + .marker + ": " + .description' \
+      <<<"$RESULT"
+  fi
 fi
