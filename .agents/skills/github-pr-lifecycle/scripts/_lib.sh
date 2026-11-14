@@ -452,7 +452,9 @@ orc_lib_near_marker_line() { orc_lib__fence_scan near-marker; }
 # `checklist_unparseable` — instead of counting a code block as evidence. 0-3
 # leading spaces stays ACCEPTED (the legitimate nested-in-a-list-item case) and
 # a line inside a fenced region is inert, not a refusal. The remedy is to
-# dedent the marker line to column 0. Reads the body on STDIN.
+# dedent the marker line to column 0 AND write it in the canonical form
+# (`- [x] <!-- orc:NAME -->`): dedenting alone does not make a near-marker
+# parseable. Reads the body on STDIN.
 orc_lib_indented_marker_line() { orc_lib__fence_scan indented-marker; }
 
 # CommonMark §2.1 line endings, normalised ONCE before any scan: replace every
@@ -793,7 +795,7 @@ orc_lib_ensure_checklist_markers() {
         indented_marker)
           echo "error: refusing to append the managed merge checklist: a managed marker is indented too far at line $construct_line (4 or more spaces, or a leading tab)" >&2
           echo "  a marker indented 4+ spaces renders as an indented code block when it is not inside a list item, where it is not a checkbox, and the scanner has no container model to tell the two apart, so it refuses every reading of the body (arbsec/orchestraitor#802): nothing is appended and your body is not modified" >&2
-          echo "  fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted" >&2
+          echo "  fix: dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->) — 0-3 leading spaces is still accepted, but dedenting alone does not make a near-marker parseable" >&2
           ;;
         *)
           echo "error: refusing to append the managed merge checklist: the PR body carries a near-marker at line $construct_line (a task-item box token plus an orc:NAME reference that is not in the canonical form)" >&2
@@ -834,6 +836,132 @@ orc_lib_ensure_checklist_markers() {
   printf '## Merge checklist\n\n'
   printf '%s\n\n' '_Added by pr-create/pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788)._'
   orc_lib_checklist_markers "$root"
+}
+
+# --- gh short-flag clusters (arbsec/orchestraitor#799 R16) ---------------------
+# pflag (gh's flag parser) accepts a CLUSTER of short flags in one token, so a
+# body can be supplied in a form a `-b`/`-F` PREFIX test does not see:
+#
+#     -fbX      == --fill --body X
+#     -dbX      == --draft --body X
+#     -wbX      == --web --body X
+#     -fF/path  == --fill --body-file /path
+#
+# Proved against the installed gh v2.104.0: `gh pr create -fF/tmp/nothing`
+# prints "open /tmp/nothing: no such file or directory" — gh READ the path as
+# the BODY FILE — and `gh pr create -dbX` reports "the `--draft` flag is not
+# supported with `--web`", i.e. the cluster's tail was the `--body` value.
+# Such a token used to fall through to the pass-through branch and reach gh
+# UNVALIDATED — and, for `-F<path>`, it bypassed the trusted-root reader
+# entirely, so an out-of-root file could be published.
+#
+# The rules below mirror pflag's, letter by letter:
+#
+#   - the letters are read LEFT TO RIGHT;
+#   - a BOOLEAN flag takes NO value from the cluster (its only value form is
+#     `--flag=false`);
+#   - a VALUE-TAKING flag takes the REST of the cluster as its value, or the
+#     NEXT argv element when the cluster ends;
+#   - `=` binds to the letter before it (`-b=X` is `--body X`), but only when
+#     what follows the letter is longer than one character (pflag's
+#     `len(shorthands) > 2 && shorthands[1] == '='`), so `-b=` is `--body "="`.
+#
+# The tables are gh's OWN documented short flags, so a token whose letters we
+# cannot resolve is REFUSED (exit 2) instead of forwarded: a flag gh grew
+# yesterday could be a body flag. The tables were read from the installed
+# gh v2.104.0 help output and re-probed letter by letter (a letter gh rejects
+# with "unknown shorthand flag" is not in the table):
+#
+#   gh pr create: -a/--assignee -B/--base -b/--body -F/--body-file -H/--head
+#                  -l/--label -m/--milestone -p/--project -r/--reviewer
+#                  -R/--repo -T/--template -t/--title   (value-taking)
+#                  -d/--draft -e/--editor -f/--fill -w/--web -h/--help (boolean)
+#   gh pr edit:   -B/--base -b/--body -F/--body-file -m/--milestone -t/--title
+#   gh pr ready:  -R/--repo
+#   gh pr close:  -R/--repo -c/--comment (value-taking), -d/--delete-branch
+#                  -h/--help (boolean)
+ORC_LIB_SHORT_VALUE_CREATE="aBbFHlmprRTt"
+ORC_LIB_SHORT_BOOL_CREATE="defhw"
+ORC_LIB_SHORT_VALUE_EDIT="BFbmt"
+ORC_LIB_SHORT_BOOL_EDIT=""
+ORC_LIB_SHORT_VALUE_READY="R"
+ORC_LIB_SHORT_BOOL_READY="h"
+ORC_LIB_SHORT_VALUE_CLOSE="cR"
+ORC_LIB_SHORT_BOOL_CLOSE="dh"
+
+# The result of splitting one short-flag token.
+#
+#   ORC_LIB_CLUSTER_HAS_BODY     true when the token carries a body
+#   ORC_LIB_CLUSTER_BODY_KIND    "body" | "body-file"
+#   ORC_LIB_CLUSTER_BODY_VALUE   the value (empty when the value is external)
+#   ORC_LIB_CLUSTER_BODY_EXTERNAL true when the value is the NEXT argv element
+#   ORC_LIB_CLUSTER_BOOLS        the boolean parts, re-emitted as their own tokens
+#
+# Usage: orc_lib_split_short_cluster <token> <value-letters> <bool-letters>
+# Returns 0 when the token was resolved, and 1 when a letter is unknown — the
+# caller must then REFUSE it (fail closed), never forward it.
+orc_lib_split_short_cluster() {
+  local token="$1" value_letters="$2" bool_letters="$3"
+  local letters="${token#-}"
+  # A separate statement: bash evaluates every `local` right-hand side BEFORE
+  # performing the assignments, so `${#letters}` would read an unset local.
+  local length=${#letters} index=0 letter rest value
+  ORC_LIB_CLUSTER_HAS_BODY=false
+  ORC_LIB_CLUSTER_BODY_KIND=""
+  ORC_LIB_CLUSTER_BODY_VALUE=""
+  ORC_LIB_CLUSTER_BODY_EXTERNAL=false
+  ORC_LIB_CLUSTER_BOOLS=()
+  while [ "$index" -lt "$length" ]; do
+    letter="${letters:$index:1}"
+    rest="${letters:$((index + 1))}"
+    # `=` binds to the letter before it, but only when more than one character
+    # follows the letter (pflag: `len(shorthands) > 2 && shorthands[1] == '='`).
+    if [ "${#rest}" -gt 1 ] && [ "${rest:0:1}" = "=" ]; then
+      value="${rest:1}"
+      case "$letter" in
+        b)
+          ORC_LIB_CLUSTER_HAS_BODY=true
+          ORC_LIB_CLUSTER_BODY_KIND=body
+          ORC_LIB_CLUSTER_BODY_VALUE="$value" ;;
+        F)
+          ORC_LIB_CLUSTER_HAS_BODY=true
+          ORC_LIB_CLUSTER_BODY_KIND=body-file
+          ORC_LIB_CLUSTER_BODY_VALUE="$value" ;;
+        *)
+          case "$bool_letters" in
+            *"$letter"*) ORC_LIB_CLUSTER_BOOLS+=("-$letter=$value") ;;
+          esac ;;
+      esac
+      return 0
+    fi
+    case "$bool_letters" in
+      *"$letter"*)
+        ORC_LIB_CLUSTER_BOOLS+=("-$letter")
+        index=$((index + 1))
+        continue ;;
+    esac
+    case "$value_letters" in
+      *"$letter"*)
+        case "$letter" in
+          b)
+            ORC_LIB_CLUSTER_HAS_BODY=true
+            ORC_LIB_CLUSTER_BODY_KIND=body ;;
+          F)
+            ORC_LIB_CLUSTER_HAS_BODY=true
+            ORC_LIB_CLUSTER_BODY_KIND=body-file ;;
+        esac
+        if [ -n "$rest" ]; then
+          ORC_LIB_CLUSTER_BODY_VALUE="$rest"
+        else
+          ORC_LIB_CLUSTER_BODY_VALUE=""
+          ORC_LIB_CLUSTER_BODY_EXTERNAL=true
+        fi
+        return 0 ;;
+    esac
+    # An UNKNOWN letter: this token could carry a body we cannot see.
+    return 1
+  done
+  return 0
 }
 
 # --- Config loader -------------------------------------------------------------

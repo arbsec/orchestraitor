@@ -36,43 +36,13 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   condition), `html_construct` (above), `indented_marker` (a managed marker OR a
   near-marker indented four or more spaces, or led by a tab: when it is not in a
   list item it renders as an indented code block, where it is not a checkbox, so
-  the reading is refused — dedent the marker line to column 0; 0-3 leading
-  spaces stays accepted and a fenced instance is inert. The marker still COUNTS,
+  the reading is refused — dedent the marker line to column 0 AND write it in
+  the canonical form (`- [x] <!-- orc:NAME -->`); 0-3 leading spaces stays
+  accepted and a fenced instance is inert. The marker still COUNTS,
   but no verdict uses that count, because the reading is refused), and
   `near_marker` (a managed marker not in the canonical form — write it
   canonically). Line endings are normalised once (CommonMark §2.1: lone CR and
   CRLF both become LF) so both engines agree on every body.
-- **`pr-create` / `pr-mutate`**: a body that carries a raw HTML construct (a
-  line starting with `<`, outside a fenced code region) is now refused with
-  exit 2 instead of having the managed checklist appended into a body no
-  scanner could ever read: the error names the line and the three remedies —
-  put it inside a fenced code block, indent it by 4 spaces, or remove it. The
-  same refusal now covers every construct that makes the reading indeterminate,
-  with the construct named and its own remedy: an `indented_fence_opener`, an
-  `indented_marker` (dedent it to column 0) and a `near_marker` (write it
-  canonically), and it runs whether or not the body already carries the
-  checklist — a body the gate would refuse is never composed. The unclosed-fence
-  refusal stays APPEND-SPECIFIC: it fires only when markers must be appended, so
-  an already-checklisted body ending in an open fence is accepted as-is. The body
-  note the helper adds for a marker-less body is prose, never an HTML comment, so
-  an injected checklist can never make its own body indeterminate.
-- **`pr-create` / `pr-mutate` body flags**: the wrapper now intervenes **only**
-  when the caller supplies a body, and it recognises only the four body
-  spellings — `--body`/`-b` and `--body-file`/`-F`, in separated,
-  `=`-joined and pflag-attached forms (`-bX`, `-F/path`). EVERY other flag is
-  forwarded untouched and is never refused: `--fill`, `--fill=true`, `-f`,
-  `-f=true`, `--fill-first`, `--fill-verbose`, `--template`, `--web`,
-  `--editor`, `--editor=true` and `-B` (`--base`) behave exactly as `gh`
-  defines them. An explicit body is validated and forwarded with the managed
-  checklist, including an explicit EMPTY one (`--body ""` / `--body=`), which
-  becomes the checklist-only body; `-f` is no longer rewritten and `-B` is no
-  longer treated specially. With **no** explicit body nothing is injected and no
-  `--body` is passed — a bodyless creation is no longer given a checklist-only
-  body — and the stderr note names `pr-mutate edit <pr> --inject-checklist` as
-  the remediation. The previous release also refused an explicit body together
-  with `--template`, `--web` or `--editor`; that refusal is GONE because it was
-  stricter than `gh` (which accepts `--body` with `--web` and `--editor` and
-  rejects only `--body` with `--template`, an error it reports itself).
 - **`orc pr status` / `reconcile-checklist --json`**: `checklist.items[].description`
   is the text after the `-->` delimiter again, for checked and unchecked items
   alike. The shell engine emitted the BOX character (`"x"` / `""`) while the
@@ -107,7 +77,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   documented remedy, so the marker stays visible and counts as what it is. A
   near-marker is escaped, not dedented (dedenting it would leave the marker
   reference intact), and a line that is both a raw HTML construct and a
-  near-marker gets both escapes, in that order.
+  near-marker gets both escapes, in that order. An INLINE HTML COMMENT in the
+  summary is escaped as well (`<!--` becomes `&lt;!--`): CommonMark allows an
+  inline comment, so `Result: <!-- tests failed --> done` used to render as
+  `Result:  done` and the text the model marked as a comment disappeared from
+  the PR body. Fenced examples are still delivered byte-identical.
   Content inside a fenced code block is delivered **byte-identical** — it is
   already inert to every scanner, so transforming it would corrupt the example
   the model wrote. The composed body is asserted against the engine itself (it

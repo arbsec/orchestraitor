@@ -489,7 +489,7 @@ fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) 
         .into_diagnostic()?;
         writeln!(
             writer,
-            "  fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted"
+            "  fix: dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->) — 0-3 leading spaces is still accepted, but dedenting alone does not make a near-marker parseable"
         )
         .into_diagnostic()?;
         return Ok(());

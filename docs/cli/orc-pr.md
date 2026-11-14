@@ -112,7 +112,10 @@ to a canonical marker AND to a near-marker; 0-3 leading spaces stays ACCEPTED
 (the legitimate nested-in-a-list-item case); a marker inside a fenced region is
 inert (an example, not a refusal). The marker still COUNTS (`marker_count` is a
 pure function of the canonical grammar) — but no verdict uses that count, because
-the reading is refused. The remedy is to dedent the marker line to column 0.
+the reading is refused. The remedy is to dedent the marker line to column 0 AND write it in the
+canonical form (`- [x] <!-- orc:NAME -->`): 0-3 leading spaces is still accepted, but dedenting
+alone does not make a near-marker parseable — `- [ ]\t<!-- orc:tests -->` stays a near-marker
+however far left it is moved.
 
 Each message names the construct it refused, and there are exactly four of them:
 `indented_fence_opener`, `html_construct`, `indented_marker` and `near_marker`. An

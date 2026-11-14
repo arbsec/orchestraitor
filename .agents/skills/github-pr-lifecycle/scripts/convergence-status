@@ -216,7 +216,7 @@ case "$CHECKLIST_UNPARSEABLE_CONSTRUCT" in
     UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body contains a raw HTML construct at line ${CHECKLIST_UNPARSEABLE_LINE:-?} (a line starting with '<'); the checklist scanner does not model HTML, so it cannot tell what that construct hides. Fix: put it inside a fenced code block, indent it by 4 spaces, or remove it."
     ;;
   indented_marker)
-    UNPARSEABLE_EXPLANATION="checklist_unparseable: a managed marker is indented too far at line ${CHECKLIST_UNPARSEABLE_LINE:-?} (4 or more spaces, or a leading tab); such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox, so the checklist cannot be read. Fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted."
+    UNPARSEABLE_EXPLANATION="checklist_unparseable: a managed marker is indented too far at line ${CHECKLIST_UNPARSEABLE_LINE:-?} (4 or more spaces, or a leading tab); such a marker renders as an indented code block when it is not inside a list item, where it is not a checkbox, so the checklist cannot be read. Fix: dedent the marker line to column 0 AND write it in the canonical form (- [x] <!-- orc:NAME -->) — 0-3 leading spaces is still accepted, but dedenting alone does not make a near-marker parseable."
     ;;
   *)
     UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}), closed or not; its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence opener to column 0."

@@ -751,7 +751,10 @@ pr.status <N> -> {
                                     # The marker still COUNTS (`marker_count` is a pure function of
                                     # the canonical grammar) but NO VERDICT uses that count: the
                                     # reading is refused. Remedy: dedent the marker line to column
-                                    # 0 (arbsec/orchestraitor#802);
+                                    # 0 AND write it in the canonical form (`- [x] <!-- orc:NAME
+                                    # -->`): 0-3 leading spaces is still accepted, but dedenting
+                                    # alone does not make a NEAR-MARKER parseable -- the canonical
+                                    # form is required as well (arbsec/orchestraitor#802);
                                     # (4) the body carries a NEAR-MARKER (`near_marker`): a line
                                     # with a task-item box token AND an `orc:NAME` reference that
                                     # is not in the canonical form, so the gate cannot tell what it

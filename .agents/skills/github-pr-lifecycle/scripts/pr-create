@@ -49,32 +49,65 @@ BODY_FILE_SET=false
 REST=()
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
-    --body|-b)
+    --body)
       # A VALUE IS REQUIRED; an EMPTY VALUE is an explicit empty body.
       [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
       BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; BODY_SET=true
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body=*|-b=*)
+    --body=*)
       BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; BODY_SET=true
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    -b?*)
-      # pflag attached short value: `-bFOO` is `--body FOO`.
-      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#-b}")"; BODY_SET=true
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body-file|-F)
+    --body-file)
       [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
       BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; BODY_FILE_SET=true
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body-file=*|-F=*)
+    --body-file=*)
       BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; BODY_FILE_SET=true
       [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    -F?*)
-      # pflag attached short value: `-F/path` is `--body-file /path`.
-      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#-F}"; BODY_FILE_SET=true
-      [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --*)
+      # Every other LONG flag is gh's to interpret: it is forwarded untouched.
+      REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    -?*)
+      # EVERY single-dash token is resolved with pflag's rules
+      # (orc_lib_split_short_cluster): a single flag, a flag with an attached
+      # value, or a CLUSTER (`-fbX` is `--fill --body X`). A cluster that
+      # carries a body is split here, so the body is validated and composed like
+      # any other; a cluster that carries NO body is forwarded VERBATIM, so the
+      # argv gh sees is exactly the argv the caller wrote.
+      if ! orc_lib_split_short_cluster "${ORC_LIB_EXTRA_ARGS[0]}" \
+        "$ORC_LIB_SHORT_VALUE_CREATE" "$ORC_LIB_SHORT_BOOL_CREATE"; then
+        echo "error: refusing to forward '${ORC_LIB_EXTRA_ARGS[0]}': its short flags cannot be resolved, and it could carry a body" >&2
+        echo "  gh accepts only the short flags this wrapper knows; an unresolved cluster is refused rather than forwarded unvalidated (arbsec/orchestraitor#799 R16)" >&2
+        echo "  fix: pass the flag in its long form (--body, --body-file, --fill, --draft, ...)" >&2
+        exit "$ORC_ERR_CONFIG"
+      fi
+      if [ "$ORC_LIB_CLUSTER_HAS_BODY" = true ]; then
+        orc_cluster_value="$ORC_LIB_CLUSTER_BODY_VALUE"
+        if [ "$ORC_LIB_CLUSTER_BODY_EXTERNAL" = true ]; then
+          [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: ${ORC_LIB_EXTRA_ARGS[0]} requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+          orc_cluster_value="${ORC_LIB_EXTRA_ARGS[1]}"
+          ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}")
+        else
+          ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
+        fi
+        case "$ORC_LIB_CLUSTER_BODY_KIND" in
+          body)
+            BODY="$(orc_lib_body_arg "--body" "$orc_cluster_value")"; BODY_SET=true ;;
+          body-file)
+            BODY_FILE="$orc_cluster_value"; BODY_FILE_SET=true
+            [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; } ;;
+        esac
+        # The boolean parts of the cluster keep their meaning and are forwarded
+        # as their own tokens.
+        if [ "${#ORC_LIB_CLUSTER_BOOLS[@]}" -gt 0 ]; then
+          REST+=("${ORC_LIB_CLUSTER_BOOLS[@]}")
+        fi
+      else
+        REST+=("${ORC_LIB_EXTRA_ARGS[0]}")
+        ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}")
+      fi ;;
     *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
 done

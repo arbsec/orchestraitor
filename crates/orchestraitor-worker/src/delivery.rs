@@ -258,6 +258,30 @@ fn neutralise_summary(summary: &str) -> String {
             if line.is_html_construct() {
                 rendered = escape_line_start_html(&rendered);
             }
+            // An INLINE HTML COMMENT (a `<!--` that is not the line's first
+            // construct) is hidden by the renderer: CommonMark allows inline
+            // comments, so `Result: <!-- tests failed --> done` shows the
+            // reviewer only `Result:  done` and the failure text disappears
+            // (arbsec/orchestraitor#799 R16, the case #814 tracks). The
+            // opener is escaped to `&lt;!--`, which renders as the text the
+            // model wrote.
+            //
+            // Three shapes are LEFT ALONE, deliberately:
+            //   - a NEAR-MARKER line: the escape below already replaces every
+            //     `<!--` on it (and the managed name reference with it);
+            //   - a CANONICAL marker's OWN delimiter: escaping it would turn a
+            //     real checklist item into a near-marker. A LATER `<!--` in the
+            //     description is still escaped;
+            //   - a line indented 4+ spaces (or led by a tab): that is literal
+            //     indented code, which the renderer shows as code, so the
+            //     comment is visible there and nothing is hidden.
+            if !line.near_marker && !line.indentation_too_deep {
+                rendered = if line.canonical.is_some() {
+                    escape_inline_comment_after_the_marker(&rendered)
+                } else {
+                    escape_inline_comment(&rendered)
+                };
+            }
             if line.near_marker {
                 rendered = escape_marker_delimiters(&rendered);
             }
@@ -290,6 +314,28 @@ fn neutralise_summary(summary: &str) -> String {
 /// managed marker.
 fn dedent(line: &str) -> String {
     line.trim_start_matches([' ', '\t']).to_string()
+}
+
+/// Escapes every INLINE HTML COMMENT opener (`<!--`) in the line to `&lt;!--`,
+/// so the text the model wrote stays visible to the reviewer instead of being
+/// swallowed by the renderer's inline-comment handling. Idempotent: the escaped
+/// form contains no `<!--`.
+fn escape_inline_comment(line: &str) -> String {
+    line.replace("<!--", "&lt;!--")
+}
+
+/// Escapes every inline comment opener EXCEPT the first one, which is the
+/// managed marker's own delimiter: escaping that would turn a real checklist
+/// item into a near-marker. A later `<!--` in the description is still hidden
+/// by the renderer, so it is still escaped.
+fn escape_inline_comment_after_the_marker(line: &str) -> String {
+    match line.find("<!--") {
+        Some(index) => {
+            let (head, tail) = line.split_at(index + "<!--".len());
+            format!("{head}{}", escape_inline_comment(tail))
+        }
+        None => line.to_string(),
+    }
 }
 
 /// Escapes the FIRST `<` of a line-start HTML construct to `&lt;`, leaving the

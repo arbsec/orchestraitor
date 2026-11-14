@@ -108,7 +108,9 @@ pub enum UnparseableKind {
     /// it.
     HtmlConstruct,
     /// A managed marker (or near-marker) indented 4+ spaces or led by a tab.
-    /// Remedy: dedent the marker line to column 0.
+    /// Remedy: dedent the marker line to column 0 AND write it in the canonical
+    /// form (`- [x] <!-- orc:NAME -->`): dedenting alone does not make a
+    /// near-marker parseable.
     IndentedMarker,
     /// A near-marker: a box token plus an `orc:NAME` reference that is not in
     /// the canonical form. Remedy: write the marker canonically.

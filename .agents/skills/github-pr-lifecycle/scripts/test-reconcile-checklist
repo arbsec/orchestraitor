@@ -565,7 +565,7 @@ CORPUS_TSV="$CORPUS_DIR/expectations.tsv"
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=83
+CORPUS_FLOOR=84
 declare -A CORPUS_COUNT=() CORPUS_ALL=() CORPUS_UNPARSEABLE=() CORPUS_CONSTRUCT=()
 while IFS=$'\t' read -r row_case row_count row_all row_unparseable row_construct; do
   case "$row_case" in
@@ -615,8 +615,8 @@ assert "f5: the corpus carries exactly $CORPUS_FLOOR cases" "$CORPUS_FLOOR" \
 # text. Before the fix the closer below closed the region and EXPOSED the
 # checked marker GitHub renders INSIDE the fence: `all_checked: true` for
 # evidence a human cannot see.
-F16_CLOSER="$(cat "$CORPUS_DIR/17-four-space-closer-is-text.md")"
-export BODY_FIXTURE="$CORPUS_DIR/17-four-space-closer-is-text.md"
+F16_CLOSER="$(cat "$CORPUS_DIR/17-four-space-run-does-not-close-the-fence.md")"
+export BODY_FIXTURE="$CORPUS_DIR/17-four-space-run-does-not-close-the-fence.md"
 run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f6: a 4-space-indented closer does not close the region' 0 \
   "$(jq -r .marker_count <<<"$OUT")"
@@ -1673,6 +1673,25 @@ CONTROL_TOPLEVEL="$(GIT_DIR="$SENTINEL/.git" GIT_WORK_TREE="$SENTINEL" \
   git -C "$HOSTILE" rev-parse --show-toplevel 2>/dev/null || true)"
 assert 'j: control: the ambient location does win over -C' "$SENTINEL" "$CONTROL_TOPLEVEL"
 
+# --- (f8e) a DESCRIPTION with an INTERNAL TAB survives (#799 R16) -------------
+# The shell engine used to pass items through a TAB-delimited intermediate, so a
+# description containing a tab was truncated at the field split (`alpha<TAB>beta`
+# became `alpha`) while the Rust engine returned the full text. The items are
+# built with `jq --arg` now, so no byte of the body can collide with the
+# encoding. Corpus case 84 is the shared fixture; this asserts the VALUE the
+# Rust engine returns for it too.
+export BODY_FIXTURE="$CORPUS_DIR/84-description-with-a-tab.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f8e: the tabbed description is counted' 2 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f8e: and the INTERNAL tab survives' "$(printf 'alpha\tbeta')" \
+  "$(jq -r '.items[0].description' <<<"$OUT")"
+assert 'f8e: the second item is unaffected' 'gamma' \
+  "$(jq -r '.items[1].description' <<<"$OUT")"
+run reconcile-checklist 7 --repo test-org/repo
+assert 'f8e: the text form prints the whole description' 1 \
+  "$(grep -cF "$(printf 'alpha\tbeta')" <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
 # --- (f9) a MANAGED MARKER indented 4+ spaces is INDETERMINATE (#802) ----------
 # CONFIRMED BY EXECUTION: nine canonical ticked markers, each preceded by FOUR
 # spaces and with no surrounding list, render entirely as an INDENTED CODE
@@ -2189,6 +2208,107 @@ for mutate_form in '-battached-edit' "-F$TMP/files/f15-attached.md"; do
   assert "f15: pr-mutate '$mutate_form' carries the nine markers" 9 \
     "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 done
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f16) a CLUSTERED short flag cannot carry a body past the wrapper ---------
+# arbsec/orchestraitor#799 R16: pflag (gh's parser) accepts a boolean shorthand
+# followed by a value-taking shorthand in ONE token, so `-fbX` is `--fill --body
+# X`, `-dbX` is `--draft --body X` and `-fF/path` is `--fill --body-file /path`
+# (proved against the installed gh v2.104.0: `gh pr create -fF/tmp/nothing`
+# prints "open /tmp/nothing: no such file or directory" — gh READ the path as
+# the body file). Such a token used to fall through to the pass-through branch
+# and reach gh UNVALIDATED, and `-F<path>` bypassed the trusted-root reader
+# entirely, so an out-of-root file could be published.
+#
+# The wrapper now resolves EVERY single-dash token with pflag's rules: a cluster
+# that carries a body is split (the body is composed and validated, the boolean
+# parts keep their meaning), a cluster that carries NO body is forwarded
+# VERBATIM, and a token whose letters cannot be resolved is REFUSED.
+#
+# `gh pr create` HAS the boolean shorthands (-d/--draft, -e/--editor,
+# -f/--fill, -w/--web), so a cluster can carry a body there. `gh pr edit` has
+# NO boolean shorthand at all (its shorts are -B -b -F -m -t), so for pr-mutate
+# the body-bearing forms are the attached ones (-bX, -FX) plus the
+# fail-closed refusal of an unresolvable token.
+for cluster_case in '-fbCLUSTER' '-dbCLUSTER' '-wbCLUSTER'; do
+  cluster_bool="$(printf '%s' "${cluster_case:0:2}" | tail -c1)"
+  OUT="$(dry_run --title t "$cluster_case" 2>&1)"; RC=$?
+  assert "f16: $cluster_case exits 0" 0 "$RC"
+  assert "f16: $cluster_case carries the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+  assert "f16: $cluster_case forwards a composed --body" 1 \
+    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+  assert "f16: $cluster_case keeps the cluster's boolean part (-$cluster_bool)" 1 \
+    "$(grep -cE -- "(^|[[:space:]])-${cluster_bool}([[:space:]]|$)" <<<"$OUT")"
+  assert "f16: $cluster_case is never forwarded as one token" 0 \
+    "$(grep -cE -- "(^|[[:space:]])${cluster_case}([[:space:]]|$)" <<<"$OUT")"
+done
+# The cluster's body part must be VALIDATED like any other body.
+OUT="$(dry_run --title t '-fb- [x] <!-- orc:issue --> linked
+<div>a block</div>' 2>&1)"; RC=$?
+assert 'f16: a cluster body is VALIDATED (refused shape exits 2)' 2 "$RC"
+assert 'f16: and names the construct' 1 "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
+assert 'f16: and never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+# A cluster carrying a BODY FILE must go through the trusted-root reader: an
+# out-of-root path is refused and never reaches gh.
+for cluster_file in '-fF/etc/passwd' '-dF/etc/passwd' '-wF/etc/passwd'; do
+  OUT="$(dry_run --title t "$cluster_file" 2>&1)"; RC=$?
+  assert "f16: $cluster_file is refused (exit 2)" 2 "$RC"
+  assert "f16: $cluster_file names the trusted-root refusal" 1 \
+    "$(grep -cF 'outside the trusted roots' <<<"$OUT")"
+  assert "f16: $cluster_file never reaches gh" 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+done
+# A cluster with NO body is forwarded VERBATIM: the argv gh sees is the argv the
+# caller wrote (no rewriting, no refusal).
+for plain_cluster in '-Bmain' '-f' '-d' '-w' '-tTITLE' '-Hbranch'; do
+  OUT="$(dry_run --title t "$plain_cluster" 2>&1)"; RC=$?
+  assert "f16: $plain_cluster exits 0" 0 "$RC"
+  assert "f16: $plain_cluster is forwarded verbatim" 1 \
+    "$(grep -cE -- "(^|[[:space:]])${plain_cluster}([[:space:]]|$)" <<<"$OUT")"
+  assert "f16: $plain_cluster injects nothing" 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
+  assert "f16: $plain_cluster passes no --body" 0 \
+    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+done
+# An UNRESOLVABLE cluster is refused, never forwarded: a flag gh grew yesterday
+# could be a body flag.
+OUT="$(dry_run --title t '-zFOO' 2>&1)"; RC=$?
+assert 'f16: an unresolved cluster is refused (exit 2)' 2 "$RC"
+assert 'f16: and the refusal names the reason' 1 \
+  "$(grep -cF 'its short flags cannot be resolved' <<<"$OUT")"
+assert 'f16: and it never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+# The CONTROLS: the non-clustered forms keep working exactly as before.
+OUT="$(dry_run --title t '-bCONTROL' 2>&1)"; RC=$?
+assert 'f16: the -b control exits 0' 0 "$RC"
+assert 'f16: the -b control carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+printf 'a control body-file summary\n' > "$TMP/files/f16-control.md"
+OUT="$(dry_run --title t "-F$TMP/files/f16-control.md" 2>&1)"; RC=$?
+assert 'f16: the -F control exits 0' 0 "$RC"
+assert 'f16: the -F control carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'f16: the -F control keeps the file summary' 1 \
+  "$(grep -cF 'a control body-file summary' <<<"$OUT")"
+# pr-mutate (gh pr edit): the attached body forms compose the checklist, an
+# out-of-root body file is refused by the trusted-root reader, and an
+# unresolvable token is refused.
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+for mutate_form in '-bMUTATE' "-F$TMP/files/f16-control.md"; do
+  rm -f "$TMP/edited-body.md"
+  run pr-mutate edit 7 --repo test-org/repo "$mutate_form"
+  assert "f16: pr-mutate '$mutate_form' exits 0" 0 "$RC"
+  assert "f16: pr-mutate '$mutate_form' carries the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+done
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo '-F/etc/passwd'
+assert 'f16: pr-mutate refuses an out-of-root body file' 2 "$RC"
+assert 'f16: and names the trusted-root refusal' 1 \
+  "$(grep -cF 'outside the trusted roots' "$TMP/stderr")"
+assert 'f16: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo '-zFOO'
+assert 'f16: pr-mutate refuses an unresolved cluster' 2 "$RC"
+assert 'f16: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"

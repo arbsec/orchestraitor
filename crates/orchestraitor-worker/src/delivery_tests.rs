@@ -759,6 +759,46 @@ fn reason_codes_are_static_and_log_safe() {
     }
 }
 
+/// An INLINE HTML COMMENT in the summary must stay VISIBLE to the reviewer
+/// (arbsec/orchestraitor#799 R16, the case `#814` tracks): `CommonMark` allows an
+/// inline comment, so `Result: <!-- tests failed --> done` renders as
+/// `Result:  done` — the failure text disappears from the PR body. The lane
+/// escapes the opener to `&lt;!--`, which renders as the text the model wrote.
+///
+/// The same escape must NOT touch a FENCED example (the region is inert and
+/// must stay byte-identical), and the composed body must still pass the
+/// engine.
+#[test]
+fn neutralise_summary_escapes_an_inline_html_comment() {
+    let summary = "Result: <!-- tests failed --> done\n";
+    let rendered = neutralise_summary(summary);
+    assert!(
+        rendered.contains("&lt;!-- tests failed -->"),
+        "the inline comment opener must be escaped: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Result: ") && rendered.contains(" done"),
+        "the model's text must stay readable: {rendered:?}"
+    );
+    // The escaped form is what the reviewer reads, and the escape is
+    // idempotent.
+    assert_eq!(neutralise_summary(&rendered), rendered);
+
+    // FENCED content stays byte-identical: the example the model wrote must
+    // not be rewritten.
+    let fenced = "```\nResult: <!-- tests failed --> done\n```\n";
+    assert_eq!(
+        neutralise_summary(fenced),
+        fenced,
+        "fenced content must stay byte-identical"
+    );
+
+    // The composed body passes the engine.
+    let composed = format!("{DELIVERY_PR_CHECKLIST}{}", neutralise_summary(summary));
+    let parsed = orchestraitor_mcp::pr_status::parse_checklist(&composed);
+    assert!(!parsed.unparseable, "the composed body must be determinate");
+}
+
 /// A model summary that FENCES its example must have that example delivered
 /// byte-identically (arbsec/orchestraitor#799 R13 review): content inside a
 /// fenced region is already inert to both scanners, so escaping a fenced `<div>`

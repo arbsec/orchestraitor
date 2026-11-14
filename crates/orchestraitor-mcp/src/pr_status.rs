@@ -254,8 +254,9 @@ pub enum UnparseableConstruct {
     /// neither the canonical grammar (its leading `[ \t]*` class) nor this
     /// scanner has a container model to tell that apart from a marker nested in
     /// a list item. The reading is therefore REFUSED rather than guessed. The
-    /// remedy is to dedent the marker line to column 0 (0-3 leading spaces stays
-    /// accepted).
+    /// remedy is to dedent the marker line to column 0 AND write it in the
+    /// canonical form (`- [x] <!-- orc:NAME -->`): 0-3 leading spaces stays
+    /// accepted, but dedenting alone does not make a near-marker parseable.
     IndentedMarker,
 }
 
@@ -2461,6 +2462,14 @@ mod tests {
             parse_checklist("- [ ] <!-- orc:tests -->\n- [x] <!-- orc:issue -->  \tgamma\t \n");
         assert_eq!(empty.items[0].description, "");
         assert_eq!(empty.items[1].description, "gamma");
+
+        // An INTERNAL tab is part of the description and must survive
+        // (arbsec/orchestraitor#799 R16): the shell engine used to pass items
+        // through a tab-delimited intermediate, so its field split truncated
+        // `alpha<TAB>beta` to `alpha` while this engine returned the full
+        // text. The shell suite asserts the same value for corpus case 84.
+        let tabbed = parse_checklist("- [x] <!-- orc:issue --> alpha\tbeta\n");
+        assert_eq!(tabbed.items[0].description, "alpha\tbeta");
     }
 
     /// The EXACT size of the shared corpus. A deleted case must FAIL, so this
@@ -2468,7 +2477,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 83;
+    const CORPUS_FLOOR: u32 = 84;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
