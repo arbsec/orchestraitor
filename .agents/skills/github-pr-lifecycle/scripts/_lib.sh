@@ -136,8 +136,12 @@ orc_lib_body_arg() {
 # GIT_DIR/GIT_WORK_TREE wins over the cwd, so an inherited location resolves
 # the "workspace" root to the CALLER's repository — and, in a fixture, makes
 # the fixture's own `git add -A` / `git commit` stage and commit the caller's
-# working tree. GIT_INDEX_FILE has the same effect on the index. Every git
-# call in this tree that resolves a repository root goes through here.
+# working tree. GIT_INDEX_FILE has the same effect on the index.
+#
+# Scope: the `@file`/`--body-file` trusted-root check and the body-file routes of
+# `pr-create` / `pr-mutate` go through here. Production gate scripts that still
+# call `git rev-parse --show-toplevel` directly are NOT covered — tracked in
+# arbsec/orchestraitor#806.
 orc_lib_git_toplevel() {
   env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
     git rev-parse --show-toplevel 2>/dev/null || true
@@ -350,7 +354,7 @@ orc_lib_ensure_checklist_markers() {
     printf '%s\n\n' "$body"
   fi
   printf '## Merge checklist\n\n'
-  printf '%s\n\n' '<!-- Added by pr-create: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788). -->'
+  printf '%s\n\n' '<!-- Added by pr-create/pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788). -->'
   orc_lib_checklist_markers "$root"
 }
 

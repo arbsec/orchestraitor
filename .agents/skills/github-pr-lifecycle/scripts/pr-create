@@ -257,10 +257,13 @@ PR_CREATE_BODY_ROOT="$(orc_lib_git_toplevel)"
 if [ -z "$BODY" ]; then
   # A bodyless PR can NEVER converge: the gate needs the managed checklist and
   # nothing else supplies it. Give the PR the checklist and say so loudly — the
-  # body still needs a summary, which the author adds afterwards with
-  # `pr-mutate edit <pr> --body-file <path>`.
+  # body still needs a summary, which the author adds afterwards. The advice MUST
+  # name a route that KEEPS the checklist: `pr-mutate edit --body-file` appends
+  # the markers when the supplied body carries none (arbsec/orchestraitor#788),
+  # so this command cannot strip the checklist it just injected.
   echo "NOTE: no PR body supplied — the body carries ONLY the managed merge checklist." >&2
-  echo "      Add a summary before requesting review:" >&2
+  echo "      Add a summary before requesting review (this route appends the managed" >&2
+  echo "      checklist whenever your summary carries none, so the body stays compliant):" >&2
   echo "        bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate edit <pr> --body-file <path>" >&2
 fi
 BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"

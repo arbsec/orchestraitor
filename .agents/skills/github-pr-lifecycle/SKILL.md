@@ -334,8 +334,13 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   block stands until the body carries the markers (an exemption
                   needs an authority the author lacks — #801). `pr-create`
                   appends the nine template markers UNCHECKED to a supplied body
-                  that carries none (and to a bodyless PR), so tick them with
-                  evidence. For a PR that ALREADY EXISTS, one command clears it:
+                  that carries none (and to a bodyless PR, whose body then carries
+                  only the managed checklist), so tick them with evidence. Every
+                  `pr-mutate` body route carries the same invariant: `edit --body`
+                  and `edit --body-file` append the markers when the supplied body
+                  carries none, so replacing a PR body can never drop the
+                  checklist. For a PR that ALREADY EXISTS whose body is already
+                  set, one command clears it:
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate
                   edit <pr> --inject-checklist` reads the current body, appends
                   the managed checklist and sets the body. Markers inside a

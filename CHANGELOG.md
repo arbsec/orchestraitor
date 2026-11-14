@@ -814,11 +814,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   backticks or 3+ tildes) is an EXAMPLE, not a checklist item: the whole
   region, including its opening and closing fence lines, is excluded from the
   scan, so a body that merely shows the checklist shape no longer satisfies the
-  gate. The rule stays satisfiable at creation: `pr-create` appends the nine
-  `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a supplied body that
-  carries none, the delivery lane appends them to its model-authored PR
-  summary, and `pr-mutate edit <pr> --inject-checklist` is the one-command
-  remediation for a PR that already exists. Documented in
+  gate. The rule stays satisfiable on EVERY body-setting route: `pr-create`
+  appends the nine `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a
+  supplied body that carries none, a bodyless PR receives a body carrying only
+  the managed checklist, the delivery lane appends them to its model-authored PR
+  summary, `pr-mutate edit --body` / `--body-file` append them as well (so
+  replacing a body can never drop the checklist), and `pr-mutate edit <pr>
+  --inject-checklist` is the one-command remediation for a PR whose body is
+  already set. Documented in
   [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`pr-create --body-file` now resolves the path through the trusted-root
   guard** (issue 788): the base `pr-create` forwarded `--body-file` straight to

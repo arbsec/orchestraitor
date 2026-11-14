@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. --inject-checklist (edit only) reads the PR's CURRENT body, appends the nine managed <!-- orc:* --> merge-checklist markers UNCHECKED when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788)."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set verbatim), so replacing a PR body can never drop the checklist. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788)."
   exit "$ORC_OK"
 fi
 
@@ -43,8 +43,8 @@ fi
 REST=("${REST[@]:1}")
 
 # Body-flow validation (issue #587): `edit --body <value>`/`--body-file <path>`
-# pass through to gh; resolve `@file` expansion and refuse path-shaped values
-# before the flag ever reaches gh — never post a path string as PR content.
+# resolve `@file` expansion and refuse path-shaped values before the flag ever
+# reaches gh — never post a path string as PR content.
 #
 # `--inject-checklist` is the REMEDIATION path for a PR that ALREADY exists
 # and carries no managed marker (arbsec/orchestraitor#788): it reads the
@@ -63,18 +63,44 @@ if [ "$ACTION" = "edit" ]; then
   done
   REST=("${PR_MUTATE_REST[@]}")
 fi
+
+# Both body routes ALSO carry the managed checklist (arbsec/orchestraitor#788):
+# `pr-create` gives a NEW PR the checklist, `--inject-checklist` remediates a PR
+# whose body is already set, and a plain `--body`/`--body-file` edit must not be
+# able to UNDO that — a summary-only file would otherwise replace the whole body
+# and drop the PR back to `checklist_markers_missing`. The SAME helper
+# `pr-create` uses appends the markers (one implementation, no drift), and a
+# supplied body that already carries a marker is passed through BYTE-VERBATIM:
+# author content is evidence, never something a helper edits.
+PR_MUTATE_BODY_ROOT=""
+pr_mutate_ensure_body() {
+  orc_lib_ensure_checklist_markers "$1" "$PR_MUTATE_BODY_ROOT"
+}
 if [ "$ACTION" = "edit" ]; then
+  PR_MUTATE_BODY_ROOT="$(orc_lib_git_toplevel)"
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     case "${REST[$index]}" in
       --body)
         [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-        REST[$((index + 1))]="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"; index=$((index + 2)) ;;
-      --body=*) REST[$index]="--body=$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")"; index=$((index + 1)) ;;
+        REST[$((index + 1))]="$(pr_mutate_ensure_body "$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")")"
+        index=$((index + 2)) ;;
+      --body=*)
+        REST[$index]="--body=$(pr_mutate_ensure_body "$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")")"
+        index=$((index + 1)) ;;
+      # `--body-file` is READ here, not forwarded: the checklist cannot be
+      # appended to a path gh expands on its own side. The file itself is never
+      # rewritten — the resolved content becomes an explicit `--body` value.
       --body-file)
         [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-        orc_lib_require_body_file "--body-file" "${REST[$((index + 1))]}"; index=$((index + 2)) ;;
-      --body-file=*) orc_lib_require_body_file "--body-file" "${REST[$index]#--body-file=}"; index=$((index + 1)) ;;
+        orc_lib_require_body_file "--body-file" "${REST[$((index + 1))]}"
+        REST[$index]="--body"
+        REST[$((index + 1))]="$(pr_mutate_ensure_body "$(cat -- "${REST[$((index + 1))]}")")"
+        index=$((index + 2)) ;;
+      --body-file=*)
+        orc_lib_require_body_file "--body-file" "${REST[$index]#--body-file=}"
+        REST[$index]="--body=$(pr_mutate_ensure_body "$(cat -- "${REST[$index]#--body-file=}")")"
+        index=$((index + 1)) ;;
       *) index=$((index + 1)) ;;
     esac
   done
@@ -113,8 +139,10 @@ ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 # markers (`checklist_markers_missing`), and `pr-create` now gives a NEW PR
 # the managed checklist. A PR that ALREADY EXISTS (opened before that rule, or
 # opened by a bot) has no such body and would block forever — so this is the
-# one-command remediation path: read the current body, append the managed
-# checklist when it carries none, and set the body.
+# one-command remediation path for a body that is ALREADY SET: read the current
+# body, append the managed checklist when it carries none, and set the body.
+# (A summary being supplied right now does not need this flag: the `--body`/
+# `--body-file` routes above carry the checklist themselves.)
 #
 # The nine markers land UNCHECKED (a checked box is a verified fact). A body
 # that already carries the checklist is left VERBATIM — the operation is
@@ -128,8 +156,7 @@ if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
     echo "error: cannot read PR #$PR body" >&2
     exit "$ORC_ERR_UNRECOVERABLE"
   }
-  PR_MUTATE_ROOT="$(orc_lib_git_toplevel)"
-  PR_MUTATE_NEW_BODY="$(orc_lib_ensure_checklist_markers "$PR_MUTATE_BODY" "$PR_MUTATE_ROOT")"
+  PR_MUTATE_NEW_BODY="$(pr_mutate_ensure_body "$PR_MUTATE_BODY")"
   if [ "$PR_MUTATE_NEW_BODY" = "$PR_MUTATE_BODY" ]; then
     echo "PR #$PR body already carries the managed merge checklist — no change needed" >&2
     exit "$ORC_OK"

@@ -45,6 +45,10 @@
 #   (i) pr-mutate --inject-checklist remediates an EXISTING PR: it appends the
 #       checklist, is idempotent, refuses to be combined with an explicit body,
 #       and its dry-run never reaches gh
+#   (k) EVERY pr-mutate body route carries the checklist: `edit --body` and
+#       `edit --body-file` append the nine markers to a body that carries none,
+#       set an already-checklisted body byte-verbatim, and the bodyless-PR note
+#       names exactly that route (pinned by running the advice it prints)
 #   (j) the fixture's git calls ignore an ambient git LOCATION (GIT_DIR /
 #       GIT_WORK_TREE / GIT_INDEX_FILE): `git -C` does not isolate the git
 #       location, so an inherited location would commit the CALLER's tree
@@ -137,9 +141,14 @@ case "$1/${2:-}" in
       *) echo "unexpected gh pr view --json '$json'" >&2; exit 1 ;;
     esac ;;
   pr/edit)
-    # Record the body this edit would set, so the test can assert on it.
+    # Record the body this edit would set AND the full argv, so the test can
+    # assert both on the value gh receives and on the flags it receives.
+    printf '%s\n' "$@" > "${GH_EDIT_ARGV_FILE:-/dev/null}"
     prev=""; body=""
     for a in "$@"; do
+      case "$a" in
+        --body=*) body="${a#--body=}" ;;
+      esac
       if [ "$prev" = "--body" ]; then body="$a"; fi
       prev="$a"
     done
@@ -163,6 +172,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export ORC_GITHUB_APP_ENFORCEMENT=required
 export GH_EDIT_BODY_FILE="$TMP/edited-body.md"
+export GH_EDIT_ARGV_FILE="$TMP/edited-argv.txt"
 
 # Review-policy provenance fixture (#748): the trusted base commit — reported as
 # the PR's `baseRefOid` — holds exactly the copies the gate is about to run, so
@@ -579,6 +589,107 @@ assert 'i: the dry-run exits 0' 0 "$RC"
 assert 'i: the dry-run never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
 assert 'i: the dry-run says it does not reach gh' 1 \
   "$(grep -cF 'dry-run never reaches gh' <<<"$OUT")"
+
+# --- (k) EVERY pr-mutate body route carries the checklist ---------------------
+# The bodyless-PR note tells the author to add a summary with
+# `pr-mutate edit <pr> --body-file <path>`. If that route set the file's text
+# verbatim it would REPLACE the whole body and strip the injected checklist,
+# dropping the PR back to `checklist_markers_missing` — advice that undoes
+# itself. Both body routes therefore carry the same marker invariant through the
+# same helper `pr-create` uses, and a body that already has a marker is set
+# BYTE-VERBATIM.
+export BODY_FIXTURE="$TMP/files/all-checked.md"
+
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body 'A wholesale summary, no markers'
+assert 'k: --body exits 0' 0 "$RC"
+EDITED="$(cat "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'k: --body carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$EDITED")"
+assert 'k: --body keeps the summary' 1 \
+  "$(grep -cF 'A wholesale summary, no markers' <<<"$EDITED")"
+assert 'k: --body pre-ticks nothing' 0 "$(grep -c -- '- \[x\]' <<<"$EDITED")"
+assert 'k: --body reaches gh as an explicit --body' 1 \
+  "$(grep -cx -- '--body' "$TMP/edited-argv.txt")"
+assert 'k: --body keeps the PR operand and repo' 2 \
+  "$(grep -cE -- '^(7|--repo)$' "$TMP/edited-argv.txt")"
+
+# The `--body=<text>` form is the same route.
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body='A joined summary, no markers'
+assert 'k: --body= carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+assert 'k: --body= keeps the summary' 1 \
+  "$(grep -cF 'A joined summary, no markers' "$TMP/edited-body.md")"
+
+# `--body-file` is READ by the script (a path cannot be annotated by gh).
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/no-markers.md"
+assert 'k: --body-file exits 0' 0 "$RC"
+EDITED="$(cat "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'k: --body-file carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$EDITED")"
+assert 'k: --body-file keeps the summary' 1 \
+  "$(grep -cF 'false quantitative claim' <<<"$EDITED")"
+assert 'k: --body-file never reaches gh as a flag' 0 \
+  "$(grep -c -- '--body-file' "$TMP/edited-argv.txt")"
+
+# A supplied body that already carries a marker is a verified fact: set it
+# byte-for-byte, never re-injected, never rewritten.
+OWN_BODY='## Summary
+- [x] <!-- orc:tests --> the suite passes'
+printf '%s' "$OWN_BODY" > "$TMP/files/own-marker-body.txt"
+printf '%s\n' "$OWN_BODY" > "$TMP/files/own-marker-body-nl.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body "$OWN_BODY"
+assert 'k: an already-checklisted --body is byte-identical' identical \
+  "$(cmp -s "$TMP/files/own-marker-body.txt" "$TMP/edited-body.md" && echo identical || echo different)"
+assert 'k: verbatim means no injected section' 0 \
+  "$(grep -cF 'Added by pr-create' "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/own-marker-body-nl.md"
+assert 'k: an already-checklisted --body-file is not re-injected' 1 \
+  "$(grep -c '<!-- orc:' "$TMP/edited-body.md")"
+
+# `--inject-checklist` still refuses an explicit body (now genuinely redundant:
+# both routes carry the checklist).
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist --body 'x'
+assert 'k: --inject-checklist + --body is still refused' 2 "$RC"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist --body-file "$TMP/files/no-markers.md"
+assert 'k: --inject-checklist + --body-file is still refused' 2 "$RC"
+
+# The dry-run path carries the checklist in the constructed argv and never
+# reaches gh.
+rm -f "$TMP/edited-body.md"
+OUT="$( cd "$TMP/repo" && SKILL_CASE=1 bash scripts/pr-mutate edit 7 \
+  --repo test-org/repo --body 'x' --dry-run 2>&1 )"; RC=$?
+assert 'k: a body-route dry-run exits 0' 0 "$RC"
+assert 'k: a body-route dry-run never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+assert 'k: the dry-run argv carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+
+# --- the bodyless-PR advice must name a route that KEEPS the checklist --------
+# Pinned end to end: extract the command pr-create prints, then run that exact
+# shape against a summary-only fixture and require a checklist-bearing body.
+OUT="$(dry_run --title t)"
+ADVICE_SHAPE='pr-mutate edit <pr> --body-file <path>'
+assert 'k: the bodyless note names the body-file route' "$ADVICE_SHAPE" \
+  "$(grep -oF "$ADVICE_SHAPE" <<<"$OUT" | head -1)"
+assert 'k: the bodyless note still asks for a summary' 1 \
+  "$(grep -cF 'Add a summary before requesting review' <<<"$OUT")"
+cat > "$TMP/files/advice-summary.md" <<'EOF'
+## Summary
+
+A summarised change, written after the PR existed.
+EOF
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/advice-summary.md"
+assert 'k: the advised route exits 0' 0 "$RC"
+EDITED="$(cat "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'k: the advised route produces a checklist-bearing body' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$EDITED")"
+assert 'k: the advised route keeps the summary' 1 \
+  "$(grep -cF 'A summarised change, written after the PR existed.' <<<"$EDITED")"
 
 # --- (j) the fixture's git calls ignore an ambient git LOCATION ---------------
 # `git -C <dir>` does NOT isolate the git location: a hook-exported
