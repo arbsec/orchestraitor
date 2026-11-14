@@ -1,0 +1,2 @@
+- [x] <!-- orc:issue --> linked
+- []] <!-- orc:security --> a box token whose middle is a bracket

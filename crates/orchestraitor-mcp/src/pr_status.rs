@@ -1288,7 +1288,8 @@ fn gh_bucket(state: &str) -> String {
 /// plain task) are NOT near-markers and never block.
 ///
 /// Markers inside a FENCED code region are EXAMPLES, not evidence: they are
-/// excluded before the scan (see [`scan_fences`]).
+/// excluded before the scan (see
+/// [`orchestraitor_core::checklist_markers::scan_body`]).
 ///
 /// A body with zero markers is an EMPTY checklist and, per
 /// arbsec/orchestraitor#788, MISSING evidence: `markers_present` is false and
@@ -2467,7 +2468,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 82;
+    const CORPUS_FLOOR: u32 = 83;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).

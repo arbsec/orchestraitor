@@ -265,10 +265,14 @@ pub fn fence_view(line: &str) -> Option<(usize, &str)> {
 /// True when the line contains a task-item BOX TOKEN: `[` + exactly ONE
 /// CHARACTER + `]`.
 ///
-/// The middle is one `char`, so a multi-byte character counts as ONE character
-/// and a box like `[✓]` is a box token. The shell engine decodes one UTF-8
-/// sequence per box character for the same reason (arbsec/orchestraitor#799
-/// R12); the shared corpus pins that the two agree.
+/// The middle is one `char` and ANY character counts, `]` included: `[]]` is a
+/// box token (the first `]` is the middle, the second is the closer), while `[]`
+/// is not, because nothing follows the pair. The middle used to exclude `]`,
+/// which let `- []] <!-- orc:security --> pending` evade the near-marker rule
+/// (arbsec/orchestraitor#799 R15). A multi-byte character still counts as ONE
+/// character (so a box holding a check mark is a box token); the shell engine
+/// decodes one UTF-8 sequence per box character for the same reason (#799 R12),
+/// and the shared corpus pins that the two agree.
 #[must_use]
 pub fn has_box_token(line: &str) -> bool {
     line.char_indices().any(|(index, character)| {
@@ -279,10 +283,9 @@ pub fn has_box_token(line: &str) -> bool {
             return false;
         };
         let mut characters = rest.chars();
-        let Some(middle) = characters.next() else {
-            return false;
-        };
-        if middle == ']' {
+        // One character is the middle — `]` is a legitimate middle character,
+        // and the NEXT character decides whether the token is complete.
+        if characters.next().is_none() {
             return false;
         }
         characters.next() == Some(']')

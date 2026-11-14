@@ -318,7 +318,8 @@ ORC_LIB_CANONICAL_MARKER_RE="^[[:blank:]]*- [[](x|X|[ ])[]] <!-- orc:(${ORC_LIB_
 # blocks with `checklist_unparseable`. This is deliberately STRICTER than
 # CommonMark — `<https://example.com>` and `<em>x</em> prose` are ordinary text
 # there — and arbsec/orchestraitor#809 tracks real modelling. The Rust engine
-# applies the same single rule in `scan_fences`; the shared corpus keeps the two
+# applies the same single rule in
+# `orchestraitor_core::checklist_markers::scan_body`; the shared corpus keeps the
 # in step.
 
 # --- Fenced code regions (arbsec/orchestraitor#788) ---------------------------
@@ -550,8 +551,11 @@ orc_lib__fence_scan() {
         if (substr(line, i, 1) != "[") continue
         len = utf8_len(line, i + 1)
         if (i + len > n) continue
-        # `[]` has an empty middle, so it is not a box token.
-        if (substr(line, i + 1, len) == "]") continue
+        # ONE character is the middle, and it may be `]` itself: `[]]` is a box
+        # token (the first `]` is the middle, the second is the closer) while `[]`
+        # is not, because nothing follows the pair. Excluding `]` let
+        # `- []] <!-- orc:security --> pending` evade the near-marker rule
+        # (arbsec/orchestraitor#799 R15).
         if (substr(line, i + len + 1, 1) == "]") return 1
       }
       return 0

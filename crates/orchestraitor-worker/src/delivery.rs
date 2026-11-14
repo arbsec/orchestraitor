@@ -248,13 +248,29 @@ fn neutralise_summary(summary: &str) -> String {
         // the `indented_fence_opener` construct itself, and the region it opens
         // starts on that line for every scanner.
         if !line.fenced || line.opens_fence.is_some() {
+            // EVERY applicable remedy is applied, never just the first: one line
+            // can be BOTH a raw HTML construct and a near-marker (e.g.
+            // `<div [x] orc:tests>`), and escaping only the marker delimiter
+            // would leave the leading `<`, so the composed body would still be
+            // `html_construct` — permanently unconvergeable
+            // (arbsec/orchestraitor#799 R15). The order is fixed: the line-start
+            // `<` first, then the marker delimiter/name reference.
+            if line.is_html_construct() {
+                rendered = escape_line_start_html(&rendered);
+            }
             if line.near_marker {
                 rendered = escape_marker_delimiters(&rendered);
-            } else if line.is_indented_fence_opener() {
-                rendered = dedent(&rendered);
-            } else if line.is_html_construct() {
-                rendered = escape_line_start_html(&rendered);
-            } else if line.is_indented_marker() {
+            }
+            if line.is_indented_fence_opener()
+                || (line.canonical.is_some() && line.indentation_too_deep)
+            {
+                // DEDENT is the documented remedy for an indented fence opener and
+                // for an indented CANONICAL marker (which stays a real checklist
+                // item, so it must stay visible). A near-marker is ESCAPED rather
+                // than dedented: dedenting it would leave the marker reference
+                // intact. `is_indented_marker()` (canonical OR near-marker) is
+                // deliberately not used here — the escape already cleared the
+                // near-marker case.
                 rendered = dedent(&rendered);
             }
         }

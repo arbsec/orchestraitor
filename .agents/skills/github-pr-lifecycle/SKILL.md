@@ -334,8 +334,15 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   block stands until the body carries the markers (an exemption
                   needs an authority the author lacks — #801). `pr-create`
                   appends the nine template markers UNCHECKED to a supplied body
-                  that carries none (and to a bodyless PR, whose body then carries
-                  only the managed checklist), so tick them with evidence. Every
+                  that carries none, so tick them with evidence. It intervenes
+                  ONLY when you supply a body: with no explicit body it injects
+                  nothing, passes no `--body` and forwards every flag untouched
+                  (gh sources or prompts for the body itself), and the note names
+                  `pr-mutate edit <pr> --inject-checklist` as the remediation. It
+                  recognises only the four body spellings (`--body`/`-b` and
+                  `--body-file`/`-F`, in separated, `=`-joined and attached
+                  forms) and never refuses any other flag — whether a combination
+                  is legal is gh's decision, not ours. Every
                   `pr-mutate` body route carries the same invariant: `edit --body`
                   and `edit --body-file` append the markers when the supplied body
                   carries none, so replacing a PR body can never drop the

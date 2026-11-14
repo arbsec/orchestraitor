@@ -69,6 +69,11 @@
 # F16: a 4-space-indented run is indented code, never an opener, so the marker counts.
 16-four-space-opener-is-text	1	true
 # F16: a 4-space-indented run is never a closer, so the enclosed marker stays hidden.
+# READ THE FILE CAREFULLY (three CodeRabbit generations mis-read it as an OPEN
+# fence): line 1 is the column-0 OPENER, line 2 is a 4-space-indented run that is
+# literal CONTENT (indented code, never a closer), line 3 is the marker inside the
+# region, and **line 4 is the real column-0 CLOSER** -- the fence is CLOSED and the
+# marker on line 3 is an example, which is why marker_count is 0.
 17-four-space-closer-is-text	0	false
 # arbsec/orchestraitor#809: a fence OPENER indented 1-3 spaces may equally
 # belong to a list item or a block quote, and the scanner has no container
@@ -365,3 +370,10 @@
 # The same pin with the delimiter present: `[✓]  <!-- orc:tests -->` is a
 # near-marker (non-canonical spacing) in both engines, in every locale.
 82-unicode-box-token-before-a-comment	1	false	true	near_marker
+# arbsec/orchestraitor#799 R15: a box token is `[` + exactly ONE character + `]`,
+# and `]` IS a legal middle character: `[]]` has the first `]` as its middle and
+# the second as its closer, so this line is a NEAR-MARKER (not prose) and the
+# reading is REFUSED. `[]` is still not a token, because nothing follows the pair.
+# NOTE: `[]]` is not a rendered GFM checkbox, so this is a near-marker DETECTION
+# gap, not a false pass of rendered evidence.
+83-box-token-is-a-bracket	1	false	true	near_marker

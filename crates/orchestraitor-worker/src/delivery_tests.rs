@@ -860,7 +860,7 @@ fn delivery_composed_bodies_are_determinate() {
         Fenced,
     }
 
-    let cases: [(&str, &str, Remedy); 6] = [
+    let cases: [(&str, &str, Remedy); 8] = [
         (
             "4-space-indented canonical marker",
             "    - [x] <!-- orc:tests --> model asserted this\n",
@@ -891,6 +891,19 @@ fn delivery_composed_bodies_are_determinate() {
             "```\n    - [ ]\t<!-- orc:tests --> fenced example\n```\n",
             Remedy::Fenced,
         ),
+        // BOTH constructs on one line: a raw HTML construct AND a near-marker.
+        // Applying only the first remedy left the composed body `html_construct`
+        // and permanently unconvergeable (arbsec/orchestraitor#799 R15).
+        (
+            "line-start HTML plus a near-marker",
+            "<div [x] orc:tests>\n",
+            Remedy::Escape,
+        ),
+        (
+            "indented line-start HTML plus a near-marker",
+            "  <pre [\u{2713}] orc:review>\n",
+            Remedy::Escape,
+        ),
     ];
     for (label, summary, remedy) in cases {
         let rendered = neutralise_summary(summary);
@@ -916,12 +929,18 @@ fn delivery_composed_bodies_are_determinate() {
                     "{label}: the rendered line must not be a near-marker: {first:?}"
                 );
                 assert!(
-                    first.contains("&lt;!--") && first.contains("orc&#58;tests"),
-                    "{label}: the escape must be a character reference: {first:?}"
+                    checklist_markers::parse_canonical_marker(first).is_none(),
+                    "{label}: the rendered line must not be a canonical marker: {first:?}"
+                );
+                // Every applicable remedy ran: a line-start `<` is escaped to
+                // `&lt;` and the managed name reference to `orc&#58;NAME`.
+                assert!(
+                    !first.trim_start_matches(' ').starts_with('<'),
+                    "{label}: a line-start `<` must be escaped: {first:?}"
                 );
                 assert!(
-                    first.contains("model asserted this"),
-                    "{label}: the model's text must stay readable: {first:?}"
+                    first.contains("orc&#58;"),
+                    "{label}: the name reference must be a character reference: {first:?}"
                 );
             }
         }

@@ -56,17 +56,23 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   an already-checklisted body ending in an open fence is accepted as-is. The body
   note the helper adds for a marker-less body is prose, never an HTML comment, so
   an injected checklist can never make its own body indeterminate.
-- **`pr-create` / `pr-mutate` body flags**: gh's short spellings are accepted
-  and normalised — `-b` = `--body`, `-F` = `--body-file`, and `-f` = `--fill`
-  for `pr-create` only (`pr edit` has no fill flag); `-B` means `--base` and is
-  left alone. An EXPLICIT body is always validated and forwarded with the
-  managed checklist, including an explicit EMPTY one (`--body ""` / `--body=`,
-  which becomes the checklist-only body) and when `--fill*` is also present;
-  gh documents that an explicit `--body` takes precedence over autofilled
-  content. Combining an explicit body with `--template`, `--web` or `--editor`
-  is refused with exit 2, because gh accepts only one body source and rejects a
-  template alongside an explicit body — that combination could never create a
-  PR. Injection is skipped only when no explicit body was supplied.
+- **`pr-create` / `pr-mutate` body flags**: the wrapper now intervenes **only**
+  when the caller supplies a body, and it recognises only the four body
+  spellings — `--body`/`-b` and `--body-file`/`-F`, in separated,
+  `=`-joined and pflag-attached forms (`-bX`, `-F/path`). EVERY other flag is
+  forwarded untouched and is never refused: `--fill`, `--fill=true`, `-f`,
+  `-f=true`, `--fill-first`, `--fill-verbose`, `--template`, `--web`,
+  `--editor`, `--editor=true` and `-B` (`--base`) behave exactly as `gh`
+  defines them. An explicit body is validated and forwarded with the managed
+  checklist, including an explicit EMPTY one (`--body ""` / `--body=`), which
+  becomes the checklist-only body; `-f` is no longer rewritten and `-B` is no
+  longer treated specially. With **no** explicit body nothing is injected and no
+  `--body` is passed — a bodyless creation is no longer given a checklist-only
+  body — and the stderr note names `pr-mutate edit <pr> --inject-checklist` as
+  the remediation. The previous release also refused an explicit body together
+  with `--template`, `--web` or `--editor`; that refusal is GONE because it was
+  stricter than `gh` (which accepts `--body` with `--web` and `--editor` and
+  rejects only `--body` with `--template`, an error it reports itself).
 - **`orc pr status` / `reconcile-checklist --json`**: `checklist.items[].description`
   is the text after the `-->` delimiter again, for checked and unchecked items
   alike. The shell engine emitted the BOX character (`"x"` / `""`) while the
@@ -92,14 +98,16 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 - **Delivery PRs**: the delivery lane now decides what to neutralise in the
   untrusted run summary by running the **engine's own scan** (the shared
   checklist-marker module the gate itself is built on) instead of a private copy
-  of the rules, and it handles **every construct the engine refuses**: a managed
-  marker or near-marker indented four or more spaces (or led by a tab) is
-  dedented to column 0 — the documented remedy, so it stays visible and counts
-  as what it is; an indented fence opener is dedented to column 0; a line whose
+  of the rules, and it handles **every construct the engine refuses**, applying
+  EVERY applicable remedy to a line rather than only the first: a line whose
   first non-whitespace character is `<` (0-3 leading spaces) has that `<`
-  escaped to `&lt;`, which is what keeps the composed body readable now that a
-  line-start `<` refuses the checklist reading; and a near-marker line is
-  rendered as literal text (`<!--` -> `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`).
+  escaped to `&lt;`; a near-marker line is rendered as literal text (`<!--` ->
+  `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`); and an indented fence opener, or an
+  indented **canonical** managed marker, is dedented to column 0 — the
+  documented remedy, so the marker stays visible and counts as what it is. A
+  near-marker is escaped, not dedented (dedenting it would leave the marker
+  reference intact), and a line that is both a raw HTML construct and a
+  near-marker gets both escapes, in that order.
   Content inside a fenced code block is delivered **byte-identical** — it is
   already inert to every scanner, so transforming it would corrupt the example
   the model wrote. The composed body is asserted against the engine itself (it

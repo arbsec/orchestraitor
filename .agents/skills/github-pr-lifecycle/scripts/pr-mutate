@@ -108,6 +108,14 @@ if [ "$ACTION" = "edit" ]; then
         resolved="$(orc_lib_body_arg "--body" "${REST[$index]#*=}")"
         REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
+      -b?*)
+        # pflag attached short value: `-bFOO` is `--body FOO` (proved against the
+        # installed gh v2.104.0: `-bFOO` parses, `-zFOO` fails with "unknown
+        # shorthand flag"). Normalised to the long spelling on the argv that
+        # reaches `gh`, like the other forms.
+        resolved="$(orc_lib_body_arg "--body" "${REST[$index]#-b}")"
+        REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
+        index=$((index + 1)) ;;
       # `--body-file` is READ here, not forwarded: the checklist cannot be
       # appended to a path gh expands on its own side. The file itself is never
       # rewritten — the resolved content becomes an explicit `--body` value.
@@ -128,6 +136,11 @@ if [ "$ACTION" = "edit" ]; then
         resolved="$(orc_lib_read_body_file "--body-file" "${REST[$index]#*=}")"
         REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
+      -F?*)
+        # pflag attached short value: `-F/path` is `--body-file /path`.
+        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$index]#-F}")"
+        REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
+        index=$((index + 1)) ;;
       *) index=$((index + 1)) ;;
     esac
   done
@@ -140,7 +153,7 @@ if [ "$INJECT_CHECKLIST" = "1" ]; then
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     case "${REST[$index]}" in
-      --body|--body=*|--body-file|--body-file=*|-b|-b=*|-F|-F=*) PR_MUTATE_BODY_CONFLICT=1 ;;
+      --body|--body=*|--body-file|--body-file=*|-b|-b=*|-b?*|-F|-F=*|-F?*) PR_MUTATE_BODY_CONFLICT=1 ;;
     esac
     index=$((index + 1))
   done
