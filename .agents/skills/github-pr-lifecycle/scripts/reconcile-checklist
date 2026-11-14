@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region or an HTML comment are examples, not checklist items. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces and never closes it is reported unparseable (all_checked false): the fence's container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region or an HTML comment are examples, not checklist items. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces is reported unparseable (all_checked false), whether or not that fence closes: its container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
   exit "$ORC_OK"
 fi
 
@@ -89,7 +89,7 @@ if [ "$OPT_JSON" = true ]; then
 else
   echo "PR checklist reconciliation:"
   if [ -n "$UNPARSEABLE_LINE" ]; then
-    echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE and never closes it;"
+    echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE, closed or not;"
     echo "   its container scope (top level, list item, block quote) cannot be determined, so no checklist reading is trusted)"
     echo "   fix: dedent the fence opener to column 0"
   fi
