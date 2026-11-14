@@ -129,7 +129,7 @@ toml_edit = "0.25"
 figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 
 # Storage (tech-stack.md §1, §11)
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 
 # Concurrency primitives (short critical sections; guard-returning locks
 # remove poisoning boilerplate at call sites)
