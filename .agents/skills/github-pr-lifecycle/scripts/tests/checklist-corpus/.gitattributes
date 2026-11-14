@@ -1,0 +1,4 @@
+# The checklist corpus is DATA, not prose: `26-crlf-line-endings.md` must keep
+# its exact bytes through git's line-ending normalisation, or that case silently
+# becomes an LF body and stops testing CRLF handling (arbsec/orchestraitor#799).
+* -text

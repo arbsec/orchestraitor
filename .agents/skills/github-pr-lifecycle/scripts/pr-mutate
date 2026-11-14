@@ -70,8 +70,10 @@ fi
 # able to UNDO that — a summary-only file would otherwise replace the whole body
 # and drop the PR back to `checklist_markers_missing`. The SAME helper
 # `pr-create` uses appends the markers (one implementation, no drift), and a
-# supplied body that already carries a marker is passed through BYTE-VERBATIM:
-# author content is evidence, never something a helper edits.
+# supplied body that already carries a marker is set with its CONTENT
+# unchanged — the routes resolve the body through a command substitution, so
+# trailing newlines are normalised and nothing else is altered: author content
+# is evidence, never something a helper edits.
 PR_MUTATE_BODY_ROOT=""
 pr_mutate_ensure_body() {
   orc_lib_ensure_checklist_markers "$1" "$PR_MUTATE_BODY_ROOT"

@@ -36,6 +36,14 @@
 #   (f2) a marker inside a FENCED code region is an example, not evidence
 #   (f3) the box character set is exactly `x`, `X` and a space
 #   (f4) KNOWN GAP: one ticked marker satisfies the gate today (#800)
+#   (f5) the SHARED cross-engine verdict corpus
+#       (scripts/tests/checklist-corpus/): every case is asserted by THIS suite
+#       and by the Rust engine in crates/orchestraitor-mcp/src/pr_status.rs, so
+#       a fence-scanner divergence in either engine fails CI (#799 F16/F17)
+#   (f6) fence recognition is INDENTATION-correct (at most three leading
+#       spaces; four spaces or a tab is an indented code block) and INFO-STRING
+#       correct (a backtick fence may not carry a backtick in its info string,
+#       a tilde fence may) — with the inverse (three-space fences) pinned too
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
 #   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
@@ -291,6 +299,13 @@ run() {
   OUT="$(cd "$TMP/repo" && bash "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
 }
 exists() { if [ -e "$1" ]; then echo 1; else echo 0; fi; }
+ensure() { # ensure <body> -> prints the body with the managed checklist applied
+  bash -c 'source "$1"; orc_lib_ensure_checklist_markers "$2" "$3"' _ \
+    "$SCRIPT_DIR/_lib.sh" "$1" "$2"
+}
+dry_run() { # dry_run <pr-create args...> -> dry-run argv on stdout
+  ( cd "$TMP/repo" && SKILL_CASE=1 bash scripts/pr-create --repo test-org/repo --dry-run "$@" 2>&1 )
+}
 
 # --- (a) reconcile-checklist: the marker-less body ------------------------------
 export BODY_FIXTURE="$TMP/files/no-markers.md"
@@ -463,6 +478,90 @@ run convergence-status 7 --repo test-org/repo --json
 assert 'f4: and the gate converges on it today (#800)' 0 "$RC"
 assert 'f4: with no reason at all (#800)' '[]' "$(jq -c .reasons <<<"$OUT")"
 
+# --- (f5) the SHARED cross-engine verdict corpus -------------------------------
+# One body per case, shared with the Rust engine
+# (`checklist_corpus_matches_both_engines` in
+# crates/orchestraitor-mcp/src/pr_status.rs): each `<nn>-<slug>.md` body must
+# reconcile to the `(marker_count, all_checked)` pair in `<nn>-<slug>.expected`.
+# Both suites assert the SAME files, so a divergence in EITHER fence scanner
+# fails CI — the recurring defect this corpus exists to stop
+# (arbsec/orchestraitor#799 F16/F17).
+CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
+CORPUS_CASES=0
+for corpus_body in "$CORPUS_DIR"/*.md; do
+  corpus_slug="$(basename "$corpus_body" .md)"
+  corpus_expected="$CORPUS_DIR/$corpus_slug.expected"
+  corpus_count="$(sed -n 's/.*marker_count=\([0-9][0-9]*\).*/\1/p' "$corpus_expected")"
+  corpus_all="$(sed -n 's/.*all_checked=\(true\|false\).*/\1/p' "$corpus_expected")"
+  export BODY_FIXTURE="$corpus_body"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f5: $corpus_slug marker_count" "$corpus_count" \
+    "$(jq -r .marker_count <<<"$OUT")"
+  assert "f5: $corpus_slug all_checked" "$corpus_all" \
+    "$(jq -r .all_checked <<<"$OUT")"
+  CORPUS_CASES=$((CORPUS_CASES+1))
+done
+# Floor the count: a deleted case must FAIL instead of silently narrowing the
+# contract (the same reasoning as the self-test discovery floor in skills.yml).
+assert 'f5: the corpus carries at least 30 cases' 1 \
+  "$([ "$CORPUS_CASES" -ge 30 ] && echo 1 || echo 0)"
+
+# --- (f6) the fence scanner is indentation- and info-string-correct ------------
+# arbsec/orchestraitor#799 F16 (generation-4 review): CommonMark allows at most
+# THREE spaces before a top-level fence, so a 4-space-indented run is literal
+# text. Before the fix the closer below closed the region and EXPOSED the
+# checked marker GitHub renders INSIDE the fence: `all_checked: true` for
+# evidence a human cannot see.
+F16_CLOSER="$(cat "$CORPUS_DIR/17-four-space-closer-is-text.md")"
+export BODY_FIXTURE="$CORPUS_DIR/17-four-space-closer-is-text.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: a 4-space-indented closer does not close the region' 0 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f6: and its enclosed checked marker is not evidence' false \
+  "$(jq -r .all_checked <<<"$OUT")"
+assert 'f6: the guard appends the checklist (the body carries none)' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$(ensure "$F16_CLOSER" "$TMP/repo")")"
+# The inverse: a THREE-space-indented opener and closer are still fences, so a
+# marker inside one is hidden and the guard still appends the checklist.
+printf '   ```\n- [x] <!-- orc:tests --> example only\n   ```\n' \
+  > "$TMP/files/f16-three-space.md"
+export BODY_FIXTURE="$TMP/files/f16-three-space.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: three-space fences still hide their marker' 0 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f6: and the guard still appends the checklist' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' \
+    <<<"$(ensure "$(cat "$TMP/files/f16-three-space.md")" "$TMP/repo")")"
+
+# arbsec/orchestraitor#799 F17 (generation-4 CodeRabbit): a backtick fence's
+# info string may not contain a backtick, so ```example``` is a CLOSED inline
+# code span — never an opener. Before the fix it opened an unclosed fence and
+# the unclosed-fence guard REFUSED this legitimate body with exit 2 (#683 class)
+# from both pr-create and pr-mutate.
+F17_BODY="$(cat "$CORPUS_DIR/20-inline-closed-span-is-not-an-opener.md")"
+F17_ENSURED="$(ensure "$F17_BODY" "$TMP/repo" 2>"$TMP/stderr")"; RC=$?
+assert 'f6: a ```example``` span is not an opener (no refusal)' 0 "$RC"
+assert 'f6: and the real marker survives untouched' 1 \
+  "$(grep -c 'orc:tests' <<<"$F17_ENSURED")"
+cp "$CORPUS_DIR/20-inline-closed-span-is-not-an-opener.md" "$TMP/files/f17-inline-span.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/f17-inline-span.md"
+assert 'f6: pr-mutate does not refuse a closed ```example``` span' 0 "$RC"
+assert 'f6: pr-mutate sets the body with its marker intact' 1 \
+  "$(grep -c 'orc:tests' "$TMP/edited-body.md")"
+OUT="$(dry_run --title t --body-file "$TMP/files/f17-inline-span.md" 2>&1)"; RC=$?
+assert 'f6: pr-create does not refuse a closed ```example``` span' 0 "$RC"
+assert 'f6: pr-create keeps the real marker' 1 "$(grep -c 'orc:tests' <<<"$OUT")"
+# A TILDE fence MAY carry backticks in its info string (GFM), so the same
+# backtick stays INSIDE the region: the marker below is not evidence.
+printf '~~~text `tick`\n- [x] <!-- orc:tests --> inside the tilde fence\n~~~\n' \
+  > "$TMP/files/f17-tilde-info.md"
+export BODY_FIXTURE="$TMP/files/f17-tilde-info.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: tilde info strings may carry backticks' 0 \
+  "$(jq -r .marker_count <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
 # --- (g) the fallback cannot drift from the template ---------------------------
 TEMPLATE_MARKERS="$(grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
   "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" \
@@ -476,10 +575,6 @@ assert 'g: the _lib.sh fallback equals the template verbatim' \
 assert 'g: the fallback lands every box unchecked' 0 \
   "$(printf '%s\n' "$FALLBACK" | grep -c '^- \[x\]')"
 
-ensure() { # ensure <body> -> prints the body with the managed checklist applied
-  bash -c 'source "$1"; orc_lib_ensure_checklist_markers "$2" "$3"' _ \
-    "$SCRIPT_DIR/_lib.sh" "$1" "$2"
-}
 ENSURED="$(ensure 'wholesale body' "$TMP/repo")"
 assert 'g: a wholesale body gains the nine markers' 9 \
   "$(grep -c '<!-- orc:' <<<"$ENSURED")"
@@ -508,9 +603,6 @@ assert 'g: a fenced-only body keeps its own text' 1 \
 # --- (h) creation stays satisfiable: pr-create injects -------------------------
 # SKILL_CASE=1 skips the pre-PR review gate (its own suite covers it); the
 # dry-run stops before any gh call, so only the constructed argv is asserted.
-dry_run() { # dry_run <pr-create args...> -> dry-run argv on stdout
-  ( cd "$TMP/repo" && SKILL_CASE=1 bash scripts/pr-create --repo test-org/repo --dry-run "$@" 2>&1 )
-}
 OUT="$(dry_run --title t --body 'wholesale body')"
 assert 'h: --body gains the nine markers' 9 "$(grep -c '<!-- orc:' <<<"$OUT")"
 assert 'h: injected markers are unchecked' 0 "$(grep -c -- '- \[x\]' <<<"$OUT")"

@@ -1270,12 +1270,17 @@ fn parse_checklist(body: &str) -> Checklist {
 /// `.agents/skills/github-pr-lifecycle/scripts/_lib.sh`) applies exactly these
 /// rules, so creation and reconciliation agree on what a marker is:
 ///
-/// - a fence OPENS on a line whose first non-whitespace characters are 3+
-///   backticks OR 3+ tildes;
-/// - the region CLOSES at the first later line whose first non-whitespace
-///   characters are the SAME fence character repeated at least as many times
-///   as the opener, with only whitespace after them (a DIFFERENT fence
-///   character never closes it);
+/// - a fence OPENS on a line with at most THREE leading spaces whose next
+///   characters are 3+ backticks OR 3+ tildes (four or more spaces — or a tab,
+///   which reaches the 4-column tab stop — is an INDENTED code block, where
+///   fence characters are literal text; arbsec/orchestraitor#799 F16);
+/// - a backtick fence's info string MUST NOT contain a backtick, which makes
+///   ```` ```example``` ```` a CLOSED inline code span rather than an opener; a
+///   tilde fence MAY carry backticks in its info string (F17);
+/// - the region CLOSES at the first later line whose first 0-3 characters are
+///   spaces and whose next characters are the SAME fence character repeated at
+///   least as many times as the opener, with only whitespace after them (a
+///   DIFFERENT fence character never closes it);
 /// - an unclosed fence runs to the end of the body;
 /// - every line inside the region — INCLUDING the opening and the closing
 ///   fence lines — is excluded from marker scanning.
@@ -1284,11 +1289,13 @@ fn strip_fenced_code(body: &str) -> String {
     // The open fence: its character and how many times it was repeated.
     let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
-        let trimmed = line.trim_start_matches([' ', '\t']);
+        let candidate = fence_line(line);
         if let Some((fence_char, fence_len)) = fence {
             // Only the SAME character, repeated at least as many times as the
             // opener, with nothing but whitespace after it, closes the region.
-            if trimmed.starts_with(fence_char) {
+            if let Some(trimmed) = candidate
+                && trimmed.starts_with(fence_char)
+            {
                 let run = trimmed.chars().take_while(|c| *c == fence_char).count();
                 let rest = trimmed.chars().skip(run).all(|c| c.is_ascii_whitespace());
                 if run >= fence_len && rest {
@@ -1297,13 +1304,15 @@ fn strip_fenced_code(body: &str) -> String {
             }
             continue;
         }
-        // Outside a region: a line whose first non-whitespace characters are 3+
-        // backticks or 3+ tildes OPENS a fence.
-        if let Some(first) = trimmed.chars().next()
+        // Outside a region: a line whose first 0-3 characters are spaces and
+        // whose next characters are 3+ backticks or 3+ tildes OPENS a fence.
+        if let Some(trimmed) = candidate
+            && let Some(first) = trimmed.chars().next()
             && (first == '`' || first == '~')
         {
             let run = trimmed.chars().take_while(|c| *c == first).count();
-            if run >= 3 {
+            let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
+            if run >= 3 && !info_has_backtick {
                 fence = Some((first, run));
                 continue;
             }
@@ -1312,6 +1321,26 @@ fn strip_fenced_code(body: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The part of `line` at which a fence may open or close, or `None` when the
+/// line is indented too far to be a fence line.
+///
+/// CommonMark/GFM allow at most THREE spaces of indentation before a top-level
+/// fence. Four or more spaces — or a tab, which reaches the 4-column tab stop —
+/// is an INDENTED code block, where fence characters are literal text
+/// (arbsec/orchestraitor#799 review, finding F16). Both engines apply the rule
+/// identically: a 4-space-indented run neither opens nor closes a region.
+fn fence_line(line: &str) -> Option<&str> {
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    if rest.starts_with('\t') {
+        return None;
+    }
+    Some(rest)
 }
 
 /// Reads the CLEAN-review record for this PR at the current head
@@ -2058,6 +2087,65 @@ mod tests {
         );
         assert_eq!(body.marker_count, 1);
         assert_eq!(body.items[0].marker, "tests");
+    }
+
+    /// The SHARED cross-engine verdict corpus
+    /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
+    ///
+    /// Every case is a PR body plus the `(marker_count, all_checked)` pair both
+    /// engines must derive from it. The shell suite
+    /// (`scripts/test-reconcile-checklist`) asserts the very same files through
+    /// `reconcile-checklist`, so the corpus is the CONTRACT between the two
+    /// implementations: the fence scanner drifted between them three review
+    /// rounds in a row (arbsec/orchestraitor#799 F16/F17), and a divergence in
+    /// EITHER engine now fails CI.
+    #[test]
+    fn checklist_corpus_matches_both_engines() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus");
+        let entries = std::fs::read_dir(&dir).expect("corpus directory");
+        let mut cases = 0_u32;
+        let mut mismatches = Vec::new();
+        for entry in entries {
+            let path = entry.expect("corpus entry").path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("corpus body");
+            let expected =
+                std::fs::read_to_string(path.with_extension("expected")).expect("expectation");
+            let mut expected_count = None;
+            let mut expected_all = None;
+            for token in expected.split_whitespace() {
+                if let Some(value) = token.strip_prefix("marker_count=") {
+                    expected_count = value.parse::<u64>().ok();
+                } else if let Some(value) = token.strip_prefix("all_checked=") {
+                    expected_all = Some(value == "true");
+                }
+            }
+            let parsed = parse_checklist(&body);
+            if Some(parsed.marker_count) != expected_count {
+                mismatches.push(format!(
+                    "{}: marker_count actual={} expected={expected_count:?}",
+                    path.display(),
+                    parsed.marker_count
+                ));
+            }
+            if Some(parsed.all_checked) != expected_all {
+                mismatches.push(format!(
+                    "{}: all_checked actual={} expected={expected_all:?}",
+                    path.display(),
+                    parsed.all_checked
+                ));
+            }
+            cases += 1;
+        }
+        assert!(cases >= 30, "corpus shrank to {cases} cases");
+        assert!(
+            mismatches.is_empty(),
+            "the Rust engine disagrees with the shared corpus:\n{}",
+            mismatches.join("\n")
+        );
     }
 
     #[test]

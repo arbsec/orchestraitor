@@ -62,7 +62,11 @@ every marker is checked: a body with no managed markers is MISSING evidence
 (reason `checklist_markers_missing`), never a vacuous pass. There is NO
 author-granted opt-out — the body cannot waive itself, so a marker-less body
 always blocks. A marker inside a fenced code region (3+ backticks or 3+
-tildes) is an EXAMPLE, not a checklist item and is excluded from the scan.
+tildes) is an EXAMPLE, not a checklist item and is excluded from the scan. A
+fence line carries at most three leading spaces (four or more, or a leading
+tab, is an indented code block where fence characters are literal text), and a
+backtick fence's info string may not contain a backtick — ```` ```example``` ````
+is a closed inline code span, not an opener — while a tilde fence's may.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

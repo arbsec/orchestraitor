@@ -816,10 +816,14 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   backticks or 3+ tildes) is an EXAMPLE, not a checklist item: the whole
   region, including its opening and closing fence lines, is excluded from the
   scan, so a body that merely shows the checklist shape no longer satisfies the
-  gate. The rule stays satisfiable: PRs opened by the orchestration delivery
-  lane (`orc worker run --deliver`, `orc loop --deliver`) carry the nine managed
-  markers UNCHECKED in their body, ahead of the run summary. Documented in
-  [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+  gate. Fence recognition follows CommonMark/GFM: a fence line carries at most
+  three leading spaces (four or more, or a leading tab, is an indented code
+  block where fence characters are literal text), and a backtick fence's info
+  string may not contain a backtick — so a line like ```` ```example``` ```` is
+  a closed inline code span, not an opener. The rule stays satisfiable: PRs
+  opened by the orchestration delivery lane (`orc worker run --deliver`, `orc
+  loop --deliver`) carry the nine managed markers UNCHECKED in their body, ahead
+  of the run summary. Documented in [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
   the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
   plain `skip`, so `checks_all_passed` was `false` on a PR whose every real

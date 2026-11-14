@@ -655,6 +655,12 @@ pr.status <N> -> {
                                      # Markers inside a fenced code region (3+ backticks or 3+
                                      # tildes) are EXAMPLES, not checklist items: the whole region
                                      # is excluded from the scan (arbsec/orchestraitor#788).
+                                     # A fence line carries at most THREE leading spaces; four or
+                                     # more (or a leading tab) is an indented code block, where
+                                     # fence characters are literal text and neither open nor close
+                                     # a region. A backtick fence's info string may not contain a
+                                     # backtick (```example``` is a closed inline span, not an
+                                     # opener); a tilde fence's info string may.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

@@ -258,12 +258,18 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 # `crates/orchestraitor-mcp/src/pr_status.rs`) agree on these semantics
 # exactly:
 #
-#   - a fence OPENS on a line whose first non-whitespace characters are 3+
-#     backticks OR 3+ tildes;
-#   - the region CLOSES at the first later line whose first non-whitespace
-#     characters are the SAME fence character repeated at least as many times
-#     as the opener, with only whitespace after them (a DIFFERENT fence
-#     character never closes it);
+#   - a fence OPENS on a line with at most THREE leading spaces whose next
+#     characters are 3+ backticks OR 3+ tildes (four or more spaces — or a
+#     tab, which reaches the 4-column tab stop — is an INDENTED code block,
+#     where fence characters are literal text; arbsec/orchestraitor#799 F16);
+#   - a backtick fence's info string MUST NOT contain a backtick: a line like
+#     ```example``` is a CLOSED inline code span, not an opener (GFM); a tilde
+#     fence MAY carry backticks in its info string (arbsec/orchestraitor#799
+#     F17);
+#   - the region CLOSES at the first later line whose first 0-3 characters are
+#     spaces and whose next characters are the SAME fence character repeated
+#     at least as many times as the opener, with only whitespace after them (a
+#     DIFFERENT fence character never closes it);
 #   - an unclosed fence runs to the end of the body;
 #   - every line inside the region — INCLUDING the opening and the closing
 #     fence lines — is excluded from marker scanning.
@@ -283,18 +289,29 @@ orc_lib_fence_state() { orc_lib__fence_scan state; }
 # Usage: orc_lib__fence_scan <strip|state>   (reads the body on STDIN)
 orc_lib__fence_scan() {
   awk -v mode="${1:?fence scan mode required}" '
-    function trim_lead(s) { sub(/^[ \t]+/, "", s); return s }
+    # The part of the line a fence may open or close at. CommonMark/GFM allow
+    # at most THREE leading spaces before a top-level fence; four or more — or
+    # a tab, which reaches the 4-column tab stop — is an INDENTED code block,
+    # where fence characters are literal text (#799 F16).
+    function fence_view(line,   n, rest) {
+      n = 0
+      while (substr(line, n + 1, 1) == " ") n++
+      if (n > 3) return ""
+      rest = substr(line, n + 1)
+      if (substr(rest, 1, 1) == "\t") return ""
+      return rest
+    }
     function run_length(s, c,   n) {
       n = 0
       while (substr(s, n + 1, 1) == c) n++
       return n
     }
     {
-      s = trim_lead($0)
+      s = fence_view($0)
       if (fence_char != "") {
         # Inside a region: only the SAME character, repeated at least as many
         # times as the opener, with nothing but whitespace after it, closes it.
-        if (substr(s, 1, 1) == fence_char) {
+        if (s != "" && substr(s, 1, 1) == fence_char) {
           n = run_length(s, fence_char)
           if (n >= fence_len && substr(s, n + 1) ~ /^[[:space:]]*$/) {
             fence_char = ""
@@ -303,10 +320,19 @@ orc_lib__fence_scan() {
         }
         next
       }
-      c = substr(s, 1, 1)
-      if (c == "`" || c == "~") {
-        n = run_length(s, c)
-        if (n >= 3) { fence_char = c; fence_len = n; next }
+      if (s != "") {
+        c = substr(s, 1, 1)
+        if (c == "`" || c == "~") {
+          n = run_length(s, c)
+          # A backtick fence info string must NOT contain a backtick (GFM):
+          # ```example``` is a CLOSED inline span, not an opener. A tilde
+          # fence MAY carry backticks (#799 F17).
+          if (n >= 3 && !(c == "`" && index(substr(s, n + 1), "`") > 0)) {
+            fence_char = c
+            fence_len = n
+            next
+          }
+        }
       }
       if (mode == "strip") print $0
     }

@@ -1,0 +1,9 @@
+- [x] <!-- orc:issue --> Linked issue and specification requirements are satisfied
+- [x] <!-- orc:service-identity --> All GitHub writes are the agent identity
+- [x] <!-- orc:tests --> Tests are added or updated
+- [x] <!-- orc:security --> Security impact is reviewed
+- [x] <!-- orc:docs --> Human-facing documentation is updated
+- [x] <!-- orc:rollback --> Rollback or recovery behavior is verified
+- [x] <!-- orc:checks --> All required and non-optional checks pass
+- [x] <!-- orc:review --> All noteworthy findings are resolved
+- [x] <!-- orc:threads --> All actionable review threads are resolved

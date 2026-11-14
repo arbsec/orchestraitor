@@ -352,7 +352,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   carries it, only the body update is skipped — other edit flags
                   in the same invocation still run). Markers inside a
                   fenced code region are EXAMPLES, not checklist items — a
-                  marker after a closed fence counts.
+                  marker after a closed fence counts. A fence line carries
+                  at most three leading spaces (four or more, or a leading
+                  tab, is an indented code block where fence characters are
+                  literal text), and a backtick fence's info string may not
+                  contain a backtick — a tilde fence's may.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon
