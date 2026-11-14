@@ -1,0 +1,4 @@
+# A comment renders invisible, so the marker inside it is not evidence: only the two
+# visible markers count. A parser without comment tracking sees three items with one
+# unticked, so this case discriminates.
+marker_count=2 all_checked=true

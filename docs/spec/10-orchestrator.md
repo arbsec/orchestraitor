@@ -644,30 +644,41 @@ pr.status <N> -> {
   },                                 # actionable = !isResolved && !isOutdated (review-threads rule);
                                      # excerpts are size-capped (see below), never full bodies
   checklist: { items: [ { marker, checked, description } ],
-               marker_count, markers_present, all_checked, unchecked_count },
-                                     # `all_checked` is true only when at least one marker exists AND
-                                     # every marker is checked: a marker-less body is MISSING evidence,
-                                     # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
-                                     # used to reach merge-gate as `mergeable: true`).
-                                     # There is NO author-granted opt-out: the body cannot waive
-                                     # itself, so a marker-less body always blocks with
-                                     # `checklist_markers_missing` (arbsec/orchestraitor#801).
-                                     # Markers inside a fenced code region (3+ backticks or 3+
-                                     # tildes) are EXAMPLES, not checklist items: the whole region
-                                     # is excluded from the scan (arbsec/orchestraitor#788).
-                                     # A fence line carries at most THREE leading spaces; four or
-                                     # more (or a leading tab) is an indented code block, where
-                                     # fence characters are literal text and neither open nor close
-                                     # a region. A backtick fence's info string may not contain a
-                                     # backtick (```example``` is a closed inline span, not an
-                                     # opener); a tilde fence's info string may. A CLOSING fence
-                                     # may be followed ONLY by spaces or tabs (CommonMark 0.31);
-                                     # a single trailing carriage return that terminates a CRLF
-                                     # line is the line ending, not content. A form feed or a
-                                     # vertical tab after the closing run is CONTENT, so it
-                                     # leaves the region OPEN, in both engines
-                                     # (arbsec/orchestraitor#799 F18). Only a space
-                                     # or a tab indents a checklist item.
+               marker_count, markers_present, all_checked, unchecked_count,
+               unparseable, unparseable_line },
+                                    # `all_checked` is true only when at least one marker exists AND
+                                    # every marker is checked: a marker-less body is MISSING evidence,
+                                    # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
+                                    # used to reach merge-gate as `mergeable: true`).
+                                    # There is NO author-granted opt-out: the body cannot waive
+                                    # itself, so a marker-less body always blocks with
+                                    # `checklist_markers_missing` (arbsec/orchestraitor#801).
+                                    # Markers inside a fenced code region (3+ backticks or 3+
+                                    # tildes) or an HTML comment (`<!--` ... `-->`) are EXAMPLES,
+                                    # not checklist items: the whole region is excluded from the
+                                    # scan (arbsec/orchestraitor#788), and an unclosed comment
+                                    # hides everything after it (fail closed). Line endings are
+                                    # normalised ONCE before any scan (CommonMark §2.1: a lone CR
+                                    # and CRLF both become LF), so a closer followed by a
+                                    # CRLF-CRLF terminator closes in both engines. A fence line
+                                    # carries at most THREE leading spaces; four or more (or a
+                                    # leading tab) is an indented code block, where fence
+                                    # characters are literal text and neither open nor close a
+                                    # region. A backtick fence's info string may not contain a
+                                    # backtick (```example``` is a closed inline span, not an
+                                    # opener); a tilde fence's info string may. A CLOSING fence
+                                    # may be followed ONLY by spaces or tabs (CommonMark 0.31);
+                                    # a form feed or a vertical tab after the closing run is
+                                    # CONTENT, so it leaves the region OPEN, in both engines
+                                    # (arbsec/orchestraitor#799 F18). Only a space or a tab
+                                    # indents a checklist item.
+                                    # `unparseable` is true when the body OPENS a fence indented
+                                    # 1-3 spaces (`unparseable_line` = the 1-based line): the
+                                    # container scope (top level, list item, block quote) is
+                                    # indeterminate without a container model, so no checklist
+                                    # reading is trusted, `all_checked` is false, and the verdict
+                                    # blocks with `checklist_unparseable` — dedent the fence to
+                                    # column 0, or close it (arbsec/orchestraitor#809).
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly
@@ -676,6 +687,7 @@ pr.status <N> -> {
     reasons: [ string ]              # stable machine codes: agent_review_not_clean_at_head,
                                      # checks_not_passing, checks_pending, unresolved_threads(n),
                                      # unchecked_items(n), checklist_markers_missing,
+                                     # checklist_unparseable,
                                      # review_required, is_draft — the same
                                      # code set convergence-status emits today, extended only
                                      # additively (merge_state is NOT a reason source; see the

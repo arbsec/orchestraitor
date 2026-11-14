@@ -350,19 +350,16 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   edit <pr> --inject-checklist` reads the current body, appends
                   the managed checklist and sets the body (when the body already
                   carries it, only the body update is skipped — other edit flags
-                  in the same invocation still run). Markers inside a
-                  fenced code region are EXAMPLES, not checklist items — a
-                  marker after a closed fence counts. A fence line carries
-                  at most three leading spaces (four or more, or a leading
-                  tab, is an indented code block where fence characters are
-                  literal text), and a backtick fence's info string may not
-                  contain a backtick — a tilde fence's may. A CLOSING fence may be
-                  followed ONLY by spaces or tabs (CommonMark 0.31); a single
-                  trailing carriage return that terminates a CRLF line is the
-                  line ending, not content. A form feed or a vertical tab after
-                  the closing run is CONTENT, so it leaves the region OPEN and a
-                  marker behind it is still inside the fence. Only a space or
-                  a tab indents a checklist item.
+                  in the same invocation still run). The exact fence and
+                  line-ending rules the scanners apply — indentation, info
+                  strings, closing tails, CRLF/CR normalisation, HTML comments,
+                  and the indeterminate-scope refusal — live in
+                  `references/pr-convergence.md` ("Fenced code is not checklist
+                  state"). A marker after a closed fence counts, and a fence
+                  opener indented 1-3 spaces makes the checklist reading
+                  INDETERMINATE, so the verdict blocks with
+                  `checklist_unparseable` — dedent the fence to column 0, or
+                  close it.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

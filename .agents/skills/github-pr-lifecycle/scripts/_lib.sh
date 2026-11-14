@@ -258,6 +258,11 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 # `crates/orchestraitor-mcp/src/pr_status.rs`) agree on these semantics
 # exactly:
 #
+#   - LINE ENDINGS are normalised ONCE, before anything is scanned (CommonMark
+#     §2.1: a lone CR is a line ending and so is CRLF; parsers normalise both to
+#     LF before parsing). Every `\r\n` becomes `\n`, then every remaining lone
+#     `\r` becomes `\n`, so no CR byte reaches the scanners and no engine strips
+#     a trailing CR ad hoc;
 #   - a fence OPENS on a line with at most THREE leading spaces whose next
 #     characters are 3+ backticks OR 3+ tildes (four or more spaces — or a
 #     tab, which reaches the 4-column tab stop — is an INDENTED code block,
@@ -270,29 +275,57 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #     spaces and whose next characters are the SAME fence character repeated
 #     at least as many times as the opener, followed by nothing but SPACES and
 #     TABS — CommonMark 0.31: the closing fence "may be followed only by
-#     spaces or tabs, which are ignored." One line-ending adjustment: a single
-#     trailing carriage return that terminates a CRLF line is not content and
-#     is stripped before that test. A form feed, a vertical tab, an info
+#     spaces or tabs, which are ignored." A form feed, a vertical tab, an info
 #     string or any other character leaves the region OPEN; a DIFFERENT fence
 #     character never closes it (arbsec/orchestraitor#799 F18);
 #   - an unclosed fence runs to the end of the body;
 #   - every line inside the region — INCLUDING the opening and the closing
-#     fence lines — is excluded from marker scanning.
+#     fence lines — is excluded from marker scanning;
+#   - an HTML COMMENT (`<!--` … `-->`) is not code and not evidence: its
+#     delimiter lines and everything between them are invisible to every scan,
+#     and a fence inside it neither opens nor closes a region. A checklist item
+#     line is NOT a comment opener: its `<!-- orc:NAME -->` is the marker
+#     delimiter, so `- [ ] <!-- orc:x -->` stays scannable. An unclosed
+#     comment runs to the end of the body (fail closed: everything after it is
+#     invisible evidence);
+#   - a fence OPENER indented 1-3 spaces is INDETERMINATE SCOPE: it may equally
+#     be inside a list item or a block quote, and this scanner has no container
+#     model, so `orc_lib_fence_unparseable_line` reports it and every checklist
+#     verdict BLOCKS with `checklist_unparseable` rather than guessing
+#     (arbsec/orchestraitor#809 tracks real container tracking).
 #
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
-# every fenced region removed).
+# every fenced region and every HTML comment removed).
 #
-# ONE state machine, two modes: `orc_lib__fence_scan` owns the rules above, and
-# both callers drive it. A second, separately written scanner is exactly how the
-# shell and Rust engines drifted before (arbsec/orchestraitor#788).
+# ONE state machine, three modes: `orc_lib__fence_scan` owns the rules above,
+# and every caller drives it. A second, separately written scanner is exactly
+# how the shell and Rust engines drifted before (arbsec/orchestraitor#788).
 orc_lib_strip_fenced_code() { orc_lib__fence_scan strip; }
 
-# The fence state at the END of the body: `closed`, or `open <char> <len>` for a
+# The scan state at the END of the body: `closed`, or `open <char> <len>` for a
 # fence that never closed. Reads the body on STDIN.
 orc_lib_fence_state() { orc_lib__fence_scan state; }
 
-# Usage: orc_lib__fence_scan <strip|state>   (reads the body on STDIN)
+# The 1-based line number of the FIRST fence opener indented 1-3 spaces, when
+# the body carries one; nothing at all otherwise. Such an opener's container
+# scope is indeterminate without a container model, so a checklist reading from
+# this body must BLOCK, never guess (arbsec/orchestraitor#809). Reads the body
+# on STDIN.
+orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
+
+# CommonMark §2.1 line endings, normalised ONCE before any scan: replace every
+# `\r\n` with `\n`, then every remaining lone `\r` with `\n`. Reading the body
+# on STDIN, this prints it with no CR byte left, so every later rule is written
+# against LF lines only. `str::lines()` in the Rust engine makes exactly one
+# strip; the scanners used to strip a second CR by hand and disagreed on
+# `` ```\r\r\n `` (arbsec/orchestraitor#799 gen-7).
+orc_lib_normalize_line_endings() {
+  awk '{ line = $0; gsub(/\r$/, "", line); gsub(/\r/, "\n", line); print line }'
+}
+
+# Usage: orc_lib__fence_scan <strip|state|indeterminate>   (stdin = body)
 orc_lib__fence_scan() {
+  orc_lib_normalize_line_endings |
   awk -v mode="${1:?fence scan mode required}" '
     # The part of the line a fence may open or close at. CommonMark/GFM allow
     # at most THREE leading spaces before a top-level fence; four or more — or
@@ -315,21 +348,24 @@ orc_lib__fence_scan() {
       return n
     }
     # The CLOSING tail test. CommonMark 0.31: a closing code fence "may be
-    # followed only by spaces or tabs, which are ignored." The single
-    # exception is line-ending handling: one trailing carriage return that
-    # terminates a CRLF line is part of the terminator, not content, so it is
-    # stripped before the test.
+    # followed only by spaces or tabs, which are ignored."
     #
     # Everything else keeps the region OPEN: a form feed (Rust
     # `is_ascii_whitespace` accepts it, the spec does not — this used to be a
     # divergence), a vertical tab, an info string. POSIX `[[:space:]]` is
     # wrong too: it carries the vertical tab, so gawk closed on "```\v" while
-    # GitHub renders the fence as still open (#799 F18).
-    function closes_here(s, n,   tail) {
-      tail = substr(s, n + 1)
-      if (tail != "" && substr(tail, length(tail)) == "\r")
-        tail = substr(tail, 1, length(tail) - 1)
-      return tail ~ /^[ \t]*$/
+    # GitHub renders the fence as still open (#799 F18). There is no carriage
+    # return to special-case: the body is normalised to LF before this scan.
+    function closes_here(s, n) {
+      return substr(s, n + 1) ~ /^[ \t]*$/
+    }
+    # A checklist marker line is NOT an HTML comment opener: its `<!-- orc:NAME
+    # -->` pair is the MARKER delimiter on a visible task-list line, so it must
+    # stay in the scan output. Exactly the shape the marker scan accepts below.
+    function is_marker_line(line,   t) {
+      t = line
+      sub(/^[ \t]+/, "", t)
+      return t ~ /^- *\[[xX ]\] *<!-- *orc:[A-Za-z0-9_-]+ *-->/
     }
     {
       s = fence_view($0)
@@ -346,6 +382,14 @@ orc_lib__fence_scan() {
         }
         next
       }
+      if (in_comment) {
+        # Inside an HTML comment: the delimiter line that carries "-->" ends it
+        # (inclusive — CommonMark ends a type-2 HTML block at the END of that
+        # line, so text after the delimiter is still invisible), and nothing on
+        # the line can open or close a fence.
+        if (index($0, "-->") > 0) in_comment = 0
+        next
+      }
       if (s != "") {
         c = substr(s, 1, 1)
         if (c == "`" || c == "~") {
@@ -354,18 +398,34 @@ orc_lib__fence_scan() {
           # ```example``` is a CLOSED inline span, not an opener. A tilde
           # fence MAY carry backticks (#799 F17).
           if (n >= 3 && !(c == "`" && index(substr(s, n + 1), "`") > 0)) {
+            # A 1-3-space indent means the opener may sit inside a list item or
+            # a block quote: its container scope is indeterminate here, so the
+            # line number is recorded and the verdict BLOCKS (#809).
+            ind = 0
+            while (substr($0, ind + 1, 1) == " ") ind++
+            if (ind > 0 && unparseable_line == 0) unparseable_line = NR
             fence_char = c
             fence_len = n
             next
           }
         }
       }
+      # `<!--` opens an HTML comment. The delimiter line itself is invisible, and
+      # a fence inside the comment opens nothing; an unclosed comment runs to
+      # the end of the body (fail closed).
+      if (index($0, "<!--") > 0 && !is_marker_line($0)) {
+        if (index(substr($0, index($0, "<!--") + 4), "-->") == 0) in_comment = 1
+        next
+      }
       if (mode == "strip") print $0
     }
     END {
-      if (mode != "state") exit
-      if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
-      else print "closed"
+      if (mode == "state") {
+        if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
+        else print "closed"
+      } else if (mode == "indeterminate" && unparseable_line > 0) {
+        print unparseable_line
+      }
     }
   '
 }

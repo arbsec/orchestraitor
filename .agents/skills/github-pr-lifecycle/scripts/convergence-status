@@ -23,6 +23,47 @@ fi
 orc_lib_require_gh_scope
 REPO="$(orc_lib_resolve_repo)"
 
+# Every verdict input is initialised EMPTY and every sub-read is validated
+# before it is used. An empty value is never a verdict: a failed or malformed
+# sub-read FAILS the script (exit 1) instead of rendering as `0` / `false` in
+# the `--json` block (the `tonumber? // 0` coercion did exactly that for a
+# failed `review-threads`, arbsec/orchestraitor#799 round 8).
+ALL_CHECKS_PASS=""
+CHECKS_PENDING=""
+UNRESOLVED_THREADS=""
+ALL_CHECKED=""
+UNCHECKED_COUNT=""
+MARKERS_PRESENT=""
+MARKER_COUNT=""
+CHECKLIST_UNPARSEABLE=""
+CHECKLIST_UNPARSEABLE_LINE=""
+REVIEW_DECISION=""
+IS_DRAFT=""
+
+# Reads one scalar from a sub-read's JSON into SUB_READ_VALUE. A jq failure or
+# an absent (null) field FAILS the script unless the field is legitimately
+# nullable: an unread fact must never become a clean verdict input, and it must
+# never be inferred as `0` / `false` (the `tonumber? // 0` coercion rendered a
+# failed `review-threads` as `unresolved_actionable_threads: 0`,
+# arbsec/orchestraitor#799 round 8). Called WITHOUT a command substitution so an
+# `exit` here ends the script rather than a subshell.
+SUB_READ_VALUE=""
+sub_read() { # <json> <jq field> <label> [nullable: yes]  -> sets SUB_READ_VALUE
+  local json="$1" field="$2" label="$3" nullable="${4:-no}" value
+  if ! value="$(printf '%s' "$json" | jq -r ".$field")"; then
+    echo "error: $label: sub-read JSON is malformed — no readable .$field; refusing to infer a value" >&2
+    exit "$ORC_ERR_UNRECOVERABLE"
+  fi
+  if [ -z "$value" ] || [ "$value" = "null" ]; then
+    if [ "$nullable" != "yes" ]; then
+      echo "error: $label: sub-read JSON carries no .$field — refusing to infer a value" >&2
+      exit "$ORC_ERR_UNRECOVERABLE"
+    fi
+    value=""
+  fi
+  SUB_READ_VALUE="$value"
+}
+
 # 0. Anchor + review-policy provenance. The PR's baseRefOid is the trusted base
 # commit, and review policy MUST come from it, never from this checkout
 # (AGENTS.md). A stale sibling `pr-checks`/`convergence-status` is refused
@@ -33,10 +74,17 @@ PR_STATE_JSON="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,b
   echo "error: failed to read PR state" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
-REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
-IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
-HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
-BASE_SHA="$(echo "$PR_STATE_JSON" | jq -r '.baseRefOid')"
+# `reviewDecision` is legitimately EMPTY when no review is required (GitHub
+# reports it as null), so it is read as nullable and normalised to ""; the anchors
+# and the draft flag are required to be present.
+sub_read "$PR_STATE_JSON" reviewDecision "PR state" yes
+REVIEW_DECISION="$SUB_READ_VALUE"
+sub_read "$PR_STATE_JSON" isDraft "PR state"
+IS_DRAFT="$SUB_READ_VALUE"
+sub_read "$PR_STATE_JSON" headRefOid "PR state"
+HEAD_SHA="$SUB_READ_VALUE"
+sub_read "$PR_STATE_JSON" baseRefOid "PR state"
+BASE_SHA="$SUB_READ_VALUE"
 
 POLICY_MODE=text
 [ "$OPT_JSON" = true ] && POLICY_MODE=json
@@ -48,15 +96,25 @@ CHECKS_JSON="$(bash "$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json 2>/dev/n
   echo "error: failed to read PR checks" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
-ALL_CHECKS_PASS="$(echo "$CHECKS_JSON" | jq -r '.all_passed')"
-CHECKS_PENDING="$(echo "$CHECKS_JSON" | jq -r '.any_pending')"
+sub_read "$CHECKS_JSON" all_passed "pr-checks"
+ALL_CHECKS_PASS="$SUB_READ_VALUE"
+sub_read "$CHECKS_JSON" any_pending "pr-checks"
+CHECKS_PENDING="$SUB_READ_VALUE"
 
 # 2. Review threads: all actionable threads must be resolved.
 THREADS_JSON="$(bash "$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
   echo "error: failed to read review threads" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
-UNRESOLVED_THREADS="$(echo "$THREADS_JSON" | jq -r '.unresolved_actionable')"
+# A failed read never reaches here (the guard above exits), and a missing count
+# fails closed instead of rendering as `0`.
+sub_read "$THREADS_JSON" unresolved_actionable "review-threads"
+UNRESOLVED_THREADS="$SUB_READ_VALUE"
+case "$UNRESOLVED_THREADS" in
+  ''|*[!0-9]*)
+    echo "error: review-threads: .unresolved_actionable is not a count ('$UNRESOLVED_THREADS')" >&2
+    exit "$ORC_ERR_UNRECOVERABLE" ;;
+esac
 
 # 3. Checklist: the body must carry the managed orc:* markers AND all of them
 # must be checked. A body with ZERO markers is MISSING evidence, never a vacuous
@@ -67,10 +125,21 @@ CHECKLIST_JSON="$(bash "$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --
   echo "error: failed to reconcile checklist" >&2
   exit "$ORC_ERR_UNRECOVERABLE"
 }
-ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
-UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
-MARKERS_PRESENT="$(echo "$CHECKLIST_JSON" | jq -r '.markers_present')"
-MARKER_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.marker_count')"
+sub_read "$CHECKLIST_JSON" all_checked "reconcile-checklist"
+ALL_CHECKED="$SUB_READ_VALUE"
+sub_read "$CHECKLIST_JSON" 'unchecked | length' "reconcile-checklist"
+UNCHECKED_COUNT="$SUB_READ_VALUE"
+sub_read "$CHECKLIST_JSON" markers_present "reconcile-checklist"
+MARKERS_PRESENT="$SUB_READ_VALUE"
+sub_read "$CHECKLIST_JSON" marker_count "reconcile-checklist"
+MARKER_COUNT="$SUB_READ_VALUE"
+# A body whose fenced scope is INDETERMINATE cannot be read at all: an opener
+# indented 1-3 spaces may belong to a list item or a block quote, and the
+# scanner has no container model (#809). Fail closed — never guess.
+sub_read "$CHECKLIST_JSON" unparseable "reconcile-checklist"
+CHECKLIST_UNPARSEABLE="$SUB_READ_VALUE"
+sub_read "$CHECKLIST_JSON" unparseable_line "reconcile-checklist" yes
+CHECKLIST_UNPARSEABLE_LINE="$SUB_READ_VALUE"
 
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
@@ -100,11 +169,15 @@ REASONS=""
 [ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
 # Two distinct checklist failures: a marker-less body is MISSING evidence
 # (`checklist_markers_missing`) and a marker-bearing body with unticked boxes is
-# `unchecked_items(N)` — never collapsed into one code (#788). There is NO
+# `unchecked_items(N)` — never collapsed into one code (#788). An INDETERMINATE
+# fenced scope is a third, distinct code (`checklist_unparseable`): the scan
+# cannot say what is code, so no checklist reading is trusted (#809). There is NO
 # author-granted opt-out: a body that carries no marker always blocks, because
 # the author cannot grant themselves the exemption (an exemption needs an
 # authority they lack — arbsec/orchestraitor#801).
-if [ "$MARKERS_PRESENT" = "true" ]; then
+if [ "$CHECKLIST_UNPARSEABLE" = "true" ]; then
+  REASONS="${REASONS}checklist_unparseable, "
+elif [ "$MARKERS_PRESENT" = "true" ]; then
   [ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
 else
   REASONS="${REASONS}checklist_markers_missing, "
@@ -115,6 +188,14 @@ REASONS="${REASONS%, }"
 
 MERGEABLE="true"
 [ -n "$REASONS" ] && MERGEABLE="false"
+
+# The explanatory line for an indeterminate fence scope: it NAMES the construct
+# and the fix. Printed on stdout in text mode and on stderr in JSON mode (the
+# JSON stdout stays a pure typed payload).
+UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}); its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence to column 0, or close it."
+if [ "$CHECKLIST_UNPARSEABLE" = "true" ] && [ "$OPT_JSON" = true ]; then
+  echo "$UNPARSEABLE_EXPLANATION" >&2
+fi
 
 if [ "$OPT_JSON" = true ]; then
   jq -n \
@@ -127,6 +208,8 @@ if [ "$OPT_JSON" = true ]; then
     --arg unchecked "$UNCHECKED_COUNT" \
     --arg marker_count "$MARKER_COUNT" \
     --arg markers_present "$MARKERS_PRESENT" \
+    --arg unparseable "$CHECKLIST_UNPARSEABLE" \
+    --arg unparseable_line "$CHECKLIST_UNPARSEABLE_LINE" \
     --arg review_decision "$REVIEW_DECISION" \
     --arg is_draft "$IS_DRAFT" \
     '{
@@ -135,10 +218,12 @@ if [ "$OPT_JSON" = true ]; then
       head_sha: $head_sha,
       base_oid: $base_oid,
       checks_all_passed: ($all_checks_pass == "true"),
-      unresolved_actionable_threads: ($unresolved | tonumber? // 0),
-      unchecked_checklist_items: ($unchecked | tonumber? // 0),
-      checklist_marker_count: ($marker_count | tonumber? // 0),
+      unresolved_actionable_threads: ($unresolved | tonumber),
+      unchecked_checklist_items: ($unchecked | tonumber),
+      checklist_marker_count: ($marker_count | tonumber),
       checklist_markers_present: ($markers_present == "true"),
+      checklist_unparseable: ($unparseable == "true"),
+      checklist_unparseable_line: (if $unparseable_line == "" then null else ($unparseable_line | tonumber) end),
       review_decision: $review_decision,
       is_draft: ($is_draft == "true")
     }'
@@ -148,6 +233,7 @@ else
   else
     echo "NOT CONVERGED: PR #$PR is blocked."
     echo "  Reasons: $REASONS"
+    [ "$CHECKLIST_UNPARSEABLE" = "true" ] && echo "  $UNPARSEABLE_EXPLANATION"
   fi
 fi
 

@@ -163,6 +163,18 @@ fn body_all_checked() -> String {
     .to_string()
 }
 
+/// A body whose fenced scope is INDETERMINATE: the opener is indented two
+/// spaces, so it may belong to the list item above it or to the top level, and
+/// the region swallows a genuine UNCHECKED item (arbsec/orchestraitor#809).
+fn body_with_indented_fence() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "- [x] <!-- orc:convergence --> evidence recorded\n- Example:\n  ```\n  sample\n\n- [ ] <!-- orc:docs --> docs updated",
+        }}}
+    })
+    .to_string()
+}
+
 /// A body with NO managed marker at all — the #788 vacuous-pass shape
 /// (observed on the merged PR #767 body).
 fn body_no_markers() -> String {
@@ -677,6 +689,81 @@ fn pr_status_marker_less_body_blocks_with_checklist_markers_missing() -> miette:
     let text = String::from_utf8(output.stdout).into_diagnostic()?;
     assert!(
         text.contains("no managed orc:* markers found (UNSUBSTANTIATED"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_indented_fence_blocks_with_checklist_unparseable() -> miette::Result<()> {
+    // #809 (fail closed): a fence OPENER indented 1-3 spaces may belong to a
+    // list item or a block quote, and the scanner has no container model. The
+    // region it models swallows a genuine unchecked item, so the reading is
+    // REFUSED with a distinct reason instead of guessed — it used to report
+    // `all_checked: true` and converge.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_with_indented_fence(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let text_endpoint = spawn_pr_status_server(payloads.clone())?;
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_unparseable"]),
+        "an indeterminate fenced scope is its own reason, never markers_missing or all-checked"
+    );
+    assert_eq!(verdict["checklist"]["unparseable"], true);
+    assert_eq!(verdict["checklist"]["unparseable_line"], 3);
+    assert_eq!(
+        verdict["checklist"]["all_checked"], false,
+        "an indeterminate scan is never 'all checked'"
+    );
+
+    // The one-pager names the construct and the fix.
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &text_endpoint,
+        &["pr", "status", "614", "--repo", "arbsec/orchestraitor"],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).into_diagnostic()?;
+    assert!(text.starts_with("BLOCKED:"), "{text}");
+    assert!(text.contains("UNPARSEABLE"), "{text}");
+    assert!(text.contains("indented 1-3 spaces"), "{text}");
+    assert!(
+        text.contains("fix: dedent the fence to column 0, or close it"),
         "{text}"
     );
     Ok(())

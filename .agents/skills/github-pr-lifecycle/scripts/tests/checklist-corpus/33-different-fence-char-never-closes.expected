@@ -1,2 +1,5 @@
 # a different fence character never closes a region.
+# The two in-region markers are UNCHECKED on purpose: a parser that wrongly closes at
+# `~~~` reports two unticked items, so the case separates "the tilde line is content"
+# from "the region closed early" — the same discrimination case 11 gained.
 marker_count=1 all_checked=true

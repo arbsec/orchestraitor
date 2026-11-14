@@ -485,7 +485,23 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
         }
     }
     if let Some(checklist) = &verdict.checklist {
-        if !checklist.markers_present {
+        if checklist.unparseable {
+            // The fenced scope cannot be determined (an opener indented 1-3
+            // spaces may belong to a list item or a block quote), so no
+            // checklist reading is trusted: the verdict blocks with
+            // `checklist_unparseable` and names the construct and the fix
+            // (arbsec/orchestraitor#809).
+            writeln!(
+                writer,
+                "checklist: UNPARSEABLE — a fenced code opener is indented 1-3 spaces (line {}); its container scope cannot be determined, so the checklist is not read (checklist_unparseable)",
+                checklist
+                    .unparseable_line
+                    .map_or_else(|| String::from("?"), |line| line.to_string())
+            )
+            .into_diagnostic()?;
+            writeln!(writer, "  fix: dedent the fence to column 0, or close it")
+                .into_diagnostic()?;
+        } else if !checklist.markers_present {
             // A marker-less body is missing evidence, never a complete checklist
             // (arbsec/orchestraitor#788) — name the state, not "0 unchecked".
             // There is NO author-granted opt-out: the body cannot waive

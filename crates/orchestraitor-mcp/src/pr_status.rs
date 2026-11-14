@@ -221,10 +221,20 @@ pub struct Checklist {
     /// Whether the body carried at least one managed marker.
     pub markers_present: bool,
     /// True only when at least one marker exists AND every marker is checked.
-    /// A marker-less body is MISSING evidence, never "all checked" (arbsec/orchestraitor#788).
+    /// A marker-less body is MISSING evidence, never "all checked" (arbsec/orchestraitor#788),
+    /// and a body whose fenced scope is indeterminate is never "all checked" either
+    /// (arbsec/orchestraitor#809).
     pub all_checked: bool,
     /// Count of unchecked items.
     pub unchecked_count: u64,
+    /// True when the body opens a fenced code block indented 1-3 spaces: its
+    /// container scope (top level, list item, block quote) cannot be determined
+    /// without a container model, so NO checklist reading from this body is
+    /// trusted and the verdict blocks with `checklist_unparseable`
+    /// (arbsec/orchestraitor#809).
+    pub unparseable: bool,
+    /// 1-based line number of the first such opener, or `None`.
+    pub unparseable_line: Option<u64>,
 }
 
 /// One managed checklist item.
@@ -858,14 +868,18 @@ fn assemble_verdict(
         ));
     }
     if let Some(checklist) = &checklist {
-        // Two DISTINCT checklist failures (arbsec/orchestraitor#788): a body
-        // with no managed markers is missing evidence, not a vacuous pass, and
-        // a marker-bearing body with unticked boxes is the item-count reason.
-        // There is NO author-granted opt-out: a marker-less body always
-        // blocks, because the author cannot grant themselves the exemption
-        // (an exemption needs an authority they lack —
+        // Three DISTINCT checklist failures (arbsec/orchestraitor#788, #809): a
+        // body with no managed markers is missing evidence, a marker-bearing
+        // body with unticked boxes is the item-count reason, and a body whose
+        // fenced scope is INDETERMINATE (a fence opener indented 1-3 spaces) is
+        // unreadable — the scanner cannot say what is code, so it refuses
+        // rather than guessing. There is NO author-granted opt-out: a
+        // marker-less body always blocks, because the author cannot grant
+        // themselves the exemption (an exemption needs an authority they lack —
         // arbsec/orchestraitor#801).
-        if !checklist.markers_present {
+        if checklist.unparseable {
+            reasons.push("checklist_unparseable".to_string());
+        } else if !checklist.markers_present {
             reasons.push("checklist_markers_missing".to_string());
         } else if !checklist.all_checked {
             reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
@@ -1204,17 +1218,21 @@ fn gh_bucket(state: &str) -> String {
 /// engines, never a checklist item (arbsec/orchestraitor#799 F18).
 ///
 /// Markers inside a FENCED code region are EXAMPLES, not evidence: they are
-/// excluded before the scan (see [`strip_fenced_code`]).
+/// excluded before the scan (see [`scan_fences`]), and so is every HTML comment.
 ///
 /// A body with zero markers is an EMPTY checklist and, per
 /// arbsec/orchestraitor#788, MISSING evidence: `markers_present` is false and
 /// `all_checked` is false (an empty `all()` used to make it vacuously true and
 /// merge a PR with no checklist evidence at all). There is NO author-granted
 /// opt-out.
+///
+/// A body whose fence scope is INDETERMINATE — a fence OPENER indented 1-3
+/// spaces — is never "all checked": the reading is refused rather than guessed
+/// (`unparseable`, arbsec/orchestraitor#809).
 fn parse_checklist(body: &str) -> Checklist {
-    let scanned = strip_fenced_code(body);
+    let scan = scan_fences(body);
     let mut items = Vec::new();
-    for line in scanned.lines() {
+    for line in scan.body.lines() {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let Some(rest) = trimmed.strip_prefix("- [") else {
             continue;
@@ -1257,27 +1275,60 @@ fn parse_checklist(body: &str) -> Checklist {
     let markers_present = !items.is_empty();
     let unchecked_count =
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
-    let all_checked = markers_present && items.iter().all(|item| item.checked);
+    // An indeterminate fence scope is never "all checked": the scan cannot say
+    // which lines are code, so the reading is refused (fail closed).
+    let unparseable = scan.indented_opener.is_some();
+    let all_checked = !unparseable && markers_present && items.iter().all(|item| item.checked);
     Checklist {
         items,
         marker_count,
         markers_present,
         all_checked,
         unchecked_count,
+        unparseable,
+        unparseable_line: scan.indented_opener,
     }
 }
 
-/// Removes every FENCED code region from the body (arbsec/orchestraitor#788).
+/// Normalises line endings ONCE, before any scan (`CommonMark` §2.1: a lone CR
+/// is a line ending and so is CRLF; parsers normalise both to LF before
+/// parsing). Every `\r\n` becomes `\n`, then every remaining lone `\r` becomes
+/// `\n`, so no CR byte reaches the scanners and the closing-fence tail rule is
+/// exactly "only spaces and tabs". The shell engine normalises identically
+/// (`orc_lib_normalize_line_endings`); the two used to disagree on
+/// `` ```\r\r\n `` because `str::lines` strips one CR and the scanners stripped
+/// a second by hand (arbsec/orchestraitor#799 gen-7).
+fn normalize_line_endings(body: &str) -> String {
+    body.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// One fence/comment scan over the normalised body.
+struct FenceScan {
+    /// The body with every fenced code region and every HTML comment removed.
+    body: String,
+    /// 1-based line number of the first fence OPENER indented 1-3 spaces.
+    /// Such an opener may belong to a list item or a block quote, and this
+    /// scanner has no container model, so every checklist reading from the body
+    /// is REFUSED rather than guessed (arbsec/orchestraitor#809).
+    indented_opener: Option<u64>,
+}
+
+/// Removes every FENCED code region and every HTML comment from the body
+/// (arbsec/orchestraitor#788, arbsec/orchestraitor#809).
 ///
 /// A managed checklist marker inside a fenced region is an EXAMPLE, not
 /// evidence. The shell engine (`orc_lib_strip_fenced_code` in
 /// `.agents/skills/github-pr-lifecycle/scripts/_lib.sh`) applies exactly these
 /// rules, so creation and reconciliation agree on what a marker is:
 ///
+/// - LINE ENDINGS are normalised once, before the scan (see
+///   [`normalize_line_endings`]), so no CR byte is special-cased below;
 /// - a fence OPENS on a line with at most THREE leading spaces whose next
 ///   characters are 3+ backticks OR 3+ tildes (four or more spaces — or a tab,
 ///   which reaches the 4-column tab stop — is an INDENTED code block, where
-///   fence characters are literal text; arbsec/orchestraitor#799 F16);
+///   fence characters are literal text; arbsec/orchestraitor#799 F16). A 1-3
+///   space indent makes the opener's CONTAINER indeterminate: the line number
+///   is recorded in [`FenceScan::indented_opener`] and the verdict blocks;
 /// - a backtick fence's info string MUST NOT contain a backtick, which makes
 ///   ```` ```example``` ```` a CLOSED inline code span rather than an opener; a
 ///   tilde fence MAY carry backticks in its info string (F17);
@@ -1285,19 +1336,27 @@ fn parse_checklist(body: &str) -> Checklist {
 ///   spaces and whose next characters are the SAME fence character repeated at
 ///   least as many times as the opener, followed by nothing but SPACES and TABS
 ///   — `CommonMark` 0.31: a closing code fence "may be followed only by spaces or
-///   tabs, which are ignored." One line-ending adjustment: a single trailing
-///   carriage return that terminates a CRLF line is not content and is stripped
-///   before that test. A form feed, a vertical tab, an info string or any other
-///   character leaves the region OPEN (a DIFFERENT fence character never closes
-///   it either);
+///   tabs, which are ignored." A form feed, a vertical tab, an info string or
+///   any other character leaves the region OPEN (a DIFFERENT fence character
+///   never closes it either);
 /// - an unclosed fence runs to the end of the body;
 /// - every line inside the region — INCLUDING the opening and the closing
-///   fence lines — is excluded from marker scanning.
-fn strip_fenced_code(body: &str) -> String {
+///   fence lines — is excluded from marker scanning;
+/// - an HTML COMMENT (`<!--` … `-->`) is not code and not evidence: its
+///   delimiter lines and everything between them are excluded from the scan,
+///   and a fence inside it neither opens nor closes a region. A checklist item
+///   line is NOT a comment opener — its `<!-- orc:NAME -->` is the marker
+///   delimiter on a visible task-list line. An unclosed comment runs to the end
+///   of the body (fail closed: everything after it is invisible evidence).
+fn scan_fences(body: &str) -> FenceScan {
+    let normalized = normalize_line_endings(body);
     let mut out = String::new();
     // The open fence: its character and how many times it was repeated.
     let mut fence: Option<(char, usize)> = None;
-    for line in body.lines() {
+    // Inside a `<!--` … `-->` HTML comment.
+    let mut in_comment = false;
+    let mut indented_opener = None;
+    for (index, line) in normalized.lines().enumerate() {
         let candidate = fence_line(line);
         if let Some((fence_char, fence_len)) = fence {
             // Only the SAME character, repeated at least as many times as the
@@ -1308,18 +1367,13 @@ fn strip_fenced_code(body: &str) -> String {
             // `char::is_ascii_whitespace` is deliberately NOT used: it also
             // admits `\f`, `\n` and `\r`, which would close a region the
             // renderer keeps open.
-            if let Some(trimmed) = candidate
+            if let Some((_, trimmed)) = candidate
                 && trimmed.starts_with(fence_char)
             {
                 let run = trimmed.chars().take_while(|c| *c == fence_char).count();
                 // The fence characters are ASCII, so `run` is also the byte
                 // offset of the tail; `get` keeps a non-boundary from panicking.
                 let tail = trimmed.get(run..).unwrap_or_default();
-                // One trailing carriage return terminates a CRLF line and is
-                // part of the line ending, not content. (`str::lines` already
-                // strips CRLF; this keeps the rule explicit and identical to
-                // the shell engine's byte-level scan.)
-                let tail = tail.strip_suffix('\r').unwrap_or(tail);
                 let blank = tail.chars().all(|c| c == ' ' || c == '\t');
                 if run >= fence_len && blank {
                     fence = None;
@@ -1327,27 +1381,87 @@ fn strip_fenced_code(body: &str) -> String {
             }
             continue;
         }
+        if in_comment {
+            // The delimiter line carrying `-->` ends the comment (inclusive:
+            // CommonMark ends a type-2 HTML block at the END of that line, so
+            // text after the delimiter is still invisible), and nothing on the
+            // line opens or closes a fence.
+            if line.contains("-->") {
+                in_comment = false;
+            }
+            continue;
+        }
         // Outside a region: a line whose first 0-3 characters are spaces and
         // whose next characters are 3+ backticks or 3+ tildes OPENS a fence.
-        if let Some(trimmed) = candidate
+        if let Some((indent, trimmed)) = candidate
             && let Some(first) = trimmed.chars().next()
             && (first == '`' || first == '~')
         {
             let run = trimmed.chars().take_while(|c| *c == first).count();
             let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
             if run >= 3 && !info_has_backtick {
+                if indent > 0 && indented_opener.is_none() {
+                    indented_opener = u64::try_from(index + 1).ok();
+                }
                 fence = Some((first, run));
                 continue;
             }
         }
+        // `<!--` opens an HTML comment: the delimiter line itself is invisible,
+        // and a fence inside the comment opens nothing. A checklist marker line
+        // is exempt — its delimiters are the marker, not a comment.
+        if line.contains("<!--") && !is_marker_line(line) {
+            if !line
+                .split_once("<!--")
+                .is_some_and(|(_, after)| after.contains("-->"))
+            {
+                in_comment = true;
+            }
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
-    out
+    FenceScan {
+        body: out,
+        indented_opener,
+    }
 }
 
-/// The part of `line` at which a fence may open or close, or `None` when the
-/// line is indented too far to be a fence line.
+/// Whether `line` is a managed checklist item line: `- [ ] <!-- orc:NAME -->`.
+///
+/// Exactly the shape [`parse_checklist`] accepts, so a marker line is never
+/// mistaken for an HTML-comment opener.
+fn is_marker_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let Some(rest) = trimmed.strip_prefix("- [") else {
+        return false;
+    };
+    let Some((checked_char, after_box)) = rest.split_once(']') else {
+        return false;
+    };
+    if checked_char.len() != 1
+        || !(checked_char == "x" || checked_char == "X" || checked_char == " ")
+    {
+        return false;
+    }
+    let Some(rest) = after_box.trim_start().strip_prefix("<!--") else {
+        return false;
+    };
+    let Some((marker, _)) = rest.split_once("-->") else {
+        return false;
+    };
+    let marker = marker.trim();
+    marker.starts_with("orc:")
+        && !marker["orc:".len()..].is_empty()
+        && marker["orc:".len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The part of `line` at which a fence may open or close, with its leading
+/// SPACE indentation, or `None` when the line is indented too far to be a fence
+/// line.
 ///
 /// CommonMark/GFM allow at most THREE spaces of indentation before a top-level
 /// fence. Four or more spaces — or a tab, which reaches the 4-column tab stop —
@@ -1356,7 +1470,7 @@ fn strip_fenced_code(body: &str) -> String {
 /// is likewise not indentation: it is content, so a `\f`- or `\v`-led fence line
 /// opens nothing (F18). Both engines apply the rule identically: a
 /// 4-space-indented run neither opens nor closes a region.
-fn fence_line(line: &str) -> Option<&str> {
+fn fence_line(line: &str) -> Option<(usize, &str)> {
     let indent = line.chars().take_while(|c| *c == ' ').count();
     if indent > 3 {
         return None;
@@ -1365,7 +1479,7 @@ fn fence_line(line: &str) -> Option<&str> {
     if rest.starts_with('\t') {
         return None;
     }
-    Some(rest)
+    Some((indent, rest))
 }
 
 /// Reads the CLEAN-review record for this PR at the current head
@@ -2119,7 +2233,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 38;
+    const CORPUS_FLOOR: u32 = 41;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
@@ -2200,9 +2314,10 @@ mod tests {
         assert_eq!(opener.items[0].marker, "tests");
 
         // The closing-tail boundary table: only spaces and tabs are ignored
-        // after the closing run, plus the carriage return of a CRLF line
-        // terminator. Every other character is CONTENT, so the region stays
-        // OPEN and the checked marker behind it is an example (0 items).
+        // after the closing run. Every other character is CONTENT, so the
+        // region stays OPEN and the checked marker behind it is an example (0
+        // items). A carriage return is no longer a special case at all: the body
+        // is normalised to LF first (see `normalize_line_endings`).
         for (tail, expected) in [
             ("", 1_u64),
             ("   ", 1),
@@ -2221,25 +2336,16 @@ mod tests {
         }
     }
 
-    /// CHARACTERIZATION — arbsec/orchestraitor#809 (deferred out of #799).
+    /// An HTML comment is not code and not evidence (arbsec/orchestraitor#809).
     ///
-    /// The fence scanner is a single-pass LINE scanner: its only state is the
-    /// fence character and its run length. It therefore has no `CommonMark` BLOCK
-    /// CONTEXT, and two bodies report `all_checked: true` while a genuine
-    /// UNCHECKED item is visible in the rendered PR:
-    ///
-    /// 1. an HTML block — `<!--` … `-->` — swallows the fence characters, so
-    ///    the ```` ``` ```` inside it is literal text and opens nothing;
-    /// 2. a fence inside a list item ends at the end of that item, not at the
-    ///    end of the document.
-    ///
-    /// This test pins the CURRENT, INCORRECT verdict so the gap is visible, so
-    /// it cannot be mistaken for intended behaviour, and so the #809 fix has a
-    /// failing test to flip. These bodies are deliberately NOT in the shared
-    /// corpus, which asserts CORRECT semantics.
+    /// A comment renders invisible, so a marker inside it is not evidence and a
+    /// fence inside it opens nothing. The unchecked item AFTER `-->` is visible
+    /// in the rendered PR, so the body must BLOCK — `all_checked` is false and
+    /// the unchecked item is counted. Before this the scanner modelled only the
+    /// fence, so the comment's fence swallowed the item and the gate converged.
     #[test]
-    fn checklist_scanner_has_no_commonmark_block_context_809() {
-        let html_comment = parse_checklist(
+    fn an_html_comment_is_not_code_and_not_evidence_809() {
+        let comment = parse_checklist(
             r"- [x] <!-- orc:issue --> linked
 
 <!--
@@ -2250,15 +2356,56 @@ mod tests {
 ",
         );
         assert_eq!(
-            html_comment.marker_count, 1,
-            "#809: the unchecked item inside the HTML block is swallowed"
+            comment.marker_count, 2,
+            "the fence inside the comment opens nothing, so the item after --> is visible"
         );
-        assert_eq!(html_comment.unchecked_count, 0);
+        assert!(!comment.unparseable);
+        assert_eq!(comment.unchecked_count, 1);
         assert!(
-            html_comment.all_checked,
-            "#809: all_checked is true although a visible item is unchecked"
+            !comment.all_checked,
+            "a visible unchecked item must block the gate"
         );
 
+        // A marker INSIDE a comment is invisible: it is not evidence at all.
+        let hidden = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+<!--
+- [ ] <!-- orc:tests --> hidden inside the comment
+-->
+- [x] <!-- orc:docs --> documented
+",
+        );
+        assert_eq!(hidden.marker_count, 2, "the comment's marker is invisible");
+        assert!(hidden.all_checked);
+        assert!(
+            hidden.items.iter().all(|item| item.marker != "tests"),
+            "the commented-out marker must never be parsed: {:?}",
+            hidden.items
+        );
+
+        // An UNCLOSED comment runs to the end of the body: everything after it
+        // is invisible evidence (fail closed). A body whose ONLY marker sits
+        // inside a comment reports ZERO markers, so the verdict is
+        // `checklist_markers_missing` — an invisible marker is never evidence.
+        let unclosed = parse_checklist(
+            "- [x] <!-- orc:issue --> linked\n<!--\n- [ ] <!-- orc:tests --> hidden\n",
+        );
+        assert_eq!(unclosed.marker_count, 1);
+        assert!(unclosed.all_checked);
+        let comment_only =
+            parse_checklist("<!--\n- [ ] <!-- orc:tests --> hidden inside the comment\n-->\n");
+        assert_eq!(comment_only.marker_count, 0);
+        assert!(!comment_only.markers_present);
+        assert!(!comment_only.all_checked);
+    }
+
+    /// A fence OPENER indented 1-3 spaces is INDETERMINATE scope
+    /// (arbsec/orchestraitor#809): it may belong to a list item or a block
+    /// quote, and the scanner has no container model, so the reading is REFUSED
+    /// rather than guessed — `all_checked` is false and `unparseable` names the
+    /// opener's line.
+    #[test]
+    fn an_indented_fence_opener_is_refused_not_guessed_809() {
         let list_item = parse_checklist(
             r"- [x] <!-- orc:issue --> linked
 - Example:
@@ -2268,15 +2415,70 @@ mod tests {
 - [ ] <!-- orc:tests --> not tested
 ",
         );
-        assert_eq!(
-            list_item.marker_count, 1,
-            "#809: the fence is scoped to the list item and ends with it"
-        );
-        assert_eq!(list_item.unchecked_count, 0);
         assert!(
-            list_item.all_checked,
-            "#809: all_checked is true although a visible item is unchecked"
+            list_item.unparseable,
+            "a 2-space-indented opener is indeterminate scope"
         );
+        assert_eq!(list_item.unparseable_line, Some(3));
+        assert!(
+            !list_item.all_checked,
+            "an indeterminate scan is never 'all checked'"
+        );
+
+        // The same body with the fence DEDENTED to column 0 is determinate, and
+        // the visible unchecked item blocks on its own count.
+        let dedented = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+```
+sample
+```
+- [ ] <!-- orc:tests --> not tested
+",
+        );
+        assert!(!dedented.unparseable);
+        assert_eq!(dedented.marker_count, 2);
+        assert!(!dedented.all_checked);
+        assert_eq!(dedented.unchecked_count, 1);
+
+        // 0-space openers and 4+ space openers are unchanged: the former is a
+        // fence, the latter is indented code (literal text).
+        let top_level = parse_checklist("```\nx\n```\n- [x] <!-- orc:tests --> fine\n");
+        assert!(!top_level.unparseable);
+        assert!(top_level.all_checked);
+        let literal = parse_checklist("    ```\n- [x] <!-- orc:tests --> fine\n");
+        assert!(!literal.unparseable);
+        assert!(literal.all_checked);
+    }
+
+    /// `CommonMark` §2.1 line endings: CRLF and a lone CR are both line endings
+    /// and are normalised to LF ONCE, before any scan. A closing fence followed
+    /// by a CRLF-CRLF terminator closes (the first CR ends the fence line, the
+    /// CRLF ends an empty line), which is the case the two engines used to
+    /// disagree on (arbsec/orchestraitor#799 gen-7).
+    #[test]
+    fn line_endings_are_normalised_once_before_the_scan() {
+        let cr_crlf = parse_checklist(
+            "```\r\r\n- [x] <!-- orc:issue --> example only\r\r\n```\r\r\n- [x] <!-- orc:tests --> real item\r\r\n",
+        );
+        assert_eq!(cr_crlf.marker_count, 1, "```\\r\\r\\n closes the fence");
+        assert!(cr_crlf.all_checked);
+
+        let lone_cr = parse_checklist(
+            "```\r- [x] <!-- orc:issue --> example only\r```\r- [x] <!-- orc:tests --> real item\r",
+        );
+        assert_eq!(
+            lone_cr.marker_count, 1,
+            "a lone CR is a line ending, so the fence closes"
+        );
+        assert!(lone_cr.all_checked);
+
+        // A form feed or a vertical tab is CONTENT after the run, so the region
+        // stays OPEN in both engines (no normalisation of those characters).
+        let form_feed = parse_checklist("```\u{c}x\n```\u{c}\n- [x] <!-- orc:tests --> x\n");
+        assert_eq!(form_feed.marker_count, 0);
+        let vertical_tab = parse_checklist("```\u{b}\n- [x] <!-- orc:tests --> x\n");
+        assert_eq!(vertical_tab.marker_count, 0);
     }
 
     #[test]

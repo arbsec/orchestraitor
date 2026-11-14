@@ -1,2 +1,4 @@
-# the scanner is fence-aware only: a fence opened inside an HTML comment still hides the marker.
-marker_count=0 all_checked=false
+# An HTML comment is not code: the fence inside it opens nothing, so the item after
+# `-->` is VISIBLE and unchecked — a parser that keeps the fence open sees nothing,
+# one that counts the item sees one unticked item.
+marker_count=1 all_checked=false

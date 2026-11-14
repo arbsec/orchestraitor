@@ -1,0 +1,4 @@
+# CommonMark §2.1: a lone CR is a line ending and so is CRLF, normalised to LF ONCE
+# before parsing. The first CR ends the fence line, the CRLF ends an empty line, so
+# the closer CLOSES. Rust and the shell used to disagree here (gen-7).
+marker_count=1 all_checked=true

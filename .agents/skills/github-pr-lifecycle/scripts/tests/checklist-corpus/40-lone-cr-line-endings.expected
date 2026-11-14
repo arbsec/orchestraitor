@@ -1,0 +1,4 @@
+# A body whose ONLY line ending is a lone CR: CommonMark §2.1 normalises it to LF,
+# so fences and markers parse exactly as with LF. Without normalisation the whole
+# body is ONE line, the opener never closes and marker_count is 0.
+marker_count=1 all_checked=true

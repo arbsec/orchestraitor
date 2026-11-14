@@ -62,16 +62,23 @@ every marker is checked: a body with no managed markers is MISSING evidence
 (reason `checklist_markers_missing`), never a vacuous pass. There is NO
 author-granted opt-out — the body cannot waive itself, so a marker-less body
 always blocks. A marker inside a fenced code region (3+ backticks or 3+
-tildes) is an EXAMPLE, not a checklist item and is excluded from the scan. A
-fence line carries at most three leading spaces (four or more, or a leading
-tab, is an indented code block where fence characters are literal text), and a
-backtick fence's info string may not contain a backtick — ```` ```example``` ````
-is a closed inline code span, not an opener — while a tilde fence's may. A
-CLOSING fence may be followed ONLY by spaces or tabs (CommonMark 0.31); a single
-trailing carriage return that terminates a CRLF line is the line ending, not
-content. A form feed or a vertical tab after the closing run is CONTENT: it
-leaves the region OPEN, so a marker behind such a closer is still inside the
-fence. Only a space or a tab indents a checklist item.
+tildes) or inside an HTML comment (`<!--` … `-->`) is an EXAMPLE, not a
+checklist item, and is excluded from the scan. A fence line carries at most
+three leading spaces (four or more, or a leading tab, is an indented code block
+where fence characters are literal text), and a backtick fence's info string may
+not contain a backtick — ```` ```example``` ```` is a closed inline code span,
+not an opener — while a tilde fence's may. A CLOSING fence may be followed ONLY
+by spaces or tabs (CommonMark 0.31). A form feed or a vertical tab after the
+closing run is CONTENT: it leaves the region OPEN, so a marker behind such a
+closer is still inside the fence. Line endings are normalised ONCE before any
+scan (CommonMark §2.1: a lone CR is a line ending and so is CRLF; both become
+LF), so a closing fence followed by a CRLF-CRLF terminator closes. Only a space
+or a tab indents a checklist item. A fence OPENER indented 1-3 spaces has an
+INDETERMINATE container scope (it may belong to a list item or a block quote,
+and the scanner has no container model): the checklist is not read, `all_checked`
+is false, and the verdict blocks with the distinct reason
+`checklist_unparseable` (arbsec/orchestraitor#809) — dedent the fence to column
+0, or close it.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

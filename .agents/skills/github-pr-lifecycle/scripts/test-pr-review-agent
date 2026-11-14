@@ -14,7 +14,7 @@ chmod +x "$TMP/repo/scripts/"*
 for check in pr-checks review-threads reconcile-checklist; do
   cat > "$TMP/repo/scripts/$check" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' '{"all_passed":true,"any_pending":false,"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unchecked":[]}'
+printf '%s\n' '{"all_passed":true,"any_pending":false,"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unparseable":false,"unchecked":[]}'
 STUB
   chmod +x "$TMP/repo/scripts/$check"
 done
