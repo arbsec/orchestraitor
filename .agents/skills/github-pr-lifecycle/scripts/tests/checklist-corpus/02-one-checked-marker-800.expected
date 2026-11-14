@@ -1,2 +1,0 @@
-# KNOWN GAP arbsec/orchestraitor#800: the gate checks only the markers it FINDS, so one ticked marker satisfies it.
-marker_count=1 all_checked=true

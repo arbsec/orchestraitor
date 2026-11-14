@@ -44,11 +44,13 @@
 #       spaces; four spaces or a tab is an indented code block) and INFO-STRING
 #       correct (a backtick fence may not carry a backtick in its info string,
 #       a tilde fence may) — with the inverse (three-space fences) pinned too
-#   (f7) arbsec/orchestraitor#809, fail closed: an HTML comment is not code and
-#       not evidence (its lines are invisible to the scan, and a fence inside it
-#       opens nothing), and a fence OPENER indented 1-3 spaces is INDETERMINATE
-#       scope — the reading is refused with `checklist_unparseable` rather than
-#       guessed (#809 stays open for real container tracking)
+#   (f7) arbsec/orchestraitor#809 + #799 R1, fail closed: HTML is NOT MODELLED.
+#       A line outside every fenced region whose FIRST non-whitespace character
+#       is `<`, indented 0-3 spaces, makes the reading INDETERMINATE
+#       (`checklist_unparseable`, `html_construct`) and the gate blocks; a
+#       4-space (or tab-led) line is literal code, a fenced line is inert, and a
+#       mid-line `<` is ordinary text. A fence OPENER indented 1-3 spaces is
+#       INDETERMINATE scope too (#809 stays open for real container tracking)
 #   (f8) arbsec/orchestraitor#799 R1, the CANONICAL managed-marker form: a
 #       managed marker is `- [BOX] <!-- orc:NAME -->` with exactly one ASCII
 #       space between every token, a box of `x`, `X` or a single space, and one
@@ -58,10 +60,12 @@
 #       `checklist_unparseable`, while PROSE that mentions `orc:NAME` and a
 #       PLAIN TASK are ignored — prose must never block. A bare
 #       `<!-- orc:none -->` still grants nothing.
-#   (f8b) arbsec/orchestraitor#799 R2, a RAW HTML BLOCK is an invisible region:
-#       a fence opener inside it opens nothing, a marker inside it is not
-#       evidence, a type-1 tag runs to its closing tag and every other tag ends
-#       at the next blank line
+#   (f8b) arbsec/orchestraitor#799 R1, the refusal NAMES itself: the message says
+#       "raw HTML construct", never a fence, and offers only remedies that work;
+#       `merge-gate` stops at the blocked verdict and never reaches `gh pr merge`
+#   (f8d) creation REFUSES a body carrying a line-start `<` (exit 2, naming the
+#       line and the three remedies), because appending the checklist there
+#       would compose a PR that can never converge
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
 #   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
@@ -414,14 +418,29 @@ export CHECKS_FIXTURE="$TMP/checks-ok.json" THREADS_FIXTURE="$TMP/threads-none.j
 # requirement, is never reported as a waiver, and never masks a
 # partially-checked checklist. An exemption may only come from an authority the
 # author does not hold (arbsec/orchestraitor#801).
+#
+# RE-DERIVED (#799 R1): a sentinel on its own line is also a line-start `<`, so
+# the reading is now REFUSED (`checklist_unparseable`, `html_construct`). That is
+# STRICTER, never a waiver: the body still blocks, and no verdict is derived
+# from the marker list. The midpoint sentinel below (`note: <!-- orc:none -->`)
+# keeps the "inert, not a waiver" property visible on a body the scanner CAN
+# read.
+printf '%s\n' 'Machine-authored summary.' 'note: <!-- orc:none --> is inert prose' \
+  > "$TMP/files/midline-sentinel.md"
+{ printf '%s\n' 'Machine-authored summary.' 'note: <!-- orc:none --> is inert prose'; cat "$TMP/files/one-unticked.md"; } \
+  > "$TMP/files/midline-sentinel-plus-markers.md"
 export BODY_FIXTURE="$TMP/files/sentinel.md"
 run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f: a sentinel is not a marker' 0 "$(jq -r .marker_count <<<"$OUT")"
 assert 'f: a sentinel never waives' false "$(jq -r 'has("waived")' <<<"$OUT")"
 assert 'f: a sentinel is not "all checked"' false "$(jq -r .all_checked <<<"$OUT")"
+assert 'f: a line-start sentinel is an unmodelled construct' true \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f: and it names html_construct' 'html_construct' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo --json
 assert 'f: a sentinel body still blocks (exit 5)' 5 "$RC"
-assert 'f: a sentinel still reports markers_missing' '["checklist_markers_missing"]' \
+assert 'f: a sentinel still blocks on the refusal' '["checklist_unparseable"]' \
   "$(jq -c .reasons <<<"$OUT")"
 assert 'f: the sentinel is not recorded as a waiver' false \
   "$(jq -r 'has("checklist_waived")' <<<"$OUT")"
@@ -431,13 +450,27 @@ assert 'f: no waiver is announced on stderr' 0 \
 export BODY_FIXTURE="$TMP/files/bare-sentinel.md"
 run convergence-status 7 --repo test-org/repo --json
 assert 'f: a bare sentinel blocks too (exit 5)' 5 "$RC"
-assert 'f: a bare sentinel still reports markers_missing' '["checklist_markers_missing"]' \
+assert 'f: a bare sentinel still blocks on the refusal' '["checklist_unparseable"]' \
   "$(jq -c .reasons <<<"$OUT")"
 
 export BODY_FIXTURE="$TMP/files/sentinel-plus-markers.md"
 run convergence-status 7 --repo test-org/repo --json
 assert 'f: a sentinel never masks unticked boxes (exit 5)' 5 "$RC"
-assert 'f: the inert sentinel leaves the item reason' '["unchecked_items(1)"]' \
+assert 'f: the inert sentinel still blocks' '["checklist_unparseable"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+
+# The MID-LINE sentinel is the readable shape: inert, and it leaves the real
+# item count to decide the verdict — never a waiver either way.
+export BODY_FIXTURE="$TMP/files/midline-sentinel.md"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f: a mid-line sentinel does not block by itself' 5 "$RC"
+assert 'f: a mid-line sentinel body reports markers_missing' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'f: a mid-line sentinel is never a waiver' false \
+  "$(jq -r 'has("checklist_waived")' <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/midline-sentinel-plus-markers.md"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f: a mid-line sentinel never masks unticked boxes' '["unchecked_items(1)"]' \
   "$(jq -c .reasons <<<"$OUT")"
 
 # --- (f2) a fenced marker is an EXAMPLE, not evidence --------------------------
@@ -513,65 +546,63 @@ assert 'f4: with no reason at all (#800)' '[]' "$(jq -c .reasons <<<"$OUT")"
 # One body per case, shared with the Rust engine
 # (`checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs): each `<nn>-<slug>.md` body must
-# reconcile to the `(marker_count, all_checked)` pair in `<nn>-<slug>.expected`.
-# Both suites assert the SAME files, so a divergence in EITHER fence scanner
+# reconcile to its row in the single `expectations.tsv`, keyed by file stem.
+# Both suites assert the SAME table, so a divergence in EITHER fence scanner
 # fails CI — the recurring defect this corpus exists to stop
-# (arbsec/orchestraitor#799 F16/F17).
+# (arbsec/orchestraitor#799 F16/F17). ONE table (not a `.expected` file per
+# case) keeps the corpus reviewable: 75 cases x 2 files pushed the PR past the
+# reviewer's 150-file limit (#799 R3).
 CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
+CORPUS_TSV="$CORPUS_DIR/expectations.tsv"
 # The EXACT number of cases in the shared corpus. A deleted case must FAIL, so
 # this is a floor that is also a ceiling: bump it whenever a case is added, and
 # never lower it to make a red suite green. A reviewer once deleted
 # `35-vt-after-closer-is-not-whitespace.md`/`.expected` and both engines stayed
-# green on `-ge 30` with a 38-case corpus — the floor tracked nothing.
-# (48: cases 39/40 pin the CommonMark §2.1 line-ending normalisation, 41 pins
-# a marker hidden inside an HTML comment, 42-45 pin the comment rule (a `<!--`
-# is literal text unless it starts the line), 46 pins the CANONICAL marker form
-# (a TAB after the box is a NEAR-MARKER, not an ordinary item), 47/48 pin the
-# STICKY indeterminate opener — 47 unclosed, 48 closed with the
-# swallowed-but-visible item that a "closing clears the condition" rule reports
-# as a pass; 25 was re-derived for the corrected comment semantics; 18 carries
-# the #809 indeterminate `all_checked=false`; 33's in-region markers are
-# unchecked so the case discriminates. Cases 45 (re-derived: a comment with NO
-# `-->` at all) and 46 (re-derived: the TAB-after-box near-marker) changed
-# meaning under the canonical grammar. Cases 49-54 pin the six near-marker
-# forms, 55/56 pin that PROSE and a PLAIN TASK never block, 57-60 pin the raw
-# HTML BLOCK model, and 61 pins that a marker's own `-->` closes the comment.)
-# (62-72 pin the CommonMark 0.31 HTML block rules EXACTLY — type 1 closing on its
-# opening line, the type-2 empty terminators, an autolink and inline HTML and an
-# incomplete tag being ordinary TEXT, types 3 and 5 hiding the markers inside
-# them, type 6 and type 7 ending at a blank line, a type-1 block running to EOF,
-# and an indented opener refusing the reading; 73 pins the near-marker the
-# delivery lane must neutralise; 74 pins the description field both engines
-# publish; 75 pins the `<!--->` terminator separately from `<!-->`.)
+# green on `-ge 30` with a 38-case corpus — the floor tracked nothing. The
+# loader below ALSO fails a case file with no row and a row with no case file,
+# so a deleted case cannot slip through either way.
+# (The per-case rationale lives in `expectations.tsv`, next to each row.)
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
 CORPUS_FLOOR=75
+declare -A CORPUS_COUNT=() CORPUS_ALL=() CORPUS_UNPARSEABLE=() CORPUS_CONSTRUCT=()
+while IFS=$'\t' read -r row_case row_count row_all row_unparseable row_construct; do
+  case "$row_case" in
+    ''|'#'*) continue ;;
+  esac
+  CORPUS_COUNT["$row_case"]="$row_count"
+  CORPUS_ALL["$row_case"]="$row_all"
+  CORPUS_UNPARSEABLE["$row_case"]="${row_unparseable:-false}"
+  CORPUS_CONSTRUCT["$row_case"]="$row_construct"
+done < "$CORPUS_TSV"
 CORPUS_CASES=0
 for corpus_body in "$CORPUS_DIR"/*.md; do
   corpus_slug="$(basename "$corpus_body" .md)"
-  corpus_expected="$CORPUS_DIR/$corpus_slug.expected"
-  # The expectation line is the LAST line of the file; the comments above it
-  # may mention the tokens, so the extraction is anchored on that line.
-  corpus_count="$(sed -n 's/.*marker_count=\([0-9][0-9]*\).*/\1/p' "$corpus_expected" | tail -1)"
-  corpus_all="$(sed -n 's/.*all_checked=\(true\|false\).*/\1/p' "$corpus_expected" | tail -1)"
-  # `unparseable` defaults to false and the construct is asserted only when the
-  # case states it — the rule it pins.
-  corpus_unparseable="$(sed -n 's/.*unparseable=\(true\|false\).*/\1/p' "$corpus_expected" | tail -1)"
-  corpus_construct="$(sed -n 's/.*unparseable_construct=\([a-z_]*\).*/\1/p' "$corpus_expected" | tail -1)"
+  # A case file with NO row is a deleted contract: fail it, never skip it.
+  if [ -z "${CORPUS_COUNT[$corpus_slug]+set}" ]; then
+    assert "f5: $corpus_slug has an expectations.tsv row" "a row" "none"
+    continue
+  fi
   export BODY_FIXTURE="$corpus_body"
   run reconcile-checklist 7 --repo test-org/repo --json
-  assert "f5: $corpus_slug marker_count" "$corpus_count" \
+  assert "f5: $corpus_slug marker_count" "${CORPUS_COUNT[$corpus_slug]}" \
     "$(jq -r .marker_count <<<"$OUT")"
-  assert "f5: $corpus_slug all_checked" "$corpus_all" \
+  assert "f5: $corpus_slug all_checked" "${CORPUS_ALL[$corpus_slug]}" \
     "$(jq -r .all_checked <<<"$OUT")"
-  assert "f5: $corpus_slug unparseable" "${corpus_unparseable:-false}" \
+  assert "f5: $corpus_slug unparseable" "${CORPUS_UNPARSEABLE[$corpus_slug]}" \
     "$(jq -r .unparseable <<<"$OUT")"
-  if [ -n "$corpus_construct" ]; then
-    assert "f5: $corpus_slug unparseable_construct" "$corpus_construct" \
+  if [ -n "${CORPUS_CONSTRUCT[$corpus_slug]}" ]; then
+    assert "f5: $corpus_slug unparseable_construct" "${CORPUS_CONSTRUCT[$corpus_slug]}" \
       "$(jq -r .unparseable_construct <<<"$OUT")"
   fi
   CORPUS_CASES=$((CORPUS_CASES+1))
+done
+# A ROW with no case file is the other half of "a deleted case must fail".
+for corpus_slug in "${!CORPUS_COUNT[@]}"; do
+  if [ ! -f "$CORPUS_DIR/$corpus_slug.md" ]; then
+    assert "f5: $corpus_slug row has a case file" "$CORPUS_DIR/$corpus_slug.md" "missing"
+  fi
 done
 # Exact, not `-ge`: a deleted case must FAIL instead of silently narrowing the
 # contract (the same reasoning as the self-test discovery floor in skills.yml).
@@ -718,73 +749,114 @@ for tail_case in none spaces tab crlf ff vt; do
 done
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
-# --- (f7) an HTML comment is not code, and an indented fence is refused -------
-# arbsec/orchestraitor#809 (the container gap #799 deferred). Two bodies that the
-# scanner used to call `all_checked: true` while a genuine UNCHECKED item was
-# visible in the rendered PR:
+# --- (f7) a line-start `<` is REFUSED, and an indented fence is refused --------
+# arbsec/orchestraitor#809 (the container gap) and arbsec/orchestraitor#799 R1
+# (the HTML rule). HTML is NOT MODELLED: three consecutive rounds tried to
+# implement CommonMark's HTML-block rules exactly and each produced a new set of
+# grammar defects, two of them FALSE PASSES. A merge gate must not depend on a
+# hand-rolled Markdown parser being spec-exact, so the scanner applies the repo's
+# rule for a construct it cannot model — refuse and block:
 #
-# 1. an HTML comment — `<!--` … `-->` — swallows the fence characters, so the
-#    ```` ``` ```` inside it is literal text and opens nothing. Comments are now
-#    MODELLED: the comment's lines are invisible to the scan, and the unchecked
-#    item after `-->` is visible, so the body BLOCKS on its own item count.
-# 2. a fence OPENED with 1-3 leading spaces may belong to a list item or a block
-#    quote, and the scanner has no container model. That scope is INDETERMINATE,
-#    so the verdict now REFUSES it with `checklist_unparseable` instead of
-#    guessing (#809 stays open for real container tracking).
-cat > "$TMP/files/html-comment-fence.md" <<'EOF'
-- [x] <!-- orc:issue --> linked
-
-<!--
-```
--->
-
-- [ ] <!-- orc:tests --> not tested
-EOF
-export BODY_FIXTURE="$TMP/files/html-comment-fence.md"
+#   A line its FIRST non-whitespace character is `<`, indented 0-3 spaces and
+#   outside every fenced code region, makes the reading INDETERMINATE
+#   (`unparseable: true`, `unparseable_construct: html_construct`) and every
+#   verdict BLOCKS with `checklist_unparseable`.
+#
+# The boundaries are pinned here: 4+ spaces (or a leading tab) is literal
+# indented code and hides nothing; a line inside a fenced region is inert; a
+# `<` that is not the line's first content is ordinary text.
+#
+# The fence half: a fence OPENED with 1-3 leading spaces may belong to a list
+# item or a block quote, and the scanner has no container model. That scope is
+# INDETERMINATE, so the verdict REFUSES it with `checklist_unparseable` instead
+# of guessing (#809 stays open for real container tracking).
+nine_ticked_plus() { # nine_ticked_plus <extra-line> -> the nine ticked markers + one line
+  local extra="$1" name
+  for name in issue service-identity tests security docs rollback checks review threads; do
+    printf -- '- [x] <!-- orc:%s --> linked\n' "$name"
+  done
+  printf '%s\n' "$extra"
+}
+# The reported shape: nine canonical ticked markers, then a complete one-line
+# `<pre></pre>`, then a VISIBLE unchecked item. Before the refusal the body was
+# read as nine ticked markers plus one unticked (which blocked on the count, and
+# on `<pre></pre>`-style bodies the OLD model could hide the item entirely).
+nine_ticked_plus '<pre></pre>
+- [ ] <!-- orc:security --> visible unchecked' > "$TMP/files/r1-html-nine.md"
+export BODY_FIXTURE="$TMP/files/r1-html-nine.md"
 run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f7: a fence inside an HTML comment opens nothing' 2 \
-  "$(jq -r .marker_count <<<"$OUT")"
-assert 'f7: and the visible unchecked item is counted' 1 \
-  "$(jq -r '.unchecked | length' <<<"$OUT")"
-assert 'f7: so the body is not "all checked"' false "$(jq -r .all_checked <<<"$OUT")"
-assert 'f7: a comment is NOT an indeterminate scope' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: a line-start <pre></pre> makes the reading indeterminate' true \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: and it names the construct html_construct' 'html_construct' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
+assert 'f7: and the line number' 10 "$(jq -r .unparseable_line <<<"$OUT")"
+assert 'f7: and it is never all checked' false "$(jq -r .all_checked <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo --json
-assert 'f7: so the gate blocks the comment body' 5 "$RC"
-assert 'f7: on the item count, not a missing marker' '["unchecked_items(1)"]' \
+assert 'f7: so the gate BLOCKS the body' 5 "$RC"
+assert 'f7: with the distinct unparseable reason' '["checklist_unparseable"]' \
   "$(jq -c .reasons <<<"$OUT")"
-
-# A marker INSIDE a comment renders invisible, so it is not evidence at all.
-cat > "$TMP/files/comment-hidden-marker.md" <<'EOF'
-- [x] <!-- orc:issue --> linked
-<!--
-- [ ] <!-- orc:tests --> hidden inside the comment
--->
-- [x] <!-- orc:docs --> documented
-EOF
-export BODY_FIXTURE="$TMP/files/comment-hidden-marker.md"
+assert 'f7: and the telemetry carries it' true "$(jq -r .checklist_unparseable <<<"$OUT")"
+assert 'f7: and it names the line' 10 "$(jq -r .checklist_unparseable_line <<<"$OUT")"
+rm -f "$TMP/merge-argv.txt"
+run merge-gate 7 --repo test-org/repo
+assert 'f7: merge-gate refuses it' 5 "$RC"
+assert 'f7: and it NEVER invokes gh pr merge' 0 "$(exists "$TMP/merge-argv.txt")"
+run convergence-status 7 --repo test-org/repo
+assert 'f7: text mode names the raw HTML construct' 1 \
+  "$(grep -cF "contains a raw HTML construct at line 10" <<<"$OUT")"
+assert 'f7: and offers only remedies that work' 1 \
+  "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' <<<"$OUT")"
+# Every construct shape from the R1 probe list is the SAME refusal: the scanner
+# does not try to tell a comment from a tag from an autolink.
+for html_probe in '<pre></pre>' '<!-->' '<!--->' '<https://example.com>' \
+  '<em>emphasis</em> prose' '<notatag nonsense' '<span>' '<span//>' '<div>' \
+  '</div>' '<?xml' '<![CDATA[' '   <div>'; do
+  nine_ticked_plus "$html_probe
+- [ ] <!-- orc:security --> visible unchecked" > "$TMP/files/r1-probe.md"
+  export BODY_FIXTURE="$TMP/files/r1-probe.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f7: '$html_probe' refuses the reading" true \
+    "$(jq -r .unparseable <<<"$OUT")"
+  assert "f7: '$html_probe' names html_construct" 'html_construct' \
+    "$(jq -r .unparseable_construct <<<"$OUT")"
+  assert "f7: '$html_probe' names its line" 10 "$(jq -r .unparseable_line <<<"$OUT")"
+  assert "f7: '$html_probe' is never all checked" false \
+    "$(jq -r .all_checked <<<"$OUT")"
+  run convergence-status 7 --repo test-org/repo --json
+  assert "f7: '$html_probe' blocks the gate" 5 "$RC"
+  assert "f7: '$html_probe' blocks on the refusal" '["checklist_unparseable"]' \
+    "$(jq -c .reasons <<<"$OUT")"
+done
+# The three boundaries that are NOT refusals.
+printf -- '- [x] <!-- orc:issue --> linked\n\n```markdown\n<!--\n```\n\n- [ ] <!-- orc:tests --> not tested\n' \
+  > "$TMP/files/r1-fenced-html.md"
+export BODY_FIXTURE="$TMP/files/r1-fenced-html.md"
 run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f7: a marker inside a comment is not evidence' 2 "$(jq -r .marker_count <<<"$OUT")"
-assert 'f7: and it never contributes an unchecked item' 0 \
+assert 'f7: a `<!--` line inside a fenced region is inert' false \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: and the visible unchecked item still counts' 1 \
   "$(jq -r '.unchecked | length' <<<"$OUT")"
-
-# A body whose ONLY marker sits inside a comment reports ZERO markers, so the
-# gate blocks with the missing-marker reason — the marker requirement is never
-# satisfied by an invisible marker.
-cat > "$TMP/files/comment-only-marker.md" <<'EOF'
-<!--
-- [ ] <!-- orc:tests --> hidden inside the comment
--->
-EOF
-export BODY_FIXTURE="$TMP/files/comment-only-marker.md"
+printf -- '    <div>\n' > "$TMP/files/r1-indented-html.md"
+for name in issue service-identity tests security docs rollback checks review threads; do
+  printf -- '- [x] <!-- orc:%s --> linked\n' "$name" >> "$TMP/files/r1-indented-html.md"
+done
+export BODY_FIXTURE="$TMP/files/r1-indented-html.md"
 run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f7: a commented-only marker reports marker_count 0' 0 \
+assert 'f7: a 4-space-indented <div> is literal text' false \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: and the nine markers are counted normally' 9 \
   "$(jq -r .marker_count <<<"$OUT")"
-assert 'f7: and it is not an indeterminate scope' false "$(jq -r .unparseable <<<"$OUT")"
-run convergence-status 7 --repo test-org/repo --json
-assert 'f7: a comment-only marker body blocks' 5 "$RC"
-assert 'f7: with the managed-marker reason' '["checklist_markers_missing"]' \
-  "$(jq -c .reasons <<<"$OUT")"
+assert 'f7: and they read as all checked' true "$(jq -r .all_checked <<<"$OUT")"
+printf -- '- [x] <!-- orc:issue --> linked\nx < y\n- [x] <!-- orc:tests --> tested\n' \
+  > "$TMP/files/r1-midline.md"
+export BODY_FIXTURE="$TMP/files/r1-midline.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f7: a mid-line < is ordinary text' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f7: and both markers count' 2 "$(jq -r .marker_count <<<"$OUT")"
 
+# A fence OPENED with 1-3 leading spaces is INDETERMINATE scope (#809): an
+# indented opener can sit inside a list item or a block quote, and the scanner
+# has no container model. The condition is STICKY — a closer does NOT clear it.
 cat > "$TMP/files/list-item-fence.md" <<'EOF'
 - [x] <!-- orc:issue --> linked
 - Example:
@@ -799,6 +871,8 @@ assert 'f7: a 2-space-indented opener is indeterminate scope (#809)' true \
   "$(jq -r .unparseable <<<"$OUT")"
 assert 'f7: and it names the opener line (#809)' 3 \
   "$(jq -r .unparseable_line <<<"$OUT")"
+assert 'f7: and names indented_fence_opener, NOT html_construct' \
+  'indented_fence_opener' "$(jq -r .unparseable_construct <<<"$OUT")"
 assert 'f7: an indeterminate scan is never "all checked" (#809)' false \
   "$(jq -r .all_checked <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo --json
@@ -808,8 +882,10 @@ assert 'f7: with the distinct indeterminate reason (#809)' '["checklist_unparsea
 assert 'f7: and the JSON telemetry carries it (#809)' true \
   "$(jq -r .checklist_unparseable <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo
-assert 'f7: text mode names the construct and the fix (#809)' 1 \
+assert 'f7: text mode names the fence construct and the fix (#809)' 1 \
   "$(grep -cF 'dedent the fence opener to column 0' <<<"$OUT")"
+assert 'f7: and does NOT call an indented fence an HTML construct' 0 \
+  "$(grep -cF 'raw HTML construct' <<<"$OUT")"
 # Every message names only a remedy that WORKS. "or close it" was a lie while
 # the condition was derived from the opener alone; it stays a lie under the
 # STICKY rule (closing never clears the condition), so no message may offer it.
@@ -897,14 +973,17 @@ assert 'f8: a plain task does not block' true "$(jq -r .all_checked <<<"$OUT")"
 # NO opt-out: a bare `<!-- orc:none -->` grants nothing — `none` is not one of
 # the nine managed names, so it is neither a canonical marker nor a
 # near-marker, and a body that carries only it has NO checklist evidence.
+# RE-DERIVED (#799 R1): on its own line it is also a raw HTML construct, so the
+# reading is REFUSED (`html_construct`) — still no evidence, and never a waiver.
 printf '%s\n' '<!-- orc:none -->' > "$TMP/files/sentinel-only.md"
 export BODY_FIXTURE="$TMP/files/sentinel-only.md"
 run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f8: a bare sentinel is not a marker' 0 "$(jq -r .marker_count <<<"$OUT")"
-assert 'f8: a bare sentinel is not a near-marker' false "$(jq -r .unparseable <<<"$OUT")"
+assert 'f8: a bare sentinel is not a near-marker' 'html_construct' \
+  "$(jq -r .unparseable_construct <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo --json
 assert 'f8: a bare sentinel still blocks' 5 "$RC"
-assert 'f8: with the missing-marker reason' '["checklist_markers_missing"]' \
+assert 'f8: with the unparseable reason' '["checklist_unparseable"]' \
   "$(jq -c .reasons <<<"$OUT")"
 # A sentinel WITH a box token is still not a managed marker (`none` is not one
 # of the nine names) and grants nothing.
@@ -916,133 +995,28 @@ assert 'f8: a sentinel with a box token is not a marker' 0 \
 assert 'f8: a sentinel with a box token is not a near-marker' false \
   "$(jq -r .unparseable <<<"$OUT")"
 
-# --- (f8b) a RAW HTML BLOCK is an invisible region ----------------------------
-# CommonMark passes an HTML block's content through as raw HTML: a task item
-# inside it is not a checkbox, and backticks inside it are not a fence.
-cat > "$TMP/files/html-pre-fence.md" <<'EOF'
-- [x] <!-- orc:issue --> linked
+# --- (f8b) the HTML refusal names its own construct and remedy ------------------
+# arbsec/orchestraitor#799 R1: the message must name WHAT was refused and offer
+# only remedies that work. A previous round's diagnostic called an indented HTML
+# opener a FENCE, which sent the author to a fix that does not apply.
+export BODY_FIXTURE="$TMP/files/r1-html-nine.md"
+run reconcile-checklist 7 --repo test-org/repo
+assert 'f8b: text mode names the raw HTML construct' 1 \
+  "$(grep -cF "contains a raw HTML construct at line 10" <<<"$OUT")"
+assert 'f8b: and never calls it a fence' 0 \
+  "$(grep -cF 'opens a fenced code block indented' <<<"$OUT")"
+assert 'f8b: and offers the three remedies that work' 1 \
+  "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' <<<"$OUT")"
 
-<pre>
-```
-</pre>
-
-- [ ] <!-- orc:tests --> not tested
-EOF
-export BODY_FIXTURE="$TMP/files/html-pre-fence.md"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8: a fence inside a <pre> block opens nothing' 2 \
-  "$(jq -r .marker_count <<<"$OUT")"
-assert 'f8: and the unchecked item after the block is counted' 1 \
-  "$(jq -r '.unchecked | length' <<<"$OUT")"
-assert 'f8: so the body is not all checked' false "$(jq -r .all_checked <<<"$OUT")"
-assert 'f8: an HTML block is not an indeterminate scope' false \
-  "$(jq -r .unparseable <<<"$OUT")"
-run convergence-status 7 --repo test-org/repo --json
-assert 'f8: so the gate blocks the <pre> body' 5 "$RC"
-assert 'f8: on the item count, not a missing marker' '["unchecked_items(1)"]' \
-  "$(jq -c .reasons <<<"$OUT")"
-# A marker inside a <pre> block renders invisible: it is not evidence.
-cat > "$TMP/files/html-pre-marker.md" <<'EOF'
-<pre>
-- [x] <!-- orc:tests --> hidden inside the pre block
-</pre>
-- [x] <!-- orc:issue --> visible
-EOF
-export BODY_FIXTURE="$TMP/files/html-pre-marker.md"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8: a marker inside a <pre> block is not evidence' 1 \
-  "$(jq -r .marker_count <<<"$OUT")"
-# A <details> block ends at the next blank line.
-cat > "$TMP/files/html-details.md" <<'EOF'
-<details>
-- [ ] <!-- orc:tests --> hidden inside the details block
-
-- [x] <!-- orc:issue --> visible after the blank line
-EOF
-export BODY_FIXTURE="$TMP/files/html-details.md"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8: a <details> block ends at the next blank line' 1 \
-  "$(jq -r .marker_count <<<"$OUT")"
-assert 'f8: and the hidden item is not counted as unchecked' 0 \
-  "$(jq -r '.unchecked | length' <<<"$OUT")"
-# A <script> block runs to its closing tag.
-cat > "$TMP/files/html-script.md" <<'EOF'
-<script>
-- [ ] <!-- orc:tests --> hidden inside the script block
-</script>
-- [x] <!-- orc:issue --> visible
-EOF
-export BODY_FIXTURE="$TMP/files/html-script.md"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8: a <script> block runs to </script>' 1 "$(jq -r .marker_count <<<"$OUT")"
-assert 'f8: and the hidden item is not counted as unchecked' 0 \
-  "$(jq -r '.unchecked | length' <<<"$OUT")"
-
-# --- (f8b2) the CommonMark HTML block rules, exactly ---------------------------
-# arbsec/orchestraitor#799 R1: the seven CommonMark 0.31 HTML block types are
-# implemented as the RULE, not as an approximation. The shared corpus pins the
-# reading of each body; this block pins the GATE-level outcome the merge path
-# consumes — the convergence reason, and that `merge-gate` never reaches
-# `gh pr merge`.
-export BODY_FIXTURE="$CORPUS_DIR/62-html-type1-closes-on-opening-line.md"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8b: <pre></pre> ends on its own line (nine + one visible)' 10 \
-  "$(jq -r .marker_count <<<"$OUT")"
-assert 'f8b: and the visible unchecked item is counted' 1 \
-  "$(jq -r '.unchecked | length' <<<"$OUT")"
-assert 'f8b: so the nine ticked markers are not a pass' false "$(jq -r .all_checked <<<"$OUT")"
-assert 'f8b: and the reading is determinate' false "$(jq -r .unparseable <<<"$OUT")"
-
-# Every corpus case with an HTML construct must block for the reason it pins.
-# A body the gate would merge while a human sees an unticked box is the
-# fail-open these rules exist to stop.
-while IFS='|' read -r html_case html_reasons; do
-  [ -n "$html_case" ] || continue
-  export BODY_FIXTURE="$CORPUS_DIR/$html_case.md"
-  run convergence-status 7 --repo test-org/repo --json
-  assert "f8b: $html_case blocks on $html_reasons" "$html_reasons" \
-    "$(jq -c .reasons <<<"$OUT")"
-done <<'TABLE'
-62-html-type1-closes-on-opening-line|["unchecked_items(1)"]
-63-html-comment-empty-terminator|["unchecked_items(1)"]
-75-html-comment-dash-terminator|["unchecked_items(1)"]
-64-autolink-is-not-a-block|["unchecked_items(1)"]
-65-inline-html-is-not-a-block|["unchecked_items(1)"]
-66-incomplete-tag-is-not-a-block|["unchecked_items(1)"]
-67-html-type3-processing-instruction|["checklist_markers_missing"]
-68-html-type5-cdata-section|["checklist_markers_missing"]
-69-html-type6-ends-at-blank-line|["unchecked_items(1)"]
-70-html-type1-unclosed-runs-to-eof|["checklist_markers_missing"]
-71-html-indented-opener-is-indeterminate|["checklist_unparseable"]
-72-html-type7-complete-tag-only|["unchecked_items(1)"]
-73-near-marker-in-a-delivery-summary|["checklist_unparseable"]
-TABLE
-
-# The `<pre></pre>` body is the reported fail-open: before the exact end
-# condition the scanner swallowed the visible unchecked item and the gate
-# reported `mergeable: true`. `merge-gate` performs the merge, so it must stop
-# at the blocked verdict and never construct a `gh pr merge` call.
-export BODY_FIXTURE="$CORPUS_DIR/62-html-type1-closes-on-opening-line.md"
+# The gate-level outcome the merge path consumes: `merge-gate` must stop at the
+# blocked verdict and never construct a `gh pr merge` call.
+export BODY_FIXTURE="$TMP/files/r1-html-nine.md"
 rm -f "$TMP/merge-argv.txt"
 run merge-gate 7 --repo test-org/repo
-assert 'f8b: merge-gate refuses the <pre></pre> body' 5 "$RC"
-assert 'f8b: naming the visible unchecked item' 1 \
-  "$(grep -cF 'unchecked_items(1)' "$TMP/stderr")"
+assert 'f8b: merge-gate refuses the HTML body' 5 "$RC"
+assert 'f8b: naming the checklist refusal' 1 \
+  "$(grep -cF 'checklist_unparseable' "$TMP/stderr")"
 assert 'f8b: and it NEVER invokes gh pr merge' 0 "$(exists "$TMP/merge-argv.txt")"
-
-# The indeterminate HTML opener names its own construct and its own remedy, so
-# the message is actionable rather than a fence remedy that does not apply.
-export BODY_FIXTURE="$CORPUS_DIR/71-html-indented-opener-is-indeterminate.md"
-run reconcile-checklist 7 --repo test-org/repo
-assert 'f8b: text mode names the indented HTML block opener' 1 \
-  "$(grep -cF 'opens a raw HTML block indented 1-3 spaces' <<<"$OUT")"
-assert 'f8b: and offers the remedy that works' 1 \
-  "$(grep -cF 'dedent the HTML block opener to column 0' <<<"$OUT")"
-run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f8b: the JSON construct is indented_html_block_opener' 'indented_html_block_opener' \
-  "$(jq -r .unparseable_construct <<<"$OUT")"
-assert 'f8b: and it names the opener line' 1 "$(jq -r .unparseable_line <<<"$OUT")"
-export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (f8c) the DESCRIPTION field is the text after the delimiter ----------------
 # arbsec/orchestraitor#799 R2: `reconcile-checklist --json` emitted the BOX
@@ -1066,60 +1040,33 @@ assert 'f8c: and the text form prints the description, unchecked' 1 \
   "$(grep -cF '[ ] tests: beta' <<<"$OUT")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
-# --- (f8d) the HTML append refusal names a workable remedy ---------------------
-# arbsec/orchestraitor#799 R3: a body ending inside a blank-line-terminated HTML
-# block was refused with "add a line carrying </>", which is nonsense — those
-# blocks end at a blank line, not a closing tag. Types 6 and 7 must NOT be
-# refused at all, and the appended markers must land AFTER the blank line (which
-# is the only place they are visible).
-for html_tag in '<div>' '<details>'; do
-  html_ensured="$(ensure "$html_tag" "$TMP/repo" 2>"$TMP/stderr")"
-  RC=$?
-  assert "f8d: $html_tag is not refused" 0 "$RC"
-  assert "f8d: $html_tag gains the nine markers" 9 \
-    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$html_ensured")"
-  assert "f8d: $html_tag keeps its own opener first" 1 \
-    "$(head -1 <<<"$html_ensured" | grep -cF "$html_tag")"
-  assert "f8d: $html_tag is followed by the blank line that ENDS the block" "" \
-    "$(sed -n 2p <<<"$html_ensured")"
-  # The proof that matters: the composed body reconciles to nine VISIBLE markers
-  # and is not indeterminate, so the appended checklist is real evidence.
-  printf '%s\n' "$html_ensured" > "$TMP/files/f8d-ensured.md"
-  export BODY_FIXTURE="$TMP/files/f8d-ensured.md"
-  run reconcile-checklist 7 --repo test-org/repo --json
-  assert "f8d: the $html_tag body then carries nine markers" 9 \
-    "$(jq -r .marker_count <<<"$OUT")"
-  assert "f8d: and reads as determinate" false "$(jq -r .unparseable <<<"$OUT")"
-  assert "f8d: and every marker is unchecked" 9 \
-    "$(jq -r '.unchecked | length' <<<"$OUT")"
-done
-export BODY_FIXTURE="$TMP/files/no-markers.md"
-
-# A type-1 block names the ACTUAL closing tag, and types 2-5 the ACTUAL
-# terminator. An unclosed raw HTML block still refuses: the appended checklist
-# would be swallowed.
-cat > "$TMP/files/f8d-html-remedies.tsv" <<'TABLE'
-<pre>|</pre>
-<script>|</script>
-<style>|</style>
-<textarea>|</textarea>
-<!--|-->
-<?xml|?>
-<!DOCTYPE html|>
-<![CDATA[|]]>
-TABLE
-while IFS='|' read -r remedy_body remedy_term; do
-  [ -n "$remedy_body" ] || continue
+# --- (f8d) the creation lane REFUSES a body it cannot make converge ------------
+# arbsec/orchestraitor#799 R1: with HTML unmodelled, a body carrying a line-start
+# `<` can NEVER be read — appending the checklist would compose a PR that blocks
+# forever with nothing the author can tick. Both creation routes refuse it
+# instead (exit 2), naming the line and the three remedies that work.
+for html_body in '<div>' '<div>a block</div>' '  <div>' '<pre>' '<!--' '<?xml' \
+  '<![CDATA[' '<https://example.com>'; do
   rm -f "$TMP/stderr"
-  ensure "$remedy_body" "$TMP/repo" >/dev/null 2>"$TMP/stderr"
+  ensure "$html_body" "$TMP/repo" >/dev/null 2>"$TMP/stderr"
   RC=$?
-  assert "f8d: '$remedy_body' is refused" 2 "$RC"
-  assert "f8d: '$remedy_body' names its terminator '$remedy_term'" 1 \
-    "$(grep -cF "add a line carrying $remedy_term" "$TMP/stderr")"
-  assert "f8d: '$remedy_body' offers no invented closing tag" 0 \
-    "$(grep -cF 'carrying </>' "$TMP/stderr")"
-done < "$TMP/files/f8d-html-remedies.tsv"
-
+  assert "f8d: '$html_body' is refused at creation" 2 "$RC"
+  assert "f8d: '$html_body' names line 1" 1 \
+    "$(grep -cF 'raw HTML construct at line 1' "$TMP/stderr")"
+  assert "f8d: '$html_body' offers the remedies that work" 1 \
+    "$(grep -cF 'put it inside a fenced code block, indent it by 4 spaces, or remove it' "$TMP/stderr")"
+  assert "f8d: '$html_body' invents no closing tag" 0 \
+    "$(grep -cF 'add a line carrying' "$TMP/stderr")"
+done
+# The controls: a 4-space-indented construct and a mid-line `<` are literal text,
+# so creation proceeds normally and the appended checklist is real evidence.
+for literal_body in '    <div>' 'x < y' '```'$'\n''<div>'$'\n''```'; do
+  literal_ensured="$(ensure "$literal_body" "$TMP/repo" 2>"$TMP/stderr")"
+  RC=$?
+  assert "f8d: '$literal_body' is not refused" 0 "$RC"
+  assert "f8d: '$literal_body' gains the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$literal_ensured")"
+done
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------
@@ -1144,13 +1091,15 @@ assert 'g: injection keeps the author body first' 1 \
 assert 'g: a body with a marker is returned verbatim' 'own body
 - [x] <!-- orc:issue --> linked' "$(ensure 'own body
 - [x] <!-- orc:issue --> linked' "$TMP/repo")"
-# A body sentinel is NOT checklist-bearing: the checklist is appended.
+# A body sentinel is NOT checklist-bearing: the checklist is appended. It must
+# be MID-LINE: a line-start `<` is a raw HTML construct that creation refuses
+# (#799 R1, pinned in (f8d)), because no append could make such a body readable.
 SENTINEL_ENSURED="$(ensure 'sentinel
-<!-- orc:none --> custom body' "$TMP/repo")"
+note: <!-- orc:none --> custom body' "$TMP/repo")"
 assert 'g: a sentinel body is not checklist-bearing' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$SENTINEL_ENSURED")"
 assert 'g: a sentinel body keeps its own text' 1 \
-  "$(grep -cF '<!-- orc:none --> custom body' <<<"$SENTINEL_ENSURED")"
+  "$(grep -cF 'note: <!-- orc:none --> custom body' <<<"$SENTINEL_ENSURED")"
 # A body whose only marker sits inside a fenced code region is NOT
 # checklist-bearing either: creation must still hand it the real checklist, or
 # the fail-closed gate could never be satisfied (#683 class).
@@ -1193,10 +1142,16 @@ OUT="$(dry_run --title t --body-file "$TMP/files/own-marker.md")"
 assert 'h: a body with its own marker is left verbatim' 1 "$(grep -c '<!-- orc:' <<<"$OUT")"
 assert 'h: verbatim means no injected section' 0 "$(grep -cF 'Added by pr-create' <<<"$OUT")"
 
-# A body sentinel is not an opt-out: the checklist is still injected.
-OUT="$(dry_run --title t --body "$(cat "$TMP/files/sentinel.md")")"
+# A body sentinel is not an opt-out: the checklist is still injected. The
+# readable shape is a MID-LINE sentinel; a LINE-START one is a raw HTML
+# construct, and creation now refuses it instead of composing a body that could
+# never converge (#799 R1 — pinned in (f8d)).
+OUT="$(dry_run --title t --body "$(cat "$TMP/files/midline-sentinel.md")")"
 assert 'h: a sentinel body still gets the injected checklist' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+OUT="$(dry_run --title t --body "$(cat "$TMP/files/sentinel.md")" 2>&1)"; RC=$?
+assert 'h: a line-start sentinel body is refused at creation' 2 "$RC"
+assert 'h: and nothing is passed to gh' 0 "$(grep -c '^\[dry-run\] gh' <<<"$OUT")"
 
 # A bodyless PR still gets the checklist, and says so.
 OUT="$(dry_run --title t)"

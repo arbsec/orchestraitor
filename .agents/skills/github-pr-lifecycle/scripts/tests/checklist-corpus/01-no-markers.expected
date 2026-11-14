@@ -1,4 +1,0 @@
-# prose that only MENTIONS the marker syntax carries no checklist item. The
-# `<!--` in that prose is mid-line, so it is literal text and opens no comment
-# (corpus case 42) — the row is visible text, not evidence either way.
-marker_count=0 all_checked=false

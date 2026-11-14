@@ -443,11 +443,11 @@ pub(crate) fn sanitize_provider_text(text: &str) -> String {
 /// construct and its one remedy.
 ///
 /// The construct is a fence OPENER indented 1-3 spaces (CLOSED OR NOT — it may
-/// belong to a list item or a block quote), an HTML BLOCK opener indented 1-3
-/// spaces (the same container ambiguity: `CommonMark` ends such a block at its
-/// container boundary), or a NEAR-MARKER (a line that presents a managed marker
-/// but not in the canonical form, so the gate cannot tell what it asserts) —
-/// arbsec/orchestraitor#809 and arbsec/orchestraitor#799 R1.
+/// belong to a list item or a block quote), a RAW HTML CONSTRUCT (a line-start
+/// `<` outside every fenced region, which the scanner does not model), or a
+/// NEAR-MARKER (a line that presents a managed marker but not in the canonical
+/// form, so the gate cannot tell what it asserts) — arbsec/orchestraitor#809 and
+/// arbsec/orchestraitor#799 R1.
 fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) -> Result<()> {
     let line = checklist
         .unparseable_line
@@ -465,13 +465,17 @@ fn write_unparseable_checklist<W: Write>(writer: &mut W, checklist: &Checklist) 
         .into_diagnostic()?;
         return Ok(());
     }
-    if let Some(UnparseableConstruct::IndentedHtmlBlockOpener) = checklist.unparseable_construct {
+    if let Some(UnparseableConstruct::HtmlConstruct) = checklist.unparseable_construct {
         writeln!(
             writer,
-            "checklist: UNPARSEABLE — an HTML block opener is indented 1-3 spaces (line {line}); CommonMark ends such a block at its container boundary, which the scanner cannot determine, so the checklist is not read (checklist_unparseable)"
+            "checklist: UNPARSEABLE — the PR body contains a raw HTML construct at line {line} (a line starting with '<'); the checklist scanner does not model HTML, so it cannot tell what that construct hides, and the checklist is not read (checklist_unparseable)"
         )
         .into_diagnostic()?;
-        writeln!(writer, "  fix: dedent the HTML block opener to column 0").into_diagnostic()?;
+        writeln!(
+            writer,
+            "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it"
+        )
+        .into_diagnostic()?;
         return Ok(());
     }
     writeln!(

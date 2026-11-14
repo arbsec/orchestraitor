@@ -1,6 +1,0 @@
-# A `<!--` at the START of a line opens an HTML comment (CommonMark HTML block
-# type 2): the marker inside it renders invisible, so it is not evidence at
-# all — only the visible marker before it counts. An engine that ignored
-# comments would report two items with one unticked, so this case
-# discriminates.
-marker_count=1 all_checked=true

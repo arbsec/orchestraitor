@@ -1,5 +1,0 @@
-# A line that mentions `orc:NAME` but carries NO task-item box token is
-# PROSE, not a managed marker: it is not a near-marker, so it never blocks.
-# Only the canonical marker counts. A gate that blocked on prose would make
-# the checklist unusable.
-marker_count=1 all_checked=true unparseable=false

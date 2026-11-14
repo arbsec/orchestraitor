@@ -215,14 +215,15 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
 }
 
 /// The summary neutraliser, exactly: an indented fence opener is dedented to
-/// column 0, a line-start `<!--` has its `<` escaped, and nothing else moves.
+/// column 0, a line-start `<` has its `<` escaped, and nothing else moves.
 /// Idempotent, so a retried delivery composes the identical body.
 #[test]
 fn neutralise_summary_dedents_openers_and_escapes_comments() {
     // Four boundaries in one body: a 2-space backtick opener and its closer
     // (dedented), a column-0 `<!--` (escaped), a TAB-led `<!--` (untouched: a
-    // tab is content, so it opens no comment), and a 4-space `<!--` / ` ``` `
-    // (untouched: indented code, not a comment opener and not a fence).
+    // tab is content, and a tab-led line is literal indented code), and a
+    // 4-space `<!--` / ` ``` ` (untouched: indented code, not a construct and
+    // not a fence).
     let summary = "- Example:\n  ```\n  sample\n  ```\n<!--\n  \t<!--\n    <!--\n    ```\n```\n";
     let expected = "- Example:\n```\n  sample\n```\n&lt;!--\n  \t<!--\n    <!--\n    ```\n```\n";
     assert_eq!(neutralise_summary(summary), expected);
@@ -356,11 +357,10 @@ async fn delivery_neutralises_an_indented_fence_opener_in_the_summary() {
     );
 }
 
-/// A model-authored summary that opens an HTML block must not hide its own tail
-/// from the reviewer. The nine trusted markers precede the summary and a marker
-/// line's `<!--` is never line-start, so convergence is unaffected either way —
-/// but an UNCLOSED `<!--` would swallow the rest of the summary, which the lane
-/// must not let untrusted text suppress. The opener is rendered as literal text.
+/// A model-authored summary whose line starts with `<` must not hide its own
+/// tail from the reviewer, and must not make its own delivery PR unconvergeable
+/// (arbsec/orchestraitor#799 R1/R2): the checklist scanner REFUSES any body
+/// carrying a line-start `<`. The opener is rendered as literal text.
 #[cfg(unix)]
 #[tokio::test]
 async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
@@ -393,8 +393,8 @@ async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
     let body = std::fs::read_to_string(&capture).unwrap();
     assert!(body.starts_with("## Merge checklist"), "{body}");
     assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
-    // No line outside the checklist opens an HTML block: nothing in the summary
-    // can hide the summary's own tail from the reviewer.
+    // No line outside the checklist starts with `<`: nothing in the summary can
+    // hide the summary's own tail from the reviewer, and no scanner refuses it.
     let summary_tail = &body[body.find("&lt;!--").expect("the escaped opener")..];
     assert!(
         !summary_tail
@@ -405,6 +405,70 @@ async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
     assert!(
         body.ends_with("still the summary"),
         "the summary's tail must stay visible: {body}"
+    );
+}
+
+/// A summary line that starts with `<` is ESCAPED, so an untrusted summary can
+/// never make its own composed body's checklist reading INDETERMINATE
+/// (arbsec/orchestraitor#799 R1) — and the two shapes arbsec/orchestraitor#810
+/// deferred are both closed by this one rule (arbsec/orchestraitor#799 R2):
+///
+/// - an INDENTED HTML opener in a summary: 0-3 leading spaces is exactly the
+///   scanner's refusal window, so it is escaped like a column-0 one;
+/// - an UNCLOSED HTML block (`<pre>` and no closer): no extent is modelled any
+///   more, so the opener itself is the only thing to neutralise — the line is
+///   escaped and the summary's tail stays visible.
+///
+/// The two CONTROLS prove the escape is surgical: a `<` MID-LINE (`x < y`) is
+/// untouched, and a 4-space-indented `<div>` is literal indented code, which no
+/// scanner refuses, so it is untouched too. This drives the REAL `open_pr`.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_escapes_a_line_start_html_construct_in_the_summary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let summary = "Prose line\n<div>a block</div>\n  <div>indented</div>\n<pre>unclosed\nno closer\nx < y\n    <div>literal</div>\n";
+    let expected_summary = "Prose line\n&lt;div>a block</div>\n  &lt;div>indented</div>\n&lt;pre>unclosed\nno closer\nx < y\n    <div>literal</div>\n";
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/8\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.to_string(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    // The trusted block still leads, with exactly the nine unchecked markers.
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
+    // Every line-start `<` is a character reference; both controls are byte-for-
+    // byte what the model wrote.
+    assert!(
+        body.ends_with(expected_summary),
+        "the summary must be escaped, not rewritten: {body}"
+    );
+    assert!(
+        body.contains("x < y"),
+        "a mid-line `<` is untouched: {body}"
+    );
+    assert!(
+        body.contains("    <div>literal</div>"),
+        "4-space-indented `<` is literal code and untouched: {body}"
     );
 }
 
@@ -459,12 +523,12 @@ async fn delivery_clears_a_near_marker_in_the_summary() {
         !summary_part.lines().any(is_near_marker_line),
         "a near-marker survived neutralisation: {body}"
     );
-    // No line outside the trusted block opens an HTML block either.
+    // No line outside the trusted block starts with `<` either.
     assert!(
         !summary_part
             .lines()
-            .any(|line| line.trim_start_matches(' ').starts_with("<!--")),
-        "a line-start comment opener survived neutralisation: {body}"
+            .any(|line| line.trim_start_matches(' ').starts_with('<')),
+        "a line-start HTML construct survived neutralisation: {body}"
     );
     // The plain task and the reported line are still readable.
     assert!(body.contains("- [ ] plain task"), "{body}");

@@ -1,2 +1,0 @@
-# F16: a 4-space-indented run is never a closer, so the enclosed marker stays hidden.
-marker_count=0 all_checked=false

@@ -169,15 +169,19 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 ///   rejects a backtick in a backtick fence's info string), so no indented
 ///   opener can survive; dedenting a line that was not an opener renders the
 ///   same either way;
-/// - a line whose first non-whitespace content is `<!--` (at most 3 leading
-///   spaces, and no leading tab) has its `<` escaped to `&lt;`, so it renders
-///   as the literal text `<!--` and opens no HTML block. The nine trusted
-///   markers precede the summary and a marker line's `<!--` is never
-///   line-start, so the checklist reading stays determinate either way — but an
-///   UNCLOSED `<!--` would swallow the rest of the summary and hide it from the
-///   reviewer, which is content the lane must not let untrusted text suppress.
-///   Escaping keeps every byte the model wrote VISIBLE; only the ability to
-///   open a region is removed;
+/// - a line whose first non-whitespace character is `<` (at most 3 leading
+///   spaces, and no leading tab) has that `<` escaped to `&lt;`, so it renders
+///   as the literal text the model wrote. This is the SAME escape the lane
+///   already applied to a line-start `<!--`, widened to the whole class
+///   (arbsec/orchestraitor#799 R2): the checklist scanner does not model HTML
+///   and REFUSES any body carrying a line-start `<` (`checklist_unparseable`,
+///   `html_construct`), so without the escape an honest summary line like
+///   `<div>` — or an indented `<div>`, or an unclosed `<pre>` — would make its
+///   own delivery PR unconvergeable forever. Escaping keeps every byte the
+///   model wrote VISIBLE; only the ability to open a region is removed. A line
+///   indented 4+ spaces (or led by a tab) is literal indented code, which the
+///   scanner never refuses, so it is left untouched, and so is a `<` anywhere
+///   but line-start (`x < y`);
 /// - a line that carries BOTH a task-item box token (`[` + exactly one
 ///   character + `]`) AND a reference to one of the nine managed marker names
 ///   is a **NEAR-MARKER** to every scanner: the gate cannot tell whether the
@@ -192,9 +196,13 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 ///   line with a box token and NO managed reference (`- [ ] plain task`) is a
 ///   PLAIN TASK, which no scanner refuses, so it is left untouched.
 ///
-/// After this, the only region the summary can open is a COLUMN-0 fence: that
-/// one is determinate, and because the trusted checklist leads the body it can
-/// never enclose it.
+/// After this, the summary CANNOT make the composed body's checklist reading
+/// indeterminate: the indented opener is dedented, the line-start `<` is
+/// escaped and the near-marker loses its delimiters. What it can still do is
+/// open a COLUMN-0 FENCE, which is determinate and renders the summary's own
+/// tail as code — visible to a reviewer, and it can never enclose the trusted
+/// checklist, which leads the body. (A column-0 fence is also the only region
+/// the summary can open at all.)
 ///
 /// The summary's LINE ENDINGS are normalised first (`CommonMark` §2.1): every
 /// `\r\n` becomes `\n` and every remaining lone `\r` becomes `\n`. Both
@@ -219,12 +227,16 @@ fn neutralise_summary(summary: &str) -> String {
         let rest = content.get(indent..).unwrap_or_default();
         let indented_opener =
             (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"));
-        let comment_opener = indent <= 3 && !rest.starts_with('\t') && rest.starts_with("<!--");
+        // A line-start `<` is the construct every scanner REFUSES (#799 R1), so
+        // it is escaped to `&lt;` and renders as the text the model wrote
+        // (#799 R2). A 4+-space indent or a leading tab is literal indented
+        // code, which no scanner refuses, so it is left alone.
+        let line_start_html = indent <= 3 && !rest.starts_with('\t') && rest.starts_with('<');
         let near_marker = is_near_marker_line(content);
         let mut rendered = String::with_capacity(content.len());
         if indented_opener {
             rendered.push_str(rest);
-        } else if comment_opener {
+        } else if line_start_html {
             rendered.push_str(&content[..indent]);
             rendered.push_str("&lt;");
             rendered.push_str(rest.get(1..).unwrap_or_default());

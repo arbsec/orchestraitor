@@ -1,8 +1,0 @@
-# A TAB between the box and the marker delimiter is NOT the canonical form
-# (the separators are exactly one ASCII space), so this line is a NEAR-MARKER:
-# it carries a task-item box token AND an orc:NAME reference, and the gate
-# cannot tell what it asserts. The reading is INDETERMINATE — the line is not
-# counted as an item and the verdict blocks with `checklist_unparseable`.
-# The old expectation counted the line as an ordinary item (the whitespace-class
-# grammar the canonical form replaces).
-marker_count=0 all_checked=false unparseable=true unparseable_construct=near_marker

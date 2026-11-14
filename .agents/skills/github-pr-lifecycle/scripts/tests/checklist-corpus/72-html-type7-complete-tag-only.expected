@@ -1,7 +1,0 @@
-# CommonMark 0.31 HTML block TYPE 7: a COMPLETE open tag alone on its line, for a
-# tag that is not in the type-6 list (`span`). It ends at the next BLANK line, so
-# the marker inside is invisible and the one after the blank line is evidence.
-# This is the rule an autolink and inline HTML fail (cases 64/65): type 7 needs
-# the tag to be COMPLETE and to be followed only by whitespace
-# (arbsec/orchestraitor#799 R1).
-marker_count=1 all_checked=false unparseable=false

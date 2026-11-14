@@ -1,8 +1,0 @@
-# The DESCRIPTION of a managed marker is the text AFTER `-->`, for a checked and
-# an unchecked item alike. `reconcile-checklist --json` emitted the BOX character
-# here (`"x"` / `""`) because its sed emitted group 1 instead of group 2, while
-# the Rust engine returned the text — a cross-engine divergence in a field
-# `pr status` publishes (arbsec/orchestraitor#799 R2). The two counts are pinned
-# here; the description VALUES are asserted by `test-reconcile-checklist`
-# (`f8c`) and by `descriptions_are_the_text_after_the_delimiter` in both engines.
-marker_count=2 all_checked=false unparseable=false

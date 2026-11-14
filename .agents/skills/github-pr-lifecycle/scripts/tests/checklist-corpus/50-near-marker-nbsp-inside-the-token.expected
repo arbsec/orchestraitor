@@ -1,6 +1,0 @@
-# A NO-BREAK SPACE inside the marker token (`<!--` and `orc:security`) is
-# not the canonical form either. The near-marker detection is a plain
-# substring search for `orc:NAME` — no whitespace class is involved — so the
-# line is recognised as a managed-marker reference and the reading is
-# INDETERMINATE.
-marker_count=1 all_checked=false unparseable=true unparseable_construct=near_marker

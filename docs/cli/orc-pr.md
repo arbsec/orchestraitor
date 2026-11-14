@@ -61,9 +61,10 @@ CLEAN-record state), `convergence` (`mergeable` + `reasons`), and
 every marker is checked: a body with no managed markers is MISSING evidence
 (reason `checklist_markers_missing`), never a vacuous pass. There is NO
 author-granted opt-out — the body cannot waive itself, so a marker-less body
-always blocks. A marker inside a fenced code region (3+ backticks or 3+
-tildes) or inside an HTML comment (`<!--` … `-->`) is an EXAMPLE, not a
-checklist item, and is excluded from the scan. A fence line carries at most
+always blocks.
+
+A marker inside a fenced code region (3+ backticks or 3+ tildes) is an EXAMPLE,
+not a checklist item, and is excluded from the scan. A fence line carries at most
 three leading spaces (four or more, or a leading tab, is an indented code block
 where fence characters are literal text), and a backtick fence's info string may
 not contain a backtick — ```` ```example``` ```` is a closed inline code span,
@@ -73,20 +74,34 @@ closing run is CONTENT: it leaves the region OPEN, so a marker behind such a
 closer is still inside the fence. Line endings are normalised ONCE before any
 scan (CommonMark §2.1: a lone CR is a line ending and so is CRLF; both become
 LF), so a closing fence followed by a CRLF-CRLF terminator closes. Only a space
-or a tab indents a checklist item. An HTML comment opens only when `<!--` is the
-line's first non-whitespace content (at most three leading spaces) — a `<!--`
-inside an inline code span or after prose is literal text, so the rest of that
-line stays visible — and closes at the first line carrying `-->` (the opener line
-included), while an unclosed type-2 block runs to the end of the body. A
-FENCE or HTML BLOCK OPENER indented 1-3 spaces has an INDETERMINATE container
-scope (it may belong to a list item or a block quote, and the scanner has no
-container model): the checklist is not read, `all_checked` is false, and the
-verdict blocks with the distinct reason `checklist_unparseable`
-(arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1), with
-`unparseable_construct` naming which one — `indented_fence_opener` or
-`indented_html_block_opener`. The condition is sticky — closing the region does
-not clear it — and the one remedy is to dedent the opener to column 0. The
-`checklist.items[].description` field is the text AFTER the `-->` delimiter, for
+or a tab indents a checklist item.
+
+**HTML is not modelled.** Rather than approximate CommonMark's HTML-block rules
+— every attempt produced another grammar defect, two of them false passes — the
+scanner applies the repo's rule for a construct it cannot model: refuse and
+block. A line whose FIRST non-whitespace character is `<`, with 0-3 leading
+spaces and outside every fenced code region, makes the reading INDETERMINATE:
+the checklist is not read, `all_checked` is false, and the verdict blocks with
+the distinct reason `checklist_unparseable` and `unparseable_construct:
+html_construct`. The boundaries: four or more leading spaces (or a leading tab)
+is literal indented code and hides nothing; a line inside a fenced region is
+inert; a line that is just `<`, and any `<` that is not the line's first
+non-whitespace character (`x < y`), is ordinary text. This is deliberately
+STRICTER than CommonMark (an autolink and inline HTML are ordinary text there);
+arbsec/orchestraitor#809 tracks real modelling. The remedies, all of which
+work: put the line inside a fenced code block, indent it by 4 spaces, or remove
+it.
+
+A FENCE OPENER indented 1-3 spaces has an INDETERMINATE container scope (it may
+belong to a list item or a block quote, and the scanner has no container model):
+the checklist is not read, `all_checked` is false, and the verdict blocks with
+`checklist_unparseable` and `unparseable_construct: indented_fence_opener`
+(arbsec/orchestraitor#809). The condition is sticky — closing the region does
+not clear it — and the one remedy is to dedent the opener to column 0. Each
+message names the construct it refused: an HTML construct is never reported as a
+fence, and a fence is never reported as HTML.
+
+The `checklist.items[].description` field is the text AFTER the `-->` delimiter, for
 checked and unchecked items alike.
 
 A managed marker has ONE canonical form: `[ \t]*- [BOX] <!-- orc:NAME -->`, where
@@ -100,20 +115,7 @@ names (`orc:NAME`) is a **near-marker**: the gate cannot tell what the author
 asserted, so the checklist is not read, `all_checked` is false, and the verdict
 blocks with `checklist_unparseable` (arbsec/orchestraitor#799 R1). A line that
 only mentions `orc:NAME` (prose) and a line that carries only a box token (a
-plain task) are not near-markers and never block. A RAW HTML BLOCK is an
-invisible region as well: its content is raw HTML, so a task item inside it is
-not a checkbox and backticks inside it are not a fence. The seven CommonMark
-0.31 HTML block types are implemented exactly: a type-1 raw-text tag (`pre`,
-`script`, `style`, `textarea`) runs to its matching closing tag; a comment
-(`<!--`) to `-->`; a processing instruction (`<?`) to `?>`; a declaration (`<!`
-plus a letter) to `>`; a CDATA section (`<![CDATA[`) to `]]>`; and a CommonMark
-block tag or a complete tag alone on its line ends at the next blank line. For
-the first five the OPENING line is checked for the terminator, so `<pre></pre>`,
-`<!-->` and `<!--->` are complete one-line blocks. An autolink
-(`<https://example.com>`) and inline HTML (`<em>x</em> prose`) are ordinary
-text, not blocks. An HTML block opener indented 1-3 spaces is an indeterminate
-scope and blocks with `checklist_unparseable`; one indented 4+ spaces is
-indented code.
+plain task) are not near-markers and never block.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

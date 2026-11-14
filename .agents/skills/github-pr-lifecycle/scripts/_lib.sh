@@ -308,18 +308,17 @@ if printf 'x' | LC_ALL=C.UTF-8 awk 'BEGIN { exit (length("é") == 1) ? 0 : 1 }' 
   ORC_LIB_SCAN_LOCALE="C.UTF-8"
 fi
 
-# The CommonMark 0.31 "HTML blocks" type-6 tag names (arbsec/orchestraitor#799
-# R1). A line beginning with `<` or `</` followed by one of these, then
-# whitespace, the end of the line, `>` or `/>`, opens an HTML block that ends at
-# the next blank line. This is the ONE copy in the shell engine: the awk scanner
-# reads it through `-v`, and the Rust engine carries the same list as
-# `HTML_BLOCK_TAGS` in `crates/orchestraitor-mcp/src/pr_status.rs`. The shared
-# corpus is what keeps the two in step.
-ORC_LIB_HTML_BLOCK_TAGS='address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option p param search section summary table tbody td tfoot th thead title tr track ul'
-
-# The CommonMark 0.31 "HTML blocks" type-1 tag names: the block runs to the
-# closing tag of whichever of these opened it.
-ORC_LIB_HTML_RAW_TEXT_TAGS='pre script style textarea'
+# HTML is NOT MODELLED (arbsec/orchestraitor#799 R1). The scanner applies the
+# repo's rule for a construct it cannot model — refuse and block — instead of
+# approximating CommonMark's HTML block rules: a line whose FIRST non-whitespace
+# character is `<`, indented 0-3 spaces and outside every fenced code region,
+# makes the checklist reading INDETERMINATE (`orc_lib_html_construct_line`
+# reports it, `unparseable_construct` is `html_construct`) and every verdict
+# blocks with `checklist_unparseable`. This is deliberately STRICTER than
+# CommonMark — `<https://example.com>` and `<em>x</em> prose` are ordinary text
+# there — and arbsec/orchestraitor#809 tracks real modelling. The Rust engine
+# applies the same single rule in `scan_fences`; the shared corpus keeps the two
+# in step.
 
 # --- Fenced code regions (arbsec/orchestraitor#788) ---------------------------
 # A managed checklist marker inside a FENCED code region is an EXAMPLE, not
@@ -352,22 +351,24 @@ ORC_LIB_HTML_RAW_TEXT_TAGS='pre script style textarea'
 #   - an unclosed fence runs to the end of the body;
 #   - every line inside the region — INCLUDING the opening and the closing
 #     fence lines — is excluded from marker scanning;
-#   - an HTML COMMENT (`<!--` … `-->`) is not code and not evidence: its
-#     delimiter lines and everything between them are invisible to every scan,
-#     and a fence inside it neither opens nor closes a region. A comment OPENS
-#     only when `<!--` is the line's FIRST non-whitespace content (CommonMark
-#     HTML block type 2: the `<!--` must start the line). A `<!--` further
-#     along the line — inside an inline code span, or after prose — is LITERAL
-#     TEXT: it opens nothing, so the rest of that line stays visible. The
-#     comment CLOSES at the first line carrying `-->` (the opener line itself
-#     included, so `<!-- orc:none -->` is a complete one-line comment), and an
-#     unclosed comment runs to the end of the body (fail closed: everything
-#     after it is invisible evidence);
+#   - HTML is NOT MODELLED, and the scanner says so instead of guessing
+#     (arbsec/orchestraitor#799 R1). A line OUTSIDE every fenced region whose
+#     FIRST non-whitespace character is `<`, indented 0-3 spaces, is reported by
+#     `orc_lib_html_construct_line` (`unparseable_construct` `html_construct`)
+#     and every checklist verdict BLOCKS with `checklist_unparseable`: the
+#     scanner cannot tell whether such a line opens a comment, a raw-text block,
+#     a declaration, an inline span or a literal autolink, and a wrong guess is
+#     a false pass. This is deliberately STRICTER than CommonMark — an AUTOLINK
+#     (`<https://example.com>`) and INLINE HTML (`<em>emphasis</em> prose`) are
+#     ordinary text there — and arbsec/orchestraitor#809 tracks real modelling.
+#     The line itself is otherwise ordinary text: nothing is hidden, because the
+#     whole reading is refused. A line indented FOUR OR MORE spaces — or led by a
+#     tab — is literal indented code and hides nothing, so it is not a refusal;
+#     a line that is JUST `<` opens no construct and is not one either; and a
+#     `<` anywhere else (`x < y`, `<` mid-line) is ordinary text;
 #   - a managed marker line needs NO exemption: it is `- [x] <!-- orc:NAME -->`,
-#     so its `<!--` is never the line's first content and it can never open a
-#     comment. The exemption that used to say otherwise disagreed with the
-#     checklist parser about whitespace (a TAB after `]`), and that disagreement
-#     hid a genuine unchecked item in one engine and not the other;
+#     so its `<!--` is never the line's first content and it can never be an
+#     HTML construct;
 #   - a fence OPENER indented 1-3 spaces is an INDETERMINATE opener: it may
 #     equally be inside a list item or a block quote, and this scanner has no
 #     container model. The condition is STICKY: it is NOT cleared when the
@@ -379,32 +380,6 @@ ORC_LIB_HTML_RAW_TEXT_TAGS='pre script style textarea'
 #     verdict BLOCKS with `checklist_unparseable` rather than guessing
 #     (arbsec/orchestraitor#809 tracks real container tracking). The remedy is
 #     to DEDENT the opener to column 0;
-#   - an HTML BLOCK opener indented 1-3 spaces is the SAME container ambiguity,
-#     for the SAME reason: CommonMark ends such a block at its container
-#     boundary, which this scanner cannot model. It is reported by
-#     `orc_lib_html_unparseable_line` (`unparseable_construct`
-#     `indented_html_block_opener`) and blocks the verdict. An opener indented
-#     4+ spaces — or led by a tab — is literal text (indented code), not a
-#     block, so it opens nothing. A marker inside an indented code block is
-#     likewise not evidence, but detecting indented code blocks needs block
-#     context: that gap is tracked by arbsec/orchestraitor#802 and is NOT
-#     modelled here;
-#   - a RAW HTML BLOCK is an invisible region too: CommonMark passes its
-#     content through as raw HTML, so a task item inside it is not a checkbox
-#     and backticks inside it are not a fence. The seven HTML block types of
-#     CommonMark 0.31 are implemented EXACTLY (arbsec/orchestraitor#799 R1),
-#     never approximated — see `orc_lib_html_block_type` for the start
-#     conditions and `orc_lib_html_block_end` for the end conditions. Two
-#     consequences are load-bearing: an AUTOLINK (`<https://example.com>`) and
-#     INLINE HTML (`<em>emphasis</em> prose`) are ORDINARY TEXT, not blocks,
-#     because neither is a complete tag alone on its line (type 7) and neither
-#     names a CommonMark block tag (type 6); and every block ends at the END of
-#     the line carrying its terminator, so `<pre></pre>`, `<!-->`, `<!--->`,
-#     `<?...?>` and `<![CDATA[...]]>` are COMPLETE ONE-LINE blocks — the
-#     opening line is checked for the terminator, not only its successors.
-#     Every line inside a block — opener and closer included — is invisible,
-#     and a fence opener inside it opens NOTHING (so it can never hide anything
-#     outside the block);
 #   - a NEAR-MARKER is a line that is not canonical but carries BOTH a task-item
 #     box token (`[` + exactly one character + `]`) AND a reference to one of
 #     the nine managed names (`orc:NAME`). The author presented a managed
@@ -415,21 +390,15 @@ ORC_LIB_HTML_RAW_TEXT_TAGS='pre script style textarea'
 #     near-markers and are ignored — prose must never block.
 #
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
-# every fenced region, every HTML comment and every HTML block removed).
+# every fenced region removed).
 #
-# ONE state machine, four modes: `orc_lib__fence_scan` owns the rules above,
+# ONE state machine, five modes: `orc_lib__fence_scan` owns the rules above,
 # and every caller drives it. A second, separately written scanner is exactly
 # how the shell and Rust engines drifted before (arbsec/orchestraitor#788).
 orc_lib_strip_fenced_code() { orc_lib__fence_scan strip; }
 
-# The scan state at the END of the body: `closed`; `open <char> <len>` for a
-# fence that never closed; or `open html <type> <terminator>` for a raw HTML
-# block that never closed, where `<type>` is the CommonMark 0.31 block type
-# (1-7) and `<terminator>` is the string that ends it — the matching closing tag
-# for type 1 (`</pre>`, `</script>`, `</style>`, `</textarea>`), `-->` for type
-# 2, `?>` for type 3, `>` for type 4, `]]>` for type 5, and `blank-line` for
-# types 6 and 7 (which end at the next blank line and have no terminator
-# string). Reads the body on STDIN.
+# The scan state at the END of the body: `closed`, or `open <char> <len>` for a
+# fence that never closed. Reads the body on STDIN.
 orc_lib_fence_state() { orc_lib__fence_scan state; }
 
 # The 1-based line number of the FIRST fence opener indented 1-3 spaces, when
@@ -441,12 +410,14 @@ orc_lib_fence_state() { orc_lib__fence_scan state; }
 # STDIN.
 orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
 
-# The same refusal for an HTML BLOCK opener indented 1-3 spaces: CommonMark ends
-# such a block at its container boundary, which this scanner cannot model, so a
-# marker it hides may still be visible to a human (arbsec/orchestraitor#799 R1,
-# the #809 family). Reported separately from the fence case so the verdict names
-# the construct it refused on. Reads the body on STDIN.
-orc_lib_html_unparseable_line() { orc_lib__fence_scan html-indeterminate; }
+# The 1-based line number of the FIRST RAW HTML CONSTRUCT — a line outside
+# every fenced code region whose first non-whitespace character is `<`, indented
+# 0-3 spaces — or nothing at all. HTML is not modelled: the scanner cannot tell
+# what such a construct hides, so the reading is REFUSED rather than guessed
+# (arbsec/orchestraitor#799 R1; #809 tracks real modelling). Reported separately
+# from the fence case so the verdict names the construct it refused on. Reads
+# the body on STDIN.
+orc_lib_html_construct_line() { orc_lib__fence_scan html-construct; }
 
 # The 1-based line number of the FIRST NEAR-MARKER — a line that is not the
 # canonical managed-marker form but carries BOTH a task-item box token (`[` +
@@ -468,16 +439,14 @@ orc_lib_normalize_line_endings() {
   LC_ALL="$ORC_LIB_SCAN_LOCALE" awk '{ line = $0; gsub(/\r$/, "", line); gsub(/\r/, "\n", line); print line }'
 }
 
-# Usage: orc_lib__fence_scan <strip|state|indeterminate|html-indeterminate|near-marker>  (stdin = body)
+# Usage: orc_lib__fence_scan <strip|state|indeterminate|html-construct|near-marker>  (stdin = body)
 orc_lib__fence_scan() {
   orc_lib_normalize_line_endings |
   LC_ALL="$ORC_LIB_SCAN_LOCALE" \
   awk -v mode="${1:?fence scan mode required}" \
       -v names="$ORC_LIB_MANAGED_NAMES" \
       -v canon="$ORC_LIB_CANONICAL_MARKER_RE" \
-      -v boxtok="$ORC_LIB_BOX_TOKEN_RE" \
-      -v blocktags="$ORC_LIB_HTML_BLOCK_TAGS" \
-      -v rawtext="$ORC_LIB_HTML_RAW_TEXT_TAGS" '
+      -v boxtok="$ORC_LIB_BOX_TOKEN_RE" '
     # The part of the line a fence or an HTML block may open or close at.
     # CommonMark/GFM allow at most THREE leading spaces before a top-level fence
     # OR HTML block; four or more — or a tab, which reaches the 4-column tab
@@ -487,8 +456,9 @@ orc_lib__fence_scan() {
     # A form feed and a vertical tab are NOT indentation: they are content, so
     # a `\f`- or `\v`-led fence line opens nothing (#799 F18, corpus case 38).
     #
-    # The SAME view decides an HTML block opener, so the two scanners agree
-    # about which lines are even candidates.
+    # The SAME view decides whether a line is an HTML CONSTRUCT candidate, so a
+    # 4+-space-indented (or tab-led) `<div>` is literal indented code, not a
+    # refusal (#799 R1).
     function fence_view(line,   n, rest) {
       n = 0
       while (substr(line, n + 1, 1) == " ") n++
@@ -514,128 +484,6 @@ orc_lib__fence_scan() {
     function closes_here(s, n) {
       return substr(s, n + 1) ~ /^[ \t]*$/
     }
-    function is_ws(c) { return c == " " || c == "\t" }
-    function is_letter(c) { return c ~ /^[A-Za-z]$/ }
-    function is_name_char(c) { return c ~ /^[A-Za-z0-9-]$/ }
-    function is_attr_start(c) { return c ~ /^[A-Za-z_:]$/ }
-    function is_attr_char(c) { return c ~ /^[A-Za-z0-9_.:-]$/ }
-    # A tag-name BOUNDARY: whitespace, the end of the line, `>` or `/>`.
-    # CommonMark 0.31 spells the end-of-line case out for type 6.
-    function tag_boundary(s, at,   c) {
-      c = substr(s, at, 1)
-      if (c == "" || is_ws(c) || c == ">") return 1
-      return c == "/" && substr(s, at + 1, 1) == ">"
-    }
-    # CommonMark 0.31 HTML block TYPE 1: `<pre`, `<script`, `<style` or
-    # `<textarea` (case-insensitive) followed by whitespace, `>` or `/>`. The
-    # block runs to the closing tag that matches — so `<pre></pre>` is a
-    # complete one-line block. Returns the closing tag, or "".
-    function type1_end(s,   low, i, n, name) {
-      low = tolower(s)
-      n = split(rawtext, raw_list, " ")
-      for (i = 1; i <= n; i++) {
-        name = raw_list[i]
-        if (substr(low, 1, length(name) + 1) != "<" name) continue
-        if (tag_boundary(s, length(name) + 2)) return "</" name ">"
-      }
-      return ""
-    }
-    # CommonMark 0.31 HTML block TYPE 6: `<` or `</` followed by one of the
-    # block tag names (case-insensitive), then whitespace, the end of the line,
-    # `>` or `/>`. Every candidate is tried: `param` must not be read as `p`
-    # followed by a non-boundary.
-    function is_type6(s,   low, at, i, t) {
-      low = tolower(s)
-      if (substr(low, 1, 2) == "</") at = 3
-      else if (substr(low, 1, 1) == "<") at = 2
-      else return 0
-      for (i = 1; i <= n_blocktags; i++) {
-        t = blocktag_list[i]
-        if (substr(low, at, length(t)) != t) continue
-        if (tag_boundary(s, at + length(t))) return 1
-      }
-      return 0
-    }
-    # CommonMark 0.31 HTML block TYPE 7: a COMPLETE open tag (any tag name other
-    # than the type-1 four) or a complete closing tag, followed only by spaces
-    # and tabs to the end of the line. A line that merely BEGINS with `<` and a
-    # name — `<notatag nonsense`, `<https://example.com>` — is ordinary text.
-    function is_type7(s,   n, i, c, j, q, ws, name, closing) {
-      n = length(s)
-      if (substr(s, 1, 1) != "<") return 0
-      i = 2
-      closing = 0
-      if (substr(s, i, 1) == "/") { closing = 1; i++ }
-      if (i > n || !is_letter(substr(s, i, 1))) return 0
-      name = substr(s, i, 1)
-      i++
-      while (i <= n && is_name_char(substr(s, i, 1))) { name = name substr(s, i, 1); i++ }
-      if (!closing) {
-        name = tolower(name)
-        for (j = 1; j <= n_rawtext; j++) if (raw_list[j] == name) return 0
-      }
-      while (1) {
-        ws = 0
-        while (i <= n && is_ws(substr(s, i, 1))) { i++; ws++ }
-        if (ws == 0) break
-        if (i > n || !is_attr_start(substr(s, i, 1))) return 0
-        i++
-        while (i <= n && is_attr_char(substr(s, i, 1))) i++
-        j = i
-        while (j <= n && is_ws(substr(s, j, 1))) j++
-        if (j <= n && substr(s, j, 1) == "=") {
-          j++
-          while (j <= n && is_ws(substr(s, j, 1))) j++
-          c = substr(s, j, 1)
-          if (c == "\"" || c == sq) {
-            q = c
-            j++
-            while (j <= n && substr(s, j, 1) != q) j++
-            if (j > n) return 0
-            j++
-          } else {
-            while (j <= n) {
-              c = substr(s, j, 1)
-              if (is_ws(c) || c == "\"" || c == sq || c == "=" || c == "<" || c == ">" || c == "`") break
-              j++
-            }
-          }
-          i = j
-        }
-      }
-      while (i <= n && is_ws(substr(s, i, 1))) i++
-      while (i <= n && substr(s, i, 1) == "/") i++
-      if (i > n || substr(s, i, 1) != ">") return 0
-      i++
-      while (i <= n) {
-        if (!is_ws(substr(s, i, 1))) return 0
-        i++
-      }
-      return 1
-    }
-    # The CommonMark 0.31 HTML block TYPE of a line whose content-after-indent
-    # is `s`, or 0 when the line starts no raw HTML block. Types are tried in
-    # the spec order; the terminator of each is returned by `html_term`.
-    function html_block_type(s) {
-      if (type1_end(s) != "") return 1
-      if (substr(s, 1, 4) == "<!--") return 2
-      if (substr(s, 1, 2) == "<?") return 3
-      if (substr(s, 1, 9) == "<![CDATA[") return 5
-      if (substr(s, 1, 2) == "<!" && is_letter(substr(s, 3, 1))) return 4
-      if (is_type6(s)) return 6
-      if (is_type7(s)) return 7
-      return 0
-    }
-    # The string that ENDS an HTML block of type `t` opened by `s`. Types 6 and
-    # 7 end at the next BLANK line and have no terminator string.
-    function html_term(t, s) {
-      if (t == 1) return type1_end(s)
-      if (t == 2) return "-->"
-      if (t == 3) return "?>"
-      if (t == 4) return ">"
-      if (t == 5) return "]]>"
-      return ""
-    }
     # The NEAR-MARKER test (#799 R1). A line that is not the CANONICAL managed
     # marker form but carries BOTH a task-item box token and a reference to one
     # of the nine managed names: the author presented a managed marker and the
@@ -653,34 +501,11 @@ orc_lib__fence_scan() {
       }
       return 0
     }
-    # Closes an open HTML block (types 1-5: the first line carrying the
-    # terminator ends it; types 6-7: the next blank line ends it).
-    function close_html_block() { in_html = 0; html_type = 0; html_term_str = "" }
     BEGIN {
       n_names = split(names, name_list, " ")
-      n_blocktags = split(blocktags, blocktag_list, " ")
-      n_rawtext = split(rawtext, raw_list, " ")
-      # A single quote cannot appear inside this shell-quoted awk program, so
-      # the apostrophe is built from its byte value (POSIX awk has sprintf and
-      # %c; no octal escape is relied on).
-      sq = sprintf("%c", 39)
     }
     {
       s = fence_view($0)
-      if (in_html) {
-        # Inside a raw HTML BLOCK: the content is passed through as raw HTML,
-        # so it is not marker evidence and a fence opener inside it opens
-        # NOTHING — it can never hide anything outside the block. Types 1-5 end
-        # at the END of the first line carrying their terminator (the opener
-        # line included, which is why `<pre></pre>` and `<!-->` are complete
-        # one-line blocks); types 6-7 end at the next BLANK line.
-        if (html_type >= 6) {
-          if ($0 ~ /^[[:blank:]]*$/) close_html_block()
-        } else if (index(tolower($0), html_term_str) > 0) {
-          close_html_block()
-        }
-        next
-      }
       if (fence_char != "") {
         # Inside a region: only the SAME character, repeated at least as many
         # times as the opener, with nothing but a blank tail after it, closes
@@ -694,28 +519,18 @@ orc_lib__fence_scan() {
         }
         next
       }
-      # A RAW HTML BLOCK opens here when the first content of the line satisfies
-      # one of the seven CommonMark 0.31 start conditions (`html_block_type`).
-      # A `<!--` is type 2 of that model, so it is NOT a separate state: an
-      # opener line carrying its own terminator (`<!-->`, `<!--->`,
-      # `<!-- orc:none -->`) is a complete one-line block, and every other
-      # comment line is invisible.
-      if (s != "") {
-        t = html_block_type(s)
-        if (t > 0) {
-          ind = 0
-          while (substr($0, ind + 1, 1) == " ") ind++
-          if (ind > 0 && html_indeterminate_line == 0) html_indeterminate_line = NR
-          term = html_term(t, s)
-          in_html = 1
-          html_type = t
-          html_term_str = term
-          # Types 1-5: the OPENING line is checked for the terminator too.
-          # `<pre></pre>`, `<!-->`, `<!--->`, `<?...?>` and `<![CDATA[...]]>`
-          # are therefore complete one-line blocks (#799 R1).
-          if (t <= 5 && index(tolower($0), term) > 0) close_html_block()
-          next
-        }
+      # A RAW HTML CONSTRUCT is REFUSED, not modelled (#799 R1): a line OUTSIDE
+      # every fenced region whose first non-whitespace character is `<` and
+      # which carries something after it, indented 0-3 spaces. The scanner
+      # cannot tell whether it opens a comment, a raw-text block, a declaration
+      # or nothing at all (an autolink and inline HTML are ordinary text in
+      # CommonMark), and a wrong guess is a false pass — so the reading is
+      # refused instead. The line is otherwise ordinary text: nothing is hidden,
+      # because the whole reading is. A 4+-space or tab-led line is literal
+      # indented code and hides nothing, and a line that is JUST `<` opens no
+      # construct at all: neither is a refusal.
+      if (substr(s, 1, 1) == "<" && length(s) > 1 && html_construct_line == 0) {
+        html_construct_line = NR
       }
       if (s != "") {
         c = substr(s, 1, 1)
@@ -749,12 +564,11 @@ orc_lib__fence_scan() {
     END {
       if (mode == "state") {
         if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
-        else if (in_html) printf "open html %d %s\n", html_type, (html_type >= 6 ? "blank-line" : html_term_str)
         else print "closed"
       } else if (mode == "indeterminate" && indeterminate_line > 0) {
         print indeterminate_line
-      } else if (mode == "html-indeterminate" && html_indeterminate_line > 0) {
-        print html_indeterminate_line
+      } else if (mode == "html-construct" && html_construct_line > 0) {
+        print html_construct_line
       } else if (mode == "near-marker" && near_marker_line > 0) {
         print near_marker_line
       }
@@ -763,9 +577,8 @@ orc_lib__fence_scan() {
 }
 
 # True (exit 0) when the text is already CHECKLIST-BEARING: at least one
-# CANONICAL managed marker line OUTSIDE any fenced code region, HTML comment or
-# HTML block. Such a body is never rewritten: author content is evidence, not
-# something a helper edits.
+# CANONICAL managed marker line OUTSIDE any fenced code region. Such a body is
+# never rewritten: author content is evidence, not something a helper edits.
 #
 # The marker line must be in the CANONICAL form — exactly one ASCII space
 # between every token, a box character of `x`, `X` or a single space, and one of
@@ -817,71 +630,53 @@ orc_lib_checklist_markers() {
 # repaired: the error names the fence to close (#788 gen-3 review, CodeRabbit
 # major).
 #
-# The same refusal applies to an unclosed raw HTML BLOCK, but the remedy depends
-# on the block TYPE (arbsec/orchestraitor#799 R3):
-#
-#   - types 6 and 7 end at the next BLANK line, so there is nothing to refuse:
-#     the appended checklist already lands after the blank line this helper
-#     writes, and it is therefore VISIBLE. (The old message told the author to
-#     "add a line carrying </>" for these, which is not a thing.)
-#   - a type-1 block ends at its closing tag, so the error names that tag —
-#     `</pre>`, `</script>`, `</style>` or `</textarea>`.
-#   - types 2-5 end at `-->`, `?>`, `>` and `]]>` respectively, and the error
-#     names that exact terminator.
+# The same refusal applies to a RAW HTML CONSTRUCT (arbsec/orchestraitor#799 R1):
+# the scanner does not model HTML, so a body carrying a line-start `<` has an
+# INDETERMINATE checklist reading that no append can repair — the composed PR
+# could never converge. The error names the line and the three remedies that
+# work: put it in a fenced code block, indent it by 4 spaces, or remove it.
 orc_lib_ensure_checklist_markers() {
   local body="$1" root="${2:-}" fence_state="" fence_char="" fence_len="" fence_name=""
-  local html_type="" html_end=""
+  local html_line=""
   if orc_lib_has_checklist "$body"; then
     printf '%s' "$body"
     return 0
   fi
   if [ -n "$body" ]; then
+    # A RAW HTML CONSTRUCT makes the reading indeterminate, and appending cannot
+    # repair that: refuse instead of composing a PR that can never converge
+    # (arbsec/orchestraitor#799 R1).
+    html_line="$(printf '%s\n' "$body" | orc_lib_html_construct_line)"
+    if [ -n "$html_line" ]; then
+      echo "error: refusing to append the managed merge checklist: the PR body contains a raw HTML construct at line $html_line (a line starting with '<')" >&2
+      echo "  the checklist scanner does not model HTML, so it cannot tell what that construct hides and would refuse every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
+      echo "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
     fence_state="$(printf '%s\n' "$body" | orc_lib_fence_state)"
     if [ "$fence_state" != "closed" ]; then
-      if [ "${fence_state#open html }" != "$fence_state" ]; then
-        # An unclosed RAW HTML BLOCK swallows everything after it, so a
-        # checklist appended there would be invisible to every marker scan —
-        # the same failure the unclosed-fence refusal exists to stop. Types 6
-        # and 7 are the exception: they end at the next blank line, and the
-        # append below writes one.
-        html_type="${fence_state#open html }"
-        html_end="${html_type#* }"
-        html_type="${html_type%% *}"
-        if [ "$html_type" != "6" ] && [ "$html_type" != "7" ]; then
-          case "$html_type" in
-            1) fence_name="the PR body ends inside an unclosed <pre>/<script>/<style>/<textarea> block" ;;
-            2) fence_name="the PR body ends inside an unclosed HTML comment" ;;
-            3) fence_name="the PR body ends inside an unclosed processing instruction" ;;
-            4) fence_name="the PR body ends inside an unclosed HTML declaration" ;;
-            5) fence_name="the PR body ends inside an unclosed CDATA section" ;;
-            *) fence_name="the PR body ends inside an unclosed HTML block" ;;
-          esac
-          echo "error: refusing to append the managed merge checklist: $fence_name (block type $html_type, terminated by '$html_end')" >&2
-          echo "  a checklist appended there would render as raw HTML and be ignored by the merge gate (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
-          echo "  fix: close the HTML block before adding the checklist — add a line carrying $html_end — then rerun this command" >&2
-          exit "$ORC_ERR_CONFIG"
-        fi
-      else
-        fence_char="${fence_state#open }"
-        fence_len="${fence_char#* }"
-        fence_char="${fence_char%% *}"
-        case "$fence_char" in
-          '`') fence_name="backticks" ;;
-          '~') fence_name="tildes" ;;
-          *) fence_name="fence characters" ;;
-        esac
-        echo "error: refusing to append the managed merge checklist: the PR body ends inside an unclosed code fence (opened with $fence_len $fence_name)" >&2
-        echo "  a checklist appended there would render as code and be ignored by the merge gate (arbsec/orchestraitor#788): nothing is appended and your body is not modified" >&2
-        echo "  fix: close the fence before adding the checklist — add a line of at least $fence_len $fence_name — then rerun this command" >&2
-        exit "$ORC_ERR_CONFIG"
-      fi
+      fence_char="${fence_state#open }"
+      fence_len="${fence_char#* }"
+      fence_char="${fence_char%% *}"
+      case "$fence_char" in
+        '`') fence_name="backticks" ;;
+        '~') fence_name="tildes" ;;
+        *) fence_name="fence characters" ;;
+      esac
+      echo "error: refusing to append the managed merge checklist: the PR body ends inside an unclosed code fence (opened with $fence_len $fence_name)" >&2
+      echo "  a checklist appended there would render as code and be ignored by the merge gate (arbsec/orchestraitor#788): nothing is appended and your body is not modified" >&2
+      echo "  fix: close the fence before adding the checklist — add a line of at least $fence_len $fence_name — then rerun this command" >&2
+      exit "$ORC_ERR_CONFIG"
     fi
-    # A blank line ENDS a blank-line-terminated HTML block (types 6 and 7) and
-    # a paragraph, so the appended markers below are always visible.
+    # A blank line ENDS a paragraph, so the appended markers below are always
+    # visible.
     printf '%s\n\n' "$body"
   fi
+  # The note is PROSE, never an HTML comment: the scanner refuses a line-start
+  # `<` anywhere in the body, so a `<!--` note here would make every body this
+  # helper composes INDETERMINATE (arbsec/orchestraitor#799 R1).
   printf '## Merge checklist\n\n'
-  printf '%s\n\n' '<!-- Added by pr-create/pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788). -->'
+  printf '%s\n\n' '_Added by pr-create/pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788)._'
   orc_lib_checklist_markers "$root"
 }
 

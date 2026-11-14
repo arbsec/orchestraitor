@@ -1,2 +1,0 @@
-# an unclosed tilde fence runs to the end of the body (a backtick line is content, not a closer).
-marker_count=0 all_checked=false

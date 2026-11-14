@@ -1,4 +1,0 @@
-# A raw HTML block other than the type-1 tags ends at the next BLANK line, so
-# the marker inside the <details> block is invisible and the marker after the
-# blank line is visible. The unchecked item inside the block is not counted.
-marker_count=1 all_checked=true unparseable=false

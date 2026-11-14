@@ -133,14 +133,16 @@ sub_read "$CHECKLIST_JSON" markers_present "reconcile-checklist"
 MARKERS_PRESENT="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" marker_count "reconcile-checklist"
 MARKER_COUNT="$SUB_READ_VALUE"
-# A body whose checklist reading is INDETERMINATE cannot be read at all. Two
+# A body whose checklist reading is INDETERMINATE cannot be read at all. Three
 # constructs make it so: an opener indented 1-3 spaces (it may belong to a list
-# item or a block quote, and the scanner has no container model — #809) and a
-# NEAR-MARKER (a line that presents a managed marker but not in the canonical
-# form, so the gate cannot tell what it asserts — #799 R1). Fail closed — never
-# guess. The indented-opener condition is STICKY: it applies whether or not the
-# region closes, because a closer can end the region earlier for the renderer
-# than for the scan, so a swallowed marker can still be visible to a human.
+# item or a block quote, and the scanner has no container model — #809); a RAW
+# HTML CONSTRUCT — a line-start `<`, which the scanner does not model at all, so
+# it cannot tell what the line hides (#799 R1); and a NEAR-MARKER (a line that
+# presents a managed marker but not in the canonical form, so the gate cannot
+# tell what it asserts — #799 R1). Fail closed — never guess. The
+# indented-opener condition is STICKY: it applies whether or not the region
+# closes, because a closer can end the region earlier for the renderer than for
+# the scan, so a swallowed marker can still be visible to a human.
 sub_read "$CHECKLIST_JSON" unparseable "reconcile-checklist"
 CHECKLIST_UNPARSEABLE="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" unparseable_line "reconcile-checklist" yes
@@ -180,7 +182,8 @@ REASONS=""
 # (`checklist_markers_missing`) and a marker-bearing body with unticked boxes is
 # `unchecked_items(N)` — never collapsed into one code (#788). An INDETERMINATE
 # checklist reading is a third, distinct code (`checklist_unparseable`): a
-# fence opener indented 1-3 spaces (#809) or a NEAR-MARKER — a line that
+# fence opener indented 1-3 spaces (#809), a raw HTML construct (a line-start
+# `<`, which the scanner does not model), or a NEAR-MARKER — a line that
 # presents a managed marker but not in the canonical form, so the scan cannot
 # say what it asserts (#799 R1). There is NO author-granted opt-out: a body that
 # carries no marker always blocks, because the author cannot grant themselves
@@ -206,6 +209,9 @@ MERGEABLE="true"
 case "$CHECKLIST_UNPARSEABLE_CONSTRUCT" in
   near_marker)
     UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body carries a NEAR-MARKER on line ${CHECKLIST_UNPARSEABLE_LINE:-?} — a line that presents a managed marker (a task-item box token plus an orc:NAME reference) but not in the canonical form, so the gate cannot tell what it asserts. Fix: write the marker canonically, as \`- [x] <!-- orc:NAME -->\` — exactly one ASCII space between every token."
+    ;;
+  html_construct)
+    UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body contains a raw HTML construct at line ${CHECKLIST_UNPARSEABLE_LINE:-?} (a line starting with '<'); the checklist scanner does not model HTML, so it cannot tell what that construct hides. Fix: put it inside a fenced code block, indent it by 4 spaces, or remove it."
     ;;
   *)
     UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}), closed or not; its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence opener to column 0."

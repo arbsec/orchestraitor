@@ -13,45 +13,36 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
 
 ### Changed
 
-- **`orc pr status` / `pr.status`**: the §9.48 checklist verdict now FAILS
-  CLOSED when the PR body's checklist reading is indeterminate — a fence OPENER
-  indented 1-3 spaces may belong to a list item or a block quote, and the
-  scanner has no container model, so the checklist is not read and the verdict
-  blocks with the reason code `checklist_unparseable`
-  (`checklist.unparseable` + `checklist.unparseable_line` in the JSON; the one
-  remedy for that construct is to dedent the fence opener to column 0 — closing
-  the region does NOT clear the condition, because a closer can end the region
-  earlier for the renderer than for the scan). The same scan now models HTML
-  comments (`<!--` … `-->`): a comment opens only when `<!--` is the line's
-  first non-whitespace content (a `<!--` inside an inline code span is literal
-  text, so it no longer hides the rest of the body), it closes at the first
-  line carrying `-->`, and an unclosed comment runs to the end of the body. A
-  marker inside a comment is not evidence, a fence inside a comment opens
-  nothing, and line endings are normalised once (CommonMark §2.1: lone CR and
-  CRLF both become LF) so both engines agree on every body. It also models RAW
-  HTML BLOCKS: their content is raw HTML, so a task item inside one is not a
-  checkbox and backticks inside one are not a fence — a fence opener inside an
-  HTML block opens nothing and therefore cannot hide anything outside it. The
-  seven CommonMark 0.31 HTML block types are now implemented exactly rather
-  than approximated: a type-1 raw-text tag (`pre`, `script`, `style`,
-  `textarea`) ends at its matching closing tag, a comment at `-->`, a
-  processing instruction at `?>`, a declaration at `>`, a CDATA section at
-  `]]>`, and a CommonMark block tag or a complete tag alone on its line at the
-  next blank line. For the first five the OPENING line is checked, so
-  `<pre></pre>`, `<!-->` and `<!--->` are complete one-line blocks instead of
-  swallowing the items below them. An autolink (`<https://example.com>`) and
-  inline HTML (`<em>x</em> prose`) are ordinary text, not blocks, so a task
-  item beside them is evidence again. An HTML block opener indented 1-3 spaces
-  is an indeterminate scope: the verdict blocks with `checklist_unparseable`
-  and `checklist.unparseable_construct` = `indented_html_block_opener`; an
-  opener indented 4+ spaces is indented code.
-- **`pr-create` / `pr-mutate`**: a body that ends inside an unterminated HTML
-  block is refused with a remedy that works. The error now names the actual
-  terminator for the block type — `</pre>`, `</script>`, `</style>`,
-  `</textarea>`, `-->`, `?>`, `>` or `]]>` — instead of the nonsense "add a
-  line carrying `</>`", and a blank-line-terminated block (a CommonMark block
-  tag or a complete tag alone on its line) is no longer refused at all: the
-  appended checklist lands after the blank line that ends it and is visible.
+- **`orc pr status` / `pr.status`**: the §9.48 checklist verdict still FAILS
+  CLOSED when the PR body's checklist reading is indeterminate, but the rule is
+  now ONE rule instead of a hand-written Markdown parser. HTML is NOT MODELLED:
+  a line outside every fenced code region whose FIRST non-whitespace character
+  is `<` (0-3 leading spaces) makes the reading indeterminate, so the checklist
+  is not read and the verdict blocks with the reason code
+  `checklist_unparseable` (`checklist.unparseable`,
+  `checklist.unparseable_line` and `checklist.unparseable_construct` =
+  `html_construct` in the JSON). Three boundaries are normative: four or more
+  leading spaces (or a leading tab) is literal indented code and hides nothing;
+  a line inside a fenced code region is inert; a line that is just `<`, and any
+  `<` that is not the line's first non-whitespace character (`x < y`), is
+  ordinary text. The remedies are: put the line inside a fenced code block,
+  indent it by 4 spaces, or remove it. This is deliberately STRICTER than
+  CommonMark — an autolink and inline HTML are ordinary text there — because a
+  merge gate must not depend on a hand-rolled parser being spec-exact; real
+  modelling is tracked separately. The other indeterminate construct is
+  unchanged: a fence OPENER indented 1-3 spaces (the one remedy is to dedent the
+  opener to column 0, and closing the region does NOT clear the condition). Line
+  endings are normalised once (CommonMark §2.1: lone CR and CRLF both become LF)
+  so both engines agree on every body.
+- **`pr-create` / `pr-mutate`**: a body that carries a raw HTML construct (a
+  line starting with `<`, outside a fenced code region) is now refused with
+  exit 2 instead of having the managed checklist appended into a body no
+  scanner could ever read: the error names the line and the three remedies —
+  put it inside a fenced code block, indent it by 4 spaces, or remove it. A
+  body that ends inside an unterminated code fence is still refused, naming the
+  fence to close. The body note the helper adds for a marker-less body is prose,
+  never an HTML comment, so an injected checklist can never make its own body
+  indeterminate.
 - **`orc pr status` / `reconcile-checklist --json`**: `checklist.items[].description`
   is the text after the `-->` delimiter again, for checked and unchecked items
   alike. The shell engine emitted the BOX character (`"x"` / `""`) while the
@@ -74,12 +65,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   line. Prose that merely mentions a managed name, and a plain task with no
   managed name, are not near-markers and never block. There is still NO
   author-granted opt-out: a bare `<!-- orc:none -->` grants nothing.
-- **Delivery PRs**: the delivery lane now normalises the untrusted summary's
-  line endings (lone CR and CRLF both become LF) before neutralising it, and
-  neutralises an untrusted summary's indented fence openers and line-start
-  comments, so a summary using lone-CR line endings can neither make the
-  composed PR permanently unconvergeable nor hide the summary's own tail from
-  the reviewer.
+- **Delivery PRs**: the delivery lane **neutralises exactly three constructs**
+  in the untrusted run summary it composes, and claims nothing more: an
+  indented fence opener is dedented to column 0; a line whose first
+  non-whitespace character is `<` (0-3 leading spaces) has that `<` escaped to
+  `&lt;`, which is what keeps the composed body readable now that a line-start
+  `<` refuses the checklist reading; and a near-marker line is rendered as
+  literal text (`<!--` -> `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`). The summary
+  therefore cannot make its own delivery PR unconvergeable, and a reviewer
+  reads exactly what the model wrote. It can still open a column-0 fence in its
+  own text, which is determinate and can never enclose the trusted checklist
+  that leads the body. The summary's line endings are normalised first (lone CR
+  and CRLF both become LF), so a lone-CR summary is neutralised by the same
+  rules.
 
 ### Added
 

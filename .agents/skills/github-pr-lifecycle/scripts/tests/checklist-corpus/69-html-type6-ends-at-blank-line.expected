@@ -1,6 +1,0 @@
-# CommonMark 0.31 HTML block TYPE 6 (`div` is in the block tag list): the block
-# ends at the next BLANK line, so the marker inside it is invisible and the
-# marker after the blank line is visible. The hidden item is not counted — a
-# scanner that ran the block to the end of the body would report
-# `checklist_markers_missing` (arbsec/orchestraitor#799 R1).
-marker_count=1 all_checked=false unparseable=false

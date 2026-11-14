@@ -1,6 +1,0 @@
-# A NO-BREAK SPACE between the box and the marker delimiter is not the
-# canonical form: the separators are exactly one ASCII space. The line carries
-# a task-item box token AND an orc:NAME reference, so it is a NEAR-MARKER and
-# the reading is INDETERMINATE — the verdict blocks with
-# `checklist_unparseable` and the line is NOT counted as an item.
-marker_count=1 all_checked=false unparseable=true unparseable_construct=near_marker

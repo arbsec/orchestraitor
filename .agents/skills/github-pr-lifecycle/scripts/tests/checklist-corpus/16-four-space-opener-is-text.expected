@@ -1,2 +1,0 @@
-# F16: a 4-space-indented run is indented code, never an opener, so the marker counts.
-marker_count=1 all_checked=true

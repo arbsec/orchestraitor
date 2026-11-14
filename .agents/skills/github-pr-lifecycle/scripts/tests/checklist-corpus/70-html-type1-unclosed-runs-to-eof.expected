@@ -1,5 +1,0 @@
-# A type-1 raw-text block that never closes runs to the END OF THE BODY
-# (CommonMark: the end condition is "line contains the matching closing tag, or
-# the end of the document"). The marker inside it is therefore invisible, not
-# evidence (arbsec/orchestraitor#799 R1).
-marker_count=0 all_checked=false unparseable=false

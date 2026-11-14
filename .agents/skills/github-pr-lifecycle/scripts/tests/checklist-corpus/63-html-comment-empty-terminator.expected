@@ -1,6 +1,0 @@
-# CommonMark 0.31 HTML block TYPE 2 end condition: the block ends at the line
-# carrying `-->`, and the OPENING line is checked — so `<!-->` is a complete
-# ONE-LINE block and may not swallow the visible marker below. Before the exact
-# rule the comment only closed on a SUBSEQUENT line, so the marker was hidden and
-# the body reported `checklist_markers_missing` (arbsec/orchestraitor#799 R1).
-marker_count=1 all_checked=false unparseable=false

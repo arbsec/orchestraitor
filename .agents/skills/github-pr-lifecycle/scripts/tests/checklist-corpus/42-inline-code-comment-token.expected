@@ -1,6 +1,0 @@
-# A `<!--` inside an inline code span is LITERAL TEXT: CommonMark's HTML block
-# type 2 needs the `<!--` at the START of the line, so the token opens no
-# comment and the visible unchecked item after it is still evidence. An engine
-# that treated ANY `<!--` as a comment opener would see one ticked marker and
-# no unticked one — the fail-open defect this case pins.
-marker_count=2 all_checked=false

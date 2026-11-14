@@ -1,6 +1,0 @@
-# `<!--->` is the second degenerate type-2 opener: the comment ends at the
-# `-->` formed by its own two trailing dashes, so it is a complete ONE-LINE
-# block and the visible marker below stays evidence. It is a separate case from
-# `<!-->` because an engine can special-case one and miss the other
-# (arbsec/orchestraitor#799 R1).
-marker_count=1 all_checked=false unparseable=false

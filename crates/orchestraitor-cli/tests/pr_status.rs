@@ -176,11 +176,11 @@ fn body_with_indented_fence() -> String {
 }
 
 /// A body carrying an inline code span with a comment token, then a VISIBLE
-/// unchecked item (arbsec/orchestraitor#799 gen-9). `CommonMark` HTML block type 2
-/// anchors `<!--` at the start of the line, so the span's token is literal text
-/// and opens no comment. Before the anchor, the scan opened a comment there, hid
-/// the unchecked item, and the verdict reported `all_checked: true` with no
-/// reasons — the fail-open defect this fixture pins end to end.
+/// unchecked item (arbsec/orchestraitor#799 gen-9). Only a line-START `<` is a
+/// refused raw HTML construct, so the span's token is literal text and changes
+/// nothing. When the scan treated ANY `<!--` as a comment opener, it hid the
+/// unchecked item and the verdict reported `all_checked: true` with no reasons
+/// — the fail-open defect this fixture pins end to end.
 fn body_with_inline_code_comment_token() -> String {
     serde_json::json!({
         "data": {"repository": {"pullRequest": {
@@ -844,6 +844,10 @@ fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
     // #788 revision: the `<!-- orc:none -->` waiver was REMOVED — a PR author
     // cannot grant themselves the exemption (arbsec/orchestraitor#801). A body
     // that carries the sentinel and no marker still blocks.
+    //
+    // #799 R1: on its own line the sentinel is also a raw HTML construct, so
+    // the block reason is `checklist_unparseable` (`html_construct`) instead of
+    // `checklist_markers_missing`. Stricter, and still no waiver.
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_project_config(&temp)?;
     let repo = write_git_repo(&temp)?;
@@ -858,6 +862,7 @@ fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
             }}}
         })
         .to_string(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
         pr_view_json(HEAD, BASE, "APPROVED", false),
     ];
     let text_endpoint = spawn_pr_status_server(payloads.clone())?;
@@ -885,11 +890,12 @@ fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
     assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
     assert_eq!(
         verdict["convergence"]["reasons"],
-        serde_json::json!(["checklist_markers_missing"]),
+        serde_json::json!(["checklist_unparseable"]),
         "a body sentinel must never waive the marker requirement"
     );
     assert_eq!(verdict["checklist"]["markers_present"], false);
     assert_eq!(verdict["checklist"]["all_checked"], false);
+    assert_eq!(verdict["checklist"]["unparseable"], true, "{verdict}");
 
     let output = pr_status_cli(
         &temp.path().display().to_string(),
@@ -907,8 +913,12 @@ fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
         "a marker-less body with a sentinel still blocks: {text}"
     );
     assert!(
-        text.contains("no managed orc:* markers found (UNSUBSTANTIATED"),
-        "{text}"
+        text.contains("checklist: UNPARSEABLE — the PR body contains a raw HTML construct"),
+        "the operator view names the refused construct: {text}"
+    );
+    assert!(
+        text.contains("put it inside a fenced code block, indent it by 4 spaces, or remove it"),
+        "and offers remedies that work: {text}"
     );
     Ok(())
 }

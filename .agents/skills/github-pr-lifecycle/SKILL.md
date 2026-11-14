@@ -352,26 +352,22 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   carries it, only the body update is skipped — other edit flags
                   in the same invocation still run). The exact fence and
                   line-ending rules the scanners apply — indentation, info
-                  strings, closing tails, CRLF/CR normalisation, HTML comments,
-                  and the indeterminate-scope refusal — live in
-                  `references/pr-convergence.md` ("Fenced code is not checklist
-                  state"). A marker after a closed fence counts. An HTML comment
-                  opens only when `<!--` is the line's first non-whitespace
-                  content (so a `<!--` inside an inline code span is literal
-                  text) and closes at the first line carrying `-->`; a raw HTML
-                  block is an invisible region too, so a fence or a marker inside
-                  one is not state — the seven CommonMark 0.31 HTML block types
-                  are implemented exactly, so an autolink or inline HTML is NOT a
-                  block and `<pre></pre>` ends on its own line (the type-by-type
-                  table is in `references/pr-convergence.md`). A managed marker
-                  has ONE canonical form —
-                  `- [BOX] <!-- orc:NAME -->` with exactly one ASCII space
-                  between every token — and a line that presents a managed
-                  marker but not in that form (a near-marker) is INDETERMINATE.
-                  A fence OR HTML block opener indented 1-3 spaces makes the
-                  checklist reading INDETERMINATE — closed or not — so the verdict
-                  blocks with `checklist_unparseable`; the one remedy is to dedent
-                  the opener to column 0.
+                  strings, closing tails, CRLF/CR normalisation, and the
+                  indeterminate-reading refusal — live in
+                  `references/pr-convergence.md` ("An indeterminate reading
+                  is REFUSED"). A marker after a closed fence counts. A managed
+                  marker has ONE canonical form — `- [BOX] <!-- orc:NAME -->`
+                  with exactly one ASCII space between every token — and a line
+                  that presents a managed marker but not in that form (a
+                  near-marker) is INDETERMINATE. HTML is NOT modelled: a line
+                  outside every fenced region whose first non-whitespace
+                  character is `<` (0-3 leading spaces) makes the reading
+                  INDETERMINATE — put it in a fenced code block, indent it by
+                  4 spaces, or remove it. A fence opener indented 1-3 spaces
+                  makes it INDETERMINATE too, closed or not. Either way the
+                  verdict blocks with `checklist_unparseable` and names the
+                  construct (`indented_fence_opener` / `html_construct` /
+                  `near_marker`) together with its remedy.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

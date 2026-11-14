@@ -1,2 +1,0 @@
-# no trailing newline on the last marker line: it still counts.
-marker_count=1 all_checked=true
