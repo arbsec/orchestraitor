@@ -18,12 +18,19 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   indented 1-3 spaces may belong to a list item or a block quote, and the
   scanner has no container model, so the checklist is not read and the verdict
   blocks with the NEW reason code `checklist_unparseable`
-  (`checklist.unparseable` + `checklist.unparseable_line` in the JSON; fix:
-  dedent the fence to column 0, or close it). The same scan now models HTML
-  comments (`<!--` … `-->`): their content renders invisible, so a marker
+  (`checklist.unparseable` + `checklist.unparseable_line` in the JSON; the one
+  remedy is to dedent the fence opener to column 0 — closing the region does
+  NOT clear the condition, because a closer can end the region earlier for the
+  renderer than for the scan). The same scan now models HTML comments
+  (`<!--` … `-->`): a comment opens only when `<!--` is the line's first
+  non-whitespace content (a `<!--` inside an inline code span is literal text,
+  so it no longer hides the rest of the body), it closes at the first line
+  carrying `-->`, and an unclosed comment runs to the end of the body. A marker
   inside a comment is not evidence, a fence inside a comment opens nothing, and
   line endings are normalised once (CommonMark §2.1: lone CR and CRLF both
-  become LF) so both engines agree on every body.
+  become LF) so both engines agree on every body. Delivery PRs are unaffected:
+  the delivery lane neutralises an untrusted summary's indented fence openers
+  and line-start comments before composing the body.
 
 ### Added
 

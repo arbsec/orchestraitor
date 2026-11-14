@@ -283,16 +283,31 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #     fence lines — is excluded from marker scanning;
 #   - an HTML COMMENT (`<!--` … `-->`) is not code and not evidence: its
 #     delimiter lines and everything between them are invisible to every scan,
-#     and a fence inside it neither opens nor closes a region. A checklist item
-#     line is NOT a comment opener: its `<!-- orc:NAME -->` is the marker
-#     delimiter, so `- [ ] <!-- orc:x -->` stays scannable. An unclosed
-#     comment runs to the end of the body (fail closed: everything after it is
-#     invisible evidence);
-#   - a fence OPENER indented 1-3 spaces is INDETERMINATE SCOPE: it may equally
-#     be inside a list item or a block quote, and this scanner has no container
-#     model, so `orc_lib_fence_unparseable_line` reports it and every checklist
+#     and a fence inside it neither opens nor closes a region. A comment OPENS
+#     only when `<!--` is the line's FIRST non-whitespace content (CommonMark
+#     HTML block type 2: the `<!--` must start the line). A `<!--` further
+#     along the line — inside an inline code span, or after prose — is LITERAL
+#     TEXT: it opens nothing, so the rest of that line stays visible. The
+#     comment CLOSES at the first line carrying `-->` (the opener line itself
+#     included, so `<!-- orc:none -->` is a complete one-line comment), and an
+#     unclosed comment runs to the end of the body (fail closed: everything
+#     after it is invisible evidence);
+#   - a managed marker line needs NO exemption: it is `- [x] <!-- orc:NAME -->`,
+#     so its `<!--` is never the line's first content and it can never open a
+#     comment. The exemption that used to say otherwise disagreed with the
+#     checklist parser about whitespace (a TAB after `]`), and that disagreement
+#     hid a genuine unchecked item in one engine and not the other;
+#   - a fence OPENER indented 1-3 spaces is an INDETERMINATE opener: it may
+#     equally be inside a list item or a block quote, and this scanner has no
+#     container model. The condition is STICKY: it is NOT cleared when the
+#     region closes, because a closer can end the region EARLIER for the
+#     renderer than for this scanner — a marker swallowed by the scanner's
+#     region is then still VISIBLE to a human, and reading such a body as
+#     "all checked" is the false pass this rule exists to stop. Every indented
+#     opener is reported by `orc_lib_fence_unparseable_line` and every checklist
 #     verdict BLOCKS with `checklist_unparseable` rather than guessing
-#     (arbsec/orchestraitor#809 tracks real container tracking).
+#     (arbsec/orchestraitor#809 tracks real container tracking). The remedy is
+#     to DEDENT the opener to column 0.
 #
 # Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
 # every fenced region and every HTML comment removed).
@@ -309,8 +324,10 @@ orc_lib_fence_state() { orc_lib__fence_scan state; }
 # The 1-based line number of the FIRST fence opener indented 1-3 spaces, when
 # the body carries one; nothing at all otherwise. Such an opener's container
 # scope is indeterminate without a container model, so a checklist reading from
-# this body must BLOCK, never guess (arbsec/orchestraitor#809). Reads the body
-# on STDIN.
+# this body must BLOCK, never guess (arbsec/orchestraitor#809). The condition is
+# STICKY: closing the region does NOT clear it, because a closer can end the
+# region earlier for the renderer than for this scanner. Reads the body on
+# STDIN.
 orc_lib_fence_unparseable_line() { orc_lib__fence_scan indeterminate; }
 
 # CommonMark §2.1 line endings, normalised ONCE before any scan: replace every
@@ -334,6 +351,10 @@ orc_lib__fence_scan() {
     #
     # A form feed and a vertical tab are NOT indentation: they are content, so
     # a `\f`- or `\v`-led fence line opens nothing (#799 F18, corpus case 38).
+    #
+    # The SAME view decides an HTML comment opener: `<!--` opens a comment only
+    # when it is the FIRST non-whitespace content of the line (#799 gen-9), so a
+    # `<!--` inside an inline code span is literal text and opens nothing.
     function fence_view(line,   n, rest) {
       n = 0
       while (substr(line, n + 1, 1) == " ") n++
@@ -359,14 +380,6 @@ orc_lib__fence_scan() {
     function closes_here(s, n) {
       return substr(s, n + 1) ~ /^[ \t]*$/
     }
-    # A checklist marker line is NOT an HTML comment opener: its `<!-- orc:NAME
-    # -->` pair is the MARKER delimiter on a visible task-list line, so it must
-    # stay in the scan output. Exactly the shape the marker scan accepts below.
-    function is_marker_line(line,   t) {
-      t = line
-      sub(/^[ \t]+/, "", t)
-      return t ~ /^- *\[[xX ]\] *<!-- *orc:[A-Za-z0-9_-]+ *-->/
-    }
     {
       s = fence_view($0)
       if (fence_char != "") {
@@ -383,11 +396,22 @@ orc_lib__fence_scan() {
         next
       }
       if (in_comment) {
-        # Inside an HTML comment: the delimiter line that carries "-->" ends it
-        # (inclusive — CommonMark ends a type-2 HTML block at the END of that
-        # line, so text after the delimiter is still invisible), and nothing on
-        # the line can open or close a fence.
+        # Inside an HTML comment: the line carrying "-->" ends it (inclusive —
+        # CommonMark ends a type-2 HTML block at the END of that line, so text
+        # after the delimiter is still invisible), and nothing on the line can
+        # open or close a fence.
         if (index($0, "-->") > 0) in_comment = 0
+        next
+      }
+      # `<!--` opens an HTML comment ONLY when it is the FIRST content of the
+      # non-whitespace content (CommonMark HTML block type 2). A `<!--` further
+      # along the line — inside an inline code span, or after prose — is
+      # LITERAL TEXT: it opens nothing, so the line stays visible and every
+      # marker on it is still evidence.
+      if (substr(s, 1, 4) == "<!--") {
+        # The opener line ends the comment itself when it carries "-->" after
+        # the `<!--` (CommonMark: the block ends at the line containing `-->`).
+        if (index(substr(s, 5), "-->") == 0) in_comment = 1
         next
       }
       if (s != "") {
@@ -399,23 +423,21 @@ orc_lib__fence_scan() {
           # fence MAY carry backticks (#799 F17).
           if (n >= 3 && !(c == "`" && index(substr(s, n + 1), "`") > 0)) {
             # A 1-3-space indent means the opener may sit inside a list item or
-            # a block quote: its container scope is indeterminate here, so the
-            # line number is recorded and the verdict BLOCKS (#809).
+            # a block quote: its container scope is indeterminate here. The
+            # condition is STICKY and is NOT cleared when the region closes: a
+            # closer at a different container level ends the region EARLIER for
+            # the renderer than for this scanner, so a marker that CLOSES the
+            # region here can still be visible to a human — a body with
+            # `  ``` ` … `- [ ] <!-- orc:x -->` … `  ``` ` must never read as
+            # "all checked". The remedy is to DEDENT the opener to column 0.
             ind = 0
             while (substr($0, ind + 1, 1) == " ") ind++
-            if (ind > 0 && unparseable_line == 0) unparseable_line = NR
+            if (ind > 0 && indeterminate_line == 0) indeterminate_line = NR
             fence_char = c
             fence_len = n
             next
           }
         }
-      }
-      # `<!--` opens an HTML comment. The delimiter line itself is invisible, and
-      # a fence inside the comment opens nothing; an unclosed comment runs to
-      # the end of the body (fail closed).
-      if (index($0, "<!--") > 0 && !is_marker_line($0)) {
-        if (index(substr($0, index($0, "<!--") + 4), "-->") == 0) in_comment = 1
-        next
       }
       if (mode == "strip") print $0
     }
@@ -423,8 +445,8 @@ orc_lib__fence_scan() {
       if (mode == "state") {
         if (fence_char != "") printf "open %s %d\n", fence_char, fence_len
         else print "closed"
-      } else if (mode == "indeterminate" && unparseable_line > 0) {
-        print unparseable_line
+      } else if (mode == "indeterminate" && indeterminate_line > 0) {
+        print indeterminate_line
       }
     }
   '

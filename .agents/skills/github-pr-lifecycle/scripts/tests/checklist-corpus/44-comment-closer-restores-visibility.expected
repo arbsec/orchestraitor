@@ -1,0 +1,5 @@
+# The comment CLOSES at the first line carrying `-->` (CommonMark ends an HTML
+# block at the line containing `-->`), so the content after it is visible again
+# and the unticked item is counted. An engine that never closed the comment
+# would see no item at all.
+marker_count=1 all_checked=false

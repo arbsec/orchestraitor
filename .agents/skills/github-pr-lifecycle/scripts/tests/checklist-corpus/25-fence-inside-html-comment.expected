@@ -1,4 +1,7 @@
-# An HTML comment is not code: the fence inside it opens nothing, so the item after
-# `-->` is VISIBLE and unchecked — a parser that keeps the fence open sees nothing,
-# one that counts the item sees one unticked item.
+# An HTML comment is not code: the `<!--` at the START of the line opens a
+# comment (CommonMark HTML block type 2), the fence inside it opens nothing,
+# and the `-->` line closes the comment — so the item after it is VISIBLE and
+# unchecked. A parser that keeps the fence open sees nothing, one that counts
+# the item sees one unticked item, and one that treats the `-->` as still
+# inside the comment sees nothing either.
 marker_count=1 all_checked=false

@@ -656,10 +656,17 @@ pr.status <N> -> {
                                     # Markers inside a fenced code region (3+ backticks or 3+
                                     # tildes) or an HTML comment (`<!--` ... `-->`) are EXAMPLES,
                                     # not checklist items: the whole region is excluded from the
-                                    # scan (arbsec/orchestraitor#788), and an unclosed comment
-                                    # hides everything after it (fail closed). Line endings are
-                                    # normalised ONCE before any scan (CommonMark §2.1: a lone CR
-                                    # and CRLF both become LF), so a closer followed by a
+                                    # scan (arbsec/orchestraitor#788). A comment opens ONLY when
+                                    # `<!--` is the line's first non-whitespace content (at most
+                                    # three leading spaces) — a `<!--` inside an inline code span,
+                                    # or after prose, is literal text and opens nothing, and a
+                                    # marker line never opens one because its `<!--` is not the
+                                    # line's first content. It closes at the FIRST line carrying
+                                    # `-->` (the opener line included, so `<!-- orc:none -->` is a
+                                    # one-line comment), and an unclosed comment hides everything
+                                    # after it to the end of the body (fail closed). Line endings
+                                    # are normalised ONCE before any scan (CommonMark §2.1: a lone
+                                    # CR and CRLF both become LF), so a closer followed by a
                                     # CRLF-CRLF terminator closes in both engines. A fence line
                                     # carries at most THREE leading spaces; four or more (or a
                                     # leading tab) is an indented code block, where fence
@@ -677,8 +684,11 @@ pr.status <N> -> {
                                     # container scope (top level, list item, block quote) is
                                     # indeterminate without a container model, so no checklist
                                     # reading is trusted, `all_checked` is false, and the verdict
-                                    # blocks with `checklist_unparseable` — dedent the fence to
-                                    # column 0, or close it (arbsec/orchestraitor#809).
+                                    # blocks with `checklist_unparseable` (arbsec/orchestraitor#809).
+                                    # The condition is STICKY: closing the region does not clear
+                                    # it (a closer can end the region earlier for the renderer
+                                    # than for the scan, so a swallowed marker can still be
+                                    # visible). The remedy is to dedent the opener to column 0.
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

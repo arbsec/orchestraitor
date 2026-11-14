@@ -134,8 +134,10 @@ MARKERS_PRESENT="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" marker_count "reconcile-checklist"
 MARKER_COUNT="$SUB_READ_VALUE"
 # A body whose fenced scope is INDETERMINATE cannot be read at all: an opener
-# indented 1-3 spaces may belong to a list item or a block quote, and the
-# scanner has no container model (#809). Fail closed — never guess.
+# indented 1-3 spaces whose region never closes may belong to a list item or a
+# block quote, and the scanner has no container model (#809). Fail closed —
+# never guess. An indented opener whose region CLOSES has a known extent, so
+# it is determinate and raises no condition.
 sub_read "$CHECKLIST_JSON" unparseable "reconcile-checklist"
 CHECKLIST_UNPARSEABLE="$SUB_READ_VALUE"
 sub_read "$CHECKLIST_JSON" unparseable_line "reconcile-checklist" yes
@@ -192,7 +194,7 @@ MERGEABLE="true"
 # The explanatory line for an indeterminate fence scope: it NAMES the construct
 # and the fix. Printed on stdout in text mode and on stderr in JSON mode (the
 # JSON stdout stays a pure typed payload).
-UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}); its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence to column 0, or close it."
+UNPARSEABLE_EXPLANATION="checklist_unparseable: the PR body opens a fenced code block indented 1-3 spaces (line ${CHECKLIST_UNPARSEABLE_LINE:-?}) and never closes it; its container scope — top level, list item, or block quote — is indeterminate, so the checklist cannot be read. Fix: dedent the fence opener to column 0."
 if [ "$CHECKLIST_UNPARSEABLE" = "true" ] && [ "$OPT_JSON" = true ]; then
   echo "$UNPARSEABLE_EXPLANATION" >&2
 fi

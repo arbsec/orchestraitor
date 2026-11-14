@@ -1,0 +1,8 @@
+# arbsec/orchestraitor#809: an opener indented 1-3 spaces may equally belong to
+# a list item or a block quote, and the scanner has no container model. While
+# that region is OPEN the scope is INDETERMINATE, so the reading is refused and
+# `all_checked` is false even though the only visible marker is ticked (the
+# verdict blocks with `checklist_unparseable`). The region never closes here,
+# which is exactly the case that stays indeterminate: a CLOSED indented region
+# has a known extent and is determinate (corpus case 18).
+marker_count=1 all_checked=false

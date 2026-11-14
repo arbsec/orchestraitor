@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region or an HTML comment are examples, not checklist items. A body that OPENS a fence with 1-3 leading spaces is reported unparseable (all_checked false): the fence's container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence to column 0, or close it."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region or an HTML comment are examples, not checklist items. An HTML comment opens only when its <!-- is the line's first content, so a <!-- inside an inline code span is literal text. A body that OPENS a fence with 1-3 leading spaces and never closes it is reported unparseable (all_checked false): the fence's container scope cannot be determined, so the verdict blocks with checklist_unparseable — dedent the fence opener to column 0."
   exit "$ORC_OK"
 fi
 
@@ -54,10 +54,12 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 # reconciliation agree on what a marker is.
 SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
 # A fence OPENER indented 1-3 spaces may sit inside a list item or a block
-# quote, and the scanner has no container model: the region it models can
+# quote, and the scanner has no container model. The region it models can
 # swallow a genuine unchecked item, so the reading is INDETERMINATE and
 # `all_checked` must never be true for it (arbsec/orchestraitor#809). The
-# verdict blocks with `checklist_unparseable`; the fix names the construct.
+# condition stands only while that region is OPEN: a region that CLOSES has a
+# known extent, so its contents are determinately code. The verdict blocks with
+# `checklist_unparseable`; the fix names the construct.
 UNPARSEABLE_LINE="$(printf '%s\n' "$BODY" | orc_lib_fence_unparseable_line)"
 RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -oP '^[ \t]*-\s*\[[xX ]\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
   CHECKED="$(printf '%s\n' "$line" | grep -oP '^[ \t]*-\s*\[[xX ]\]' | grep -oP '(?<=\[).' || echo " ")"
@@ -87,9 +89,9 @@ if [ "$OPT_JSON" = true ]; then
 else
   echo "PR checklist reconciliation:"
   if [ -n "$UNPARSEABLE_LINE" ]; then
-    echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE;"
+    echo "  (UNPARSEABLE: the body opens a fenced code block indented 1-3 spaces on line $UNPARSEABLE_LINE and never closes it;"
     echo "   its container scope (top level, list item, block quote) cannot be determined, so no checklist reading is trusted)"
-    echo "   fix: dedent the fence to column 0, or close it"
+    echo "   fix: dedent the fence opener to column 0"
   fi
   if [ -z "$RESULT" ]; then
     echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"

@@ -73,12 +73,18 @@ closing run is CONTENT: it leaves the region OPEN, so a marker behind such a
 closer is still inside the fence. Line endings are normalised ONCE before any
 scan (CommonMark §2.1: a lone CR is a line ending and so is CRLF; both become
 LF), so a closing fence followed by a CRLF-CRLF terminator closes. Only a space
-or a tab indents a checklist item. A fence OPENER indented 1-3 spaces has an
+or a tab indents a checklist item. An HTML comment opens only when `<!--` is the
+line's first non-whitespace content (at most three leading spaces) — a `<!--`
+inside an inline code span or after prose is literal text, so the rest of that
+line stays visible — and closes at the first line carrying `-->` (the opener line
+included), while an unclosed comment runs to the end of the body. A fence OPENER
+indented 1-3 spaces has an
 INDETERMINATE container scope (it may belong to a list item or a block quote,
 and the scanner has no container model): the checklist is not read, `all_checked`
 is false, and the verdict blocks with the distinct reason
-`checklist_unparseable` (arbsec/orchestraitor#809) — dedent the fence to column
-0, or close it.
+`checklist_unparseable` (arbsec/orchestraitor#809). The condition is sticky —
+closing the region does not clear it — and the one remedy is to dedent the fence
+opener to column 0.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

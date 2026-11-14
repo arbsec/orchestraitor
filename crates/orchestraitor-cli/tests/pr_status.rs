@@ -175,6 +175,21 @@ fn body_with_indented_fence() -> String {
     .to_string()
 }
 
+/// A body carrying an inline code span with a comment token, then a VISIBLE
+/// unchecked item (arbsec/orchestraitor#799 gen-9). `CommonMark` HTML block type 2
+/// anchors `<!--` at the start of the line, so the span's token is literal text
+/// and opens no comment. Before the anchor, the scan opened a comment there, hid
+/// the unchecked item, and the verdict reported `all_checked: true` with no
+/// reasons — the fail-open defect this fixture pins end to end.
+fn body_with_inline_code_comment_token() -> String {
+    serde_json::json!({
+        "data": {"repository": {"pullRequest": {
+            "body": "- [x] <!-- orc:issue --> linked\n\n`<!--`\n\n- [ ] <!-- orc:tests --> not tested",
+        }}}
+    })
+    .to_string()
+}
+
 /// A body with NO managed marker at all — the #788 vacuous-pass shape
 /// (observed on the merged PR #767 body).
 fn body_no_markers() -> String {
@@ -763,8 +778,63 @@ fn pr_status_indented_fence_blocks_with_checklist_unparseable() -> miette::Resul
     assert!(text.contains("UNPARSEABLE"), "{text}");
     assert!(text.contains("indented 1-3 spaces"), "{text}");
     assert!(
-        text.contains("fix: dedent the fence to column 0, or close it"),
+        text.contains("fix: dedent the fence opener to column 0"),
         "{text}"
+    );
+    // The remedy must be one that WORKS: closing the region never clears the
+    // (sticky) indeterminate condition, so no message may offer it.
+    assert!(!text.contains("or close it"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn pr_status_inline_code_comment_token_keeps_the_item_visible() -> miette::Result<()> {
+    // End-to-end regression for the fail-open defect: nine markers ticked would
+    // be fine — here ONE is ticked and one is visibly unticked behind an inline
+    // code span carrying `<!--`. The verdict must BLOCK on the item count, so
+    // `merge-gate` never reaches `gh pr merge`.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        body_with_inline_code_comment_token(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["unchecked_items(1)"]),
+        "the visible unticked item behind an inline code token is evidence"
+    );
+    assert_eq!(verdict["checklist"]["unparseable"], false, "{verdict}");
+    assert_eq!(verdict["checklist"]["marker_count"], 2, "{verdict}");
+    assert_eq!(
+        verdict["checklist"]["all_checked"], false,
+        "a visible unticked item must never read as all-checked"
     );
     Ok(())
 }

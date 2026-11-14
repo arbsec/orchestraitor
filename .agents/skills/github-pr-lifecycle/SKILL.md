@@ -355,11 +355,14 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   strings, closing tails, CRLF/CR normalisation, HTML comments,
                   and the indeterminate-scope refusal — live in
                   `references/pr-convergence.md` ("Fenced code is not checklist
-                  state"). A marker after a closed fence counts, and a fence
+                  state"). A marker after a closed fence counts. An HTML comment
+                  opens only when `<!--` is the line's first non-whitespace
+                  content (so a `<!--` inside an inline code span is literal
+                  text) and closes at the first line carrying `-->`. A fence
                   opener indented 1-3 spaces makes the checklist reading
-                  INDETERMINATE, so the verdict blocks with
-                  `checklist_unparseable` — dedent the fence to column 0, or
-                  close it.
+                  INDETERMINATE — closed or not — so the verdict blocks with
+                  `checklist_unparseable`; the one remedy is to dedent the fence
+                  opener to column 0.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

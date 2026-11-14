@@ -231,7 +231,7 @@ pub struct Checklist {
     /// container scope (top level, list item, block quote) cannot be determined
     /// without a container model, so NO checklist reading from this body is
     /// trusted and the verdict blocks with `checklist_unparseable`
-    /// (arbsec/orchestraitor#809).
+    /// (arbsec/orchestraitor#809). STICKY: a closer does not clear it.
     pub unparseable: bool,
     /// 1-based line number of the first such opener, or `None`.
     pub unparseable_line: Option<u64>,
@@ -1227,8 +1227,9 @@ fn gh_bucket(state: &str) -> String {
 /// opt-out.
 ///
 /// A body whose fence scope is INDETERMINATE — a fence OPENER indented 1-3
-/// spaces — is never "all checked": the reading is refused rather than guessed
-/// (`unparseable`, arbsec/orchestraitor#809).
+/// spaces, whether or not its region closes — is never "all checked": the
+/// reading is refused rather than guessed (`unparseable`,
+/// arbsec/orchestraitor#809).
 fn parse_checklist(body: &str) -> Checklist {
     let scan = scan_fences(body);
     let mut items = Vec::new();
@@ -1309,7 +1310,8 @@ struct FenceScan {
     /// 1-based line number of the first fence OPENER indented 1-3 spaces.
     /// Such an opener may belong to a list item or a block quote, and this
     /// scanner has no container model, so every checklist reading from the body
-    /// is REFUSED rather than guessed (arbsec/orchestraitor#809).
+    /// is REFUSED rather than guessed (arbsec/orchestraitor#809). The condition
+    /// is STICKY: closing the region does not clear it.
     indented_opener: Option<u64>,
 }
 
@@ -1328,7 +1330,11 @@ struct FenceScan {
 ///   which reaches the 4-column tab stop — is an INDENTED code block, where
 ///   fence characters are literal text; arbsec/orchestraitor#799 F16). A 1-3
 ///   space indent makes the opener's CONTAINER indeterminate: the line number
-///   is recorded in [`FenceScan::indented_opener`] and the verdict blocks;
+///   is recorded in [`FenceScan::indented_opener`] and the verdict blocks. The
+///   condition is STICKY — a closer does NOT clear it, because a closer at a
+///   different container level ends the region EARLIER for the renderer than
+///   for this scanner, so a marker swallowed by the scanner's region can still
+///   be visible to a human;
 /// - a backtick fence's info string MUST NOT contain a backtick, which makes
 ///   ```` ```example``` ```` a CLOSED inline code span rather than an opener; a
 ///   tilde fence MAY carry backticks in its info string (F17);
@@ -1344,10 +1350,20 @@ struct FenceScan {
 ///   fence lines — is excluded from marker scanning;
 /// - an HTML COMMENT (`<!--` … `-->`) is not code and not evidence: its
 ///   delimiter lines and everything between them are excluded from the scan,
-///   and a fence inside it neither opens nor closes a region. A checklist item
-///   line is NOT a comment opener — its `<!-- orc:NAME -->` is the marker
-///   delimiter on a visible task-list line. An unclosed comment runs to the end
-///   of the body (fail closed: everything after it is invisible evidence).
+///   and a fence inside it neither opens nor closes a region. A comment OPENS
+///   only when `<!--` is the line's FIRST non-whitespace content (`CommonMark`
+///   HTML block type 2: the `<!--` must start the line) — a `<!--` further
+///   along the line, inside an inline code span or after prose, is LITERAL
+///   TEXT that opens nothing, so the rest of that line stays visible. The
+///   comment CLOSES at the first line carrying `-->` (the opener line
+///   included, so `<!-- orc:none -->` is a complete one-line comment), and an
+///   unclosed comment runs to the end of the body (fail closed: everything
+///   after it is invisible evidence);
+/// - a managed marker line needs NO exemption: it is `- [x] <!-- orc:NAME -->`,
+///   so its `<!--` is never the line's first content and it can never open a
+///   comment. The exemption that used to say otherwise disagreed with the
+///   checklist parser about whitespace (a TAB after `]`), and that disagreement
+///   hid a genuine unchecked item in one engine and not the other.
 fn scan_fences(body: &str) -> FenceScan {
     let normalized = normalize_line_endings(body);
     let mut out = String::new();
@@ -1391,6 +1407,22 @@ fn scan_fences(body: &str) -> FenceScan {
             }
             continue;
         }
+        // `<!--` opens an HTML comment ONLY when it is the line's first
+        // non-whitespace content (CommonMark HTML block type 2). A `<!--`
+        // further along the line — inside an inline code span, or after prose —
+        // is LITERAL TEXT: it opens nothing, so the line stays visible and
+        // every marker on it is still evidence.
+        if let Some((_, trimmed)) = candidate
+            && trimmed.starts_with("<!--")
+        {
+            // The opener line ends the comment itself when it carries `-->`
+            // after the `<!--` (CommonMark: the block ends at the line
+            // containing `-->`).
+            if !trimmed[4..].contains("-->") {
+                in_comment = true;
+            }
+            continue;
+        }
         // Outside a region: a line whose first 0-3 characters are spaces and
         // whose next characters are 3+ backticks or 3+ tildes OPENS a fence.
         if let Some((indent, trimmed)) = candidate
@@ -1400,24 +1432,21 @@ fn scan_fences(body: &str) -> FenceScan {
             let run = trimmed.chars().take_while(|c| *c == first).count();
             let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
             if run >= 3 && !info_has_backtick {
+                // A 1-3-space indent makes the opener's CONTAINER indeterminate:
+                // it may equally belong to a list item or a block quote. The
+                // condition is STICKY and is NOT cleared when the region closes:
+                // a closer at a different container level ends the region
+                // EARLIER for the renderer than for this scanner, so a marker
+                // that closes the region here can still be visible to a human —
+                // reading such a body as "all checked" is the false pass this
+                // rule exists to stop (#809). The remedy is to DEDENT the opener
+                // to column 0.
                 if indent > 0 && indented_opener.is_none() {
                     indented_opener = u64::try_from(index + 1).ok();
                 }
                 fence = Some((first, run));
                 continue;
             }
-        }
-        // `<!--` opens an HTML comment: the delimiter line itself is invisible,
-        // and a fence inside the comment opens nothing. A checklist marker line
-        // is exempt — its delimiters are the marker, not a comment.
-        if line.contains("<!--") && !is_marker_line(line) {
-            if !line
-                .split_once("<!--")
-                .is_some_and(|(_, after)| after.contains("-->"))
-            {
-                in_comment = true;
-            }
-            continue;
         }
         out.push_str(line);
         out.push('\n');
@@ -1426,37 +1455,6 @@ fn scan_fences(body: &str) -> FenceScan {
         body: out,
         indented_opener,
     }
-}
-
-/// Whether `line` is a managed checklist item line: `- [ ] <!-- orc:NAME -->`.
-///
-/// Exactly the shape [`parse_checklist`] accepts, so a marker line is never
-/// mistaken for an HTML-comment opener.
-fn is_marker_line(line: &str) -> bool {
-    let trimmed = line.trim_start_matches([' ', '\t']);
-    let Some(rest) = trimmed.strip_prefix("- [") else {
-        return false;
-    };
-    let Some((checked_char, after_box)) = rest.split_once(']') else {
-        return false;
-    };
-    if checked_char.len() != 1
-        || !(checked_char == "x" || checked_char == "X" || checked_char == " ")
-    {
-        return false;
-    }
-    let Some(rest) = after_box.trim_start().strip_prefix("<!--") else {
-        return false;
-    };
-    let Some((marker, _)) = rest.split_once("-->") else {
-        return false;
-    };
-    let marker = marker.trim();
-    marker.starts_with("orc:")
-        && !marker["orc:".len()..].is_empty()
-        && marker["orc:".len()..]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// The part of `line` at which a fence may open or close, with its leading
@@ -2233,7 +2231,7 @@ mod tests {
     /// never lower it to make a red suite green. `CORPUS_FLOOR` in
     /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
     /// carries the same number; keep the two in step.
-    const CORPUS_FLOOR: u32 = 41;
+    const CORPUS_FLOOR: u32 = 48;
 
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
@@ -2449,6 +2447,100 @@ sample
         let literal = parse_checklist("    ```\n- [x] <!-- orc:tests --> fine\n");
         assert!(!literal.unparseable);
         assert!(literal.all_checked);
+
+        // A CLOSED indented region does NOT clear the condition (the rule is
+        // STICKY): a closer at a different container level ends the region
+        // EARLIER for the renderer than for this scanner, so the scanner can
+        // swallow a marker a human still sees. `CommonMark` ends this fence with
+        // the list item, so the unticked item is VISIBLE — a "closing clears"
+        // rule reported it as no evidence at all.
+        let closed = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+  ```
+  sample
+- [ ] <!-- orc:tests --> not tested
+  ```
+",
+        );
+        assert!(
+            closed.unparseable,
+            "a CLOSED 1-3-space opener is still indeterminate (sticky)"
+        );
+        assert_eq!(closed.unparseable_line, Some(3));
+        assert_eq!(
+            closed.marker_count, 1,
+            "the scanner's region swallows the visible item — which is exactly why the reading is refused"
+        );
+        assert!(!closed.all_checked, "the sticky condition must block");
+    }
+
+    /// `CommonMark` HTML block type 2: a comment ANCHORS at the start of the
+    /// line, so a `<!--` that is not the line's first non-whitespace content is
+    /// LITERAL TEXT and opens nothing (arbsec/orchestraitor#799 gen-9).
+    ///
+    /// The regression this pins: a body with every marker ticked, then a line
+    /// carrying an inline code span with a comment token, then a VISIBLE
+    /// unchecked item, reported `all_checked: true` and reached the merge —
+    /// both engines agreeing on the wrong answer. The line-start anchor removes
+    /// the inline-code parsing entirely: a marker line's own `<!--` is never
+    /// the line's first content, so the deleted `is_marker_line` exemption has
+    /// nothing left to exempt.
+    #[test]
+    fn an_html_comment_anchors_at_the_start_of_the_line() {
+        // The reported defect, verbatim: the inline code span's token must not
+        // open a comment, so the visible unchecked item after it is evidence.
+        let inline_token = parse_checklist(
+            "- [x] <!-- orc:issue --> visible\n\n`<!--`\n\n- [ ] <!-- orc:tests --> visible unchecked\n",
+        );
+        assert_eq!(inline_token.marker_count, 2);
+        assert!(!inline_token.unparseable);
+        assert_eq!(inline_token.unchecked_count, 1);
+        assert!(
+            !inline_token.all_checked,
+            "a visible unchecked item behind an inline code token must block the gate"
+        );
+
+        // The same token AFTER PROSE is literal text too.
+        let after_prose = parse_checklist(
+            "- [x] <!-- orc:tests --> Tests pass\nThe parser recognizes the `<!--` token.\n- [ ] <!-- orc:security --> Review pending\n",
+        );
+        assert_eq!(after_prose.marker_count, 2);
+        assert!(!after_prose.all_checked);
+
+        // A line-start `<!--` DOES open a comment: the marker inside it is
+        // invisible, so a body whose only marker sits there reports none.
+        let line_start =
+            parse_checklist("<!--\n- [ ] <!-- orc:tests --> hidden inside the comment\n-->\n");
+        assert_eq!(line_start.marker_count, 0);
+        assert!(!line_start.markers_present);
+
+        // The first line carrying `-->` closes it (the opener line included),
+        // so content AFTER it is visible again.
+        let restored = parse_checklist("<!--\nhidden\n-->\n- [ ] <!-- orc:tests --> visible\n");
+        assert_eq!(restored.marker_count, 1);
+        assert_eq!(restored.unchecked_count, 1);
+        assert!(!restored.all_checked);
+        let one_line = parse_checklist("<!-- orc:none -->\n- [ ] <!-- orc:tests --> real item\n");
+        assert_eq!(
+            one_line.marker_count, 1,
+            "a one-line comment closes itself, so the item below it is visible"
+        );
+
+        // An unclosed comment runs to the end of the body (fail closed).
+        let unclosed = parse_checklist(
+            "- [x] <!-- orc:issue --> before\n<!--\n- [ ] <!-- orc:tests --> hidden\n",
+        );
+        assert_eq!(unclosed.marker_count, 1);
+        assert!(unclosed.all_checked);
+
+        // A marker line is never a comment opener — its `<!--` is not the first
+        // content — and a TAB after the box changes nothing. The deleted
+        // exemption matched the marker with a SPACES-only pattern, so the shell
+        // engine hid this item while this engine counted it.
+        let tab_after_box = parse_checklist("- [ ]\t<!-- orc:tests --> tab after the box\n");
+        assert_eq!(tab_after_box.marker_count, 1);
+        assert!(!tab_after_box.items[0].checked);
     }
 
     /// `CommonMark` §2.1 line endings: CRLF and a lone CR are both line endings

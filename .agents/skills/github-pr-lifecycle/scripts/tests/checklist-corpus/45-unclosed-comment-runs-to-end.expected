@@ -1,0 +1,5 @@
+# An UNCLOSED comment runs to the end of the body (fail closed): the marker
+# inside it is invisible evidence, so only the marker before it counts. An
+# engine that let a stray `<!--` open a comment it never closed would hide the
+# rest of the body.
+marker_count=1 all_checked=true

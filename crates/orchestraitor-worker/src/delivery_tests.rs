@@ -214,6 +214,134 @@ async fn untrusted_summary_cannot_enclose_the_trusted_checklist() {
     );
 }
 
+/// The summary neutraliser, exactly: an indented fence opener is dedented to
+/// column 0, a line-start `<!--` has its `<` escaped, and nothing else moves.
+/// Idempotent, so a retried delivery composes the identical body.
+#[test]
+fn neutralise_summary_dedents_openers_and_escapes_comments() {
+    // Four boundaries in one body: a 2-space backtick opener and its closer
+    // (dedented), a column-0 `<!--` (escaped), a TAB-led `<!--` (untouched: a
+    // tab is content, so it opens no comment), and a 4-space `<!--` / ` ``` `
+    // (untouched: indented code, not a comment opener and not a fence).
+    let summary = "- Example:\n  ```\n  sample\n  ```\n<!--\n  \t<!--\n    <!--\n    ```\n```\n";
+    let expected = "- Example:\n```\n  sample\n```\n&lt;!--\n  \t<!--\n    <!--\n    ```\n```\n";
+    assert_eq!(neutralise_summary(summary), expected);
+    assert_eq!(
+        neutralise_summary(&neutralise_summary(summary)),
+        expected,
+        "neutralisation must be idempotent"
+    );
+}
+
+/// A model-authored summary that carries an INDENTED fence opener must never
+/// make the delivery PR unmergeable by construction (arbsec/orchestraitor#809:
+/// a 1-3-space opener is `checklist_unparseable`, and that condition is sticky).
+/// The lane composes the body from untrusted content, so it owns the guarantee:
+/// the opener is dedented to column 0 — the very remedy the gate's message
+/// names — and the trusted nine markers still lead, unchecked.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_neutralises_an_indented_fence_opener_in_the_summary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let summary = "- Example:\n  ```\n  sample\n  ```\n- a real line after the fence";
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/3\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.to_string(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    // The trusted block leads and carries the nine unchecked markers.
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
+    // No indented fence opener survives anywhere in the composed body: that is
+    // what makes the checklist reading determinate.
+    assert!(
+        !body.lines().any(|line| {
+            let indent = line.chars().take_while(|c| *c == ' ').count();
+            let rest = line.get(indent..).unwrap_or_default();
+            (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"))
+        }),
+        "an indented fence opener survived neutralisation: {body}"
+    );
+    // The summary survives, dedented, and its tail is still readable text.
+    assert!(body.contains("- Example:\n```\n  sample\n```\n"), "{body}");
+    assert!(
+        body.ends_with("- a real line after the fence"),
+        "the summary must survive, after the checklist: {body}"
+    );
+}
+
+/// A model-authored summary that opens an HTML block must not hide its own tail
+/// from the reviewer. The nine trusted markers precede the summary and a marker
+/// line's `<!--` is never line-start, so convergence is unaffected either way —
+/// but an UNCLOSED `<!--` would swallow the rest of the summary, which the lane
+/// must not let untrusted text suppress. The opener is rendered as literal text.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_neutralises_a_line_start_html_comment_in_the_summary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let summary = "<!-- a note the model wrote\nstill the summary";
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/4\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let request = DeliveryRequest {
+        summary: summary.to_string(),
+        ..request()
+    };
+    sink.open_pr(temp.path(), "orc-delivery/branch", &request)
+        .await
+        .expect("the fake orc succeeds");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+    assert!(body.starts_with("## Merge checklist"), "{body}");
+    assert_eq!(body.matches("- [ ] <!-- orc:").count(), 9, "{body}");
+    // No line outside the checklist opens an HTML block: nothing in the summary
+    // can hide the summary's own tail from the reviewer.
+    let summary_tail = &body[body.find("&lt;!--").expect("the escaped opener")..];
+    assert!(
+        !summary_tail
+            .lines()
+            .any(|line| line.trim_start_matches(' ').starts_with("<!--")),
+        "a line-start comment opener survived neutralisation: {body}"
+    );
+    assert!(
+        body.ends_with("still the summary"),
+        "the summary's tail must stay visible: {body}"
+    );
+}
+
 /// Drift guard: the checklist appended to delivery PRs is the repository's
 /// managed checklist, verbatim (the marker lines in
 /// `.github/PULL_REQUEST_TEMPLATE.md`).

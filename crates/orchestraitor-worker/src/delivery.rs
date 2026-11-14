@@ -148,6 +148,68 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 - [ ] <!-- orc:threads --> All actionable review threads are resolved\n\
 \n";
 
+/// Neutralises the two constructs an UNTRUSTED model summary could use to make
+/// the composed PR body **INDETERMINATE** or to hide content from a reviewer.
+///
+/// The checklist gate refuses a body that carries a fence OPENER indented 1-3
+/// spaces (`checklist_unparseable`, arbsec/orchestraitor#809), and that
+/// condition is STICKY: it is not cleared when the region closes, because a
+/// closer at a different container level ends the region earlier for the
+/// renderer than for the scanner. A model summary that legitimately contains a
+/// nested code fence (```` ``` ```` inside a list item, say) would therefore
+/// make every delivery PR unmergeable by construction — and the summary is
+/// untrusted content the LANE composed, so the lane owns that guarantee.
+///
+/// Two transformations, both minimal and both idempotent:
+///
+/// - a line indented 1-3 SPACES whose next characters are 3+ backticks or 3+
+///   tildes is **dedented to column 0**. That is exactly the remedy the gate's
+///   own message names, and it makes the opener a determinate column-0 fence.
+///   The test is a strict SUPERSET of the scanner's opener rule (which also
+///   rejects a backtick in a backtick fence's info string), so no indented
+///   opener can survive; dedenting a line that was not an opener renders the
+///   same either way;
+/// - a line whose first non-whitespace content is `<!--` (at most 3 leading
+///   spaces, and no leading tab) has its `<` escaped to `&lt;`, so it renders
+///   as the literal text `<!--` and opens no HTML block. The nine trusted
+///   markers precede the summary and a marker line's `<!--` is never
+///   line-start, so the checklist reading stays determinate either way — but an
+///   UNCLOSED `<!--` would swallow the rest of the summary and hide it from the
+///   reviewer, which is content the lane must not let untrusted text suppress.
+///   Escaping keeps every byte the model wrote VISIBLE; only the ability to
+///   open a region is removed.
+///
+/// After this, the only region the summary can open is a COLUMN-0 fence: that
+/// one is determinate, and because the trusted checklist leads the body it can
+/// never enclose it.
+fn neutralise_summary(summary: &str) -> String {
+    let mut out = String::with_capacity(summary.len());
+    for line in summary.split_inclusive('\n') {
+        // Keep the terminator out of the tests, then put it back: an opener is
+        // recognised from the line's content alone.
+        let (content, newline) = match line.strip_suffix('\n') {
+            Some(rest) => (rest, "\n"),
+            None => (line, ""),
+        };
+        let indent = content.chars().take_while(|c| *c == ' ').count();
+        let rest = content.get(indent..).unwrap_or_default();
+        let indented_opener =
+            (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"));
+        let comment_opener = indent <= 3 && !rest.starts_with('\t') && rest.starts_with("<!--");
+        if indented_opener {
+            out.push_str(rest);
+        } else if comment_opener {
+            out.push_str(&content[..indent]);
+            out.push_str("&lt;");
+            out.push_str(rest.get(1..).unwrap_or_default());
+        } else {
+            out.push_str(content);
+        }
+        out.push_str(newline);
+    }
+    out
+}
+
 /// Real delivery sink (issue #656): hands a completed run's committed
 /// worktree state to `orc github push-branch` (the App-signed landing
 /// primitive, #491) and then opens a PR through `orc github
@@ -292,9 +354,16 @@ impl PushBranchDeliverySink {
         // would land INSIDE that fence, where every scanner strips them as an
         // example — a summary with one ticked marker plus an unclosed fence
         // would then pass the merge gate on its own (see DELIVERY_PR_CHECKLIST).
+        //
+        // The summary is also NEUTRALISED before it is composed (see
+        // [`neutralise_summary`]): an indented fence opener in it would make the
+        // composed body INDETERMINATE (`checklist_unparseable`) and a line-start
+        // `<!--` would hide the rest of the summary from the reviewer. The
+        // trusted block is composed here, never derived from the summary, so it
+        // can never be reordered behind a region the summary creates.
         let body = format!(
-            "{DELIVERY_PR_CHECKLIST}{summary}",
-            summary = request.summary
+            "{DELIVERY_PR_CHECKLIST}{}",
+            neutralise_summary(&request.summary)
         );
         let mut pr = tokio::process::Command::new(&self.orc_bin);
         pr.current_dir(worktree).args([

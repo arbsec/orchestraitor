@@ -1,0 +1,6 @@
+# Only SPACE and TAB indent a checklist item, and the box may be followed by a
+# TAB before the marker delimiter: `- [ ]\t<!-- orc:tests -->` is an ordinary
+# item. The comment exemption this case replaces matched the marker with a
+# SPACES-only pattern, so the shell engine hid this item while the Rust engine
+# counted it — the divergence this case pins.
+marker_count=1 all_checked=false

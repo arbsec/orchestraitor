@@ -501,14 +501,19 @@ CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
 # never lower it to make a red suite green. A reviewer once deleted
 # `35-vt-after-closer-is-not-whitespace.md`/`.expected` and both engines stayed
 # green on `-ge 30` with a 38-case corpus — the floor tracked nothing.
-# (41: cases 39/40 pin the CommonMark §2.1 line-ending normalisation and 41 pins
-# a marker hidden inside an HTML comment; 25 was re-derived for the corrected
-# comment semantics; 18 now carries the #809 indeterminate `all_checked=false`;
-# 33's in-region markers are unchecked so the case discriminates.)
+# (48: cases 39/40 pin the CommonMark §2.1 line-ending normalisation, 41 pins
+# a marker hidden inside an HTML comment, 42-45 pin the comment rule (a `<!--`
+# is literal text unless it starts the line), 46 pins a marker whose line
+# carries a TAB after the box, and 47/48 pin the STICKY indeterminate
+# opener — 47 unclosed, 48 closed with the swallowed-but-visible item that a
+# "closing clears the condition" rule reports as a pass; 25 was re-derived for
+# the corrected comment semantics; 18 carries the #809 indeterminate
+# `all_checked=false`; 33's in-region markers are unchecked so the case
+# discriminates.)
 # `checklist_corpus_matches_both_engines` in
 # crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
 # two in step.
-CORPUS_FLOOR=41
+CORPUS_FLOOR=48
 CORPUS_CASES=0
 for corpus_body in "$CORPUS_DIR"/*.md; do
   corpus_slug="$(basename "$corpus_body" .md)"
@@ -543,23 +548,63 @@ assert 'f6: and its enclosed checked marker is not evidence' false \
   "$(jq -r .all_checked <<<"$OUT")"
 assert 'f6: the guard appends the checklist (the body carries none)' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$(ensure "$F16_CLOSER" "$TMP/repo")")"
-# The inverse: a THREE-space-indented opener and closer are still fences, so a
-# marker inside one is hidden — but the scope is INDETERMINATE now (#809): the
-# opener may belong to a list item or a block quote, so `unparseable` is true,
-# `all_checked` is false and the verdict blocks with `checklist_unparseable`.
+# A 1-3-space-indented OPENER is INDETERMINATE scope (#809): it may belong to a
+# list item or a block quote, and the scanner has no container model. The
+# condition is STICKY — a closer does NOT clear it — because a closer can end
+# the region EARLIER for the renderer than for this scanner, so a marker the
+# scanner swallows can still be visible to a human. Both fixtures below are
+# therefore `unparseable: true` / `all_checked: false`, and both block.
+# CLOSED opener: 3-space opener + 3-space closer, the marker inside hidden.
 printf '   ```\n- [x] <!-- orc:tests --> example only\n   ```\n' \
-  > "$TMP/files/f16-three-space.md"
-export BODY_FIXTURE="$TMP/files/f16-three-space.md"
+  > "$TMP/files/f16-three-space-closed.md"
+export BODY_FIXTURE="$TMP/files/f16-three-space-closed.md"
 run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f6: three-space fences still hide their marker' 0 \
   "$(jq -r .marker_count <<<"$OUT")"
-assert 'f6: a 3-space opener is indeterminate scope (#809)' true \
+assert 'f6: a CLOSED 3-space opener is still indeterminate (#809)' true \
   "$(jq -r .unparseable <<<"$OUT")"
-assert 'f6: and an indeterminate scan is never "all checked" (#809)' false \
+assert 'f6: and it names the opener line (#809)' 1 \
+  "$(jq -r .unparseable_line <<<"$OUT")"
+assert 'f6: and a closed indeterminate scan is never "all checked" (#809)' false \
   "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f6: so the gate BLOCKS the closed-opener body (#809)' 5 "$RC"
+assert 'f6: with the distinct indeterminate reason (#809)' '["checklist_unparseable"]' \
+  "$(jq -c .reasons <<<"$OUT")"
 assert 'f6: and the guard still appends the checklist' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' \
-    <<<"$(ensure "$(cat "$TMP/files/f16-three-space.md")" "$TMP/repo")")"
+    <<<"$(ensure "$(cat "$TMP/files/f16-three-space-closed.md")" "$TMP/repo")")"
+
+# UNCLOSED opener: the same 3-space opener with no closer at all.
+printf '   ```\n- [x] <!-- orc:tests --> example only\n' \
+  > "$TMP/files/f16-three-space-unclosed.md"
+export BODY_FIXTURE="$TMP/files/f16-three-space-unclosed.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: an UNCLOSED 3-space opener is indeterminate (#809)' true \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f6: and it names the opener line (#809)' 1 \
+  "$(jq -r .unparseable_line <<<"$OUT")"
+assert 'f6: and it is never "all checked" (#809)' false \
+  "$(jq -r .all_checked <<<"$OUT")"
+# The swallowed-but-VISIBLE shape the sticky rule exists for: CommonMark ends
+# the fence at the end of the list item, so the unticked marker below is
+# visible in the rendered PR while this scanner's region runs on to the final
+# closer. A "closing clears the condition" rule would report one ticked marker
+# and no unticked one — a false pass.
+printf -- '- [x] <!-- orc:issue --> linked\n- Example:\n  ```\n  sample\n- [ ] <!-- orc:tests --> not tested\n  ```\n' \
+  > "$TMP/files/f16-swallowed-visible-item.md"
+export BODY_FIXTURE="$TMP/files/f16-swallowed-visible-item.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: a closed 2-space opener swallows the visible item' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f6: but the scan is refused, not read (#809)' true \
+  "$(jq -r .unparseable <<<"$OUT")"
+assert 'f6: so the swallowed visible item can never become a pass (#809)' false \
+  "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f6: and the gate blocks that body too (#809)' 5 "$RC"
+assert 'f6: on the distinct indeterminate reason (#809)' '["checklist_unparseable"]' \
+  "$(jq -c .reasons <<<"$OUT")"
 
 # arbsec/orchestraitor#799 F17 (generation-4 CodeRabbit): a backtick fence's
 # info string may not contain a backtick, so ```example``` is a CLOSED inline
@@ -719,7 +764,12 @@ assert 'f7: and the JSON telemetry carries it (#809)' true \
   "$(jq -r .checklist_unparseable <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo
 assert 'f7: text mode names the construct and the fix (#809)' 1 \
-  "$(grep -cF 'dedent the fence to column 0' <<<"$OUT")"
+  "$(grep -cF 'dedent the fence opener to column 0' <<<"$OUT")"
+# Every message names only a remedy that WORKS. "or close it" was a lie while
+# the condition was derived from the opener alone; it stays a lie under the
+# STICKY rule (closing never clears the condition), so no message may offer it.
+assert 'f7: no message offers the ineffective "or close it" (#809)' 0 \
+  "$(grep -cF 'or close it' <<<"$OUT")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------
