@@ -54,14 +54,15 @@ The `--json` output is the §9.48 schema: `number`, `repository`, `head_sha`,
 `checks_any_failing`, `checks_any_pending`, `threads` (total, unresolved
 actionable, resolved, outdated, size-capped items), `checklist`
 (`marker_count`, `markers_present`, `all_checked`, `unchecked_count`,
-`waived`, `waiver_reason`, and the `<!-- orc:* -->` items), `review_record`
+and the `<!-- orc:* -->` items), `review_record`
 (the `.orchestraitor/reviews/`
 CLEAN-record state), `convergence` (`mergeable` + `reasons`), and
 `fetched_at`. `all_checked` is true only when at least one marker exists AND
 every marker is checked: a body with no managed markers is MISSING evidence
-(reason `checklist_markers_missing`), never a vacuous pass, and converges only
-under the recorded `<!-- orc:none --> <one-line justification>` waiver —
-reported as `waived`/`waiver_reason`, never silently.
+(reason `checklist_markers_missing`), never a vacuous pass. There is NO
+author-granted opt-out — the body cannot waive itself, so a marker-less body
+always blocks. A marker inside a fenced code region (3+ backticks or 3+
+tildes) is an EXAMPLE, not a checklist item and is excluded from the scan.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

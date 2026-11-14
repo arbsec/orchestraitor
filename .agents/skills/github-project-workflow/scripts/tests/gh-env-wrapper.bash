@@ -661,6 +661,11 @@ new_orc_stub ""
 OUT="$(run_script "$PRCREATE" "" -R arbsec/orchestraitor --title "t" --body "b" 2>&1)" || true
 grep -q '^orc:github gh-env -- /.*/gh pr create --repo arbsec/orchestraitor --title t --body b' "$ORC_LOG" \
   || fail "pr-create with resolved config must take the service path regardless of the pin: orc=[$(cat "$ORC_LOG")]"
+# A marker-less body is given the managed checklist UNCHECKED (#788), so the
+# single logged argv spans lines: the routing prefix above still holds, and the
+# injected marker rides on the following line.
+grep -q '^- \[ \] <!-- orc:issue -->' "$ORC_LOG" \
+  || fail "pr-create must append the managed checklist to a marker-less body (#788): orc=[$(cat "$ORC_LOG")]"
 
 # --- 17. dry-run: writes nothing, never reaches orc gh-env or gh.
 : > "$ORC_LOG"; : > "$GH_LOG"

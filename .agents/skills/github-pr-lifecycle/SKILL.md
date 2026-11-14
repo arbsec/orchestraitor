@@ -329,13 +329,18 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   to compute the verdict from checks + threads + checklist.
                   A PR body with ZERO `<!-- orc:* -->` markers blocks with
                   `checklist_markers_missing` — a marker-less body is MISSING
-                  evidence, never a satisfied checklist (#788). `pr-create`
+                  evidence, never a satisfied checklist (#788). There is NO
+                  author-granted opt-out: the body cannot waive itself, so the
+                  block stands until the body carries the markers (an exemption
+                  needs an authority the author lacks — #801). `pr-create`
                   appends the nine template markers UNCHECKED to a supplied body
-                  that carries none, so tick them with evidence; the one
-                  recorded opt-out is a standalone
-                  `<!-- orc:none --> <one-line justification>` body line
-                  (visible in the verdict and on stderr — never silent, and
-                  inert when real markers exist).
+                  that carries none (and to a bodyless PR), so tick them with
+                  evidence. For a PR that ALREADY EXISTS, one command clears it:
+                  `bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate
+                  edit <pr> --inject-checklist` reads the current body, appends
+                  the managed checklist and sets the body. Markers inside a
+                  fenced code region are EXAMPLES, not checklist items — a
+                  marker after a closed fence counts.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

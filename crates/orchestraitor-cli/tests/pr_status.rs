@@ -15,6 +15,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -277,53 +278,87 @@ fn write_project_config(temp: &tempfile::TempDir) -> miette::Result<()> {
     .into_diagnostic()
 }
 
+/// Runs `git` inside `repo` with the ambient git LOCATION scrubbed.
+///
+/// `git -C <dir>` does NOT isolate the git location: a hook-exported
+/// `GIT_DIR`/`GIT_WORK_TREE` wins over `-C`, so an inherited location would
+/// redirect the fixture's commits into the caller's real repository.
+/// `GIT_INDEX_FILE` has the same effect on the index. The scrub is applied
+/// AFTER `overrides`, so it always wins — `overrides` exist to SIMULATE a
+/// hostile ambient location in the regression test, never to defeat the
+/// scrub.
+///
+/// Every call's exit status is asserted — a silently failed fixture step must
+/// fail the test, not poison later assertions.
+fn git_in(
+    repo: &std::path::Path,
+    overrides: &[(&str, &str)],
+    args: &[&str],
+) -> miette::Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command.args(["-C", &repo.display().to_string()]).args(args);
+    for (name, value) in overrides {
+        command.env(name, value);
+    }
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(variable);
+    }
+    let output = command.output().into_diagnostic()?;
+    if !output.status.success() {
+        return Err(miette::miette!(
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(output)
+}
+
 /// Initializes a git repo in the temp dir with the fixture remote, so
 /// `--repo` default resolution and the review-record root resolve there.
 fn write_git_repo(temp: &tempfile::TempDir) -> miette::Result<String> {
+    write_git_repo_with_env(temp, &[])
+}
+
+/// The same fixture, but the fixture's git calls carry `overrides` in the
+/// CHILD environment. The regression test uses it to simulate a hook-exported
+/// `GIT_DIR`/`GIT_WORK_TREE`; the scrub inside [`git_in`] always wins, so the
+/// overrides never redirect the fixture's own commits.
+fn write_git_repo_with_env(
+    temp: &tempfile::TempDir,
+    overrides: &[(&str, &str)],
+) -> miette::Result<String> {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).into_diagnostic()?;
     let repo_str = repo.display().to_string();
-    // Scrub the ambient GIT_* location variables (the production code does
-    // the same): a hook-exported GIT_DIR/GIT_WORK_TREE would redirect the
-    // fixture commits into the caller's real repository. Every call's exit
-    // status is asserted — a silently failed fixture step must fail the
-    // test, not poison later assertions.
-    let git = |args: &[&str]| -> miette::Result<()> {
-        let mut command = Command::new("git");
-        command.args(["-C", &repo_str]).args(args);
-        for variable in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_COMMON_DIR",
-            "GIT_NAMESPACE",
-        ] {
-            command.env_remove(variable);
-        }
-        let output = command.output().into_diagnostic()?;
-        if !output.status.success() {
-            return Err(miette::miette!(
-                "fixture git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        Ok(())
-    };
-    git(&["init", "-q"])?;
-    git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/arbsec/orchestraitor.git",
-    ])?;
-    git(&["config", "user.email", "test@example.com"])?;
-    git(&["config", "user.name", "test"])?;
+    git_in(&repo, overrides, &["init", "-q"])?;
+    git_in(
+        &repo,
+        overrides,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/arbsec/orchestraitor.git",
+        ],
+    )?;
+    git_in(
+        &repo,
+        overrides,
+        &["config", "user.email", "test@example.com"],
+    )?;
+    git_in(&repo, overrides, &["config", "user.name", "test"])?;
     fs::write(repo.join("README.md"), "fixture\n").into_diagnostic()?;
-    git(&["add", "."])?;
-    git(&["commit", "-q", "-m", "fixture"])?;
+    git_in(&repo, overrides, &["add", "."])?;
+    git_in(&repo, overrides, &["commit", "-q", "-m", "fixture"])?;
     Ok(repo_str)
 }
 
@@ -622,8 +657,11 @@ fn pr_status_marker_less_body_blocks_with_checklist_markers_missing() -> miette:
     assert_eq!(verdict["checklist"]["marker_count"], 0);
     assert_eq!(verdict["checklist"]["markers_present"], false);
     assert_eq!(verdict["checklist"]["all_checked"], false);
-    assert_eq!(verdict["checklist"]["waived"], false);
     assert_eq!(verdict["checklist"]["unchecked_count"], 0);
+    assert!(
+        verdict["checklist"].get("waived").is_none(),
+        "there is no author-granted opt-out: the checklist object carries no waiver field"
+    );
 
     // The one-pager names the state instead of rendering "0 unchecked item(s)".
     let output = pr_status_cli(
@@ -645,9 +683,10 @@ fn pr_status_marker_less_body_blocks_with_checklist_markers_missing() -> miette:
 }
 
 #[test]
-fn pr_status_waived_marker_less_body_passes_visibly() -> miette::Result<()> {
-    // The #788 opt-out: `<!-- orc:none --> <justification>` is the ONE recorded
-    // way a marker-less body converges — and it stays visible in the verdict.
+fn pr_status_body_sentinel_is_not_an_opt_out() -> miette::Result<()> {
+    // #788 revision: the `<!-- orc:none -->` waiver was REMOVED — a PR author
+    // cannot grant themselves the exemption (arbsec/orchestraitor#801). A body
+    // that carries the sentinel and no marker still blocks.
     let temp = tempfile::tempdir().into_diagnostic()?;
     write_project_config(&temp)?;
     let repo = write_git_repo(&temp)?;
@@ -686,17 +725,15 @@ fn pr_status_waived_marker_less_body_passes_visibly() -> miette::Result<()> {
     );
     let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
     let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
-    assert_eq!(verdict["convergence"]["mergeable"], true, "{verdict}");
-    assert_eq!(verdict["convergence"]["reasons"], serde_json::json!([]));
-    assert_eq!(verdict["checklist"]["waived"], true, "{verdict}");
+    assert_eq!(verdict["convergence"]["mergeable"], false, "{verdict}");
     assert_eq!(
-        verdict["checklist"]["waiver_reason"],
-        "delivery summary only"
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_markers_missing"]),
+        "a body sentinel must never waive the marker requirement"
     );
     assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(verdict["checklist"]["all_checked"], false);
 
-    // The one-pager records WHY the requirement was waived — the opt-out is
-    // visible, never a silent pass.
     let output = pr_status_cli(
         &temp.path().display().to_string(),
         &text_endpoint,
@@ -709,12 +746,150 @@ fn pr_status_waived_marker_less_body_passes_visibly() -> miette::Result<()> {
     );
     let text = String::from_utf8(output.stdout).into_diagnostic()?;
     assert!(
-        text.starts_with("MERGEABLE:"),
-        "a waived marker-less body still merges: {text}"
+        text.starts_with("BLOCKED:"),
+        "a marker-less body with a sentinel still blocks: {text}"
     );
     assert!(
-        text.contains("checklist: marker requirement WAIVED — delivery summary only"),
+        text.contains("no managed orc:* markers found (UNSUBSTANTIATED"),
         "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pr_status_fenced_marker_is_not_a_checklist_item() -> miette::Result<()> {
+    // #788: a marker inside a fenced code region is an EXAMPLE, not evidence.
+    // The body below shows the checklist shape and carries no real item.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    write_project_config(&temp)?;
+    let repo = write_git_repo(&temp)?;
+    write_clean_record(&repo)?;
+    let payloads = vec![
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+        checks_all_pass(),
+        threads_none(),
+        serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "body": "Here is the shape:\n\n```markdown\n- [x] <!-- orc:issue --> example only\n```\n",
+            }}}
+        })
+        .to_string(),
+        pr_view_json(HEAD, BASE, "APPROVED", false),
+    ];
+    let endpoint = spawn_pr_status_server(payloads)?;
+
+    let output = pr_status_cli(
+        &temp.path().display().to_string(),
+        &endpoint,
+        &[
+            "pr",
+            "status",
+            "614",
+            "--repo",
+            "arbsec/orchestraitor",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).into_diagnostic()?;
+    let verdict: serde_json::Value = serde_json::from_str(&stdout).into_diagnostic()?;
+    assert_eq!(verdict["checklist"]["marker_count"], 0, "{verdict}");
+    assert_eq!(verdict["checklist"]["markers_present"], false);
+    assert_eq!(
+        verdict["convergence"]["reasons"],
+        serde_json::json!(["checklist_markers_missing"]),
+        "a fenced example must never satisfy the checklist gate"
+    );
+    Ok(())
+}
+
+#[test]
+fn fixture_git_ignores_an_ambient_git_location() -> miette::Result<()> {
+    // F1 regression: a hook-exported GIT_DIR/GIT_WORK_TREE must never
+    // redirect the fixture's own git calls. `git -C <dir>` does NOT isolate
+    // the git location — the location wins over `-C` — so without the scrub
+    // the fixture's `git add .` / `git commit` would stage and commit the
+    // CALLER's working tree.
+    let temp = tempfile::tempdir().into_diagnostic()?;
+    let sentinel = temp.path().join("sentinel");
+    fs::create_dir_all(&sentinel).into_diagnostic()?;
+    git_in(&sentinel, &[], &["init", "-q"])?;
+    git_in(
+        &sentinel,
+        &[],
+        &["config", "user.email", "sentinel@example.com"],
+    )?;
+    git_in(&sentinel, &[], &["config", "user.name", "sentinel"])?;
+    fs::write(sentinel.join("README.md"), "sentinel\n").into_diagnostic()?;
+    git_in(&sentinel, &[], &["add", "."])?;
+    git_in(&sentinel, &[], &["commit", "-q", "-m", "sentinel"])?;
+    let sentinel_head =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["rev-parse", "HEAD"])?.stdout)
+            .trim()
+            .to_string();
+
+    // The hostile location: GIT_DIR/GIT_WORK_TREE point at the sentinel.
+    let sentinel_git_dir = sentinel.join(".git").display().to_string();
+    let sentinel_work_tree = sentinel.display().to_string();
+    let repo = write_git_repo_with_env(
+        &temp,
+        &[
+            ("GIT_DIR", sentinel_git_dir.as_str()),
+            ("GIT_WORK_TREE", sentinel_work_tree.as_str()),
+        ],
+    )?;
+
+    // The fixture repo carries ONLY its own commit — nothing leaked in from
+    // the sentinel, and the sentinel's own commit is not the fixture's.
+    let fixture_head =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["rev-parse", "HEAD"])?.stdout)
+            .trim()
+            .to_string();
+    assert_ne!(
+        fixture_head, sentinel_head,
+        "the fixture's commit landed in the sentinel repository"
+    );
+    let fixture_log =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["log", "--format=%s"])?.stdout)
+            .to_string();
+    assert_eq!(fixture_log.trim(), "fixture", "{fixture_log}");
+    let fixture_status =
+        String::from_utf8_lossy(&git_in(Path::new(&repo), &[], &["status", "--porcelain"])?.stdout)
+            .to_string();
+    assert!(fixture_status.trim().is_empty(), "{fixture_status}");
+
+    // The sentinel repository is untouched: one commit, a clean work tree, and
+    // no file from the fixture.
+    let sentinel_log =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["log", "--format=%s"])?.stdout)
+            .to_string();
+    assert_eq!(
+        sentinel_log.trim(),
+        "sentinel",
+        "the sentinel repository gained a commit: {sentinel_log}"
+    );
+    let sentinel_status =
+        String::from_utf8_lossy(&git_in(&sentinel, &[], &["status", "--porcelain"])?.stdout)
+            .to_string();
+    assert!(
+        sentinel_status.trim().is_empty(),
+        "the sentinel work tree was modified: {sentinel_status}"
+    );
+    let sentinel_files: Vec<String> = std::fs::read_dir(&sentinel)
+        .into_diagnostic()?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+        })
+        .collect();
+    assert!(
+        !sentinel_files.iter().any(|name| name == "repo"),
+        "the fixture repo was created inside the sentinel: {sentinel_files:?}"
     );
     Ok(())
 }

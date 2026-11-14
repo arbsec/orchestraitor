@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... | ready <pr> | close <pr> [reason flags]."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. --inject-checklist (edit only) reads the PR's CURRENT body, appends the nine managed <!-- orc:* --> merge-checklist markers UNCHECKED when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788)."
   exit "$ORC_OK"
 fi
 
@@ -42,16 +42,27 @@ if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
 fi
 REST=("${REST[@]:1}")
 
-# `edit` has no meaningful effect without at least one edit flag; refuse the
-# no-op instead of letting gh error later with an ambiguous message.
-if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ]; then
-  echo "error: edit requires at least one edit flag (e.g. --add-reviewer <login>)" >&2
-  exit "$ORC_ERR_CONFIG"
-fi
-
 # Body-flow validation (issue #587): `edit --body <value>`/`--body-file <path>`
 # pass through to gh; resolve `@file` expansion and refuse path-shaped values
 # before the flag ever reaches gh — never post a path string as PR content.
+#
+# `--inject-checklist` is the REMEDIATION path for a PR that ALREADY exists
+# and carries no managed marker (arbsec/orchestraitor#788): it reads the
+# PR's current body, appends the managed checklist, and sets the body. It is
+# extracted here (before the body-flow validation) so it never reaches gh as
+# an unknown flag.
+INJECT_CHECKLIST=0
+if [ "$ACTION" = "edit" ]; then
+  PR_MUTATE_REST=()
+  index=0
+  while [ "$index" -lt "${#REST[@]}" ]; do
+    case "${REST[$index]}" in
+      --inject-checklist) INJECT_CHECKLIST=1; index=$((index + 1)) ;;
+      *) PR_MUTATE_REST+=("${REST[$index]}"); index=$((index + 1)) ;;
+    esac
+  done
+  REST=("${PR_MUTATE_REST[@]}")
+fi
 if [ "$ACTION" = "edit" ]; then
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
@@ -69,9 +80,63 @@ if [ "$ACTION" = "edit" ]; then
   done
 fi
 
+# `--inject-checklist` SETS the body itself; combining it with an explicit
+# body is ambiguous (which body wins?) — refuse instead of guessing.
+if [ "$INJECT_CHECKLIST" = "1" ]; then
+  PR_MUTATE_BODY_CONFLICT=0
+  index=0
+  while [ "$index" -lt "${#REST[@]}" ]; do
+    case "${REST[$index]}" in
+      --body|--body=*|--body-file|--body-file=*) PR_MUTATE_BODY_CONFLICT=1 ;;
+    esac
+    index=$((index + 1))
+  done
+  if [ "$PR_MUTATE_BODY_CONFLICT" = "1" ]; then
+    echo "error: --inject-checklist cannot be combined with --body/--body-file — it sets the body itself (current body + the managed checklist)" >&2
+    exit "$ORC_ERR_CONFIG"
+  fi
+fi
+
+# `edit` has no meaningful effect without at least one edit flag; refuse the
+# no-op instead of letting gh error later with an ambiguous message.
+if [ "$ACTION" = "edit" ] && [ "${#REST[@]}" -eq 0 ] && [ "$INJECT_CHECKLIST" != "1" ]; then
+  echo "error: edit requires at least one edit flag (e.g. --add-reviewer <login>, or --inject-checklist)" >&2
+  exit "$ORC_ERR_CONFIG"
+fi
+
 REPO="$(orc_lib_resolve_repo)"
 ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 [ "${#REST[@]}" -gt 0 ] && ARGS+=("${REST[@]}")
+
+# --- Managed-checklist remediation for an ALREADY-OPEN PR (arbsec/orchestraitor#788) ---
+# `convergence-status` FAILS CLOSED on a body with zero `<!-- orc:* -->`
+# markers (`checklist_markers_missing`), and `pr-create` now gives a NEW PR
+# the managed checklist. A PR that ALREADY EXISTS (opened before that rule, or
+# opened by a bot) has no such body and would block forever — so this is the
+# one-command remediation path: read the current body, append the managed
+# checklist when it carries none, and set the body.
+#
+# The nine markers land UNCHECKED (a checked box is a verified fact). A body
+# that already carries the checklist is left VERBATIM — the operation is
+# idempotent and never rewrites author content.
+if [ "$ACTION" = "edit" ] && [ "$INJECT_CHECKLIST" = "1" ]; then
+  if [ "$OPT_DRY_RUN" = true ]; then
+    echo "[dry-run] would read PR #$PR's body, append the managed merge checklist, and set it (dry-run never reaches gh)" >&2
+    exit "$ORC_OK"
+  fi
+  PR_MUTATE_BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""')" || {
+    echo "error: cannot read PR #$PR body" >&2
+    exit "$ORC_ERR_UNRECOVERABLE"
+  }
+  PR_MUTATE_ROOT="$(orc_lib_git_toplevel)"
+  PR_MUTATE_NEW_BODY="$(orc_lib_ensure_checklist_markers "$PR_MUTATE_BODY" "$PR_MUTATE_ROOT")"
+  if [ "$PR_MUTATE_NEW_BODY" = "$PR_MUTATE_BODY" ]; then
+    echo "PR #$PR body already carries the managed merge checklist — no change needed" >&2
+    exit "$ORC_OK"
+  fi
+  ARGS+=(--body "$PR_MUTATE_NEW_BODY")
+  echo "NOTE: appending the managed merge checklist to PR #$PR's body (arbsec/orchestraitor#788)" >&2
+fi
 
 # Reviewer-request gate (workflow policy "PR labeling and human attention"):
 # an `edit --add-reviewer` asks for human attention exactly like

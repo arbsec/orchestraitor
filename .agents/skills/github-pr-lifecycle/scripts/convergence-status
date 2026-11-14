@@ -71,8 +71,6 @@ ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
 UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 MARKERS_PRESENT="$(echo "$CHECKLIST_JSON" | jq -r '.markers_present')"
 MARKER_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.marker_count')"
-CHECKLIST_WAIVED="$(echo "$CHECKLIST_JSON" | jq -r '.waived')"
-WAIVER_REASON="$(echo "$CHECKLIST_JSON" | jq -r '.waiver_reason // ""')"
 
 # 4. Require persisted CLEAN review evidence for the exact current HEAD.
 # The record's fixed metadata header is authoritative; finding text below it
@@ -102,12 +100,13 @@ REASONS=""
 [ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
 # Two distinct checklist failures: a marker-less body is MISSING evidence
 # (`checklist_markers_missing`) and a marker-bearing body with unticked boxes is
-# `unchecked_items(N)` — never collapsed into one code (#788). The waiver is the
-# only pass without markers, and it is recorded (JSON `checklist_waived`, stderr
-# notice) rather than indistinguishable from a complete checklist.
+# `unchecked_items(N)` — never collapsed into one code (#788). There is NO
+# author-granted opt-out: a body that carries no marker always blocks, because
+# the author cannot grant themselves the exemption (an exemption needs an
+# authority they lack — arbsec/orchestraitor#801).
 if [ "$MARKERS_PRESENT" = "true" ]; then
   [ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
-elif [ "$CHECKLIST_WAIVED" != "true" ]; then
+else
   REASONS="${REASONS}checklist_markers_missing, "
 fi
 [ "$REVIEW_DECISION" = "REVIEW_REQUIRED" ] && REASONS="${REASONS}review_required, "
@@ -116,10 +115,6 @@ REASONS="${REASONS%, }"
 
 MERGEABLE="true"
 [ -n "$REASONS" ] && MERGEABLE="false"
-
-if [ "$CHECKLIST_WAIVED" = "true" ]; then
-  echo "NOTE: checklist marker requirement WAIVED for PR #$PR by the body sentinel: $WAIVER_REASON" >&2
-fi
 
 if [ "$OPT_JSON" = true ]; then
   jq -n \
@@ -132,8 +127,6 @@ if [ "$OPT_JSON" = true ]; then
     --arg unchecked "$UNCHECKED_COUNT" \
     --arg marker_count "$MARKER_COUNT" \
     --arg markers_present "$MARKERS_PRESENT" \
-    --arg checklist_waived "$CHECKLIST_WAIVED" \
-    --arg waiver_reason "$WAIVER_REASON" \
     --arg review_decision "$REVIEW_DECISION" \
     --arg is_draft "$IS_DRAFT" \
     '{
@@ -146,10 +139,9 @@ if [ "$OPT_JSON" = true ]; then
       unchecked_checklist_items: ($unchecked | tonumber? // 0),
       checklist_marker_count: ($marker_count | tonumber? // 0),
       checklist_markers_present: ($markers_present == "true"),
-      checklist_waived: ($checklist_waived == "true"),
       review_decision: $review_decision,
       is_draft: ($is_draft == "true")
-    } | if .checklist_waived then .checklist_waiver_reason = $waiver_reason else . end'
+    }'
 else
   if [ "$MERGEABLE" = "true" ]; then
     echo "CONVERGED: PR #$PR is mergeable at HEAD $HEAD_SHA."

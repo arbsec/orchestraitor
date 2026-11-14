@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path>, or pass through any gh pr create flags after --). A supplied body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers or the <!-- orc:none --> <justification> waiver is left verbatim. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). A body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers is left verbatim. With no body at all the PR still gets the checklist, and a note on stderr says the body needs a summary. --body-file paths are resolved through the trusted-root guard (workspace or temp directory); '-' reads the body from STDIN. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
   exit "$ORC_OK"
 fi
 
@@ -19,8 +19,10 @@ fi
 # words); the remaining args are passed through to `gh pr create` verbatim
 # (e.g. --draft, --base, --head, --reviewer, --). `--body-file` is read here
 # rather than passed through so the managed-checklist injection below (which the
-# fail-closed gate depends on) applies to BOTH body routes; the file is resolved
-# through the same trusted-root guard as `--body @file` (never an arbitrary read).
+# fail-closed gate depends on) applies to BOTH body routes. `--body-file -`
+# reads the body from STDIN (gh's own convention, preserved explicitly); a
+# path is resolved through the same trusted-root guard as `--body @file`
+# (never an arbitrary read).
 TITLE=""
 BODY=""
 BODY_FILE=""
@@ -88,7 +90,7 @@ fi
 # service route itself, so base resolution would fail there for reasons the
 # chain test does not exercise.
 if [ -z "${SKILL_CASE:-}" ]; then
-PR_CREATE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_REPO_ROOT=""
+PR_CREATE_REPO_ROOT="$(orc_lib_git_toplevel)"
 if [ -z "$PR_CREATE_REPO_ROOT" ]; then
   echo "error: pr-create requires running from the target git checkout" >&2
   exit "$ORC_ERR_CONFIG"
@@ -247,14 +249,21 @@ fi # SKILL_CASE gate wrapper
 # applied (#683: a fail-closed rule no caller can satisfy is worse than the bug).
 # The nine managed markers are appended UNCHECKED: checkboxes are verified facts,
 # ticked later with evidence — never pre-ticked here. A body that already carries
-# any marker, or the `<!-- orc:none -->` waiver sentinel, is left VERBATIM.
+# any marker is left VERBATIM.
 if [ -n "$BODY_FILE" ]; then
-  BODY="$(orc_lib_body_arg "--body-file" "@$BODY_FILE")"
+  BODY="$(orc_lib_read_body_file "--body-file" "$BODY_FILE")"
 fi
-if [ -n "$BODY" ]; then
-  PR_CREATE_BODY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || PR_CREATE_BODY_ROOT=""
-  BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
+PR_CREATE_BODY_ROOT="$(orc_lib_git_toplevel)"
+if [ -z "$BODY" ]; then
+  # A bodyless PR can NEVER converge: the gate needs the managed checklist and
+  # nothing else supplies it. Give the PR the checklist and say so loudly — the
+  # body still needs a summary, which the author adds afterwards with
+  # `pr-mutate edit <pr> --body-file <path>`.
+  echo "NOTE: no PR body supplied — the body carries ONLY the managed merge checklist." >&2
+  echo "      Add a summary before requesting review:" >&2
+  echo "        bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate edit <pr> --body-file <path>" >&2
 fi
+BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
 
 ARGS=(pr create --repo "$(orc_lib_resolve_repo)")
 [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")

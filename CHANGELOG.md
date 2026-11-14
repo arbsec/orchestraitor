@@ -802,20 +802,33 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   for a body with zero `<!-- orc:* -->` markers (an empty set is vacuously
   true), so a wholesale body rewrite (PR #767's) reached `mergeable: true` with
   no checklist evidence at all. The checklist now keeps the two states apart:
-  the `checklist` object gains `marker_count`, `markers_present`, `waived`, and
-  `waiver_reason`; `all_checked` is true only when at least one marker exists
-  AND every marker is checked; a marker-less body blocks with the new reason
+  the `checklist` object gains `marker_count` and `markers_present`;
+  `all_checked` is true only when at least one marker exists AND every marker
+  is checked; a marker-less body blocks with the new reason
   `checklist_markers_missing` (a marker-bearing body keeps
   `unchecked_items(n)`); and the one-pager names the missing state instead of
-  rendering "0 unchecked item(s)". The one recorded opt-out is a standalone
-  `<!-- orc:none --> <one-line justification>` line in the body: it converges
-  and is reported (`waived` + `waiver_reason`) and announced on stderr rather
-  than silently indistinguishable from a complete checklist, and it can never
-  mask unticked boxes. The rule stays satisfiable at creation: `pr-create`
-  appends the nine `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a
-  supplied body that carries none, and the delivery lane appends them to its
-  model-authored PR summary. Documented in
+  rendering "0 unchecked item(s)". **There is no author-granted opt-out**: the
+  body cannot waive itself, so a marker-less body always blocks — an exemption
+  must come from an authority the PR author does not hold (tracked in
+  arbsec/orchestraitor#801). A marker inside a fenced code region (3+
+  backticks or 3+ tildes) is an EXAMPLE, not a checklist item: the whole
+  region, including its opening and closing fence lines, is excluded from the
+  scan, so a body that merely shows the checklist shape no longer satisfies the
+  gate. The rule stays satisfiable at creation: `pr-create` appends the nine
+  `.github/PULL_REQUEST_TEMPLATE.md` markers UNCHECKED to a supplied body that
+  carries none, the delivery lane appends them to its model-authored PR
+  summary, and `pr-mutate edit <pr> --inject-checklist` is the one-command
+  remediation for a PR that already exists. Documented in
   [docs/cli/orc-pr.md](docs/cli/orc-pr.md).
+- **`pr-create --body-file` now resolves the path through the trusted-root
+  guard** (issue 788): the base `pr-create` forwarded `--body-file` straight to
+  `gh`, which accepted any readable path. The body is now read by the script
+  itself (so the managed-checklist injection applies to both body routes),
+  which means a path outside the trusted roots — the current workspace or the
+  system/user temp directories — is refused with exit 2 instead of being read.
+  `--body-file -` is supported explicitly and reads the body from STDIN (gh's
+  own convention, preserved); a terminal on STDIN is refused with a message
+  naming the supported forms.
 - **`orc pr status` no longer blocks a green bot-authored PR** (issue 740):
   the §9.48 engine classified `CodeRabbit`'s structural `SKIPPED` check as a
   plain `skip`, so `checks_all_passed` was `false` on a PR whose every real

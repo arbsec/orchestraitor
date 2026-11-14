@@ -488,25 +488,13 @@ pub(crate) fn write_verdict_details<W: Write>(writer: &mut W, verdict: &PrStatus
         if !checklist.markers_present {
             // A marker-less body is missing evidence, never a complete checklist
             // (arbsec/orchestraitor#788) — name the state, not "0 unchecked".
-            if checklist.waived {
-                writeln!(
-                    writer,
-                    "checklist: marker requirement WAIVED — {}",
-                    sanitize_provider_text(
-                        checklist
-                            .waiver_reason
-                            .as_deref()
-                            .unwrap_or("(no justification)"),
-                    )
-                )
-                .into_diagnostic()?;
-            } else {
-                writeln!(
-                    writer,
-                    "checklist: no managed orc:* markers found (UNSUBSTANTIATED — checklist_markers_missing)"
-                )
-                .into_diagnostic()?;
-            }
+            // There is NO author-granted opt-out: the body cannot waive
+            // itself (arbsec/orchestraitor#801).
+            writeln!(
+                writer,
+                "checklist: no managed orc:* markers found (UNSUBSTANTIATED — checklist_markers_missing)"
+            )
+            .into_diagnostic()?;
         } else if !checklist.all_checked {
             writeln!(
                 writer,

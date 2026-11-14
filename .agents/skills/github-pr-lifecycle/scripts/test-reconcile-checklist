@@ -8,7 +8,14 @@
 #
 # Also pins the other half of the fix: the gate must stay SATISFIABLE (#683), so
 # `pr-create` appends the nine managed markers to a wholesale body, and the
-# template/fallback copies cannot drift.
+# template/fallback copies cannot drift. A PR that ALREADY exists carries no
+# marker, so `pr-mutate --inject-checklist` is the one-command remediation path
+# for it.
+#
+# There is NO author-granted opt-out: a body that carries no marker always
+# fails closed with `checklist_markers_missing`. A body sentinel
+# (`<!-- orc:none -->`) is INERT — an exemption may only come from an authority
+# the author does not hold (arbsec/orchestraitor#801).
 #
 # Synthetic `gh` responses; no network or provider calls.
 #
@@ -24,23 +31,63 @@
 #       are gone): checks_all_passed, unresolved_actionable_threads,
 #       unchecked_checklist_items, checklist_marker_count, review_decision,
 #       is_draft
-#   (f) the recorded opt-out: `<!-- orc:none --> <justification>` converges and
-#       is visible (JSON + stderr); a BARE sentinel waives nothing; a sentinel
-#       beside real markers is inert
+#   (f) NO author-granted opt-out: a body sentinel waives nothing, is never
+#       reported as a waiver, and never masks a partially-checked checklist
+#   (f2) a marker inside a FENCED code region is an example, not evidence
+#   (f3) the box character set is exactly `x`, `X` and a space
+#   (f4) KNOWN GAP: one ticked marker satisfies the gate today (#800)
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
-#   (h) pr-create injects the markers into a wholesale `--body` AND
-#       `--body-file` (both creation routes stay satisfiable), leaves a body
-#       that already carries markers or the waiver verbatim, and refuses
-#       `--body` + `--body-file` together
+#   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
+#       and `--body-file -`, and gives a bodyless PR the checklist too; a body
+#       that already carries markers is left verbatim, and `--body` +
+#       `--body-file` together are refused
+#   (i) pr-mutate --inject-checklist remediates an EXISTING PR: it appends the
+#       checklist, is idempotent, refuses to be combined with an explicit body,
+#       and its dry-run never reaches gh
+#   (j) the fixture's git calls ignore an ambient git LOCATION (GIT_DIR /
+#       GIT_WORK_TREE / GIT_INDEX_FILE): `git -C` does not isolate the git
+#       location, so an inherited location would commit the CALLER's tree
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/scripts" "$TMP/repo/.github" "$TMP/bin" "$TMP/files"
-git -C "$TMP/repo" init -q
-for script in _lib.sh reconcile-checklist convergence-status pr-create; do
+
+# --- (j) git helper: the ambient git LOCATION is scrubbed ------------------------
+# `git -C <dir>` does NOT isolate the git location: a hook-exported
+# GIT_DIR/GIT_WORK_TREE wins over `-C`, so an inherited location resolves the
+# "repository" to the CALLER's repo — and in a fixture makes the fixture's own
+# `git add -A` / `git commit` stage and commit the CALLER's working tree.
+# GIT_INDEX_FILE has the same effect on the index. Every git call in this
+# fixture goes through `git_repo`, which scrubs those variables.
+#
+# GIT_REPO_ENV holds `NAME=VALUE` assignments that are exported INTO the git
+# child BEFORE the scrub, so a test can simulate a hostile ambient location.
+# The scrub is applied last and therefore always wins: the overrides exist to
+# prove the scrub works, never to defeat it.
+GIT_REPO_ENV=()
+git_repo() {
+  local repo="$1"; shift
+  (
+    for assignment in "${GIT_REPO_ENV[@]}"; do
+      export "${assignment?}"
+    done
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_COMMON_DIR GIT_NAMESPACE
+    git -C "$repo" "$@"
+  )
+}
+
+# The suite itself runs with a clean git location: a hook-exported GIT_DIR
+# would otherwise redirect the fixture's own git calls (see (j)).
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_COMMON_DIR GIT_NAMESPACE
+
+for script in _lib.sh reconcile-checklist convergence-status pr-create pr-mutate; do
   cp -L -- "$SCRIPT_DIR/$script" "$TMP/repo/scripts/"
 done
 cp -L -- "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$TMP/repo/.github/"
@@ -63,21 +110,41 @@ printf '%s\n' '{"unresolved_actionable":0}' > "$TMP/threads-none.json"
 printf '%s\n' '{"unresolved_actionable":2}' > "$TMP/threads-two.json"
 export CHECKS_FIXTURE="$TMP/checks-ok.json" THREADS_FIXTURE="$TMP/threads-none.json"
 
+# The gh stub answers the reads the gate makes and records the body a
+# `gh pr edit` would have set.
 cat > "$TMP/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1/${2:-}" in
   auth/status) exit 0 ;;
   pr/view)
-    json=""; prev=""
-    for a in "$@"; do [ "$prev" = "--json" ] && json="$a"; prev="$a"; done
+    json=""; prev=""; jq_expr=""
+    for a in "$@"; do
+      case "$prev" in
+        --json) json="$a" ;;
+        --jq) jq_expr="$a" ;;
+      esac
+      prev="$a"
+    done
     case "$json" in
-      body) jq -n --rawfile b "$BODY_FIXTURE" '{body:$b}' ;;
+      body)
+        # With a --jq filter the caller wants the FILTERED value (the raw body
+        # text for `.body // ""`), not the JSON envelope.
+        if [ -n "$jq_expr" ]; then cat "$BODY_FIXTURE"; else jq -n --rawfile b "$BODY_FIXTURE" '{body:$b}'; fi ;;
       baseRefOid) jq -n --arg b "$TEST_BASE" '{baseRefOid:$b}' ;;
       reviewDecision,baseRefOid,headRefOid,isDraft)
         jq -n --arg h "$TEST_HEAD" --arg b "$TEST_BASE" \
           '{reviewDecision:"APPROVED",baseRefOid:$b,headRefOid:$h,isDraft:false}' ;;
       *) echo "unexpected gh pr view --json '$json'" >&2; exit 1 ;;
     esac ;;
+  pr/edit)
+    # Record the body this edit would set, so the test can assert on it.
+    prev=""; body=""
+    for a in "$@"; do
+      if [ "$prev" = "--body" ]; then body="$a"; fi
+      prev="$a"
+    done
+    printf '%s' "$body" > "${GH_EDIT_BODY_FILE:-/dev/null}"
+    exit 0 ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 STUB
@@ -95,15 +162,17 @@ chmod +x "$TMP/bin/orc"
 export PATH="$TMP/bin:/usr/bin:/bin"
 export ORC_BIN="$TMP/bin/orc" GH_BIN="$TMP/bin/gh"
 export ORC_GITHUB_APP_ENFORCEMENT=required
+export GH_EDIT_BODY_FILE="$TMP/edited-body.md"
 
 # Review-policy provenance fixture (#748): the trusted base commit — reported as
 # the PR's `baseRefOid` — holds exactly the copies the gate is about to run, so
 # no spurious stale-policy refusal fires.
 GIT_ID=(-c user.name=skills-test -c user.email=skills-test@example.invalid)
-git -C "$TMP/repo" add -A
-git -C "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base: current review policy"
+git_repo "$TMP/repo" init -q
+git_repo "$TMP/repo" "${GIT_ID[@]}" add -A
+git_repo "$TMP/repo" "${GIT_ID[@]}" commit -q -m "base: current review policy"
 TEST_HEAD=abcdef1234567890abcdef1234567890abcdef12
-TEST_BASE="$(git -C "$TMP/repo" rev-parse HEAD)"
+TEST_BASE="$(git_repo "$TMP/repo" rev-parse HEAD)"
 export TEST_HEAD TEST_BASE
 mkdir -p "$TMP/repo/.orchestraitor/reviews"
 # convergence-status record format: line 3 verdict, line 5 head, line 6 base.
@@ -135,15 +204,63 @@ grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
   | sed -E 's/^([[:space:]]*)-[[:space:]]*\[[ xX]\]/\1- [x]/' > "$TMP/files/all-checked.md"
 # (d) the same nine, the first one unticked.
 sed -E '1s/^- \[x\]/- [ ]/' "$TMP/files/all-checked.md" > "$TMP/files/one-unticked.md"
-# (f) the recorded opt-out, with and without a justification.
+# (f) the body sentinel, with and without a justification. It is NOT an
+# opt-out: an author cannot grant themselves the exemption.
 { cat "$TMP/files/no-markers.md"; printf '\n<!-- orc:none --> machine-authored release-notes body\n'; } \
-  > "$TMP/files/waived.md"
-{ cat "$TMP/files/no-markers.md"; printf '\n<!-- orc:none -->\n'; } > "$TMP/files/bare-waiver.md"
+  > "$TMP/files/sentinel.md"
+{ cat "$TMP/files/no-markers.md"; printf '\n<!-- orc:none -->\n'; } > "$TMP/files/bare-sentinel.md"
 # (f) a sentinel beside a partially-checked checklist is INERT.
 { printf '<!-- orc:none --> sneaky waiver\n'; cat "$TMP/files/one-unticked.md"; } \
-  > "$TMP/files/waiver-plus-markers.md"
+  > "$TMP/files/sentinel-plus-markers.md"
 # (h) a body that already carries its own marker: never rewritten.
 printf '%s\n' '- [x] <!-- orc:issue --> linked' > "$TMP/files/own-marker.md"
+# (f2) a marker inside a fenced code region is an EXAMPLE, not evidence.
+cat > "$TMP/files/fenced-marker.md" <<'EOF'
+Here is the shape of a managed checklist:
+
+```markdown
+- [x] <!-- orc:issue --> example only
+```
+
+No real checklist here.
+EOF
+# (f2) a marker AFTER a closed fence IS a real checklist item.
+cat > "$TMP/files/fenced-then-marker.md" <<'EOF'
+```markdown
+- [x] <!-- orc:issue --> example only
+```
+
+- [x] <!-- orc:tests --> a real item
+EOF
+# (f2) an unclosed fence runs to the end of the body.
+cat > "$TMP/files/unclosed-fence.md" <<'EOF'
+```markdown
+- [x] <!-- orc:issue --> example only
+- [x] <!-- orc:tests --> another example
+EOF
+# (f2) a tilde fence is a fence too.
+cat > "$TMP/files/tilde-fence.md" <<'EOF'
+~~~text
+- [x] <!-- orc:issue --> example only
+~~~
+EOF
+# (f2) a DIFFERENT fence character never closes a region.
+cat > "$TMP/files/mixed-fence.md" <<'EOF'
+```markdown
+- [x] <!-- orc:issue --> example only
+~~~
+- [x] <!-- orc:tests --> still inside the region
+```
+
+- [x] <!-- orc:docs --> a real item after the fence closed
+EOF
+# (f3) the box character set is exactly `x`, `X` and a space.
+printf '%s\n' '- [x] <!-- orc:issue --> lower x' > "$TMP/files/box-lower.md"
+printf '%s\n' '- [X] <!-- orc:issue --> upper X' > "$TMP/files/box-upper.md"
+printf '%s\n' '- [ ] <!-- orc:issue --> a space' > "$TMP/files/box-space.md"
+printf '%s\n' '- [y] <!-- orc:issue --> a nonsense box' > "$TMP/files/box-nonsense.md"
+# (f4) a single ticked marker: the KNOWN GAP (arbsec/orchestraitor#800).
+printf '%s\n' '- [x] <!-- orc:issue --> only one marker, ticked' > "$TMP/files/one-ticked-only.md"
 
 PASS=0; FAIL=0
 assert() {
@@ -153,6 +270,7 @@ assert() {
 run() {
   OUT="$(cd "$TMP/repo" && bash "scripts/$1" "${@:2}" 2>"$TMP/stderr")"; RC=$?
 }
+exists() { if [ -e "$1" ]; then echo 1; else echo 0; fi; }
 
 # --- (a) reconcile-checklist: the marker-less body ------------------------------
 export BODY_FIXTURE="$TMP/files/no-markers.md"
@@ -163,8 +281,9 @@ assert 'a: markers_present false' false "$(jq -r .markers_present <<<"$OUT")"
 assert 'a: all_checked false (the vacuous pass)' false "$(jq -r .all_checked <<<"$OUT")"
 assert 'a: items stays the empty-parse contract' 0 "$(jq -r '.items | length' <<<"$OUT")"
 assert 'a: no unchecked items' 0 "$(jq -r '.unchecked | length' <<<"$OUT")"
-assert 'a: not waived' false "$(jq -r .waived <<<"$OUT")"
-assert 'a: waiver_reason absent (not null)' false "$(jq -r 'has("waiver_reason")' <<<"$OUT")"
+# There is NO author-granted opt-out: the waiver fields do not exist at all.
+assert 'a: no waiver field' false "$(jq -r 'has("waived")' <<<"$OUT")"
+assert 'a: no waiver_reason field' false "$(jq -r 'has("waiver_reason")' <<<"$OUT")"
 
 # --- (a2) text mode names the missing state ------------------------------------
 run reconcile-checklist 7 --repo test-org/repo
@@ -180,7 +299,9 @@ assert 'b: the DISTINCT reason' '["checklist_markers_missing"]' \
   "$(jq -c .reasons <<<"$OUT")"
 assert 'b: telemetry marker_count 0' 0 "$(jq -r .checklist_marker_count <<<"$OUT")"
 assert 'b: telemetry markers_present false' false "$(jq -r .checklist_markers_present <<<"$OUT")"
-assert 'b: telemetry not waived' false "$(jq -r .checklist_waived <<<"$OUT")"
+assert 'b: telemetry carries no waiver field' false "$(jq -r 'has("checklist_waived")' <<<"$OUT")"
+assert 'b: telemetry carries no waiver reason field' false \
+  "$(jq -r 'has("checklist_waiver_reason")' <<<"$OUT")"
 assert 'b: telemetry unchecked 0 (never a vacuous 0)' 0 \
   "$(jq -r .unchecked_checklist_items <<<"$OUT")"
 
@@ -222,35 +343,105 @@ assert 'e: review_decision is real' APPROVED "$(jq -r .review_decision <<<"$OUT"
 assert 'e: is_draft is real' false "$(jq -r .is_draft <<<"$OUT")"
 export CHECKS_FIXTURE="$TMP/checks-ok.json" THREADS_FIXTURE="$TMP/threads-none.json"
 
-# --- (f) the recorded opt-out --------------------------------------------------
-export BODY_FIXTURE="$TMP/files/waived.md"
+# --- (f) there is NO author-granted opt-out ------------------------------------
+# A body sentinel (`<!-- orc:none -->`) is inert: it never waives the marker
+# requirement, is never reported as a waiver, and never masks a
+# partially-checked checklist. An exemption may only come from an authority the
+# author does not hold (arbsec/orchestraitor#801).
+export BODY_FIXTURE="$TMP/files/sentinel.md"
 run reconcile-checklist 7 --repo test-org/repo --json
-assert 'f: waived true' true "$(jq -r .waived <<<"$OUT")"
-assert 'f: waiver reason recorded' 'machine-authored release-notes body' \
-  "$(jq -r .waiver_reason <<<"$OUT")"
-assert 'f: a waived body is still not "all checked"' false "$(jq -r .all_checked <<<"$OUT")"
+assert 'f: a sentinel is not a marker' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f: a sentinel never waives' false "$(jq -r 'has("waived")' <<<"$OUT")"
+assert 'f: a sentinel is not "all checked"' false "$(jq -r .all_checked <<<"$OUT")"
 run convergence-status 7 --repo test-org/repo --json
-assert 'f: the waiver converges (exit 0)' 0 "$RC"
-assert 'f: no other reasons' '[]' "$(jq -c .reasons <<<"$OUT")"
-assert 'f: mergeable true' true "$(jq -r .mergeable <<<"$OUT")"
-assert 'f: the waiver is VISIBLE in the verdict' true "$(jq -r .checklist_waived <<<"$OUT")"
-assert 'f: the waiver reason rides the verdict' 'machine-authored release-notes body' \
-  "$(jq -r .checklist_waiver_reason <<<"$OUT")"
-assert 'f: the waiver is announced on stderr' 1 \
-  "$(grep -cF 'checklist marker requirement WAIVED' "$TMP/stderr")"
+assert 'f: a sentinel body still blocks (exit 5)' 5 "$RC"
+assert 'f: a sentinel still reports markers_missing' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+assert 'f: the sentinel is not recorded as a waiver' false \
+  "$(jq -r 'has("checklist_waived")' <<<"$OUT")"
+assert 'f: no waiver is announced on stderr' 0 \
+  "$(grep -cF 'WAIVED' "$TMP/stderr")"
 
-export BODY_FIXTURE="$TMP/files/bare-waiver.md"
+export BODY_FIXTURE="$TMP/files/bare-sentinel.md"
 run convergence-status 7 --repo test-org/repo --json
-assert 'f: a bare sentinel waives nothing (exit 5)' 5 "$RC"
+assert 'f: a bare sentinel blocks too (exit 5)' 5 "$RC"
 assert 'f: a bare sentinel still reports markers_missing' '["checklist_markers_missing"]' \
   "$(jq -c .reasons <<<"$OUT")"
 
-export BODY_FIXTURE="$TMP/files/waiver-plus-markers.md"
+export BODY_FIXTURE="$TMP/files/sentinel-plus-markers.md"
 run convergence-status 7 --repo test-org/repo --json
 assert 'f: a sentinel never masks unticked boxes (exit 5)' 5 "$RC"
 assert 'f: the inert sentinel leaves the item reason' '["unchecked_items(1)"]' \
   "$(jq -c .reasons <<<"$OUT")"
-assert 'f: the inert sentinel is not waived' false "$(jq -r .checklist_waived <<<"$OUT")"
+
+# --- (f2) a fenced marker is an EXAMPLE, not evidence --------------------------
+export BODY_FIXTURE="$TMP/files/fenced-marker.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f2: a fenced marker is not a checklist item' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f2: a fenced body has no markers' false "$(jq -r .markers_present <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f2: a fenced body blocks' 5 "$RC"
+assert 'f2: a fenced body reports markers_missing' '["checklist_markers_missing"]' \
+  "$(jq -c .reasons <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/fenced-then-marker.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f2: a marker after a closed fence IS an item' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f2: and it is the real one' 'tests' "$(jq -r '.items[0].marker' <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/unclosed-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f2: an unclosed fence runs to the end of the body' 0 "$(jq -r .marker_count <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/tilde-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f2: a tilde fence is a fence too' 0 "$(jq -r .marker_count <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/mixed-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f2: a different fence character never closes a region' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f2: only the marker outside the region counts' 'docs' \
+  "$(jq -r '.items[0].marker' <<<"$OUT")"
+
+# --- (f3) the box character set is exactly `x`, `X` and a space -----------------
+# The Rust engine (`parse_checklist` in crates/orchestraitor-mcp/src/pr_status.rs)
+# accepts exactly the same three: `x`/`X` are checked, a space is unchecked, and
+# any other character is not a checklist line at all.
+export BODY_FIXTURE="$TMP/files/box-lower.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f3: `x` is a checklist item' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f3: `x` is checked' true "$(jq -r '.items[0].checked' <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/box-upper.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f3: `X` is a checklist item' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f3: `X` is checked' true "$(jq -r '.items[0].checked' <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/box-space.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f3: a space is a checklist item' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f3: a space is unchecked' false "$(jq -r '.items[0].checked' <<<"$OUT")"
+
+export BODY_FIXTURE="$TMP/files/box-nonsense.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f3: a nonsense box is not a checklist item' 0 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f3: a nonsense box leaves no markers' false "$(jq -r .markers_present <<<"$OUT")"
+
+# --- (f4) KNOWN GAP: one ticked marker satisfies the gate today ----------------
+# The gate requires the markers it FINDS to be present and checked; it does NOT
+# require the full managed SET. A body that carries one ticked marker and drops
+# the other eight therefore converges — the checklist can be shortened to a
+# single tick. That is a real gap, tracked in arbsec/orchestraitor#800; this
+# test pins the CURRENT behaviour so the gap stays visible and so the #800 fix
+# has a failing test to flip.
+export BODY_FIXTURE="$TMP/files/one-ticked-only.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f4: one ticked marker is counted (#800)' 1 "$(jq -r .marker_count <<<"$OUT")"
+assert 'f4: one ticked marker reads as all checked (#800)' true "$(jq -r .all_checked <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f4: and the gate converges on it today (#800)' 0 "$RC"
+assert 'f4: with no reason at all (#800)' '[]' "$(jq -c .reasons <<<"$OUT")"
 
 # --- (g) the fallback cannot drift from the template ---------------------------
 TEMPLATE_MARKERS="$(grep -oP '^\s*-\s*\[[ xX]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->.*$' \
@@ -278,9 +469,21 @@ assert 'g: injection keeps the author body first' 1 \
 assert 'g: a body with a marker is returned verbatim' 'own body
 - [x] <!-- orc:issue --> linked' "$(ensure 'own body
 - [x] <!-- orc:issue --> linked' "$TMP/repo")"
-assert 'g: a waived body is returned verbatim' 'waived
-<!-- orc:none --> custom body' "$(ensure 'waived
+# A body sentinel is NOT checklist-bearing: the checklist is appended.
+SENTINEL_ENSURED="$(ensure 'sentinel
 <!-- orc:none --> custom body' "$TMP/repo")"
+assert 'g: a sentinel body is not checklist-bearing' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$SENTINEL_ENSURED")"
+assert 'g: a sentinel body keeps its own text' 1 \
+  "$(grep -cF '<!-- orc:none --> custom body' <<<"$SENTINEL_ENSURED")"
+# A body whose only marker sits inside a fenced code region is NOT
+# checklist-bearing either: creation must still hand it the real checklist, or
+# the fail-closed gate could never be satisfied (#683 class).
+FENCED_ENSURED="$(ensure "$(cat "$TMP/files/fenced-marker.md")" "$TMP/repo")"
+assert 'g: a fenced-only body is not checklist-bearing' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$FENCED_ENSURED")"
+assert 'g: a fenced-only body keeps its own text' 1 \
+  "$(grep -cF 'example only' <<<"$FENCED_ENSURED")"
 
 # --- (h) creation stays satisfiable: pr-create injects -------------------------
 # SKILL_CASE=1 skips the pre-PR review gate (its own suite covers it); the
@@ -303,17 +506,123 @@ assert 'h: --body-file content survives' 1 "$(grep -cF 'false quantitative claim
 assert 'h: --body-file is resolved (no --body-file reaches gh)' 0 \
   "$(grep -c -- '--body-file' <<<"$OUT")"
 
+# `--body-file -` reads the body from STDIN (gh's own convention, preserved
+# explicitly rather than rejected).
+OUT="$(printf '%s\n' 'wholesale stdin body' | dry_run --title t --body-file -)"
+assert 'h: --body-file - gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'h: --body-file - content survives' 1 "$(grep -cF 'wholesale stdin body' <<<"$OUT")"
+assert 'h: --body-file - never reaches gh as a flag' 0 \
+  "$(grep -c -- '--body-file' <<<"$OUT")"
+OUT="$(printf '' | dry_run --title t --body-file - 2>&1)"; RC=$?
+assert 'h: an empty STDIN body is refused' 2 "$RC"
+
 OUT="$(dry_run --title t --body-file "$TMP/files/own-marker.md")"
 assert 'h: a body with its own marker is left verbatim' 1 "$(grep -c '<!-- orc:' <<<"$OUT")"
 assert 'h: verbatim means no injected section' 0 "$(grep -cF 'Added by pr-create' <<<"$OUT")"
 
-OUT="$(dry_run --title t --body "$(cat "$TMP/files/waived.md")")"
-assert 'h: a waived body gets no injected checklist' 0 \
+# A body sentinel is not an opt-out: the checklist is still injected.
+OUT="$(dry_run --title t --body "$(cat "$TMP/files/sentinel.md")")"
+assert 'h: a sentinel body still gets the injected checklist' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+
+# A bodyless PR still gets the checklist, and says so.
+OUT="$(dry_run --title t)"
+assert 'h: a bodyless PR gains the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'h: a bodyless PR says the body needs a summary' 1 \
+  "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
 
 dry_run --title t --body 'a' --body-file "$TMP/files/own-marker.md" >/dev/null
 RC=$?
 assert 'h: --body + --body-file is refused' 2 "$RC"
+
+# --- (i) pr-mutate --inject-checklist: remediation for an EXISTING PR ----------
+# `pr-create` gives a NEW PR the managed checklist. A PR that ALREADY exists
+# carries none and would block forever — `--inject-checklist` is the
+# one-command remediation path: read the current body, append the managed
+# checklist, set the body.
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist
+assert 'i: the remediation exits 0' 0 "$RC"
+assert 'i: the remediation reached gh pr edit' 1 "$(exists "$TMP/edited-body.md")"
+EDITED="$(cat "$TMP/edited-body.md" 2>/dev/null || true)"
+assert 'i: the new body carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$EDITED")"
+assert 'i: the new body pre-ticks nothing' 0 "$(grep -c -- '- \[x\]' <<<"$EDITED")"
+assert 'i: the author body survives' 1 "$(grep -cF 'false quantitative claim' <<<"$EDITED")"
+
+# Idempotent: a body that already carries the checklist is left verbatim and gh
+# is never called.
+export BODY_FIXTURE="$TMP/files/all-checked.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist
+assert 'i: an already-checklisted body is a no-op (exit 0)' 0 "$RC"
+assert 'i: the no-op never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+assert 'i: the no-op says so' 1 \
+  "$(grep -cF 'already carries the managed merge checklist' "$TMP/stderr")"
+
+# The remediation sets the body itself: combining it with an explicit body is
+# ambiguous and is refused.
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist --body 'x'
+assert 'i: --inject-checklist + --body is refused' 2 "$RC"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist --body-file "$TMP/files/no-markers.md"
+assert 'i: --inject-checklist + --body-file is refused' 2 "$RC"
+
+# The dry-run never reaches gh.
+rm -f "$TMP/edited-body.md"
+OUT="$( cd "$TMP/repo" && SKILL_CASE=1 bash scripts/pr-mutate edit 7 \
+  --repo test-org/repo --inject-checklist --dry-run 2>&1 )"; RC=$?
+assert 'i: the dry-run exits 0' 0 "$RC"
+assert 'i: the dry-run never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+assert 'i: the dry-run says it does not reach gh' 1 \
+  "$(grep -cF 'dry-run never reaches gh' <<<"$OUT")"
+
+# --- (j) the fixture's git calls ignore an ambient git LOCATION ---------------
+# `git -C <dir>` does NOT isolate the git location: a hook-exported
+# GIT_DIR/GIT_WORK_TREE wins over `-C`. Without the scrub the fixture's
+# `git add -A` / `git commit` would stage and commit the CALLER's working tree.
+SENTINEL="$TMP/sentinel"
+HOSTILE="$TMP/hostile"
+mkdir -p "$SENTINEL" "$HOSTILE"
+git_repo "$SENTINEL" init -q
+git_repo "$SENTINEL" config user.email sentinel@example.invalid
+git_repo "$SENTINEL" config user.name sentinel
+printf 'sentinel\n' > "$SENTINEL/README.md"
+git_repo "$SENTINEL" add -A
+git_repo "$SENTINEL" commit -q -m sentinel
+SENTINEL_HEAD="$(git_repo "$SENTINEL" rev-parse HEAD)"
+SENTINEL_LOG="$(git_repo "$SENTINEL" log --format=%s)"
+
+# The hostile location: GIT_DIR/GIT_WORK_TREE point at the sentinel repo.
+GIT_REPO_ENV=("GIT_DIR=$SENTINEL/.git" "GIT_WORK_TREE=$SENTINEL")
+git_repo "$HOSTILE" init -q
+git_repo "$HOSTILE" config user.email hostile@example.invalid
+git_repo "$HOSTILE" config user.name hostile
+printf 'hostile\n' > "$HOSTILE/README.md"
+git_repo "$HOSTILE" add -A
+git_repo "$HOSTILE" commit -q -m hostile
+GIT_REPO_ENV=()
+
+HOSTILE_HEAD="$(git_repo "$HOSTILE" rev-parse HEAD)"
+SENTINEL_HEAD_AFTER="$(git_repo "$SENTINEL" rev-parse HEAD)"
+SENTINEL_LOG_AFTER="$(git_repo "$SENTINEL" log --format=%s)"
+# The fixture's own commit landed in the FIXTURE, not in the sentinel.
+assert 'j: the hostile fixture carries its own commit' 'hostile' \
+  "$(git_repo "$HOSTILE" log --format=%s)"
+assert 'j: the hostile location did not capture the fixture' 'different' \
+  "$([ "$HOSTILE_HEAD" != "$SENTINEL_HEAD" ] && echo different || echo same)"
+# The sentinel repo still holds exactly its own commit: nothing leaked into it.
+assert 'j: the sentinel HEAD is unchanged' "$SENTINEL_HEAD" "$SENTINEL_HEAD_AFTER"
+assert 'j: the sentinel log is unchanged' "$SENTINEL_LOG" "$SENTINEL_LOG_AFTER"
+# Positive control: WITHOUT the scrub the ambient location wins over `-C`, so
+# the hostile values really are effective here — the scrub is what keeps the
+# fixture out of the sentinel.
+CONTROL_TOPLEVEL="$(GIT_DIR="$SENTINEL/.git" GIT_WORK_TREE="$SENTINEL" \
+  git -C "$HOSTILE" rev-parse --show-toplevel 2>/dev/null || true)"
+assert 'j: control: the ambient location does win over -C' "$SENTINEL" "$CONTROL_TOPLEVEL"
 
 printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

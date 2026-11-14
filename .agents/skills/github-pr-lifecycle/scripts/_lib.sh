@@ -129,6 +129,20 @@ orc_lib_body_arg() {
   printf '%s' "$value"
 }
 
+# The git toplevel of the CURRENT WORKING DIRECTORY, with the ambient git
+# LOCATION scrubbed.
+#
+# `git -C <dir>` does NOT isolate the git location: a hook-exported
+# GIT_DIR/GIT_WORK_TREE wins over the cwd, so an inherited location resolves
+# the "workspace" root to the CALLER's repository — and, in a fixture, makes
+# the fixture's own `git add -A` / `git commit` stage and commit the caller's
+# working tree. GIT_INDEX_FILE has the same effect on the index. Every git
+# call in this tree that resolves a repository root goes through here.
+orc_lib_git_toplevel() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+    git rev-parse --show-toplevel 2>/dev/null || true
+}
+
 # Canonicalize an @file path and verify it falls inside a trusted root
 # (workspace git toplevel, or a system/user temp directory). Prints a typed
 # error and returns 1 when the path is outside every trusted root; returns 0
@@ -146,7 +160,7 @@ orc_lib_body_arg__check_trusted() {
     return 0
   fi
   local roots=()
-  if root="$(git rev-parse --show-toplevel 2>/dev/null)" && [ -n "$root" ]; then
+  if root="$(orc_lib_git_toplevel)" && [ -n "$root" ]; then
     roots+=("$root")
   fi
   local t
@@ -183,6 +197,33 @@ orc_lib_require_body_file() {
   fi
 }
 
+# Reads a `--body-file` value: a PATH, or `-` for STDIN. Prints the content.
+#
+# `--body-file -` is supported EXPLICITLY: `gh pr create --body-file -` reads
+# the body from stdin, and the base `pr-create` forwarded `--body-file` to gh,
+# so a caller that pipes a body must keep working. A path is resolved through
+# the SAME trusted-root guard as `--body @file` — an out-of-root path is
+# refused with exit 2 (the tightened rule, recorded in CHANGELOG.md).
+#
+# Usage: orc_lib_read_body_file <arg-name> <path-or-dash>
+orc_lib_read_body_file() {
+  local arg_name="$1" file="$2" content=""
+  if [ "$file" = "-" ]; then
+    if [ -t 0 ]; then
+      echo "error: $arg_name: '-' reads the body from STDIN, but STDIN is a terminal — pipe the body in, or pass a file path" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    content="$(cat)"
+    if [ -z "$content" ]; then
+      echo "error: $arg_name: no body on STDIN" >&2
+      exit "$ORC_ERR_CONFIG"
+    fi
+    printf '%s' "$content"
+    return 0
+  fi
+  orc_lib_body_arg "$arg_name" "@$file"
+}
+
 # --- Managed PR checklist (arbsec/orchestraitor#788) ---------------------------
 # `reconcile-checklist` reports a body with ZERO `<!-- orc:* -->` markers as
 # MISSING evidence, never as "all checked", and `convergence-status` blocks that
@@ -204,17 +245,76 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 - [ ] <!-- orc:review --> All noteworthy findings are resolved
 - [ ] <!-- orc:threads --> All actionable review threads are resolved'
 
+# --- Fenced code regions (arbsec/orchestraitor#788) ---------------------------
+# A managed checklist marker inside a FENCED code region is an EXAMPLE, not
+# evidence: the marker scan must ignore it, or a body that merely SHOWS the
+# checklist shape satisfies the gate. The shell engine (this helper) and the
+# Rust engine (the helper next to `parse_checklist` in
+# `crates/orchestraitor-mcp/src/pr_status.rs`) agree on these semantics
+# exactly:
+#
+#   - a fence OPENS on a line whose first non-whitespace characters are 3+
+#     backticks OR 3+ tildes;
+#   - the region CLOSES at the first later line whose first non-whitespace
+#     characters are the SAME fence character repeated at least as many times
+#     as the opener, with only whitespace after them (a DIFFERENT fence
+#     character never closes it);
+#   - an unclosed fence runs to the end of the body;
+#   - every line inside the region — INCLUDING the opening and the closing
+#     fence lines — is excluded from marker scanning.
+#
+# Usage: orc_lib_strip_fenced_code   (reads the body on STDIN, prints it with
+# every fenced region removed).
+orc_lib_strip_fenced_code() {
+  awk '
+    function trim_lead(s) { sub(/^[ \t]+/, "", s); return s }
+    function run_length(s, c,   n) {
+      n = 0
+      while (substr(s, n + 1, 1) == c) n++
+      return n
+    }
+    {
+      s = trim_lead($0)
+      if (fence_char != "") {
+        # Inside a region: only the SAME character, repeated at least as many
+        # times as the opener, with nothing but whitespace after it, closes it.
+        if (substr(s, 1, 1) == fence_char) {
+          n = run_length(s, fence_char)
+          if (n >= fence_len && substr(s, n + 1) ~ /^[[:space:]]*$/) {
+            fence_char = ""
+            fence_len = 0
+          }
+        }
+        next
+      }
+      c = substr(s, 1, 1)
+      if (c == "`" || c == "~") {
+        n = run_length(s, c)
+        if (n >= 3) { fence_char = c; fence_len = n; next }
+      }
+      print $0
+    }
+  '
+}
+
 # True (exit 0) when the text is already CHECKLIST-BEARING: at least one
-# `- [ ] <!-- orc:NAME -->` item line, or the explicit waiver sentinel
-# `<!-- orc:none --> <justification>` (the recorded opt-out, #788). Such a body
-# is never rewritten: author content is evidence, not something a helper edits.
+# `- [ ] <!-- orc:NAME -->` item line OUTSIDE any fenced code region. Such a
+# body is never rewritten: author content is evidence, not something a helper
+# edits.
+#
+# The marker line must carry a REAL box character — a space (unchecked), `x`
+# or `X` (checked) — and nothing else: any other character is not a checklist
+# line at all (the Rust engine accepts exactly the same three).
+#
+# There is NO author-granted opt-out: a body that carries no marker is
+# missing evidence and fails closed with `checklist_markers_missing`
+# (arbsec/orchestraitor#788). An exemption may only come from an authority
+# the author does not hold — tracked in arbsec/orchestraitor#801.
 orc_lib_has_checklist() {
-  local text="$1"
-  if printf '%s\n' "$text" \
-    | grep -qP '^\s*-\s*\[(.)\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->'; then
-    return 0
-  fi
-  printf '%s\n' "$text" | grep -qP '^\s*<!--\s*orc:none\s*-->\s*\S'
+  local text="$1" stripped
+  stripped="$(printf '%s\n' "$text" | orc_lib_strip_fenced_code)"
+  printf '%s\n' "$stripped" \
+    | grep -cP '^\s*-\s*\[[xX ]\]\s*<!--\s*orc:[A-Za-z0-9_-]+\s*-->' >/dev/null
 }
 
 # Prints the managed checklist (nine UNCHECKED markers). Reads
@@ -235,17 +335,21 @@ orc_lib_checklist_markers() {
 
 # Prints the body, appending the managed checklist when it carries none (#788).
 # Usage: orc_lib_ensure_checklist_markers <body> [repo-root]
+#
+# An EMPTY body is a legitimate input: `pr-create` with no `--body`/`--body-file`
+# still owes the PR a compliant body, and a body that carries only the
+# checklist is better than a body that can never converge (#683 class: a
+# fail-closed rule no caller can satisfy is worse than the bug).
 orc_lib_ensure_checklist_markers() {
   local body="$1" root="${2:-}"
   if orc_lib_has_checklist "$body"; then
     printf '%s' "$body"
     return 0
   fi
-  printf '%s' "$body"
   if [ -n "$body" ]; then
-    printf '\n'
+    printf '%s\n\n' "$body"
   fi
-  printf '\n## Merge checklist\n\n'
+  printf '## Merge checklist\n\n'
   printf '%s\n\n' '<!-- Added by pr-create: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788). -->'
   orc_lib_checklist_markers "$root"
 }

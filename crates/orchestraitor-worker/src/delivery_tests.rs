@@ -69,6 +69,71 @@ fn delivery_body_appends_the_managed_checklist_unchecked() {
     assert!(!body.contains("- [x]"), "delivery never pre-ticks a box");
 }
 
+/// The PRODUCTION body carries the managed checklist: a marker-less body is
+/// blocked at merge (`checklist_markers_missing`, arbsec/orchestraitor#788),
+/// so the delivery lane's own PRs must not be unmergeable by construction.
+///
+/// This test drives the REAL `PushBranchDeliverySink::open_pr` against a fake
+/// `orc` executable and asserts the `--body` argument the production code
+/// actually passes — a test that rebuilds the body itself cannot detect the
+/// delivery lane dropping the checklist.
+#[cfg(unix)]
+#[tokio::test]
+async fn delivery_pr_body_carries_the_managed_checklist() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let capture = temp.path().join("body.txt");
+    // The fake `orc` records the `--body` value it was handed and prints a PR
+    // URL on stdout (the shape `open_pr` expects on success). The body is one
+    // argv entry that spans many lines, so it is captured WHOLE — a
+    // line-oriented capture would only ever see its first line.
+    let orc_stub = temp.path().join("orc");
+    std::fs::write(
+        &orc_stub,
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--body\" ]; then shift; printf '%s' \"$1\" > '{}'; break; fi; shift; done\nprintf 'https://example.invalid/pull/1\\n'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&orc_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = PushBranchDeliverySink::new(orc_stub, "arbsec/orchestraitor".into(), "main".into())
+        .unwrap();
+    let url = sink
+        .open_pr(temp.path(), "orc-delivery/branch", &request())
+        .await
+        .expect("the fake orc succeeds");
+    assert_eq!(url, "https://example.invalid/pull/1");
+
+    let body = std::fs::read_to_string(&capture).unwrap();
+
+    // The SUMMARY survives, and all NINE managed markers ride along UNCHECKED.
+    assert!(
+        body.starts_with("did the thing"),
+        "the summary must survive: {body}"
+    );
+    assert_eq!(body.matches("<!-- orc:").count(), 9, "{body}");
+    for marker in [
+        "orc:issue",
+        "orc:service-identity",
+        "orc:tests",
+        "orc:security",
+        "orc:docs",
+        "orc:rollback",
+        "orc:checks",
+        "orc:review",
+        "orc:threads",
+    ] {
+        assert!(
+            body.contains(&format!("- [ ] <!-- {marker} -->")),
+            "the production body is missing the unchecked marker {marker}: {body}"
+        );
+    }
+    assert!(!body.contains("- [x]"), "delivery never pre-ticks a box");
+}
+
 /// Drift guard: the checklist appended to delivery PRs is the repository's
 /// managed checklist, verbatim (the marker lines in
 /// `.github/PULL_REQUEST_TEMPLATE.md`).

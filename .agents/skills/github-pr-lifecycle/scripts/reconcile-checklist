@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist; the recorded opt-out is a standalone '<!-- orc:none --> <justification>' line."
+  orc_lib_print_help "reconcile-checklist" "Parse PR body for <!-- orc:* --> markers and report checked vs unchecked items. A body with no markers is reported MISSING (marker_count 0, all_checked false), never as an all-checked checklist, and always blocks with checklist_markers_missing — there is no author-granted opt-out. Markers inside a fenced code region are examples, not checklist items."
   exit "$ORC_OK"
 fi
 
@@ -31,59 +31,54 @@ BODY="$(orc_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
 # Extract each checklist line with its orc marker.
 # Pattern: - [ ] <!-- orc:XXX --> description  OR  - [x] <!-- orc:XXX --> description
+# The box holds a REAL checkbox character and nothing else: a space (unchecked),
+# `x` or `X` (checked). Any other character is not a checklist line — the Rust
+# engine (`parse_checklist`) accepts exactly the same three.
 # A body with zero markers is legitimate to PARSE (custom PR bodies; #394 keeps
 # "an empty parse is an empty list"), so grep matching nothing is guarded under
 # pipefail — empty means an empty checklist. An empty checklist is NOT a
 # satisfied one (#788): the derived state below keeps "no markers" distinguishable
 # from "all markers checked", and `convergence-status` blocks the former with
 # `checklist_markers_missing` instead of reading it as a vacuous pass.
-RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
-  CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
-  MARKER="$(echo "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
-  DESC="$(echo "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
+# There is NO author-granted opt-out: a body with no marker is missing
+# evidence and always fails closed (an exemption may only come from an
+# authority the author does not hold — arbsec/orchestraitor#801).
+#
+# Fenced code regions are EXAMPLES, not evidence: a marker inside a fence is
+# not a checklist item. `orc_lib_strip_fenced_code` (in _lib.sh) removes
+# them; the Rust engine applies the same rule, so creation and
+# reconciliation agree on what a marker is.
+SCANNED_BODY="$(printf '%s\n' "$BODY" | orc_lib_strip_fenced_code)"
+RESULT="$(printf '%s\n' "$SCANNED_BODY" | { grep -oP '^\s*-\s*\[[xX ]\]\s*<!--\s*orc:([A-Za-z0-9_-]+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
+  CHECKED="$(printf '%s\n' "$line" | grep -oP '^\s*-\s*\[[xX ]\]' | grep -oP '(?<=\[).' || echo " ")"
+  MARKER="$(printf '%s\n' "$line" | grep -oP '(?<=orc:)[A-Za-z0-9_-]+')"
+  DESC="$(printf '%s\n' "$line" | sed 's/^[^>]*-->[[:space:]]*//' || true)"
   printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
 done)"
 
-# The ONE recorded opt-out (#788): a standalone
-# `<!-- orc:none --> <one-line justification>` line. The justification is
-# mandatory (a bare sentinel waives nothing), and it waives ONLY a body with
-# zero markers — it can never mask a partially-checked checklist. The waiver is
-# surfaced in text mode, in the JSON (`waived` / `waiver_reason`) and by
-# `convergence-status` (stderr notice + `checklist_waived`).
-WAIVER=""
-WAIVER_LINE="$(echo "$BODY" | grep -m1 -oP '^\s*<!--\s*orc:none\s*-->\s*\S.*$' || true)"
-if [ -n "$WAIVER_LINE" ]; then
-  WAIVER="$(echo "$WAIVER_LINE" | sed -E 's/^\s*<!--\s*orc:none\s*-->\s*//')"
-fi
-
 if [ "$OPT_JSON" = true ]; then
-  echo "$RESULT" | jq -R -s --arg waiver "$WAIVER" '
+  echo "$RESULT" | jq -R -s '
     split("\n") | map(select(length > 0)) |
     map(split("\t")) | map({
       marker: .[0],
-      checked: (.[1] == "x"),
+      checked: (.[1] == "x" or .[1] == "X"),
       description: .[2]
     }) | {
       items: .,
       marker_count: length,
       markers_present: (length > 0),
       all_checked: ((length > 0) and all(.[]; .checked == true)),
-      unchecked: map(select(.checked == false)),
-      waived: ((length == 0) and ($waiver != ""))
-    } | if .waived then .waiver_reason = $waiver else . end
+      unchecked: map(select(.checked == false))
+    }
   '
 else
   echo "PR checklist reconciliation:"
   if [ -z "$RESULT" ]; then
-    if [ -n "$WAIVER" ]; then
-      echo "  (no managed orc:* checklist markers; marker requirement WAIVED — $WAIVER)"
-    else
-      echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"
-    fi
+    echo "  (no managed orc:* checklist markers found — checklist UNSUBSTANTIATED)"
   else
     echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
       [ -z "$marker" ] && continue
-      if [ "$checked" = "x" ]; then
+      if [ "$checked" = "x" ] || [ "$checked" = "X" ]; then
         echo "  [x] $marker: $desc"
       else
         echo "  [ ] $marker: $desc"

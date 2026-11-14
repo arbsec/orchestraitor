@@ -225,12 +225,6 @@ pub struct Checklist {
     pub all_checked: bool,
     /// Count of unchecked items.
     pub unchecked_count: u64,
-    /// Whether the body's `<!-- orc:none --> <justification>` sentinel waived
-    /// the marker requirement (only when no marker exists).
-    pub waived: bool,
-    /// The waiver's one-line justification (present only when `waived`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
 }
 
 /// One managed checklist item.
@@ -867,11 +861,12 @@ fn assemble_verdict(
         // Two DISTINCT checklist failures (arbsec/orchestraitor#788): a body
         // with no managed markers is missing evidence, not a vacuous pass, and
         // a marker-bearing body with unticked boxes is the item-count reason.
-        // The `<!-- orc:none --> <justification>` waiver passes only the former.
+        // There is NO author-granted opt-out: a marker-less body always
+        // blocks, because the author cannot grant themselves the exemption
+        // (an exemption needs an authority they lack —
+        // arbsec/orchestraitor#801).
         if !checklist.markers_present {
-            if !checklist.waived {
-                reasons.push("checklist_markers_missing".to_string());
-            }
+            reasons.push("checklist_markers_missing".to_string());
         } else if !checklist.all_checked {
             reasons.push(format!("unchecked_items({})", checklist.unchecked_count));
         }
@@ -1199,21 +1194,35 @@ fn gh_bucket(state: &str) -> String {
 /// Parses the PR body for `<!-- orc:MARKER -->` checklist lines
 /// (reconcile-checklist's grep pattern, verbatim):
 /// `- [ ] <!-- orc:XXX --> description` / `- [x] <!-- orc:XXX --> description`.
+///
+/// The box holds a REAL checkbox character and nothing else: a space
+/// (unchecked), `x` or `X` (checked). Any other character is not a checklist
+/// line at all — the shell engine accepts exactly the same three.
+///
+/// Markers inside a FENCED code region are EXAMPLES, not evidence: they are
+/// excluded before the scan (see [`strip_fenced_code`]).
+///
 /// A body with zero markers is an EMPTY checklist and, per
 /// arbsec/orchestraitor#788, MISSING evidence: `markers_present` is false and
 /// `all_checked` is false (an empty `all()` used to make it vacuously true and
-/// merge a PR with no checklist evidence at all).
+/// merge a PR with no checklist evidence at all). There is NO author-granted
+/// opt-out.
 fn parse_checklist(body: &str) -> Checklist {
+    let scanned = strip_fenced_code(body);
     let mut items = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
+    for line in scanned.lines() {
+        let trimmed = line.trim_start_matches([' ', '\t']);
         let Some(rest) = trimmed.strip_prefix("- [") else {
             continue;
         };
         let Some((checked_char, after_box)) = rest.split_once(']') else {
             continue;
         };
-        if checked_char.len() != 1 || !(checked_char == "x" || checked_char == " ") {
+        // Exactly three accepted box characters: `x`, `X` (checked) and a
+        // space (unchecked). Anything else is not a checklist line.
+        if checked_char.len() != 1
+            || !(checked_char == "x" || checked_char == "X" || checked_char == " ")
+        {
             continue;
         }
         let after_box = after_box.trim_start();
@@ -1236,7 +1245,7 @@ fn parse_checklist(body: &str) -> Checklist {
         let description = after_marker.trim().to_string();
         items.push(ChecklistItem {
             marker,
-            checked: checked_char == "x",
+            checked: checked_char != " ",
             description,
         });
     }
@@ -1245,46 +1254,64 @@ fn parse_checklist(body: &str) -> Checklist {
     let unchecked_count =
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
     let all_checked = markers_present && items.iter().all(|item| item.checked);
-    // The #788 opt-out is effective ONLY for a marker-less body: it can never
-    // mask a partially-checked checklist.
-    let waiver_reason = if markers_present {
-        None
-    } else {
-        parse_checklist_waiver(body)
-    };
     Checklist {
         items,
         marker_count,
         markers_present,
         all_checked,
         unchecked_count,
-        waived: waiver_reason.is_some(),
-        waiver_reason,
     }
 }
 
-/// Parses the recorded opt-out (arbsec/orchestraitor#788): a standalone
-/// `<!-- orc:none --> <one-line justification>` line. The justification is
-/// mandatory — a bare sentinel waives nothing — and the first qualifying line
-/// wins (reconcile-checklist's `grep -m1`).
-fn parse_checklist_waiver(body: &str) -> Option<String> {
+/// Removes every FENCED code region from the body (arbsec/orchestraitor#788).
+///
+/// A managed checklist marker inside a fenced region is an EXAMPLE, not
+/// evidence. The shell engine (`orc_lib_strip_fenced_code` in
+/// `.agents/skills/github-pr-lifecycle/scripts/_lib.sh`) applies exactly these
+/// rules, so creation and reconciliation agree on what a marker is:
+///
+/// - a fence OPENS on a line whose first non-whitespace characters are 3+
+///   backticks OR 3+ tildes;
+/// - the region CLOSES at the first later line whose first non-whitespace
+///   characters are the SAME fence character repeated at least as many times
+///   as the opener, with only whitespace after them (a DIFFERENT fence
+///   character never closes it);
+/// - an unclosed fence runs to the end of the body;
+/// - every line inside the region — INCLUDING the opening and the closing
+///   fence lines — is excluded from marker scanning.
+fn strip_fenced_code(body: &str) -> String {
+    let mut out = String::new();
+    // The open fence: its character and how many times it was repeated.
+    let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("<!--") else {
-            continue;
-        };
-        let Some((marker, after_marker)) = rest.split_once("-->") else {
-            continue;
-        };
-        if marker.trim() != "orc:none" {
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        if let Some((fence_char, fence_len)) = fence {
+            // Only the SAME character, repeated at least as many times as the
+            // opener, with nothing but whitespace after it, closes the region.
+            if trimmed.starts_with(fence_char) {
+                let run = trimmed.chars().take_while(|c| *c == fence_char).count();
+                let rest = trimmed.chars().skip(run).all(|c| c.is_ascii_whitespace());
+                if run >= fence_len && rest {
+                    fence = None;
+                }
+            }
             continue;
         }
-        let justification = after_marker.trim();
-        if !justification.is_empty() {
-            return Some(justification.to_string());
+        // Outside a region: a line whose first non-whitespace characters are 3+
+        // backticks or 3+ tildes OPENS a fence.
+        if let Some(first) = trimmed.chars().next()
+            && (first == '`' || first == '~')
+        {
+            let run = trimmed.chars().take_while(|c| *c == first).count();
+            if run >= 3 {
+                fence = Some((first, run));
+                continue;
+            }
         }
+        out.push_str(line);
+        out.push('\n');
     }
-    None
+    out
 }
 
 /// Reads the CLEAN-review record for this PR at the current head
@@ -1834,8 +1861,6 @@ mod tests {
         assert!(!checklist.markers_present);
         assert!(!checklist.all_checked);
         assert_eq!(checklist.unchecked_count, 0);
-        assert!(!checklist.waived);
-        assert_eq!(checklist.waiver_reason, None);
     }
 
     #[test]
@@ -1850,28 +1875,25 @@ mod tests {
     }
 
     #[test]
-    fn checklist_waiver_requires_a_justification() {
-        // A bare sentinel waives nothing: the justification is the record.
+    fn a_body_sentinel_is_not_an_opt_out() {
+        // arbsec/orchestraitor#788 revision: the `<!-- orc:none -->` waiver was
+        // REMOVED — an author cannot grant themselves the exemption. A body
+        // that carries the sentinel and no marker is still MISSING evidence
+        // and blocks with `checklist_markers_missing`.
         let bare = parse_checklist("A body.\n\n<!-- orc:none -->\n");
         assert!(!bare.markers_present);
-        assert!(!bare.waived, "a bare sentinel must not waive");
-        assert_eq!(bare.waiver_reason, None);
+        assert!(!bare.all_checked);
+        assert_eq!(bare.marker_count, 0);
 
-        let waived =
+        let justified =
             parse_checklist("A body.\n\n<!-- orc:none --> machine-authored delivery summary\n");
-        assert!(!waived.markers_present);
-        assert!(waived.waived);
-        assert_eq!(
-            waived.waiver_reason.as_deref(),
-            Some("machine-authored delivery summary")
-        );
-        // Waived is still not "all checked": the checklist was never substantiated.
-        assert!(!waived.all_checked);
-        assert_eq!(waived.marker_count, 0);
+        assert!(!justified.markers_present, "the sentinel is not a marker");
+        assert!(!justified.all_checked);
+        assert_eq!(justified.marker_count, 0);
     }
 
     #[test]
-    fn checklist_waiver_never_masks_a_partially_checked_checklist() {
+    fn a_sentinel_never_masks_a_partially_checked_checklist() {
         let checklist = parse_checklist(
             "<!-- orc:none --> sneaky waiver\n\
              - [x] <!-- orc:issue --> linked\n\
@@ -1879,10 +1901,111 @@ mod tests {
         );
         assert!(checklist.markers_present);
         assert_eq!(checklist.marker_count, 2);
-        assert!(!checklist.waived, "a waiver is inert when markers exist");
-        assert_eq!(checklist.waiver_reason, None);
         assert!(!checklist.all_checked);
         assert_eq!(checklist.unchecked_count, 1);
+    }
+
+    #[test]
+    fn checkbox_characters_are_case_insensitive_and_exactly_three() {
+        // arbsec/orchestraitor#788 review finding: the shell regex accepted
+        // ANY single character in the box while the Rust parser accepted only
+        // `x` and a space. Both engines now accept exactly `x`, `X` and a
+        // space: `x`/`X` are checked, a space is unchecked, and any other
+        // character is not a checklist line at all.
+        let upper = parse_checklist("- [X] <!-- orc:tests --> tested\n");
+        assert_eq!(upper.marker_count, 1);
+        assert!(upper.items[0].checked, "`X` is a checked box");
+        assert!(upper.all_checked);
+
+        let space = parse_checklist("- [ ] <!-- orc:tests --> untested\n");
+        assert_eq!(space.marker_count, 1);
+        assert!(!space.items[0].checked, "a space is an unchecked box");
+
+        let nonsense = parse_checklist("- [q] <!-- orc:tests --> nonsense box\n");
+        assert_eq!(nonsense.marker_count, 0, "a nonsense box is not an item");
+        assert!(!nonsense.markers_present);
+        assert!(!nonsense.all_checked);
+    }
+
+    #[test]
+    fn fenced_code_is_not_checklist_state() {
+        // A marker inside a fenced code region is an EXAMPLE, not evidence:
+        // both engines exclude the fenced region before scanning.
+        let fenced = parse_checklist(
+            "Here is the shape:\n\
+             ```markdown\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ```\n\
+             \n\
+             No real checklist here.\n",
+        );
+        assert_eq!(fenced.marker_count, 0);
+        assert!(!fenced.markers_present);
+        assert!(!fenced.all_checked);
+
+        let tilde_fenced = parse_checklist(
+            "~~~text\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ~~~\n",
+        );
+        assert_eq!(tilde_fenced.marker_count, 0);
+
+        // A marker AFTER a closed fence IS a marker.
+        let after = parse_checklist(
+            "```\n\
+             - [x] <!-- orc:issue --> example only\n\
+             ```\n\
+             - [x] <!-- orc:tests --> real item\n",
+        );
+        assert_eq!(after.marker_count, 1);
+        assert_eq!(after.items[0].marker, "tests");
+        assert!(after.all_checked);
+    }
+
+    #[test]
+    fn an_unclosed_fence_runs_to_the_end_of_the_body() {
+        let body = parse_checklist(
+            "```\n\
+             - [x] <!-- orc:issue --> example only\n\
+             - [x] <!-- orc:tests --> also example\n",
+        );
+        assert_eq!(body.marker_count, 0);
+        assert!(!body.markers_present);
+    }
+
+    #[test]
+    fn a_different_fence_character_never_closes_a_region() {
+        // The opener is a backtick fence; a tilde line does not close it.
+        let body = parse_checklist(
+            "```\n\
+             ~~~\n\
+             - [x] <!-- orc:issue --> still inside the fence\n\
+             ```\n\
+             - [x] <!-- orc:tests --> real item\n",
+        );
+        assert_eq!(body.marker_count, 1);
+        assert_eq!(body.items[0].marker, "tests");
+    }
+
+    #[test]
+    fn one_ticked_marker_satisfies_the_gate_today() {
+        // DOCUMENTED GAP — arbsec/orchestraitor#800 (deferred from #788).
+        //
+        // The gate asserts that every marker the body CARRIES is checked; it
+        // does NOT assert that the body carries the managed marker SET. A body
+        // with exactly ONE ticked marker therefore reports `all_checked: true`
+        // and produces no checklist reason, so the other eight managed markers
+        // are silently absent.
+        //
+        // This is PRE-EXISTING (the base gate at 1297cb07 had the same
+        // property) and independently testable, so it is tracked in its own
+        // issue rather than folded into the #788 bug-fix. This test exists so
+        // the gap is VISIBLE and cannot be mistaken for intended behaviour.
+        let checklist = parse_checklist("- [x] <!-- orc:issue --> linked\n");
+        assert_eq!(checklist.marker_count, 1);
+        assert!(checklist.markers_present);
+        assert!(checklist.all_checked);
+        assert_eq!(checklist.unchecked_count, 0);
     }
 
     #[test]

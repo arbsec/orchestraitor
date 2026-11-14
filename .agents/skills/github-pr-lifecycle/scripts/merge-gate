@@ -68,12 +68,6 @@ if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
   exit "$ORC_ERR_BLOCKED"
 fi
 
-# A pass taken under the #788 waiver must be VISIBLE at the merge decision, not
-# only in the convergence report: the body carried no managed checklist markers.
-if [ "$(echo "$CONVERGENCE" | jq -r '.checklist_waived // false')" = "true" ]; then
-  echo "NOTICE: checklist marker requirement WAIVED for PR #$PR by the body sentinel: $(echo "$CONVERGENCE" | jq -r '.checklist_waiver_reason // ""')" >&2
-fi
-
 # Read the head SHA for --match-head-commit and re-check BOTH anchors: a
 # changed head invalidates the review generation outright, and a changed
 # base changes the diff the generation reviewed even at an unchanged head

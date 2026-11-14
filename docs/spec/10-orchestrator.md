@@ -644,16 +644,17 @@ pr.status <N> -> {
   },                                 # actionable = !isResolved && !isOutdated (review-threads rule);
                                      # excerpts are size-capped (see below), never full bodies
   checklist: { items: [ { marker, checked, description } ],
-               marker_count, markers_present, all_checked, unchecked_count,
-               waived, waiver_reason? },
+               marker_count, markers_present, all_checked, unchecked_count },
                                      # `all_checked` is true only when at least one marker exists AND
                                      # every marker is checked: a marker-less body is MISSING evidence,
                                      # never a vacuous pass (arbsec/orchestraitor#788 — the empty `all()`
                                      # used to reach merge-gate as `mergeable: true`).
-                                     # `waived`/`waiver_reason` carry the ONE recorded opt-out: a
-                                     # standalone `<!-- orc:none --> <one-line justification>` body line,
-                                     # effective only when no marker exists, reported so a waived pass is
-                                     # never mistakable for a complete checklist.
+                                     # There is NO author-granted opt-out: the body cannot waive
+                                     # itself, so a marker-less body always blocks with
+                                     # `checklist_markers_missing` (arbsec/orchestraitor#801).
+                                     # Markers inside a fenced code region (3+ backticks or 3+
+                                     # tildes) are EXAMPLES, not checklist items: the whole region
+                                     # is excluded from the scan (arbsec/orchestraitor#788).
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly
