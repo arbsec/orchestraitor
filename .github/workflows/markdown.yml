@@ -58,7 +58,7 @@ jobs:
       # The version the job actually got is asserted against the pin before
       # the lint runs, so a runner-image or registry change cannot silently
       # shift the gate.
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b  # v5.2.7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
         with:
           install_args: rumdl
       - name: Lint markdown
@@ -91,7 +91,7 @@ jobs:
           persist-credentials: false
       # Rust comes from `.mise.toml` (1.98.1, matching `rust-toolchain.toml`),
       # the same setup code.yml uses for `cargo fmt`/`clippy`/`check`.
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b  # v5.2.7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
       # `--locked`: CI must never rewrite the committed lockfile. A non-zero
       # exit fails the job — no `continue-on-error`, no `|| true`.
       - name: Docs consistency check
