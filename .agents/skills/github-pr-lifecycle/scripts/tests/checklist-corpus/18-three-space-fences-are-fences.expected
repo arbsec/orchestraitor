@@ -1,1 +1,2 @@
+# three leading spaces are still a fence: opener and closer are both recognized.
 marker_count=1 all_checked=true

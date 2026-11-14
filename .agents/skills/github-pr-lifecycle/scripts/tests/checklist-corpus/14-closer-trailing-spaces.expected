@@ -1,1 +1,2 @@
+# a closer with trailing spaces still closes (only whitespace may follow it).
 marker_count=1 all_checked=true

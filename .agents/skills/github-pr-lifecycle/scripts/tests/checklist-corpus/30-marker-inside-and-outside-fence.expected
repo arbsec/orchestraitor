@@ -1,1 +1,2 @@
+# only the marker OUTSIDE the fence counts (and it is unchecked).
 marker_count=1 all_checked=false

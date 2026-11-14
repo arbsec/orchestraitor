@@ -1,1 +1,2 @@
+# CRLF line endings: fences and markers parse exactly as with LF.
 marker_count=1 all_checked=true

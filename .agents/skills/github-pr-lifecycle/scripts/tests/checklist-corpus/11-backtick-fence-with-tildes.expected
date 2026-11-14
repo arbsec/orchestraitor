@@ -1,1 +1,2 @@
+# a backtick fence may contain tilde lines; only the marker AFTER the backtick closer counts.
 marker_count=1 all_checked=true

@@ -1,1 +1,2 @@
+# the scanner is fence-aware only: a fence opened inside an HTML comment still hides the marker.
 marker_count=0 all_checked=false
