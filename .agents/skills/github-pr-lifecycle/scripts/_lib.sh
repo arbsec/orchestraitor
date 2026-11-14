@@ -714,49 +714,89 @@ orc_lib_checklist_markers() {
 # could never converge. The error names the line and the three remedies that
 # work: put it in a fenced code block, indent it by 4 spaces, or remove it.
 #
-# Two more constructs make the reading indeterminate, and both are refused here
-# too (#799 R12 review): a NEAR-MARKER (a task-item box token plus an `orc:NAME`
-# reference that is not in the canonical form) and a MANAGED MARKER INDENTED
-# 4+ SPACES (or led by a tab — arbsec/orchestraitor#802). All three are
-# validated BEFORE the `has_checklist` early return: a body that already carries
-# a marker used to be handed straight to `gh`, which then produced a PR whose
-# checklist `reconcile-checklist` refuses on the very next read — an exit-0
-# composition of a body the gate rejects. The unclosed-fence refusal stays
-# APPEND-SPECIFIC (below): it is about where the appended markers would land, so
-# it only applies when markers are actually being appended.
+# EVERY construct that makes the reading indeterminate is refused here, through
+# the engine's own scan and its own selection (`orc_lib_first_unparseable_line`):
+# a STICKY 1-3-space fence OPENER (arbsec/orchestraitor#809 — closing the region
+# does NOT clear it), a RAW HTML CONSTRUCT (#799 R1), a MANAGED MARKER INDENTED
+# 4+ SPACES or tab-led (#802), and a NEAR-MARKER (#799 R1).
+#
+# They are validated BEFORE the `has_checklist` early return AND before any
+# append (arbsec/orchestraitor#799 R14). Two drifts made that necessary: a body
+# that already carried a marker was handed straight to `gh`, which produced a PR
+# whose checklist `reconcile-checklist` refuses on the very next read (an exit-0
+# composition of a body the gate rejects); and a body whose 1-space fence opener
+# had already CLOSED passed the old `fence_state == closed` test and was appended
+# to, although the engine reports `indented_fence_opener` for it (the condition
+# is sticky by design). Only the UNCLOSED-FENCE refusal stays append-specific
+# (below): it is about where the appended markers would land.
+# The FIRST construct that makes a body's checklist reading INDETERMINATE, with
+# the line it sits on and its name — the SAME selection `reconcile-checklist`
+# makes (earliest line wins; at one line the order is fence opener, HTML
+# construct, indented marker, near-marker). Prints "<line>\t<name>", or nothing
+# at all when the reading is determinate.
+#
+# This is the single predicate every composition caller uses
+# (arbsec/orchestraitor#799 R14): the four refusal rules are the ENGINE's own
+# scan (`orc_lib_fence_unparseable_line` is sticky, `orc_lib_html_construct_line`,
+# `orc_lib_indented_marker_line`, `orc_lib_near_marker_line`), so a caller cannot
+# compose a body the gate then refuses.
+#
+# Usage: orc_lib_first_unparseable_line <body>
+orc_lib_first_unparseable_line() {
+  local body="$1" candidate line name best_line="" best_name=""
+  for candidate in \
+    "$(printf '%s\n' "$body" | orc_lib_fence_unparseable_line):indented_fence_opener" \
+    "$(printf '%s\n' "$body" | orc_lib_html_construct_line):html_construct" \
+    "$(printf '%s\n' "$body" | orc_lib_indented_marker_line):indented_marker" \
+    "$(printf '%s\n' "$body" | orc_lib_near_marker_line):near_marker"; do
+    line="${candidate%%:*}"
+    name="${candidate#*:}"
+    [ -n "$line" ] || continue
+    if [ -z "$best_line" ] || [ "$line" -lt "$best_line" ]; then
+      best_line="$line"
+      best_name="$name"
+    fi
+  done
+  [ -z "$best_line" ] || printf '%s\t%s\n' "$best_line" "$best_name"
+}
+
 orc_lib_ensure_checklist_markers() {
   local body="$1" root="${2:-}" fence_state="" fence_char="" fence_len="" fence_name=""
-  local construct_line=""
+  local construct="" construct_line="" construct_name=""
+  # ALL FOUR refusals run BEFORE the `has_checklist` early return AND before any
+  # append (arbsec/orchestraitor#799 R14): a body the engine would refuse must
+  # never be composed, whether it already carries markers or is about to receive
+  # them. The STICKY indented-fence-opener condition is part of this set — an
+  # already-checklisted body with a 1-3-space opener is refused too, because the
+  # engine refuses it. Only the UNCLOSED-FENCE refusal below stays
+  # APPEND-SPECIFIC: it is about where the appended markers would land.
   if [ -n "$body" ]; then
-    # A RAW HTML CONSTRUCT makes the reading indeterminate, and appending cannot
-    # repair that: refuse instead of composing a PR that can never converge
-    # (arbsec/orchestraitor#799 R1).
-    construct_line="$(printf '%s\n' "$body" | orc_lib_html_construct_line)"
+    construct="$(orc_lib_first_unparseable_line "$body")"
+    construct_line="${construct%%$'\t'*}"
     if [ -n "$construct_line" ]; then
-      echo "error: refusing to append the managed merge checklist: the PR body contains a raw HTML construct at line $construct_line (a line starting with '<')" >&2
-      echo "  the checklist scanner does not model HTML, so it cannot tell what that construct hides and would refuse every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
-      echo "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it" >&2
-      exit "$ORC_ERR_CONFIG"
-    fi
-    # A MANAGED MARKER indented 4+ spaces (or led by a tab) renders as an
-    # INDENTED CODE BLOCK when it is not inside a list item, and no scanner can
-    # tell those apart (#802). Refused BEFORE any append, and before the
-    # `has_checklist` early return below.
-    construct_line="$(printf '%s\n' "$body" | orc_lib_indented_marker_line)"
-    if [ -n "$construct_line" ]; then
-      echo "error: refusing to append the managed merge checklist: a managed marker is indented too far at line $construct_line (4 or more spaces, or a leading tab)" >&2
-      echo "  a marker indented 4+ spaces renders as an indented code block when it is not inside a list item, where it is not a checkbox, and the scanner has no container model to tell the two apart, so it refuses every reading of the body (arbsec/orchestraitor#802): nothing is appended and your body is not modified" >&2
-      echo "  fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted" >&2
-      exit "$ORC_ERR_CONFIG"
-    fi
-    # A NEAR-MARKER: the gate cannot tell what such a line asserts, so any body
-    # carrying one is refused on every read (#799 R1) — including a body that
-    # already carries the nine canonical markers.
-    construct_line="$(printf '%s\n' "$body" | orc_lib_near_marker_line)"
-    if [ -n "$construct_line" ]; then
-      echo "error: refusing to append the managed merge checklist: the PR body carries a near-marker at line $construct_line (a task-item box token plus an orc:NAME reference that is not in the canonical form)" >&2
-      echo "  the gate cannot tell what such a line asserts, so it refuses every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
-      echo "  fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token" >&2
+      construct_name="${construct#*$'\t'}"
+      case "$construct_name" in
+        indented_fence_opener)
+          echo "error: refusing to append the managed merge checklist: the body opens a fenced code block indented 1-3 spaces on line $construct_line, closed or not" >&2
+          echo "  its container scope (top level, list item, block quote) cannot be determined, so the checklist scanner refuses every reading of the body (arbsec/orchestraitor#809): nothing is appended and your body is not modified" >&2
+          echo "  fix: dedent the fence opener to column 0" >&2
+          ;;
+        html_construct)
+          echo "error: refusing to append the managed merge checklist: the PR body contains a raw HTML construct at line $construct_line (a line starting with '<')" >&2
+          echo "  the checklist scanner does not model HTML, so it cannot tell what that construct hides and would refuse every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
+          echo "  fix: put it inside a fenced code block, indent it by 4 spaces, or remove it" >&2
+          ;;
+        indented_marker)
+          echo "error: refusing to append the managed merge checklist: a managed marker is indented too far at line $construct_line (4 or more spaces, or a leading tab)" >&2
+          echo "  a marker indented 4+ spaces renders as an indented code block when it is not inside a list item, where it is not a checkbox, and the scanner has no container model to tell the two apart, so it refuses every reading of the body (arbsec/orchestraitor#802): nothing is appended and your body is not modified" >&2
+          echo "  fix: dedent the marker line to column 0 — 0-3 leading spaces is still accepted" >&2
+          ;;
+        *)
+          echo "error: refusing to append the managed merge checklist: the PR body carries a near-marker at line $construct_line (a task-item box token plus an orc:NAME reference that is not in the canonical form)" >&2
+          echo "  the gate cannot tell what such a line asserts, so it refuses every reading of the body (arbsec/orchestraitor#799): nothing is appended and your body is not modified" >&2
+          echo "  fix: write the marker canonically — - [x] <!-- orc:NAME --> — with exactly one ASCII space between every token" >&2
+          ;;
+      esac
       exit "$ORC_ERR_CONFIG"
     fi
   fi

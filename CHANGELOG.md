@@ -29,20 +29,44 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   indent it by 4 spaces, or remove it. This is deliberately STRICTER than
   CommonMark — an autolink and inline HTML are ordinary text there — because a
   merge gate must not depend on a hand-rolled parser being spec-exact; real
-  modelling is tracked separately. The other indeterminate construct is
-  unchanged: a fence OPENER indented 1-3 spaces (the one remedy is to dedent the
-  opener to column 0, and closing the region does NOT clear the condition). Line
-  endings are normalised once (CommonMark §2.1: lone CR and CRLF both become LF)
-  so both engines agree on every body.
+  modelling is tracked separately. Exactly FOUR constructs make the reading
+  indeterminate, and `checklist.unparseable_construct` names which one:
+  `indented_fence_opener` (a fence opener indented 1-3 spaces; its one remedy is
+  to dedent the opener to column 0, and closing the region does NOT clear the
+  condition), `html_construct` (above), `indented_marker` (a managed marker OR a
+  near-marker indented four or more spaces, or led by a tab: when it is not in a
+  list item it renders as an indented code block, where it is not a checkbox, so
+  the reading is refused — dedent the marker line to column 0; 0-3 leading
+  spaces stays accepted and a fenced instance is inert. The marker still COUNTS,
+  but no verdict uses that count, because the reading is refused), and
+  `near_marker` (a managed marker not in the canonical form — write it
+  canonically). Line endings are normalised once (CommonMark §2.1: lone CR and
+  CRLF both become LF) so both engines agree on every body.
 - **`pr-create` / `pr-mutate`**: a body that carries a raw HTML construct (a
   line starting with `<`, outside a fenced code region) is now refused with
   exit 2 instead of having the managed checklist appended into a body no
   scanner could ever read: the error names the line and the three remedies —
-  put it inside a fenced code block, indent it by 4 spaces, or remove it. A
-  body that ends inside an unterminated code fence is still refused, naming the
-  fence to close. The body note the helper adds for a marker-less body is prose,
-  never an HTML comment, so an injected checklist can never make its own body
-  indeterminate.
+  put it inside a fenced code block, indent it by 4 spaces, or remove it. The
+  same refusal now covers every construct that makes the reading indeterminate,
+  with the construct named and its own remedy: an `indented_fence_opener`, an
+  `indented_marker` (dedent it to column 0) and a `near_marker` (write it
+  canonically), and it runs whether or not the body already carries the
+  checklist — a body the gate would refuse is never composed. The unclosed-fence
+  refusal stays APPEND-SPECIFIC: it fires only when markers must be appended, so
+  an already-checklisted body ending in an open fence is accepted as-is. The body
+  note the helper adds for a marker-less body is prose, never an HTML comment, so
+  an injected checklist can never make its own body indeterminate.
+- **`pr-create` / `pr-mutate` body flags**: gh's short spellings are accepted
+  and normalised — `-b` = `--body`, `-F` = `--body-file`, and `-f` = `--fill`
+  for `pr-create` only (`pr edit` has no fill flag); `-B` means `--base` and is
+  left alone. An EXPLICIT body is always validated and forwarded with the
+  managed checklist, including an explicit EMPTY one (`--body ""` / `--body=`,
+  which becomes the checklist-only body) and when `--fill*` is also present;
+  gh documents that an explicit `--body` takes precedence over autofilled
+  content. Combining an explicit body with `--template`, `--web` or `--editor`
+  is refused with exit 2, because gh accepts only one body source and rejects a
+  template alongside an explicit body — that combination could never create a
+  PR. Injection is skipped only when no explicit body was supplied.
 - **`orc pr status` / `reconcile-checklist --json`**: `checklist.items[].description`
   is the text after the `-->` delimiter again, for checked and unchecked items
   alike. The shell engine emitted the BOX character (`"x"` / `""`) while the
@@ -65,19 +89,26 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   line. Prose that merely mentions a managed name, and a plain task with no
   managed name, are not near-markers and never block. There is still NO
   author-granted opt-out: a bare `<!-- orc:none -->` grants nothing.
-- **Delivery PRs**: the delivery lane **neutralises exactly three constructs**
-  in the untrusted run summary it composes, and claims nothing more: an
-  indented fence opener is dedented to column 0; a line whose first
-  non-whitespace character is `<` (0-3 leading spaces) has that `<` escaped to
-  `&lt;`, which is what keeps the composed body readable now that a line-start
-  `<` refuses the checklist reading; and a near-marker line is rendered as
-  literal text (`<!--` -> `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`). The summary
-  therefore cannot make its own delivery PR unconvergeable, and a reviewer
-  reads exactly what the model wrote. It can still open a column-0 fence in its
-  own text, which is determinate and can never enclose the trusted checklist
-  that leads the body. The summary's line endings are normalised first (lone CR
-  and CRLF both become LF), so a lone-CR summary is neutralised by the same
-  rules.
+- **Delivery PRs**: the delivery lane now decides what to neutralise in the
+  untrusted run summary by running the **engine's own scan** (the shared
+  checklist-marker module the gate itself is built on) instead of a private copy
+  of the rules, and it handles **every construct the engine refuses**: a managed
+  marker or near-marker indented four or more spaces (or led by a tab) is
+  dedented to column 0 — the documented remedy, so it stays visible and counts
+  as what it is; an indented fence opener is dedented to column 0; a line whose
+  first non-whitespace character is `<` (0-3 leading spaces) has that `<`
+  escaped to `&lt;`, which is what keeps the composed body readable now that a
+  line-start `<` refuses the checklist reading; and a near-marker line is
+  rendered as literal text (`<!--` -> `&lt;!--`, `orc:NAME` -> `orc&#58;NAME`).
+  Content inside a fenced code block is delivered **byte-identical** — it is
+  already inert to every scanner, so transforming it would corrupt the example
+  the model wrote. The composed body is asserted against the engine itself (it
+  must parse with no indeterminate construct), so the summary cannot make its
+  own delivery PR unconvergeable, and a reviewer reads exactly what the model
+  wrote. It can still open a column-0 fence in its own text, which is
+  determinate and can never enclose the trusted checklist that leads the body.
+  The summary's line endings are normalised first (lone CR and CRLF both become
+  LF), so a lone-CR summary is neutralised by the same rules.
 
 ### Added
 

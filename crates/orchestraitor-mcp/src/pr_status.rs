@@ -18,6 +18,7 @@
 //! BLOCKING — callers on async runtimes wrap [`Engine::aggregate`] in
 //! `tokio::task::spawn_blocking`.
 
+use orchestraitor_core::checklist_markers;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -211,25 +212,13 @@ pub struct ThreadItem {
     pub last_comment_excerpt: Option<String>,
 }
 
-/// The nine MANAGED marker names.
-///
-/// A managed marker has ONE canonical form and its `<NAME>` is one of these.
-/// The list is the SINGLE source of truth for the shell engine too (the
-/// `_lib.sh` fallback, which the drift guard in `test-reconcile-checklist`
-/// asserts equals `.github/PULL_REQUEST_TEMPLATE.md` verbatim); the Rust copy
-/// is guarded by [`managed_marker_names_match_the_template`], so the two cannot
-/// drift.
-const MANAGED_MARKER_NAMES: [&str; 9] = [
-    "issue",
-    "service-identity",
-    "tests",
-    "security",
-    "docs",
-    "rollback",
-    "checks",
-    "review",
-    "threads",
-];
+// The nine MANAGED marker names live in the SHARED grammar
+// (`orchestraitor_core::checklist_markers`), which the engine and the delivery
+// lane both read: a per-crate copy is exactly what drifted twice
+// (arbsec/orchestraitor#799 R14). The engine's own code never needs the array
+// directly (the scan reports names), but its tests pin it to the template.
+#[cfg(test)]
+use orchestraitor_core::checklist_markers::MANAGED_MARKER_NAMES;
 
 /// The construct that made a checklist reading INDETERMINATE.
 ///
@@ -1314,42 +1303,37 @@ fn gh_bucket(state: &str) -> String {
 /// rather than a checkbox whenever it is not inside a list item — is never "all
 /// checked": the reading is refused rather than guessed
 /// (arbsec/orchestraitor#809, arbsec/orchestraitor#799 R1, #802).
-fn parse_checklist(body: &str) -> Checklist {
-    let scan = scan_fences(body);
+///
+/// `must_use`: a dropped verdict is a silent gate, so the reading must be
+/// consumed by the caller.
+#[must_use]
+pub fn parse_checklist(body: &str) -> Checklist {
+    // ONE scan, shared with every other caller: the grammar, the fence rules and
+    // the four refusal constructs live in `orchestraitor_core::checklist_markers`
+    // (arbsec/orchestraitor#799 R14). This function only maps the scan onto the
+    // typed verdict the gate publishes, so no caller can drift from the engine.
+    let scan = checklist_markers::scan_body(body);
     let mut items = Vec::new();
-    for (_line_number, line) in &scan.lines {
-        let Some(item) = parse_canonical_marker(line) else {
+    for line in scan.visible() {
+        let Some(marker) = &line.canonical else {
             continue;
         };
-        items.push(item);
+        items.push(ChecklistItem {
+            marker: marker.name.to_string(),
+            checked: marker.checked,
+            description: marker.description.clone(),
+        });
     }
     let marker_count = u64::try_from(items.len()).unwrap_or(u64::MAX);
     let markers_present = !items.is_empty();
     let unchecked_count =
         u64::try_from(items.iter().filter(|item| !item.checked).count()).unwrap_or(u64::MAX);
-    // An indeterminate reading is never "all checked": the scan cannot say what
-    // the body asserts, so the reading is refused (fail closed). The EARLIEST
-    // of the constructs wins — every one of them makes the reading undecidable.
-    let mut unparseable_line: Option<u64> = None;
-    let mut unparseable_construct: Option<UnparseableConstruct> = None;
-    for (line, construct) in [
-        (
-            scan.indented_opener,
-            UnparseableConstruct::IndentedFenceOpener,
-        ),
-        (scan.html_construct, UnparseableConstruct::HtmlConstruct),
-        (scan.indented_marker, UnparseableConstruct::IndentedMarker),
-        (scan.near_marker, UnparseableConstruct::NearMarker),
-    ] {
-        let Some(line) = line else {
-            continue;
-        };
-        if unparseable_line.is_none_or(|earliest| line < earliest) {
-            unparseable_line = Some(line);
-            unparseable_construct = Some(construct);
-        }
-    }
-    let unparseable = unparseable_line.is_some();
+    // An indeterminate reading is never "all checked": the shared scan refuses it
+    // (fail closed), naming the EARLIEST construct.
+    let first_unparseable = scan.first_unparseable();
+    let unparseable_line = first_unparseable.map(|(line, _)| line);
+    let unparseable_construct = first_unparseable.map(|(_, kind)| to_construct(kind));
+    let unparseable = first_unparseable.is_some();
     let all_checked = !unparseable && markers_present && items.iter().all(|item| item.checked);
     Checklist {
         items,
@@ -1363,328 +1347,17 @@ fn parse_checklist(body: &str) -> Checklist {
     }
 }
 
-/// Parses one line as a CANONICAL managed marker.
-///
-/// The grammar is exact and contains NO whitespace class: the indent is
-/// spaces/tabs, every separator is exactly one ASCII space, the box is `x`,
-/// `X` or a single space, and the name is one of [`MANAGED_MARKER_NAMES`].
-/// Returns `None` for anything else — including a NEAR-MARKER, which is
-/// reported by the scan, not counted as an item.
-fn parse_canonical_marker(line: &str) -> Option<ChecklistItem> {
-    let trimmed = line.trim_start_matches([' ', '\t']);
-    let rest = trimmed.strip_prefix("- [")?;
-    let (checked_char, after_box) = rest.split_once(']')?;
-    if !matches!(checked_char, "x" | "X" | " ") {
-        return None;
+/// Maps the shared scan's construct onto the typed verdict this module
+/// publishes.
+fn to_construct(kind: checklist_markers::UnparseableKind) -> UnparseableConstruct {
+    match kind {
+        checklist_markers::UnparseableKind::IndentedFenceOpener => {
+            UnparseableConstruct::IndentedFenceOpener
+        }
+        checklist_markers::UnparseableKind::HtmlConstruct => UnparseableConstruct::HtmlConstruct,
+        checklist_markers::UnparseableKind::IndentedMarker => UnparseableConstruct::IndentedMarker,
+        checklist_markers::UnparseableKind::NearMarker => UnparseableConstruct::NearMarker,
     }
-    // Exactly one ASCII space between `]` and `<!--`.
-    let after_box = after_box.strip_prefix(' ')?;
-    let rest = after_box.strip_prefix("<!--")?;
-    // Exactly one ASCII space after `<!--`, then `orc:NAME`.
-    let rest = rest.strip_prefix(' ')?;
-    let rest = rest.strip_prefix("orc:")?;
-    let (name, rest) = split_managed_marker_name(rest)?;
-    // Exactly one ASCII space before `-->`.
-    let rest = rest.strip_prefix(' ')?;
-    let rest = rest.strip_prefix("-->")?;
-    Some(ChecklistItem {
-        marker: name.to_string(),
-        checked: checked_char != " ",
-        // The description is the rest of the line, trimmed of SPACES and TABS
-        // only — never of a Unicode whitespace class, which is the divergence
-        // this grammar removes.
-        description: rest.trim_matches([' ', '\t']).to_string(),
-    })
-}
-
-/// Splits a managed marker NAME out of `orc:NAME -->`, requiring the name to be
-/// one of [`MANAGED_MARKER_NAMES`] and to be followed by exactly one ASCII
-/// space and `-->`.
-fn split_managed_marker_name(rest: &str) -> Option<(&'static str, &str)> {
-    for name in MANAGED_MARKER_NAMES {
-        if let Some(tail) = rest.strip_prefix(name) {
-            return Some((name, tail));
-        }
-    }
-    None
-}
-
-/// True when the line carries a task-item BOX TOKEN — `[` + exactly one
-/// character + `]` — and a reference to one of the nine managed names
-/// (`orc:NAME`), but is NOT in the canonical form.
-///
-/// The reference test is a plain substring search and the canonical test is an
-/// exact ASCII comparison: no whitespace class is involved, so the two engines
-/// cannot disagree about it (arbsec/orchestraitor#799 R1).
-fn is_near_marker(line: &str) -> bool {
-    if parse_canonical_marker(line).is_some() {
-        return false;
-    }
-    if !has_box_token(line) {
-        return false;
-    }
-    MANAGED_MARKER_NAMES
-        .iter()
-        .any(|name| line.contains(&format!("orc:{name}")))
-}
-
-/// True when the line contains a `[` + exactly one character + `]` box token.
-fn has_box_token(line: &str) -> bool {
-    line.char_indices().any(|(index, character)| {
-        if character != '[' {
-            return false;
-        }
-        // One character, then `]`. A multi-byte character counts as ONE
-        // character, so the scan is over CHARACTERS, not bytes.
-        let Some(rest) = line.get(index + 1..) else {
-            return false;
-        };
-        let mut characters = rest.chars();
-        let Some(middle) = characters.next() else {
-            return false;
-        };
-        if middle == ']' {
-            return false;
-        }
-        characters.next() == Some(']')
-    })
-}
-
-/// Normalises line endings ONCE, before any scan (`CommonMark` §2.1: a lone CR
-/// is a line ending and so is CRLF; parsers normalise both to LF before
-/// parsing). Every `\r\n` becomes `\n`, then every remaining lone `\r` becomes
-/// `\n`, so no CR byte reaches the scanners and the closing-fence tail rule is
-/// exactly "only spaces and tabs". The shell engine normalises identically
-/// (`orc_lib_normalize_line_endings`); the two used to disagree on
-/// `` ```\r\r\n `` because `str::lines` strips one CR and the scanners stripped
-/// a second by hand (arbsec/orchestraitor#799 gen-7).
-fn normalize_line_endings(body: &str) -> String {
-    body.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-/// One fence scan over the normalised body.
-struct FenceScan {
-    /// The VISIBLE lines with their 1-based line numbers in the ORIGINAL body.
-    /// Every line inside a fenced code region is absent: it is an example, not
-    /// evidence.
-    lines: Vec<(u64, String)>,
-    /// 1-based line number of the first fence OPENER indented 1-3 spaces.
-    /// Such an opener may belong to a list item or a block quote, and this
-    /// scanner has no container model, so every checklist reading from the body
-    /// is REFUSED rather than guessed (arbsec/orchestraitor#809). The condition
-    /// is STICKY: closing the region does not clear it.
-    indented_opener: Option<u64>,
-    /// 1-based line number of the first RAW HTML CONSTRUCT: a line outside every
-    /// fenced region whose first non-whitespace character is `<`, indented 0-3
-    /// spaces. The scanner does not model HTML, so it cannot tell what the
-    /// construct hides and REFUSES the reading (arbsec/orchestraitor#799 R1).
-    html_construct: Option<u64>,
-    /// 1-based line number of the first NEAR-MARKER: a line that presents a
-    /// managed marker (a task-item box token plus an `orc:NAME` reference) but
-    /// not in the canonical form, so the gate cannot tell what the author
-    /// asserted (arbsec/orchestraitor#799 R1). Every checklist reading from
-    /// the body is REFUSED rather than guessed.
-    near_marker: Option<u64>,
-    /// 1-based line number of the first MANAGED MARKER indented too far: a
-    /// canonical managed marker, or a near-marker, indented FOUR OR MORE spaces
-    /// or led by a TAB (arbsec/orchestraitor#802). Such a line renders as an
-    /// INDENTED CODE BLOCK whenever it is not inside a list item, and neither
-    /// this scanner nor the canonical grammar has a container model to tell that
-    /// apart from a marker nested in a list item, so every checklist reading
-    /// from the body is REFUSED rather than guessed.
-    indented_marker: Option<u64>,
-}
-
-/// Removes every FENCED code region from the body and reports the constructs
-/// that make a reading INDETERMINATE (arbsec/orchestraitor#788, #809).
-///
-/// A managed checklist marker inside a fenced region is an EXAMPLE, not
-/// evidence. The shell engine (`orc_lib_strip_fenced_code` in
-/// `.agents/skills/github-pr-lifecycle/scripts/_lib.sh`) applies exactly these
-/// rules, so creation and reconciliation agree on what a marker is:
-///
-/// - LINE ENDINGS are normalised once, before the scan (see
-///   [`normalize_line_endings`]), so no CR byte is special-cased below;
-/// - a fence OPENS on a line with at most THREE leading spaces whose next
-///   characters are 3+ backticks OR 3+ tildes (four or more spaces — or a tab,
-///   which reaches the 4-column tab stop — is an INDENTED code block, where
-///   fence characters are literal text; arbsec/orchestraitor#799 F16). A 1-3
-///   space indent makes the opener's CONTAINER indeterminate: the line number
-///   is recorded in [`FenceScan::indented_opener`] and the verdict blocks. The
-///   condition is STICKY — a closer does NOT clear it, because a closer at a
-///   different container level ends the region EARLIER for the renderer than
-///   for this scanner, so a marker swallowed by the scanner's region can still
-///   be visible to a human;
-/// - a backtick fence's info string MUST NOT contain a backtick, which makes
-///   ```` ```example``` ```` a CLOSED inline code span rather than an opener; a
-///   tilde fence MAY carry backticks in its info string (F17);
-/// - the region CLOSES at the first later line whose first 0-3 characters are
-///   spaces and whose next characters are the SAME fence character repeated at
-///   least as many times as the opener, followed by nothing but SPACES and TABS
-///   — `CommonMark` 0.31: a closing code fence "may be followed only by spaces or
-///   tabs, which are ignored." A form feed, a vertical tab, an info string or
-///   any other character leaves the region OPEN (a DIFFERENT fence character
-///   never closes it either);
-/// - an unclosed fence runs to the end of the body;
-/// - every line inside the region — INCLUDING the opening and the closing
-///   fence lines — is excluded from marker scanning;
-/// - HTML IS NOT MODELLED, and the scanner says so instead of guessing
-///   (arbsec/orchestraitor#799 R1). A line OUTSIDE every fenced region whose
-///   FIRST non-whitespace character is `<`, indented 0-3 spaces, is recorded in
-///   [`FenceScan::html_construct`] and REFUSES the reading
-///   ([`UnparseableConstruct::HtmlConstruct`]): the scanner cannot tell whether
-///   such a line opens a comment, a raw-text block, a declaration, an inline
-///   span or a literal autolink, and a wrong guess is a false pass. This is
-///   deliberately STRICTER than `CommonMark` — `<https://example.com>` and
-///   `<em>x</em> prose` ARE ordinary text there — and arbsec/orchestraitor#809
-///   tracks real modelling. The line itself is otherwise ordinary text: nothing
-///   is hidden, because the whole reading is refused. A line indented by FOUR OR
-///   MORE spaces, or led by a tab, is literal indented code and hides nothing,
-///   so it is not a refusal; a line that is JUST `<` opens no construct and is
-///   not one either; and a `<` anywhere else (`x < y`, `<` mid-line) is
-///   ordinary text;
-/// - the same applies to a managed marker line: its `<!--` is never the line's
-///   first content, so a marker is never an HTML construct;
-/// - a MANAGED MARKER (canonical, or a NEAR-MARKER) indented FOUR OR MORE
-///   spaces, or led by a tab, is INDETERMINATE (arbsec/orchestraitor#802): when
-///   it is not inside a list item it renders as an INDENTED CODE BLOCK, where it
-///   is not a checkbox, and this scanner has no container model to tell that
-///   apart from a marker nested in a list item. The line number is recorded in
-///   [`FenceScan::indented_marker`] and the reading is REFUSED
-///   ([`UnparseableConstruct::IndentedMarker`]). 0-3 leading spaces stays
-///   accepted; the marker still COUNTS (`marker_count` is a pure function of the
-///   canonical grammar) — it is the reading that is refused, so no verdict is
-///   derived from that count. A marker inside a fenced region is inert, not a
-///   refusal. The remedy is to dedent the marker line to column 0.
-fn scan_fences(body: &str) -> FenceScan {
-    let normalized = normalize_line_endings(body);
-    let mut lines: Vec<(u64, String)> = Vec::new();
-    // The open fence: its character and how many times it was repeated.
-    let mut fence: Option<(char, usize)> = None;
-    let mut indented_opener = None;
-    let mut html_construct = None;
-    let mut near_marker = None;
-    let mut indented_marker = None;
-    for (index, line) in normalized.lines().enumerate() {
-        let candidate = fence_line(line);
-        let line_number = u64::try_from(index + 1).ok();
-        if let Some((fence_char, fence_len)) = fence {
-            // Only the SAME character, repeated at least as many times as the
-            // opener, with nothing but a blank tail after it, closes the
-            // region. CommonMark 0.31 permits only spaces and tabs there, so a
-            // form feed or a vertical tab leaves the fence OPEN — GitHub
-            // renders the marker behind it as code (#799 F18). Rust's
-            // `char::is_ascii_whitespace` is deliberately NOT used: it also
-            // admits `\f`, `\n` and `\r`, which would close a region the
-            // renderer keeps open.
-            if let Some((_, trimmed)) = candidate
-                && trimmed.starts_with(fence_char)
-            {
-                let run = trimmed.chars().take_while(|c| *c == fence_char).count();
-                // The fence characters are ASCII, so `run` is also the byte
-                // offset of the tail; `get` keeps a non-boundary from panicking.
-                let tail = trimmed.get(run..).unwrap_or_default();
-                let blank = tail.chars().all(|c| c == ' ' || c == '\t');
-                if run >= fence_len && blank {
-                    fence = None;
-                }
-            }
-            continue;
-        }
-        // A RAW HTML CONSTRUCT is REFUSED, not modelled (#799 R1): a line
-        // OUTSIDE every fenced region whose first non-whitespace character is
-        // `<` and which carries something after it, indented 0-3 spaces. The
-        // scanner cannot tell whether it opens a comment, a raw-text block, a
-        // declaration or nothing at all (an autolink and inline HTML are
-        // ordinary text in CommonMark), and a wrong guess is a false pass — so
-        // the reading is refused instead. The line is otherwise ordinary text:
-        // nothing is hidden, because the whole reading is. A 4+-space or
-        // tab-led line is literal indented code and hides nothing, and a line
-        // that is JUST `<` opens no construct at all: neither is a refusal.
-        if candidate.is_some_and(|(_, trimmed)| trimmed.len() > 1 && trimmed.starts_with('<'))
-            && html_construct.is_none()
-        {
-            html_construct = line_number;
-        }
-        // Outside a region: a line whose first 0-3 characters are spaces and
-        // whose next characters are 3+ backticks or 3+ tildes OPENS a fence.
-        if let Some((indent, trimmed)) = candidate
-            && let Some(first) = trimmed.chars().next()
-            && (first == '`' || first == '~')
-        {
-            let run = trimmed.chars().take_while(|c| *c == first).count();
-            let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
-            if run >= 3 && !info_has_backtick {
-                // A 1-3-space indent makes the opener's CONTAINER indeterminate:
-                // it may equally belong to a list item or a block quote. The
-                // condition is STICKY and is NOT cleared when the region closes:
-                // a closer at a different container level ends the region
-                // EARLIER for the renderer than for this scanner, so a marker
-                // that closes the region here can still be visible to a human —
-                // reading such a body as "all checked" is the false pass this
-                // rule exists to stop (#809). The remedy is to DEDENT the opener
-                // to column 0.
-                if indent > 0 && indented_opener.is_none() {
-                    indented_opener = line_number;
-                }
-                fence = Some((first, run));
-                continue;
-            }
-        }
-        // A VISIBLE line: it is evidence, and it may be a NEAR-MARKER — a line
-        // that presents a managed marker but not in the canonical form, so the
-        // gate cannot tell what the author asserted (#799 R1). It may also be a
-        // MANAGED MARKER indented too far (#802): `fence_line` is `None` for
-        // FOUR OR MORE leading spaces, or for a tab after 0-3 spaces (a tab
-        // reaches the 4-column tab stop). Such a line renders as an INDENTED
-        // CODE BLOCK whenever it is not inside a list item, where it is not a
-        // checkbox, and this scanner has no container model to tell that apart
-        // from a marker nested in a list item — so the reading is REFUSED, never
-        // counted as evidence. 0-3 leading spaces stays accepted; a line inside
-        // a fenced region never reaches here (it is inert, not a refusal).
-        if indented_marker.is_none()
-            && fence_line(line).is_none()
-            && (parse_canonical_marker(line).is_some() || is_near_marker(line))
-        {
-            indented_marker = line_number;
-        }
-        if near_marker.is_none() && is_near_marker(line) {
-            near_marker = line_number;
-        }
-        if let Some(number) = line_number {
-            lines.push((number, line.to_string()));
-        }
-    }
-    FenceScan {
-        lines,
-        indented_opener,
-        html_construct,
-        near_marker,
-        indented_marker,
-    }
-}
-
-/// The part of `line` at which a fence may open or close, with its leading
-/// SPACE indentation, or `None` when the line is indented too far to be a fence
-/// line.
-///
-/// CommonMark/GFM allow at most THREE spaces of indentation before a top-level
-/// fence. Four or more spaces — or a tab, which reaches the 4-column tab stop —
-/// is an INDENTED code block, where fence characters are literal text
-/// (arbsec/orchestraitor#799 review, finding F16). A form feed or a vertical tab
-/// is likewise not indentation: it is content, so a `\f`- or `\v`-led fence line
-/// opens nothing (F18). Both engines apply the rule identically: a
-/// 4-space-indented run neither opens nor closes a region.
-fn fence_line(line: &str) -> Option<(usize, &str)> {
-    let indent = line.chars().take_while(|c| *c == ' ').count();
-    if indent > 3 {
-        return None;
-    }
-    let rest = &line[indent..];
-    if rest.starts_with('\t') {
-        return None;
-    }
-    Some((indent, rest))
 }
 
 /// Reads the CLEAN-review record for this PR at the current head

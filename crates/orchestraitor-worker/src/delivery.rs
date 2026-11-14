@@ -7,6 +7,7 @@
 //! itself.
 
 use async_trait::async_trait;
+use orchestraitor_core::checklist_markers;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -204,202 +205,90 @@ const DELIVERY_PR_CHECKLIST: &str = "## Merge checklist\n\n\
 /// checklist, which leads the body. (A column-0 fence is also the only region
 /// the summary can open at all.)
 ///
-/// The summary's LINE ENDINGS are normalised first (`CommonMark` §2.1): every
-/// `\r\n` becomes `\n` and every remaining lone `\r` becomes `\n`. Both
-/// production scanners normalise the same way before they read a body, so a
-/// summary that uses lone-CR line endings must be seen by the neutraliser as
-/// the same LINES the scanners will see. Splitting on `\n` alone left a
-/// lone-CR summary as ONE line: its indented fence opener and its line-start
-/// `<!--` survived neutralisation, and the composed PR then reported
-/// `checklist_unparseable` (permanently unconvergeable) or hid the summary's
-/// tail from the reviewer.
+/// The summary's LINE ENDINGS are normalised first (`CommonMark` §2.1) by the
+/// SHARED scan, exactly as both engines normalise them, so a summary that uses
+/// lone-CR line endings is seen as the same LINES the scanners will see.
 ///
-/// A FENCED region is tracked while the summary is walked, with the scanners'
-/// own rules (`summary_fence_view` / `summary_fence_opener` /
-/// `summary_fence_closes` mirror `scan_fences` in
-/// `crates/orchestraitor-mcp/src/pr_status.rs`): content inside a fence is
-/// already INERT to every marker scan, so transforming it would corrupt the
-/// example the model wrote — a fenced `<div>` is not an HTML construct and a
-/// fenced near-marker is not a near-marker. Such lines are emitted
-/// byte-identical. The OPENER line is still transformed (an indented opener is
-/// DEDENTED, which is the remedy for `indented_fence_opener`); the region it
-/// opens starts on the NEXT line, exactly as both scanners model it.
+/// Every decision below comes from `orchestraitor_core::checklist_markers` —
+/// the same scan the engine (`parse_checklist`) is built on — and never from a
+/// local `trim_start`/`starts_with` reimplementation. That is the whole point:
+/// this function used to classify a marker indented four spaces as CANONICAL
+/// (its own `trim_start` test) and leave it in the composed body, where the
+/// engine then reported `indented_marker` and the PR was permanently
+/// unconvergeable (arbsec/orchestraitor#799 R14).
+///
+/// The remedies, in the order they are applied to one line:
+///
+/// - a line inside a FENCED region is emitted BYTE-IDENTICAL: content there is
+///   already inert to every scanner, so transforming it would corrupt the
+///   example the model wrote;
+/// - a NEAR-MARKER loses its delimiter and name reference (`&lt;!--`,
+///   `orc&#58;NAME`), whether or not it is also indented — escaping is the
+///   stronger remedy and the only one that clears a near-marker;
+/// - an INDENTED (1-3 space) FENCE OPENER is DEDENTED to column 0, the
+///   documented remedy for `indented_fence_opener` (the region then opens on
+///   that line, exactly as the scan models it);
+/// - a line-start `<` (a raw HTML construct) has its `<` escaped to `&lt;`,
+///   which renders the text the model wrote and removes the construct;
+/// - a MANAGED MARKER (canonical or near-marker) indented 4+ spaces or led by a
+///   tab is DEDENTED to column 0, the documented remedy for `indented_marker`
+///   (arbsec/orchestraitor#802): the marker stays visible and counts as what it
+///   is, instead of being deleted or escaped away.
+///
+/// After this the composed body passes the engine with `unparseable == false`
+/// for any summary that opens no fence of its own; the delivery tests assert
+/// that with the engine's own `parse_checklist`.
 fn neutralise_summary(summary: &str) -> String {
-    let normalized = summary.replace("\r\n", "\n").replace('\r', "\n");
-    let mut out = String::with_capacity(normalized.len());
-    // The fence region the walk is currently inside: its character and run.
-    let mut fence: Option<(char, usize)> = None;
-    for line in normalized.split_inclusive('\n') {
-        // Keep the terminator out of the tests, then put it back: an opener is
-        // recognised from the line's content alone.
-        let (content, newline) = match line.strip_suffix('\n') {
-            Some(rest) => (rest, "\n"),
-            None => (line, ""),
-        };
-        // Inside a region: emit the bytes the model wrote and only watch for the
-        // closer. Nothing here can be a construct the scanners act on.
-        if let Some((fence_char, fence_len)) = fence {
-            if summary_fence_closes(content, fence_char, fence_len) {
-                fence = None;
+    let scan = checklist_markers::scan_body(summary);
+    let mut out = String::with_capacity(summary.len());
+    for line in &scan.lines {
+        let mut rendered = line.text.clone();
+        // A line INSIDE a fenced region — content or closer — is byte-identical.
+        // The OPENER is the boundary and is still transformed: its indentation is
+        // the `indented_fence_opener` construct itself, and the region it opens
+        // starts on that line for every scanner.
+        if !line.fenced || line.opens_fence.is_some() {
+            if line.near_marker {
+                rendered = escape_marker_delimiters(&rendered);
+            } else if line.is_indented_fence_opener() {
+                rendered = dedent(&rendered);
+            } else if line.is_html_construct() {
+                rendered = escape_line_start_html(&rendered);
+            } else if line.is_indented_marker() {
+                rendered = dedent(&rendered);
             }
-            out.push_str(content);
-            out.push_str(newline);
-            continue;
-        }
-        let indent = content.chars().take_while(|c| *c == ' ').count();
-        let rest = content.get(indent..).unwrap_or_default();
-        let indented_opener =
-            (1..=3).contains(&indent) && (rest.starts_with("```") || rest.starts_with("~~~"));
-        // A line-start `<` is the construct every scanner REFUSES (#799 R1), so
-        // it is escaped to `&lt;` and renders as the text the model wrote
-        // (#799 R2). A 4+-space indent or a leading tab is literal indented
-        // code, which no scanner refuses, so it is left alone.
-        let line_start_html = indent <= 3 && !rest.starts_with('\t') && rest.starts_with('<');
-        let near_marker = is_near_marker_line(content);
-        let mut rendered = String::with_capacity(content.len());
-        if indented_opener {
-            rendered.push_str(rest);
-        } else if line_start_html {
-            rendered.push_str(&content[..indent]);
-            rendered.push_str("&lt;");
-            rendered.push_str(rest.get(1..).unwrap_or_default());
-        } else {
-            rendered.push_str(content);
-        }
-        if near_marker {
-            // Escape the REMAINING delimiter and the name reference of a
-            // managed-marker line. `&lt;!--` / `orc&#58;NAME` render as the
-            // bytes the model wrote, so nothing is hidden from the reviewer.
-            rendered = escape_marker_delimiters(&rendered);
-        }
-        // The OPENER line is emitted transformed (above); the region it opens
-        // starts on the NEXT line, which is where every scanner's region begins
-        // after the opener. `content`, not `rendered`, is inspected: the
-        // dedent above never changes the fence character or its run length.
-        if let Some(opener) = summary_fence_opener(content) {
-            fence = Some(opener);
         }
         out.push_str(&rendered);
-        out.push_str(newline);
+        out.push('\n');
+    }
+    // `str::lines` drops the terminator of the LAST line, so a body that does not
+    // end with a newline must not gain one: keep the composed shape faithful.
+    if !summary.is_empty() && !checklist_markers::normalize_line_endings(summary).ends_with('\n') {
+        out.pop();
     }
     out
 }
 
-/// The part of `line` a fence may open or close at, or `None` when the line is
-/// indented too far to be a fence line: FOUR OR MORE leading spaces, or a TAB
-/// after 0-3 spaces (a tab reaches the 4-column tab stop), is an INDENTED code
-/// block, where fence characters are literal text. This mirrors
-/// `fence_line`/`fence_view` in the two scanners, so the lane and the scans
-/// agree on where a region starts and ends.
-fn summary_fence_view(line: &str) -> Option<(usize, &str)> {
+/// Removes the leading indentation of `line` (spaces and tabs only), which is
+/// the documented remedy for an indented fence opener and for an indented
+/// managed marker.
+fn dedent(line: &str) -> String {
+    line.trim_start_matches([' ', '\t']).to_string()
+}
+
+/// Escapes the FIRST `<` of a line-start HTML construct to `&lt;`, leaving the
+/// rest of the line — and any indentation — exactly as written.
+fn escape_line_start_html(line: &str) -> String {
     let indent = line.chars().take_while(|c| *c == ' ').count();
-    if indent > 3 {
-        return None;
-    }
-    let rest = line.get(indent..)?;
-    if rest.starts_with('\t') {
-        return None;
-    }
-    Some((indent, rest))
+    let mut escaped = String::with_capacity(line.len() + 3);
+    escaped.push_str(&line[..indent]);
+    escaped.push_str("&lt;");
+    escaped.push_str(line.get(indent + 1..).unwrap_or_default());
+    escaped
 }
-
-/// The fence an OPENER line opens — `(character, run length)` — or `None`. The
-/// rules are the scanners' own: at most three leading spaces, THREE OR MORE
-/// backticks or tildes, and a backtick fence's info string may not contain a
-/// backtick (so ```example``` is a closed inline span, not an opener) while a
-/// tilde fence's may.
-fn summary_fence_opener(line: &str) -> Option<(char, usize)> {
-    let (_, trimmed) = summary_fence_view(line)?;
-    let first = trimmed.chars().next()?;
-    if first != '`' && first != '~' {
-        return None;
-    }
-    let run = trimmed.chars().take_while(|c| *c == first).count();
-    let info_has_backtick = first == '`' && trimmed.chars().skip(run).any(|c| c == '`');
-    if run >= 3 && !info_has_backtick {
-        Some((first, run))
-    } else {
-        None
-    }
-}
-
-/// True when `line` CLOSES the region opened by `(fence_char, fence_len)`: the
-/// SAME character repeated at least as many times as the opener, followed by
-/// nothing but spaces or tabs (`CommonMark` 0.31: a closing fence "may be
-/// followed only by spaces or tabs, which are ignored"), after at most three
-/// leading spaces. A different fence character never closes the region.
-fn summary_fence_closes(line: &str, fence_char: char, fence_len: usize) -> bool {
-    let Some((_, trimmed)) = summary_fence_view(line) else {
-        return false;
-    };
-    if !trimmed.starts_with(fence_char) {
-        return false;
-    }
-    let run = trimmed.chars().take_while(|c| *c == fence_char).count();
-    let tail = trimmed.get(run..).unwrap_or_default();
-    run >= fence_len && tail.chars().all(|c| c == ' ' || c == '\t')
-}
-
-/// True when the line is a NEAR-MARKER: it carries a task-item BOX TOKEN (`[` +
-/// exactly one character + `]`) AND a reference to one of the nine managed
-/// marker names (`orc:NAME`) but is NOT in the canonical managed-marker form.
-///
-/// This is the exact condition both scanner engines refuse the whole reading
-/// for. A CANONICAL marker in the summary is deliberately NOT escaped: it is a
-/// real checklist item a reviewer can tick, so it is remediable, whereas a
-/// near-marker makes the reading indeterminate with nothing to tick.
-fn is_near_marker_line(line: &str) -> bool {
-    has_box_token(line)
-        && managed_marker_names().any(|name| line.contains(&name_reference(name)))
-        && !is_canonical_marker_line(line)
-}
-
-/// True when the line already has the canonical managed-marker prefix
-/// (`[ \t]*- [x|X| ] <!-- orc:NAME -->`), so it is a real checklist item the
-/// reviewer can act on. The prefix test is the shared grammar's own prefix; the
-/// shared corpus pins the grammar, and `neutraliser_knows_every_managed_marker_name`
-/// pins that the name set cannot drift.
-fn is_canonical_marker_line(line: &str) -> bool {
-    let trimmed = line.trim_start_matches([' ', '\t']);
-    managed_marker_names().any(|name| {
-        ["x", "X", " "]
-            .iter()
-            .any(|box_char| trimmed.starts_with(&format!("- [{box_char}] <!-- orc:{name} -->")))
-    })
-}
-
 /// The `orc:NAME` text a scanner looks for.
 fn name_reference(name: &str) -> String {
     format!("orc:{name}")
-}
-
-/// True when the line contains a `[` + exactly one character + `]` box token.
-fn has_box_token(line: &str) -> bool {
-    line.char_indices().any(|(index, character)| {
-        if character != '[' {
-            return false;
-        }
-        let Some(rest) = line.get(index + 1..) else {
-            return false;
-        };
-        let mut characters = rest.chars();
-        let Some(middle) = characters.next() else {
-            return false;
-        };
-        middle != ']' && characters.next() == Some(']')
-    })
-}
-
-/// The nine MANAGED marker names, derived from [`DELIVERY_PR_CHECKLIST`] — the
-/// single copy in this crate — so the near-marker shape the neutraliser removes
-/// can never drift from the checklist it composes.
-fn managed_marker_names() -> impl Iterator<Item = &'static str> {
-    DELIVERY_PR_CHECKLIST
-        .match_indices("<!-- orc:")
-        .filter_map(|(index, prefix)| {
-            let tail = DELIVERY_PR_CHECKLIST.get(index + prefix.len()..)?;
-            tail.split_once(" -->").map(|(name, _)| name)
-        })
 }
 
 /// Renders a near-marker line so it can no longer present a managed marker,
@@ -407,9 +296,12 @@ fn managed_marker_names() -> impl Iterator<Item = &'static str> {
 /// `orc:NAME` becomes `orc&#58;NAME`. Both are character references, so the
 /// reviewer reads the text the model wrote and no delimiter survives for a
 /// scanner to find. Idempotent: the escaped forms contain neither needle.
+///
+/// The name list is the SHARED grammar's (`MANAGED_MARKER_NAMES`), so a name
+/// added to the template can never be missed here.
 fn escape_marker_delimiters(line: &str) -> String {
     let mut escaped = line.replace("<!--", "&lt;!--");
-    for name in managed_marker_names() {
+    for name in checklist_markers::MANAGED_MARKER_NAMES {
         escaped = escaped.replace(&name_reference(name), &format!("orc&#58;{name}"));
     }
     escaped

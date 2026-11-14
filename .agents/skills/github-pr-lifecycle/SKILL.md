@@ -343,7 +343,11 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   the same trusted-root guard as `--body @file`; `-` reads STDIN).
                   A supplied body that ENDS inside an unclosed code fence is
                   refused with exit 2 — appended markers would render as code and
-                  be hidden from the scan — so close the fence and rerun.
+                  be hidden from the scan — so close the fence and rerun. That
+                  refusal is APPEND-SPECIFIC: it fires only when markers must be
+                  appended, so a body that already carries the checklist is
+                  accepted as-is. The sticky indented-opener refusal is NOT
+                  append-specific — it refuses an already-checklisted body too.
                   For a PR that ALREADY EXISTS whose body is already
                   set, one command clears it:
                   `bash .agents/skills/github-pr-lifecycle/scripts/pr-mutate
@@ -364,10 +368,16 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   character is `<` (0-3 leading spaces) makes the reading
                   INDETERMINATE — put it in a fenced code block, indent it by
                   4 spaces, or remove it. A fence opener indented 1-3 spaces
-                  makes it INDETERMINATE too, closed or not. Either way the
-                  verdict blocks with `checklist_unparseable` and names the
-                  construct (`indented_fence_opener` / `html_construct` /
-                  `near_marker`) together with its remedy.
+                  makes it INDETERMINATE too, closed or not; so does a managed
+                  marker or near-marker indented 4+ spaces (or led by a tab),
+                  which renders as an indented code block — dedent it to column
+                  0. Whatever the cause, the verdict blocks with
+                  `checklist_unparseable` and names exactly one of the FOUR
+                  constructs — `indented_fence_opener`, `html_construct`,
+                  `indented_marker`, `near_marker` — together with its remedy
+                  (the full rule set, with boundaries and remedies, is in
+                  `references/pr-convergence.md`, "An indeterminate reading is
+                  REFUSED").
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon

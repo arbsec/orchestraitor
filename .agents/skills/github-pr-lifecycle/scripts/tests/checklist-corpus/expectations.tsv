@@ -350,7 +350,10 @@
 # A NEAR-MARKER indented 4 spaces is indeterminate for BOTH reasons; the reported
 # construct is `indented_marker`, because the indentation is what makes it
 # render as code (the construct list resolves a same-line tie to the more
-# specific rule). The nine column-0 markers still count.
+# specific rule). The nine column-0 markers still count. This row is
+# `9 false true indented_marker` on purpose: the reading is REFUSED, so the
+# fixture is NOT a question about list nesting and NOT an acceptance case --
+# every ticked box in it is irrelevant while the line stays indented.
 80-four-space-indented-near-marker	9	false	true	indented_marker
 # arbsec/orchestraitor#799 R12, the LOCALE-INDEPENDENCE pin: a box token is `[` +
 # exactly ONE CHARACTER + `]`, and the shell decoder reads one UTF-8 sequence by

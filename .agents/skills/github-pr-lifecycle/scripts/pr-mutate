@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set with its content unchanged; only trailing newlines are normalised), so replacing a PR body can never drop the checklist. --body-file is READ by the script and resolved through the trusted-root guard (workspace or temp directory; '-' reads the body from STDIN). A supplied body that ENDS inside an unclosed code fence is refused with exit 2 — appended markers would render as code and be hidden — so close the fence and rerun; the body is never reordered or repaired. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788). When the body already carries the checklist it skips only the body update and still executes any other edit flags."
+  orc_lib_print_help "pr-mutate" "Edit, ready, or close a PR (gh pr edit / ready / close) through the service-identity wrapper. Subcommand is the FIRST positional: edit <pr> [--body <text>|--body-file <path>] [--add-reviewer <login>]... [--add-assignee <login>]... [--add-label <label>]... [--inject-checklist] | ready <pr> | close <pr> [reason flags]. Every body route carries the nine managed <!-- orc:* --> merge-checklist markers: --body/--body-file append them UNCHECKED when the supplied body carries none (a body that already carries a marker is set with its content unchanged; only trailing newlines are normalised), so replacing a PR body can never drop the checklist. --body-file is READ by the script and resolved through the trusted-root guard (workspace or temp directory; '-' reads the body from STDIN). A supplied body that ENDS inside an unclosed code fence is refused with exit 2 — appended markers would render as code and be hidden — so close the fence and rerun (append-specific: a body that already carries the checklist is set unchanged); the body is never reordered or repaired. --inject-checklist (edit only) is the same operation for a PR whose body is ALREADY SET: it reads the PR's CURRENT body, appends the markers when it carries none, and sets the body — the one-command remediation path for a PR that already exists and carries no markers (arbsec/orchestraitor#788). When the body already carries the checklist it skips only the body update and still executes any other edit flags."
   exit "$ORC_OK"
 fi
 
@@ -83,8 +83,19 @@ if [ "$ACTION" = "edit" ]; then
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     case "${REST[$index]}" in
-      --body)
-        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      # `-b` and `-F` are gh's SHORT spellings of `--body` and `--body-file`
+      # (verified against the installed `gh pr edit --help`, v2.104.0:
+      # `-b, --body string`, `-F, --body-file file`; `-B` is `--base`, NOT a body
+      # flag, so it is left alone). They are handled HERE, by the same code path,
+      # so `pr-mutate edit 123 -b Summary` can no longer replace the body WITHOUT
+      # the managed checklist (arbsec/orchestraitor#811 / #799 R14).
+      --body|-b)
+        # A VALUE IS REQUIRED, an EMPTY VALUE IS NOT an error: `-b ""` is an
+        # explicit empty body (it becomes the checklist-only body).
+        [ "$((index + 1))" -lt "${#REST[@]}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+        # The alias is normalised to the long spelling, exactly like the
+        # `--body-file` route below: one argv shape reaches `gh`.
+        REST[$index]="--body"
         # RESOLVE FIRST, in its OWN assignment. `X="$(f "$(g)")"` takes the
         # OUTER substitution's status, so `g`'s `exit 2` never trips `set -e`:
         # the guard's typed error was printed and the body was then rewritten
@@ -93,8 +104,8 @@ if [ "$ACTION" = "edit" ]; then
         resolved="$(orc_lib_body_arg "--body" "${REST[$((index + 1))]}")"
         REST[$((index + 1))]="$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 2)) ;;
-      --body=*)
-        resolved="$(orc_lib_body_arg "--body" "${REST[$index]#--body=}")"
+      --body=*|-b=*)
+        resolved="$(orc_lib_body_arg "--body" "${REST[$index]#*=}")"
         REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
       # `--body-file` is READ here, not forwarded: the checklist cannot be
@@ -107,14 +118,14 @@ if [ "$ACTION" = "edit" ]; then
       # `pr-create` uses, so both routes refuse an out-of-root path with exit 2
       # (#599), resolve symlinks on the FULL target, refuse an empty body, and
       # accept `-` for STDIN (#788 gen-3 review).
-      --body-file)
-        [ -n "${REST[$((index + 1))]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      --body-file|-F)
+        [ "$((index + 1))" -lt "${#REST[@]}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
         resolved="$(orc_lib_read_body_file "--body-file" "${REST[$((index + 1))]}")"
         REST[$index]="--body"
         REST[$((index + 1))]="$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 2)) ;;
-      --body-file=*)
-        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$index]#--body-file=}")"
+      --body-file=*|-F=*)
+        resolved="$(orc_lib_read_body_file "--body-file" "${REST[$index]#*=}")"
         REST[$index]="--body=$(pr_mutate_ensure_body "$resolved")"
         index=$((index + 1)) ;;
       *) index=$((index + 1)) ;;
@@ -129,7 +140,7 @@ if [ "$INJECT_CHECKLIST" = "1" ]; then
   index=0
   while [ "$index" -lt "${#REST[@]}" ]; do
     case "${REST[$index]}" in
-      --body|--body=*|--body-file|--body-file=*) PR_MUTATE_BODY_CONFLICT=1 ;;
+      --body|--body=*|--body-file|--body-file=*|-b|-b=*|-F|-F=*) PR_MUTATE_BODY_CONFLICT=1 ;;
     esac
     index=$((index + 1))
   done

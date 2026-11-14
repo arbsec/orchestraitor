@@ -313,7 +313,7 @@ fn neutralise_summary_clears_a_near_marker_line() {
         !rendered.contains("<!--"),
         "no marker delimiter may survive: {rendered}"
     );
-    for name in managed_marker_names() {
+    for name in checklist_markers::MANAGED_MARKER_NAMES {
         assert!(
             !rendered.contains(&name_reference(name)),
             "no `{name}` name reference may survive: {rendered}"
@@ -328,7 +328,7 @@ fn neutralise_summary_clears_a_near_marker_line() {
         "the reviewer must still read the line the model wrote: {rendered}"
     );
     assert!(
-        !is_near_marker_line(&rendered),
+        !checklist_markers::is_near_marker(&rendered),
         "the rendered line must not be a near-marker: {rendered}"
     );
     assert_eq!(
@@ -357,7 +357,7 @@ fn neutralise_summary_clears_a_near_marker_line() {
     // name reference alone has to be neutralised.
     let bare = neutralise_summary("- [ ] orc:threads unresolved");
     assert!(
-        !is_near_marker_line(&bare),
+        !checklist_markers::is_near_marker(&bare),
         "bare reference survived: {bare}"
     );
     assert!(bare.contains("orc&#58;threads"), "{bare}");
@@ -579,7 +579,7 @@ async fn delivery_clears_a_near_marker_in_the_summary() {
     // condition every scanner refuses with `checklist_unparseable`.
     let summary_part = &body[body.find("## Summary").expect("the summary")..];
     assert!(
-        !summary_part.lines().any(is_near_marker_line),
+        !summary_part.lines().any(checklist_markers::is_near_marker),
         "a near-marker survived neutralisation: {body}"
     );
     // No line outside the trusted block starts with `<` either.
@@ -717,13 +717,21 @@ fn delivery_checklist_matches_the_pr_template() {
 /// (arbsec/orchestraitor#799 R4).
 #[test]
 fn neutraliser_knows_every_managed_marker_name() {
-    let derived: Vec<&str> = managed_marker_names().collect();
+    // The neutraliser no longer carries a name list of its own: it iterates the
+    // SHARED grammar's names (arbsec/orchestraitor#799 R14). This guard pins that
+    // list to the template AND to the checklist the lane composes, so a template
+    // line added without a matching shared name still fails here.
+    let derived: Vec<&str> = checklist_markers::MANAGED_MARKER_NAMES.to_vec();
     assert_eq!(derived.len(), 9, "derived names: {derived:?}");
     let template = include_str!("../../../.github/PULL_REQUEST_TEMPLATE.md");
     for name in &derived {
         assert!(
             template.contains(&format!("<!-- orc:{name} -->")),
-            "delivery derives a name the template does not carry: {name}"
+            "the shared grammar names a marker the template does not carry: {name}"
+        );
+        assert!(
+            DELIVERY_PR_CHECKLIST.contains(&format!("<!-- orc:{name} -->")),
+            "the composed checklist is missing a shared marker name: {name}"
         );
     }
 }
@@ -815,7 +823,124 @@ async fn delivery_leaves_fenced_constructs_byte_identical() {
         .last()
         .expect("the text after the fenced region");
     assert!(
-        !outside.lines().skip(1).any(is_near_marker_line),
+        !outside
+            .lines()
+            .skip(1)
+            .any(checklist_markers::is_near_marker),
         "a near-marker survived outside the fence: {body}"
     );
+}
+
+/// The delivery lane may only compose bodies the ENGINE accepts
+/// (arbsec/orchestraitor#799 R14). The invariant is asserted directly — run the
+/// engine's own `parse_checklist` over the composed body and require
+/// `unparseable == false` — instead of listing constructs, so a future refusal
+/// rule cannot be missed here.
+///
+/// The four shapes that used to slip through:
+///
+/// - a canonical marker indented FOUR spaces: the lane's old local `trim_start`
+///   test called it CANONICAL and left it, and the engine then reported
+///   `indented_marker` — a permanently unconvergeable PR;
+/// - a TAB-led canonical marker (same classification bug);
+/// - a 4-space-indented NEAR-MARKER (indeterminate twice over);
+/// - every one of those INSIDE a fence, where the bytes must not move at all.
+#[test]
+fn delivery_composed_bodies_are_determinate() {
+    /// How the lane must render one shape.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Remedy {
+        /// DEDENT to column 0: the documented remedy for `indented_marker` and
+        /// for an indented fence opener.
+        Dedent,
+        /// Escape the delimiter and the name reference: the only remedy that
+        /// clears a near-marker.
+        Escape,
+        /// Inside a fenced region: the bytes must not move at all.
+        Fenced,
+    }
+
+    let cases: [(&str, &str, Remedy); 6] = [
+        (
+            "4-space-indented canonical marker",
+            "    - [x] <!-- orc:tests --> model asserted this\n",
+            Remedy::Dedent,
+        ),
+        (
+            "tab-led canonical marker",
+            "\t- [x] <!-- orc:tests --> model asserted this\n",
+            Remedy::Dedent,
+        ),
+        (
+            "4-space-indented near-marker",
+            "    - [ ]\t<!-- orc:tests --> model asserted this\n",
+            Remedy::Escape,
+        ),
+        (
+            "fenced 4-space-indented canonical marker",
+            "```\n    - [x] <!-- orc:tests --> fenced example\n```\n",
+            Remedy::Fenced,
+        ),
+        (
+            "fenced tab-led canonical marker",
+            "```\n\t- [x] <!-- orc:tests --> fenced example\n```\n",
+            Remedy::Fenced,
+        ),
+        (
+            "fenced 4-space-indented near-marker",
+            "```\n    - [ ]\t<!-- orc:tests --> fenced example\n```\n",
+            Remedy::Fenced,
+        ),
+    ];
+    for (label, summary, remedy) in cases {
+        let rendered = neutralise_summary(summary);
+        match remedy {
+            Remedy::Fenced => {
+                assert_eq!(rendered, summary, "{label}: fenced bytes moved");
+            }
+            Remedy::Dedent => {
+                let first = rendered.lines().next().unwrap_or_default();
+                assert!(
+                    !first.starts_with(' ') && !first.starts_with('\t'),
+                    "{label}: the marker line must be dedented to column 0: {rendered:?}"
+                );
+                assert!(
+                    checklist_markers::parse_canonical_marker(first).is_some(),
+                    "{label}: the dedented line must be the canonical marker: {first:?}"
+                );
+            }
+            Remedy::Escape => {
+                let first = rendered.lines().next().unwrap_or_default();
+                assert!(
+                    !checklist_markers::is_near_marker(first),
+                    "{label}: the rendered line must not be a near-marker: {first:?}"
+                );
+                assert!(
+                    first.contains("&lt;!--") && first.contains("orc&#58;tests"),
+                    "{label}: the escape must be a character reference: {first:?}"
+                );
+                assert!(
+                    first.contains("model asserted this"),
+                    "{label}: the model's text must stay readable: {first:?}"
+                );
+            }
+        }
+        // THE invariant: the composed body passes the ENGINE's own reader.
+        let composed = format!("{DELIVERY_PR_CHECKLIST}{rendered}");
+        let parsed = orchestraitor_mcp::pr_status::parse_checklist(&composed);
+        assert!(
+            !parsed.unparseable,
+            "{label}: the composed body must pass the engine, got {:?} on line {:?}",
+            parsed.unparseable_construct, parsed.unparseable_line
+        );
+        // The nine trusted markers always lead; a DEDENTED canonical marker
+        // counts as the real checklist item it now is, while a fenced one and an
+        // escaped near-marker do not count at all.
+        let expected_markers = if remedy == Remedy::Dedent { 10 } else { 9 };
+        assert_eq!(parsed.marker_count, expected_markers, "{label}: {composed}");
+        assert!(
+            !parsed.all_checked,
+            "{label}: unticked markers are never a pass"
+        );
+    }
 }

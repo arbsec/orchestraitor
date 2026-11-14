@@ -647,9 +647,19 @@ run convergence-status 7 --repo test-org/repo --json
 assert 'f6: so the gate BLOCKS the closed-opener body (#809)' 5 "$RC"
 assert 'f6: with the distinct indeterminate reason (#809)' '["checklist_unparseable"]' \
   "$(jq -c .reasons <<<"$OUT")"
-assert 'f6: and the guard still appends the checklist' 9 \
-  "$(grep -c -- '- \[ \] <!-- orc:' \
-    <<<"$(ensure "$(cat "$TMP/files/f16-three-space-closed.md")" "$TMP/repo")")"
+# RE-DERIVED (arbsec/orchestraitor#799 R14): the guard no longer APPENDS to a
+# body whose reading the engine refuses. A closed 3-space opener is
+# `indented_fence_opener` (sticky), so `ensure` now refuses it (exit 2) instead
+# of composing a PR that `reconcile-checklist` refuses on the next read — the
+# exact drift this round closes. The remedy it names is the opener's dedent.
+rm -f "$TMP/stderr"
+ensure "$(cat "$TMP/files/f16-three-space-closed.md")" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f6: the guard REFUSES a closed 3-space opener (#799 R14)' 2 "$RC"
+assert 'f6: naming the fence construct' 1 \
+  "$(grep -cF 'opens a fenced code block indented 1-3 spaces on line 1' "$TMP/stderr")"
+assert 'f6: and the dedent remedy' 1 \
+  "$(grep -cF 'dedent the fence opener to column 0' "$TMP/stderr")"
+assert 'f6: and appends nothing' 0 "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/stderr")"
 
 # UNCLOSED opener: the same 3-space opener with no closer at all.
 printf '   ```\n- [x] <!-- orc:tests --> example only\n' \
@@ -1753,7 +1763,9 @@ export BODY_FIXTURE="$TMP/files/no-markers.md"
 # `reconcile-checklist` then refuses: the HTML check ran only when the helper
 # was about to APPEND markers (it returns early for a body that already carries
 # one) and neither the near-marker rule nor #802's indented-marker rule was
-# validated at all. All three constructs are now validated BEFORE that early
+# validated at all. All FOUR constructs (the sticky indented fence opener, the
+# raw HTML construct, the indented marker and the near-marker) are now validated
+# BEFORE that early
 # return; the unclosed-fence refusal stays append-specific.
 printf -- '- [x] <!-- orc:issue --> linked\n<div>a block</div>\n' > "$TMP/files/f10-html.md"
 printf -- '- [ ]\t<!-- orc:tests --> near only\n' > "$TMP/files/f10-near.md"
@@ -1840,6 +1852,235 @@ assert 'f11: the scan decoder is locale-independent (C locale)' 1 \
   "$(printf -- '- [x] <!-- orc:tests --> t\n[\342\234\223] orc:tests\n' \
     | LC_ALL=C bash -c 'source "$1"; orc_lib_near_marker_line' _ "$SCRIPT_DIR/_lib.sh" \
     | grep -c '^2$')"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f12) composition and the engine agree, for EVERY construct (#799 R14) ---
+# The recurring defect: the refusal rules exist in three copies and each drifted.
+# The shell composition helper now runs the ENGINE's own four refusals (through
+# `orc_lib_first_unparseable_line`) BEFORE its early return and before any
+# append. The invariant asserted here is the real one: if `reconcile-checklist`
+# would report an unparseable construct, `pr-create`/`pr-mutate` must have
+# refused (exit 2) and never called `gh`; and every body the helper ACCEPTS must
+# parse as determinate when the real `reconcile-checklist` reads it.
+compose_invariant() { # compose_invariant <label> <composed body>
+  local label="$1" composed="$2"
+  printf '%s' "$composed" > "$TMP/files/invariant.md"
+  export BODY_FIXTURE="$TMP/files/invariant.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  assert "f12: $label — reconcile-checklist reads the composed body" 0 "$RC"
+  assert "f12: $label — the composed body is DETERMINATE" false \
+    "$(jq -r .unparseable <<<"$OUT")"
+}
+# Every construct, as a seed the caller could plausibly supply.
+F12_INDENTED_FENCE=$' ```\nexample\n ```\n'          # 1-space opener, CLOSES
+F12_THREE_SPACE_FENCE=$'   ```\nexample\n   ```\n'   # 3-space opener, CLOSES
+F12_HTML=$'- [x] <!-- orc:issue --> linked\n<div>a block</div>\n'
+F12_INDENTED_MARKER=$'- [x] <!-- orc:issue --> linked\n    - [x] <!-- orc:tests --> indented\n'
+F12_NEAR_MARKER=$'- [x] <!-- orc:issue --> linked\n- [ ]  <!-- orc:tests --> near\n'
+for seed_case in indented-fence three-space-fence html indented-marker near-marker; do
+  case "$seed_case" in
+    indented-fence)      seed="$F12_INDENTED_FENCE";      want='opens a fenced code block indented 1-3 spaces on line 1' ;;
+    three-space-fence)   seed="$F12_THREE_SPACE_FENCE";   want='opens a fenced code block indented 1-3 spaces on line 1' ;;
+    html)                seed="$F12_HTML";                want='raw HTML construct at line 2' ;;
+    indented-marker)     seed="$F12_INDENTED_MARKER";     want='indented too far at line 2' ;;
+    near-marker)         seed="$F12_NEAR_MARKER";         want='near-marker at line 2' ;;
+  esac
+  # (1) the shared helper refuses it
+  rm -f "$TMP/stderr"
+  ensure "$seed" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+  assert "f12: $seed_case is refused by the helper" 2 "$RC"
+  assert "f12: $seed_case names what it refused" 1 "$(grep -cF "$want" "$TMP/stderr")"
+  assert "f12: $seed_case appends nothing" 0 "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/stderr")"
+  # (2) pr-create refuses it and never reaches gh
+  OUT="$(dry_run --title t --body "$seed" 2>&1)"; RC=$?
+  assert "f12: pr-create refuses $seed_case" 2 "$RC"
+  assert "f12: pr-create names $seed_case" 1 "$(grep -cF "$want" <<<"$OUT")"
+  assert "f12: pr-create never reaches gh for $seed_case" 0 \
+    "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+  # (3) pr-mutate refuses it and never reaches gh
+  rm -f "$TMP/edited-body.md"
+  run pr-mutate edit 7 --repo test-org/repo --body "$seed"
+  assert "f12: pr-mutate refuses $seed_case" 2 "$RC"
+  assert "f12: pr-mutate names $seed_case" 1 "$(grep -cF "$want" "$TMP/stderr")"
+  assert "f12: pr-mutate never reaches gh for $seed_case" 0 \
+    "$(exists "$TMP/edited-body.md")"
+done
+# The STICKY opener refusal is NOT append-specific: an ALREADY-CHECKLISTED body
+# with a 1-3-space opener is refused too, because the engine refuses it.
+printf -- '- [x] <!-- orc:issue --> linked\n ```\nexample\n ```\n' > "$TMP/files/f12-sticky-with-markers.md"
+rm -f "$TMP/stderr"
+ensure "$(cat "$TMP/files/f12-sticky-with-markers.md")" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f12: an already-checklisted body with a sticky opener is refused' 2 "$RC"
+assert 'f12: and names the fence construct' 1 \
+  "$(grep -cF 'opens a fenced code block indented 1-3 spaces on line 2' "$TMP/stderr")"
+# The UNCLOSED-fence refusal STAYS append-specific: a body that already carries
+# the checklist is not refused for a fence it is not appending into.
+printf -- '- [x] <!-- orc:issue --> linked\n```\nunclosed\n' > "$TMP/files/f12-open-fence-with-markers.md"
+rm -f "$TMP/stderr"
+ensure "$(cat "$TMP/files/f12-open-fence-with-markers.md")" "$TMP/repo" >/dev/null 2>"$TMP/stderr"; RC=$?
+assert 'f12: an already-checklisted body with an open fence is still accepted' 0 "$RC"
+# The POSITIVE half of the invariant: every accepted composition is determinate.
+compose_invariant 'plain summary' "$(ensure $'a plain summary\n' "$TMP/repo")"
+compose_invariant 'explicit empty body' "$(ensure '' "$TMP/repo")"
+compose_invariant 'already-checklisted body' "$(ensure $'- [x] <!-- orc:issue --> linked\n' "$TMP/repo")"
+compose_invariant 'column-0 closed fence' "$(ensure $'```\nexample\n```\n' "$TMP/repo")"
+compose_invariant '4-space-indented HTML is literal code' "$(ensure $'    <div>\n' "$TMP/repo")"
+compose_invariant 'two-space-indented marker is accepted' \
+  "$(ensure $'- [x] <!-- orc:issue --> linked\n  - [x] <!-- orc:tests --> nested\n' "$TMP/repo")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f13) an EXPLICIT body is tracked by the ARGUMENTS, not by its value -------
+# `pr-create --body "" --fill` used to exit 2 ("--body requires a value") and
+# `--body= --fill` exited 0 while silently DROPPING the supplied body: the code
+# tested `-n "$BODY"`, which cannot tell "supplied and empty" from "not supplied".
+# Explicitness is now its own variable, set by the parser, and it drives the
+# conflict, the validation, the exclusive-source refusal, the note and forwarding.
+for empty_form in 'separated' 'joined'; do
+  if [ "$empty_form" = separated ]; then empty_args=(--body ""); else empty_args=(--body=); fi
+  # (a) no gh body source: the explicit empty body becomes the checklist-only
+  #     body and is FORWARDED; the bodyless note must NOT print.
+  OUT="$(dry_run --title t "${empty_args[@]}" 2>&1)"; RC=$?
+  assert "f13: [$empty_form] an explicit empty body exits 0" 0 "$RC"
+  assert "f13: [$empty_form] it is forwarded to gh" 1 \
+    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+  assert "f13: [$empty_form] it carries the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+  assert "f13: [$empty_form] the bodyless note does NOT print" 0 \
+    "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
+  # (b) alongside `--fill` the explicit empty body is validated and forwarded
+  #     (gh gives an explicit body precedence over autofill).
+  OUT="$(dry_run --title t "${empty_args[@]}" --fill 2>&1)"; RC=$?
+  assert "f13: [$empty_form] --fill + explicit empty body exits 0" 0 "$RC"
+  assert "f13: [$empty_form] --fill + explicit empty body forwards --body" 1 \
+    "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+  assert "f13: [$empty_form] --fill + explicit empty body carries nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+  assert "f13: [$empty_form] and prints no remediation note" 0 \
+    "$(grep -cF 'pr-mutate edit <pr> --inject-checklist' <<<"$OUT")"
+  # (c) the exclusive gh body sources still refuse the combination.
+  for exclusive in --template --web --editor; do
+    if [ "$exclusive" = --template ]; then extra=(--template .github/pull_request_template.md); else extra=("$exclusive"); fi
+    OUT="$(dry_run --title t "${empty_args[@]}" "${extra[@]}" 2>&1)"; RC=$?
+    assert "f13: [$empty_form] $exclusive + explicit empty body is refused" 2 "$RC"
+    assert "f13: [$empty_form] $exclusive refusal names the exclusivity" 1 \
+      "$(grep -cF 'accepts only one body source' <<<"$OUT")"
+    assert "f13: [$empty_form] $exclusive never reaches gh" 0 \
+      "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+  done
+done
+# An EMPTY body FILE is not reachable by design (the reader refuses it), so the
+# explicit empty body exists only in the inline form. Pinned through the real
+# route.
+printf '' > "$TMP/files/f13-empty.md"
+OUT="$(dry_run --title t --body-file "$TMP/files/f13-empty.md" 2>&1)"; RC=$?
+assert 'f13: an empty body-file is refused by the reader' 2 "$RC"
+assert 'f13: and the refusal says the file is empty' 1 \
+  "$(grep -cF 'is empty' <<<"$OUT")"
+assert 'f13: and nothing reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+# pr-mutate composes an explicit empty body the same way.
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body ""
+assert 'f13: pr-mutate sets an explicit empty body to the checklist-only body' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+
+# --- (f14) the SHORT body flags are the long ones (#811) ----------------------
+# `-b`, `-F` and `-f` are gh's short spellings (verified against the installed
+# `gh pr create --help`/`gh pr edit --help`, v2.104.0). `-B` is `--base` and is
+# deliberately NOT normalised. Before this, `pr-mutate edit 123 -b Summary`
+# replaced the body WITHOUT the managed checklist and `pr-create -b X` bypassed
+# composition validation entirely.
+OUT="$(dry_run --title t -b 'a short-form summary' 2>&1)"; RC=$?
+assert 'f14: pr-create -b exits 0' 0 "$RC"
+assert 'f14: pr-create -b carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+assert 'f14: pr-create -b keeps the summary' 1 "$(grep -cF 'a short-form summary' <<<"$OUT")"
+OUT="$(dry_run --title t -b 'a short-form summary' --fill 2>&1)"; RC=$?
+assert 'f14: pr-create -b + --fill forwards a body' 1 \
+  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+assert 'f14: pr-create -b + --fill carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+OUT="$(dry_run --title t -b '- [x] <!-- orc:issue --> linked
+<div>a block</div>' 2>&1)"; RC=$?
+assert 'f14: pr-create -b is VALIDATED (refused shape exits 2)' 2 "$RC"
+assert 'f14: and names the construct' 1 "$(grep -cF 'raw HTML construct at line 2' <<<"$OUT")"
+assert 'f14: and never reaches gh' 0 "$(grep -cE '^\[dry-run\] gh ' <<<"$OUT")"
+OUT="$(dry_run --title t -b=joined-short-summary 2>&1)"; RC=$?
+assert 'f14: pr-create -b=<value> exits 0' 0 "$RC"
+assert 'f14: pr-create -b=<value> carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+printf 'a short body-file summary\n' > "$TMP/files/f14-summary.md"
+OUT="$(dry_run --title t -F "$TMP/files/f14-summary.md" 2>&1)"; RC=$?
+assert 'f14: pr-create -F exits 0' 0 "$RC"
+assert 'f14: pr-create -F carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+OUT="$(dry_run --title t "-F=$TMP/files/f14-summary.md" 2>&1)"; RC=$?
+assert 'f14: pr-create -F=<path> exits 0' 0 "$RC"
+assert 'f14: pr-create -F=<path> carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+OUT="$(dry_run --title t -f 2>&1)"; RC=$?
+assert 'f14: pr-create -f (short --fill) exits 0' 0 "$RC"
+assert 'f14: pr-create -f passes no --body' 0 \
+  "$(grep -cE '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")"
+assert 'f14: pr-create -f injects nothing' 0 "$(grep -c '<!-- orc:' <<<"$OUT")"
+assert 'f14: pr-create -f normalises to --fill for gh' 1 \
+  "$(grep -cE '^\[dry-run\] gh .* --fill' <<<"$OUT")"
+assert 'f14: pr-create -f prints the accurate note' 1 \
+  "$(grep -cF 'and no --body was' <<<"$OUT")"
+# `--fill=false` is NOT a body source (gh does not autofill), so the bodyless
+# route applies: the checklist is injected and the accurate note prints. gh's
+# short `-f=false` spelling is normalised to the same long flag.
+for negated in '--fill=false' '-f=false'; do
+  OUT="$(dry_run --title t "$negated" 2>&1)"; RC=$?
+  assert "f14: $negated exits 0" 0 "$RC"
+  assert "f14: $negated is not treated as a body source" 1 \
+    "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
+  assert "f14: $negated still injects the nine markers" 9 \
+    "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+  # The dry-run argv spans several lines (the body is multi-line), so the flag is
+  # counted anywhere in the output; the checklist text never contains it.
+  assert "f14: $negated is forwarded to gh" 1 \
+    "$(grep -c -- '--fill=false' <<<"$OUT")"
+done
+# `-B` is --base, NOT a body flag: it is passed through and no body is invented.
+OUT="$(dry_run --title t -B main 2>&1)"; RC=$?
+assert 'f14: pr-create -B exits 0' 0 "$RC"
+assert 'f14: pr-create -B is passed through as --base' 1 "$(grep -cE ' -B main' <<<"$OUT")"
+assert 'f14: pr-create -B is NOT read as a body' 0 \
+  "$(grep -cF 'main' <<<"$(grep -E '^\[dry-run\] gh .* --body([ =]|$)' <<<"$OUT")")"
+assert 'f14: pr-create -B keeps the bodyless note (the checklist is still injected)' 1 \
+  "$(grep -cF 'NOTE: no PR body supplied' <<<"$OUT")"
+assert 'f14: pr-create -B still composes the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' <<<"$OUT")"
+# pr-mutate: the #811 regression — the alias must carry the checklist.
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo -b 'a short-form summary'
+assert 'f14: pr-mutate -b exits 0' 0 "$RC"
+assert 'f14: pr-mutate -b carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+assert 'f14: pr-mutate -b keeps the summary' 1 \
+  "$(grep -cF 'a short-form summary' "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo -b=joined-short-summary
+assert 'f14: pr-mutate -b=<value> carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo -F "$TMP/files/f14-summary.md"
+assert 'f14: pr-mutate -F exits 0' 0 "$RC"
+assert 'f14: pr-mutate -F carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo "-F=$TMP/files/f14-summary.md"
+assert 'f14: pr-mutate -F=<path> carries the nine markers' 9 \
+  "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist -b x
+assert 'f14: --inject-checklist + -b is refused' 2 "$RC"
+assert 'f14: and never reaches gh' 0 "$(exists "$TMP/edited-body.md")"
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --inject-checklist -F "$TMP/files/f14-summary.md"
+assert 'f14: --inject-checklist + -F is refused' 2 "$RC"
+assert 'f14: and never reaches gh (file form)' 0 "$(exists "$TMP/edited-body.md")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 printf '\n=== reconcile-checklist regression: %s passed, %s failed ===\n' "$PASS" "$FAIL"

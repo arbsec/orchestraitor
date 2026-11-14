@@ -74,7 +74,9 @@ closing run is CONTENT: it leaves the region OPEN, so a marker behind such a
 closer is still inside the fence. Line endings are normalised ONCE before any
 scan (CommonMark §2.1: a lone CR is a line ending and so is CRLF; both become
 LF), so a closing fence followed by a CRLF-CRLF terminator closes. Only a space
-or a tab indents a checklist item.
+or a tab indents a checklist item (never a form feed or a vertical tab), and a
+marker indented four or more spaces — or led by a tab — is `indented_marker`
+and refuses the reading (see below); 0-3 leading spaces is accepted.
 
 **HTML is not modelled.** Rather than approximate CommonMark's HTML-block rules
 — every attempt produced another grammar defect, two of them false passes — the
@@ -97,9 +99,25 @@ belong to a list item or a block quote, and the scanner has no container model):
 the checklist is not read, `all_checked` is false, and the verdict blocks with
 `checklist_unparseable` and `unparseable_construct: indented_fence_opener`
 (arbsec/orchestraitor#809). The condition is sticky — closing the region does
-not clear it — and the one remedy is to dedent the opener to column 0. Each
-message names the construct it refused: an HTML construct is never reported as a
-fence, and a fence is never reported as HTML.
+not clear it — and the one remedy is to dedent the opener to column 0.
+
+A MANAGED MARKER indented FOUR OR MORE spaces, or led by a TAB, is
+`indented_marker` (arbsec/orchestraitor#802). When such a line is not inside a
+list item it renders as an INDENTED CODE BLOCK, where it is not a checkbox at
+all, and neither the canonical grammar nor the scan has a container model to
+tell that apart from a marker nested in a list item — so the reading is REFUSED:
+the checklist is not read, `all_checked` is false, and the verdict blocks with
+`checklist_unparseable` and `unparseable_construct: indented_marker`. It applies
+to a canonical marker AND to a near-marker; 0-3 leading spaces stays ACCEPTED
+(the legitimate nested-in-a-list-item case); a marker inside a fenced region is
+inert (an example, not a refusal). The marker still COUNTS (`marker_count` is a
+pure function of the canonical grammar) — but no verdict uses that count, because
+the reading is refused. The remedy is to dedent the marker line to column 0.
+
+Each message names the construct it refused, and there are exactly four of them:
+`indented_fence_opener`, `html_construct`, `indented_marker` and `near_marker`. An
+HTML construct is never reported as a fence, a fence is never reported as HTML,
+and neither is ever reported as an indented marker.
 
 The `checklist.items[].description` field is the text AFTER the `-->` delimiter, for
 checked and unchecked items alike.
@@ -109,7 +127,7 @@ every separator is EXACTLY one ASCII space (between `-` and `[`, between `]` and
 `<!--`, and inside `<!-- orc:NAME -->`), `<BOX>` is exactly one of `x`, `X` or a
 single space, and `<NAME>` is one of the nine managed names (`issue`,
 `service-identity`, `tests`, `security`, `docs`, `rollback`, `checks`, `review`,
-`threads`). A line that is not canonical but carries BOTH a task-item box token
+`threads`). The leading `[ \t]*` indent does NOT by itself make a line valid: a marker indented four or more spaces (or led by a tab) is `indented_marker` and REFUSES the reading (see above), while 0-3 leading spaces is accepted. A line that is not canonical but carries BOTH a task-item box token
 (`[` + exactly one character + `]`) AND a reference to one of the nine managed
 names (`orc:NAME`) is a **near-marker**: the gate cannot tell what the author
 asserted, so the checklist is not read, `all_checked` is false, and the verdict

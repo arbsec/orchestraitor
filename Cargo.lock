@@ -4914,6 +4914,7 @@ dependencies = [
  "orchestraitor-core",
  "orchestraitor-cost-ledger",
  "orchestraitor-events",
+ "orchestraitor-mcp",
  "orchestraitor-model",
  "orchestraitor-provider-api",
  "orchestraitor-provider-neuralwatt",

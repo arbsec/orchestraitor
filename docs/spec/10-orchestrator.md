@@ -719,28 +719,47 @@ pr.status <N> -> {
                                     # a form feed or a vertical tab after the closing run is
                                     # CONTENT, so it leaves the region OPEN, in both engines
                                     # (arbsec/orchestraitor#799 F18). Only a space or a tab
-                                    # indents a checklist item.
+                                    # indents a checklist item, and FOUR OR MORE spaces (or a
+                                    # leading tab) on a marker line is itself a refusal
+                                    # (`indented_marker`, below); 0-3 spaces is accepted.
                                     # `unparseable` is true when the checklist reading is
-                                    # INDETERMINATE, which happens in three cases, and
+                                    # INDETERMINATE, which happens in FOUR cases, and
                                     # `unparseable_line` is the 1-based line of the EARLIEST of
-                                    # them: the body OPENS a fence indented 1-3 spaces
-                                    # (`unparseable_construct` = `indented_fence_opener`); the body
-                                    # carries a RAW HTML CONSTRUCT — a line-start `<` in the 0-3
-                                    # space window, outside every fenced region
-                                    # (`unparseable_construct` = `html_construct`); or the body
-                                    # carries a NEAR-MARKER (`unparseable_construct` =
-                                    # `near_marker`). In each case the construct's scope, content or
-                                    # assertion cannot be determined without a container model, an
-                                    # HTML model or a canonical form, so no checklist reading is
-                                    # trusted, `all_checked` is false, and the verdict blocks with
+                                    # them (at one line the order below decides):
+                                    # (1) the body OPENS a fence indented 1-3 spaces
+                                    # (`unparseable_construct` = `indented_fence_opener`): the
+                                    # opener's container scope cannot be determined without a
+                                    # container model. STICKY — closing the region does not clear
+                                    # it, because a closer can end the region earlier for the
+                                    # renderer than for the scan, so a swallowed marker can still
+                                    # be visible. Remedy: dedent the opener to column 0;
+                                    # (2) the body carries a RAW HTML CONSTRUCT — a line-start `<`
+                                    # in the 0-3 space window, outside every fenced region
+                                    # (`html_construct`): the scanner models no HTML, so it cannot
+                                    # tell what the line hides. Remedies: fence it, indent it by 4
+                                    # spaces, or remove it. A 4+-space (or tab-led) `<` is literal
+                                    # indented code and is NOT a refusal, and `<` anywhere else
+                                    # (`x < y`) is ordinary text;
+                                    # (3) the body carries a MANAGED MARKER — canonical OR a
+                                    # near-marker — indented FOUR OR MORE spaces, or led by a TAB
+                                    # (`indented_marker`): when such a line is not inside a list
+                                    # item it renders as an INDENTED CODE BLOCK, where it is not a
+                                    # checkbox, and neither the canonical grammar nor the scan has
+                                    # a container model to tell that apart from a marker nested in
+                                    # a list item. 0-3 leading spaces stays ACCEPTED, and a marker
+                                    # inside a FENCED region is inert (an example, not a refusal).
+                                    # The marker still COUNTS (`marker_count` is a pure function of
+                                    # the canonical grammar) but NO VERDICT uses that count: the
+                                    # reading is refused. Remedy: dedent the marker line to column
+                                    # 0 (arbsec/orchestraitor#802);
+                                    # (4) the body carries a NEAR-MARKER (`near_marker`): a line
+                                    # with a task-item box token AND an `orc:NAME` reference that
+                                    # is not in the canonical form, so the gate cannot tell what it
+                                    # asserts. Remedy: write the marker canonically.
+                                    # In every case no checklist reading is trusted, `all_checked`
+                                    # is false, and the verdict blocks with
                                     # `checklist_unparseable` (arbsec/orchestraitor#809,
-                                    # arbsec/orchestraitor#799 R1).
-                                    # The indented-opener condition is STICKY: closing the region
-                                    # does not clear it (a closer can end the region earlier for the
-                                    # renderer than for the scan, so a swallowed marker can still be
-                                    # visible). Its remedy is to dedent the opener to column 0; a
-                                    # raw HTML construct's remedies are the fence/4-space/remove set
-                                    # above; a near-marker's remedy is to write it canonically.
+                                    # arbsec/orchestraitor#799 R1/R14, arbsec/orchestraitor#802).
   review_record: {                   # the .orchestraitor/reviews/ CLEAN-record state
     present, verdict, head_sha_match, base_oid_match
   },                                 # CLEAN record must match BOTH anchors exactly

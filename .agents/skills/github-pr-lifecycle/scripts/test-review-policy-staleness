@@ -182,6 +182,31 @@ cat > "$TMP/repo/scripts/reconcile-checklist" <<'STUB'
 printf '%s\n' '{"unresolved_actionable":0,"markers_present":true,"marker_count":1,"all_checked":true,"unparseable":false,"unchecked":[]}'
 STUB
 
+# --- (c3) `reconcile-checklist` is NOT a guarded policy file ------------------
+# Two reviewers have now asked whether replacing `reconcile-checklist` above can
+# trip a STALE-POLICY refusal (the scenario would then never reach its
+# assertion). It cannot, and this pins WHY so a future change to either policy
+# list fails HERE instead of silently invalidating the (c2) scenario: the
+# provenance guard only covers the files each entry point passes to
+# `orc_lib_require_policy_current`.
+policy_list() { # policy_list <script> -> the basenames its provenance guard covers
+  awk '
+    /orc_lib_require_policy_current/ { incall = 1 }
+    incall { print; if ($0 !~ /\\$/) exit }
+  ' "$TMP/repo/scripts/$1" |
+    grep -oE '\$SCRIPT_DIR/[a-z-]+' | sed 's|.*\$SCRIPT_DIR/||' | sort
+}
+CONV_POLICY="$(policy_list convergence-status)"
+MERGE_POLICY="$(policy_list merge-gate)"
+assert 'policy: convergence-status guards pr-checks + itself' \
+  'convergence-status pr-checks' "$(tr '\n' ' ' <<<"$CONV_POLICY" | sed 's/ $//')"
+assert 'policy: merge-gate guards pr-checks + convergence-status + itself' \
+  'convergence-status merge-gate pr-checks' "$(tr '\n' ' ' <<<"$MERGE_POLICY" | sed 's/ $//')"
+assert 'policy: reconcile-checklist is NOT guarded by convergence-status' 0 \
+  "$(grep -c '^reconcile-checklist$' <<<"$CONV_POLICY")"
+assert 'policy: reconcile-checklist is NOT guarded by merge-gate' 0 \
+  "$(grep -c '^reconcile-checklist$' <<<"$MERGE_POLICY")"
+
 # --- fixture: branches carrying policy that is NOT the base's ------------------
 git -C "$TMP/repo" switch -q -c stale-classifier
 # The pre-#707 policy shape: no bot-author exemption -> CodeRabbit SKIPPED is a

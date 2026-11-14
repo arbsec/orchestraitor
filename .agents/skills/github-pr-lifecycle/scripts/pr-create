@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 orc_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). A body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers keeps its content unchanged (only trailing newlines are normalised). With no body at all the PR still gets the checklist, and a note on stderr says the body needs a summary. --body-file paths are resolved through the trusted-root guard (workspace or temp directory); '-' reads the body from STDIN. A body that ENDS inside an unclosed code fence is refused with exit 2 (appended markers would render as code and be hidden), so close the fence and rerun. An explicit --body/--body-file is ALWAYS validated through the same composition helper (the HTML / indented-marker / near-marker / unclosed-fence refusals) and forwarded with the managed checklist, even alongside gh's additive autofill sources (--fill, --fill-first, --fill-verbose): gh documents that an explicit --body takes precedence over autofilled content. gh's EXCLUSIVE body sources (--template, --web, --editor) cannot be combined with an explicit body in gh itself, so that combination is refused (exit 2) instead of failing inside gh. Injection is skipped ONLY when no explicit body was supplied (e.g. --fill alone): gh then sources the body itself, no --body is passed, and a stderr note names 'pr-mutate edit <pr> --inject-checklist' as the remediation. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
+  orc_lib_print_help "pr-create" "Open a PR (gh pr create) through the service-identity wrapper. Positional: --title <text> --body <text> (or --body-file <path> | --body-file - for STDIN, or pass through any gh pr create flags after --). The gh short spellings -b, -F and -f are accepted and normalised to --body, --body-file and --fill (-B is --base and is left alone). An EXPLICIT body is validated and forwarded whatever else is passed, including an explicit EMPTY one (--body "" or --body=), which becomes the checklist-only body. A body with no managed <!-- orc:* --> checklist markers gets the nine .github/PULL_REQUEST_TEMPLATE.md markers appended UNCHECKED, so the fail-closed checklist gate (checklist_markers_missing) stays satisfiable; a body that already carries markers keeps its content unchanged (only trailing newlines are normalised). With no body at all the PR still gets the checklist, and a note on stderr says the body needs a summary. --body-file paths are resolved through the trusted-root guard (workspace or temp directory); '-' reads the body from STDIN. A body that ENDS inside an unclosed code fence is refused with exit 2 (appended markers would render as code and be hidden), so close the fence and rerun — that refusal is APPEND-SPECIFIC and does not fire for a body that already carries the checklist, whereas the sticky indented-opener refusal refuses such a body too. An explicit --body/--body-file is ALWAYS validated through the same composition helper (the HTML / indented-marker / near-marker / unclosed-fence refusals) and forwarded with the managed checklist, even alongside gh's additive autofill sources (--fill, --fill-first, --fill-verbose): gh documents that an explicit --body takes precedence over autofilled content. gh's EXCLUSIVE body sources (--template, --web, --editor) cannot be combined with an explicit body in gh itself, so that combination is refused (exit 2) instead of failing inside gh. Injection is skipped ONLY when no explicit body was supplied (e.g. --fill alone): gh then sources the body itself, no --body is passed, and a stderr note names 'pr-mutate edit <pr> --inject-checklist' as the remediation. A pre-PR local review gate runs before creation: a CLEAN pr-review-agent generation must exist at the current (head, base) pair unless --skip-review-gate is passed or the diff is docs-only. The base is resolved from the freshly fetched, fully-qualified refs/remotes/origin/<base> tip (never a local branch); an unresolvable base refuses with exit 6 — except under an explicit --skip-review-gate, which is evaluated before base resolution and bypasses base resolution and the review gate together (the docs-only auto-skip still requires a resolvable base)."
   exit "$ORC_OK"
 fi
 
@@ -26,32 +26,61 @@ fi
 TITLE=""
 BODY=""
 BODY_FILE=""
+# EXPLICITNESS is a property of the ARGUMENTS, never of the value: `--body ""`
+# and `--body=` supply an explicit (empty) body, which must be validated,
+# composed into the checklist-only body and forwarded exactly like any other
+# (arbsec/orchestraitor#799 R14). `-n "$BODY"` cannot tell those apart from "no
+# body was supplied", which is how an explicit empty body used to be dropped (or
+# rejected outright). Set by the PARSER, below.
+BODY_SET=false
+BODY_FILE_SET=false
 REST=()
+# `-b`, `-F` and `-f` are gh's SHORT spellings of `--body`, `--body-file` and
+# `--fill` — verified against the installed `gh pr create --help` (v2.104.0):
+# `-b, --body string`, `-F, --body-file file`, `-f, --fill[=true|false]`. `-B` is
+# `--base` there, NOT a body flag, so it is deliberately left alone: normalising
+# a flag whose meaning is not proven would be a guess (arbsec/orchestraitor#811).
+# The short forms are normalised to the long ones BEFORE anything looks at the
+# body, so one code path — and one set of refusals — handles both spellings.
 while [ "${#ORC_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ORC_LIB_EXTRA_ARGS[0]}" in
     --title)
       [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --title requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
       TITLE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
     --title=*) TITLE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body)
-      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body=*)  BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
-    --body-file)
-      [ -n "${ORC_LIB_EXTRA_ARGS[1]:-}" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
-      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
-    --body-file=*)
-      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"
+    --body|-b)
+      # A VALUE IS REQUIRED, an EMPTY VALUE IS NOT an error: `--body ""` is an
+      # explicit empty body.
+      [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body requires a value" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[1]}")"; BODY_SET=true
+      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body=*|-b=*)
+      BODY="$(orc_lib_body_arg "--body" "${ORC_LIB_EXTRA_ARGS[0]#*=}")"; BODY_SET=true
+      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    --body-file|-F)
+      [ "${#ORC_LIB_EXTRA_ARGS[@]}" -ge 2 ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[1]}"; BODY_FILE_SET=true
+      ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:2}") ;;
+    --body-file=*|-F=*)
+      BODY_FILE="${ORC_LIB_EXTRA_ARGS[0]#*=}"; BODY_FILE_SET=true
       [ -n "$BODY_FILE" ] || { echo "error: --body-file requires a path" >&2; exit "$ORC_ERR_CONFIG"; }
       ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    -f)  # gh: -f, --fill[=true|false]
+      REST+=("--fill"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
+    -f=*)
+      REST+=("--fill=${ORC_LIB_EXTRA_ARGS[0]#*=}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     --skip-review-gate) SKIP_REVIEW_GATE=1; PR_CREATE_EXPLICIT_SKIP=1; ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
     *)         REST+=("${ORC_LIB_EXTRA_ARGS[0]}"); ORC_LIB_EXTRA_ARGS=("${ORC_LIB_EXTRA_ARGS[@]:1}") ;;
   esac
 done
 
-if [ -n "$BODY" ] && [ -n "$BODY_FILE" ]; then
+if [ "$BODY_SET" = true ] && [ "$BODY_FILE_SET" = true ]; then
   echo "error: --body and --body-file are mutually exclusive" >&2
   exit "$ORC_ERR_CONFIG"
+fi
+BODY_EXPLICIT=false
+if [ "$BODY_SET" = true ] || [ "$BODY_FILE_SET" = true ]; then
+  BODY_EXPLICIT=true
 fi
 
 # --- Pre-PR local review gate ----------------------------------------------------
@@ -284,14 +313,17 @@ for PR_CREATE_ARG in "${REST[@]}"; do
   esac
 done
 
-if [ -n "$BODY_FILE" ]; then
+if [ "$BODY_FILE_SET" = true ]; then
+  # NOTE: an EMPTY body-file is not reachable — `orc_lib_read_body_file` refuses
+  # an empty file and empty STDIN by design ("@file is empty"), so the explicit
+  # empty body exists only in the inline form (`--body ""` / `--body=`).
   BODY="$(orc_lib_read_body_file "--body-file" "$BODY_FILE")"
 fi
 PR_CREATE_BODY_ROOT="$(orc_lib_git_toplevel)"
 # The explicit body is validated and carries the checklist FIRST, whatever body
 # source gh was given: the refusals are about the body itself, not about where gh
-# would otherwise source one.
-if [ -n "$BODY" ]; then
+# would otherwise source one (arbsec/orchestraitor#799 R14).
+if [ "$BODY_EXPLICIT" = true ]; then
   BODY="$(orc_lib_ensure_checklist_markers "$BODY" "$PR_CREATE_BODY_ROOT")"
   case "$PR_CREATE_GH_BODY_SOURCE" in
     --template|--template=*|--web|--editor)
@@ -322,8 +354,9 @@ else
 fi
 
 # The body for a caller who supplied NOTHING still gets the checklist: the
-# bodyless route above only PRINTS the note, so injection happens here.
-if [ -z "$BODY" ] && [ -z "$PR_CREATE_GH_BODY_SOURCE" ]; then
+# bodyless route above only PRINTS the note, so injection happens here. An
+# EXPLICIT body — including an explicit EMPTY one — was composed above.
+if [ "$BODY_EXPLICIT" = false ] && [ -z "$PR_CREATE_GH_BODY_SOURCE" ]; then
   BODY="$(orc_lib_ensure_checklist_markers "" "$PR_CREATE_BODY_ROOT")"
 fi
 
