@@ -1305,7 +1305,7 @@ run pr-mutate edit 7 --repo test-org/repo --body "$OWN_BODY"
 assert 'k: an already-checklisted --body is byte-identical' identical \
   "$(cmp -s "$TMP/files/own-marker-body.txt" "$TMP/edited-body.md" && echo identical || echo different)"
 assert 'k: verbatim means no injected section' 0 \
-  "$(grep -cF 'Added by pr-create' "$TMP/edited-body.md")"
+  "$(grep -cF 'Added by pr-mutate' "$TMP/edited-body.md")"
 rm -f "$TMP/edited-body.md"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/own-marker-body-nl.md"
 assert 'k: an already-checklisted --body-file is not re-injected' 1 \

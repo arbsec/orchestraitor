@@ -54,11 +54,13 @@ REST=("${REST[@]:1}")
 INJECT_CHECKLIST=0
 
 # Both body routes ALSO carry the managed checklist (arbsec/orchestraitor#788):
-# `pr-create` gives a NEW PR the checklist, `--inject-checklist` remediates a PR
-# whose body is already set, and a plain `--body`/`--body-file` edit must not be
-# able to UNDO that — a summary-only file would otherwise replace the whole body
-# and drop the PR back to `checklist_markers_missing`. The SAME helper
-# `pr-create` uses appends the markers (one implementation, no drift), and a
+# `pr-create` composes NOTHING (it forwards gh's argv verbatim), so this script
+# is the only composer: `--inject-checklist` remediates a PR whose body is
+# already set, and a plain `--body`/`--body-file` edit must not be able to UNDO
+# the checklist — a summary-only file would otherwise replace the whole body and
+# drop the PR back to `checklist_markers_missing`. The shared helper
+# `orc_lib_ensure_checklist_markers` appends the markers (one implementation, no
+# drift), and a
 # supplied body that already carries a marker is set with its CONTENT
 # unchanged — the routes resolve the body through a command substitution, so
 # trailing newlines are normalised and nothing else is altered: author content
@@ -264,9 +266,10 @@ ARGS=(pr "$ACTION" "$PR" --repo "$REPO")
 
 # --- Managed-checklist remediation for an ALREADY-OPEN PR (arbsec/orchestraitor#788) ---
 # `convergence-status` FAILS CLOSED on a body with zero `<!-- orc:* -->`
-# markers (`checklist_markers_missing`), and `pr-create` now gives a NEW PR
-# the managed checklist. A PR that ALREADY EXISTS (opened before that rule, or
-# opened by a bot) has no such body and would block forever — so this is the
+# markers (`checklist_markers_missing`), and `pr-create` composes nothing, so a
+# created PR carries no marker until this script adds one. A PR that ALREADY
+# EXISTS (opened before the rule, or opened by a bot) has no such body and would
+# block forever — so this is the
 # one-command remediation path for a body that is ALREADY SET: read the current
 # body, append the managed checklist when it carries none, and set the body.
 # (A summary being supplied right now does not need this flag: the `--body`/

@@ -233,9 +233,12 @@ orc_lib_read_body_file() {
 # `reconcile-checklist` reports a body with ZERO `<!-- orc:* -->` markers as
 # MISSING evidence, never as "all checked", and `convergence-status` blocks that
 # body with the distinct reason `checklist_markers_missing`. The gate is only
-# satisfiable if PR CREATION gives a wholesale body the managed checklist, so
-# `pr-create` appends these markers to a body that carries none (#683 class:
-# a fail-closed rule no caller can satisfy is worse than the bug).
+# satisfiable if the COMPOSITION path gives a wholesale body the managed
+# checklist — `pr-create` composes nothing, so `pr-mutate` (and its
+# `--inject-checklist`) is the only composer — so
+# `pr-mutate` appends these markers to a body that carries none, and
+# `--inject-checklist` remediates a PR whose body is already set (#683 class: a
+# fail-closed rule no caller can satisfy is worse than the bug).
 #
 # `.github/PULL_REQUEST_TEMPLATE.md` is the single source of truth; this
 # constant is the fallback for a checkout that does not carry it. The drift
@@ -923,7 +926,7 @@ orc_lib_ensure_checklist_markers() {
   # `<` anywhere in the body, so a `<!--` note here would make every body this
   # helper composes INDETERMINATE (arbsec/orchestraitor#799 R1).
   printf '## Merge checklist\n\n'
-  printf '%s\n\n' '_Added by pr-create/pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788)._'
+  printf '%s\n\n' '_Added by pr-mutate: this body carried no managed checklist marker. Checkboxes are verified facts — tick each with evidence (arbsec/orchestraitor#788)._'
   orc_lib_checklist_markers "$root"
 }
 
