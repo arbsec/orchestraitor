@@ -268,9 +268,13 @@ ORC_LIB_CHECKLIST_FALLBACK='- [ ] <!-- orc:issue --> Linked issue and specificat
 #     F17);
 #   - the region CLOSES at the first later line whose first 0-3 characters are
 #     spaces and whose next characters are the SAME fence character repeated
-#     at least as many times as the opener, with nothing but fence-tail
-#     whitespace after them — space, tab, carriage return or form feed, never a
-#     vertical tab (a DIFFERENT fence character never closes it);
+#     at least as many times as the opener, followed by nothing but SPACES and
+#     TABS — CommonMark 0.31: the closing fence "may be followed only by
+#     spaces or tabs, which are ignored." One line-ending adjustment: a single
+#     trailing carriage return that terminates a CRLF line is not content and
+#     is stripped before that test. A form feed, a vertical tab, an info
+#     string or any other character leaves the region OPEN; a DIFFERENT fence
+#     character never closes it (arbsec/orchestraitor#799 F18);
 #   - an unclosed fence runs to the end of the body;
 #   - every line inside the region — INCLUDING the opening and the closing
 #     fence lines — is excluded from marker scanning.
@@ -294,6 +298,9 @@ orc_lib__fence_scan() {
     # at most THREE leading spaces before a top-level fence; four or more — or
     # a tab, which reaches the 4-column tab stop — is an INDENTED code block,
     # where fence characters are literal text (#799 F16).
+    #
+    # A form feed and a vertical tab are NOT indentation: they are content, so
+    # a `\f`- or `\v`-led fence line opens nothing (#799 F18, corpus case 38).
     function fence_view(line,   n, rest) {
       n = 0
       while (substr(line, n + 1, 1) == " ") n++
@@ -307,19 +314,32 @@ orc_lib__fence_scan() {
       while (substr(s, n + 1, 1) == c) n++
       return n
     }
+    # The CLOSING tail test. CommonMark 0.31: a closing code fence "may be
+    # followed only by spaces or tabs, which are ignored." The single
+    # exception is line-ending handling: one trailing carriage return that
+    # terminates a CRLF line is part of the terminator, not content, so it is
+    # stripped before the test.
+    #
+    # Everything else keeps the region OPEN: a form feed (Rust
+    # `is_ascii_whitespace` accepts it, the spec does not — this used to be a
+    # divergence), a vertical tab, an info string. POSIX `[[:space:]]` is
+    # wrong too: it carries the vertical tab, so gawk closed on "```\v" while
+    # GitHub renders the fence as still open (#799 F18).
+    function closes_here(s, n,   tail) {
+      tail = substr(s, n + 1)
+      if (tail != "" && substr(tail, length(tail)) == "\r")
+        tail = substr(tail, 1, length(tail) - 1)
+      return tail ~ /^[ \t]*$/
+    }
     {
       s = fence_view($0)
       if (fence_char != "") {
         # Inside a region: only the SAME character, repeated at least as many
-        # times as the opener, with nothing but FENCE-TAIL whitespace after it,
-        # closes it. That set is space, tab, carriage return and form feed —
-        # exactly what Rust `char::is_ascii_whitespace` accepts. It is NOT the
-        # POSIX `[[:space:]]` class, which also carries VERTICAL TAB: gawk
-        # would close on "```\v" while GitHub renders the fence as still open,
-        # so the shell gate counted markers a human sees as code (#799 F18).
+        # times as the opener, with nothing but a blank tail after it, closes
+        # it (see `closes_here`).
         if (s != "" && substr(s, 1, 1) == fence_char) {
           n = run_length(s, fence_char)
-          if (n >= fence_len && substr(s, n + 1) ~ /^[ \t\r\f]*$/) {
+          if (n >= fence_len && closes_here(s, n)) {
             fence_char = ""
             fence_len = 0
           }

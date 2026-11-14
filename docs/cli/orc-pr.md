@@ -66,11 +66,12 @@ tildes) is an EXAMPLE, not a checklist item and is excluded from the scan. A
 fence line carries at most three leading spaces (four or more, or a leading
 tab, is an indented code block where fence characters are literal text), and a
 backtick fence's info string may not contain a backtick — ```` ```example``` ````
-is a closed inline code span, not an opener — while a tilde fence's may. The
-whitespace a CLOSING fence may carry after its run is space, tab, carriage
-return and form feed only: a vertical tab leaves the region OPEN, so a marker
-behind a closer followed by a vertical tab is still inside the fence. Only a
-space or a tab indents a checklist item.
+is a closed inline code span, not an opener — while a tilde fence's may. A
+CLOSING fence may be followed ONLY by spaces or tabs (CommonMark 0.31); a single
+trailing carriage return that terminates a CRLF line is the line ending, not
+content. A form feed or a vertical tab after the closing run is CONTENT: it
+leaves the region OPEN, so a marker behind such a closer is still inside the
+fence. Only a space or a tab indents a checklist item.
 
 The human one-pager renders the same verdict as verdict-first prose
 (`MERGEABLE` / `BLOCKED`), the reason codes, one line per failing/pending

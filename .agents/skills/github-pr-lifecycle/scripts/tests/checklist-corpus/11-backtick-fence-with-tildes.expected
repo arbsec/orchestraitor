@@ -1,2 +1,5 @@
-# a backtick fence may contain tilde lines; only the marker AFTER the backtick closer counts.
+# A backtick fence may contain tilde lines; only the marker AFTER the backtick closer counts.
+# The fenced marker is UNCHECKED on purpose: a parser that wrongly counted it would see two
+# items with one unticked, so this case separates "ignored the fenced marker" from "counted
+# it and ignored the real one".
 marker_count=1 all_checked=true

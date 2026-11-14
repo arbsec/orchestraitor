@@ -356,11 +356,12 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   at most three leading spaces (four or more, or a leading
                   tab, is an indented code block where fence characters are
                   literal text), and a backtick fence's info string may not
-                  contain a backtick — a tilde fence's may. The only
-                  whitespace a CLOSING fence may carry after its run is space,
-                  tab, carriage return or form feed — never a vertical tab, so
-                  a closer followed by a vertical tab leaves the region OPEN and
-                  a marker behind it is still inside the fence. Only a space or
+                  contain a backtick — a tilde fence's may. A CLOSING fence may be
+                  followed ONLY by spaces or tabs (CommonMark 0.31); a single
+                  trailing carriage return that terminates a CRLF line is the
+                  line ending, not content. A form feed or a vertical tab after
+                  the closing run is CONTENT, so it leaves the region OPEN and a
+                  marker behind it is still inside the fence. Only a space or
                   a tab indents a checklist item.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior

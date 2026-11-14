@@ -1283,10 +1283,13 @@ fn parse_checklist(body: &str) -> Checklist {
 ///   tilde fence MAY carry backticks in its info string (F17);
 /// - the region CLOSES at the first later line whose first 0-3 characters are
 ///   spaces and whose next characters are the SAME fence character repeated at
-///   least as many times as the opener, with nothing but fence-tail whitespace
-///   after them — space, tab, carriage return or form feed, exactly
-///   [`char::is_ascii_whitespace`] and NEVER a vertical tab (a DIFFERENT fence
-///   character never closes it);
+///   least as many times as the opener, followed by nothing but SPACES and TABS
+///   — `CommonMark` 0.31: a closing code fence "may be followed only by spaces or
+///   tabs, which are ignored." One line-ending adjustment: a single trailing
+///   carriage return that terminates a CRLF line is not content and is stripped
+///   before that test. A form feed, a vertical tab, an info string or any other
+///   character leaves the region OPEN (a DIFFERENT fence character never closes
+///   it either);
 /// - an unclosed fence runs to the end of the body;
 /// - every line inside the region — INCLUDING the opening and the closing
 ///   fence lines — is excluded from marker scanning.
@@ -1298,16 +1301,27 @@ fn strip_fenced_code(body: &str) -> String {
         let candidate = fence_line(line);
         if let Some((fence_char, fence_len)) = fence {
             // Only the SAME character, repeated at least as many times as the
-            // opener, with nothing but fence-tail whitespace after it, closes
-            // the region: space, tab, carriage return or form feed. A vertical
-            // tab is NOT fence-tail whitespace — GitHub leaves the fence open
-            // there, and the shell engine narrows its class to match (#799 F18).
+            // opener, with nothing but a blank tail after it, closes the
+            // region. CommonMark 0.31 permits only spaces and tabs there, so a
+            // form feed or a vertical tab leaves the fence OPEN — GitHub
+            // renders the marker behind it as code (#799 F18). Rust's
+            // `char::is_ascii_whitespace` is deliberately NOT used: it also
+            // admits `\f`, `\n` and `\r`, which would close a region the
+            // renderer keeps open.
             if let Some(trimmed) = candidate
                 && trimmed.starts_with(fence_char)
             {
                 let run = trimmed.chars().take_while(|c| *c == fence_char).count();
-                let rest = trimmed.chars().skip(run).all(|c| c.is_ascii_whitespace());
-                if run >= fence_len && rest {
+                // The fence characters are ASCII, so `run` is also the byte
+                // offset of the tail; `get` keeps a non-boundary from panicking.
+                let tail = trimmed.get(run..).unwrap_or_default();
+                // One trailing carriage return terminates a CRLF line and is
+                // part of the line ending, not content. (`str::lines` already
+                // strips CRLF; this keeps the rule explicit and identical to
+                // the shell engine's byte-level scan.)
+                let tail = tail.strip_suffix('\r').unwrap_or(tail);
+                let blank = tail.chars().all(|c| c == ' ' || c == '\t');
+                if run >= fence_len && blank {
                     fence = None;
                 }
             }
@@ -1338,8 +1352,10 @@ fn strip_fenced_code(body: &str) -> String {
 /// CommonMark/GFM allow at most THREE spaces of indentation before a top-level
 /// fence. Four or more spaces — or a tab, which reaches the 4-column tab stop —
 /// is an INDENTED code block, where fence characters are literal text
-/// (arbsec/orchestraitor#799 review, finding F16). Both engines apply the rule
-/// identically: a 4-space-indented run neither opens nor closes a region.
+/// (arbsec/orchestraitor#799 review, finding F16). A form feed or a vertical tab
+/// is likewise not indentation: it is content, so a `\f`- or `\v`-led fence line
+/// opens nothing (F18). Both engines apply the rule identically: a
+/// 4-space-indented run neither opens nor closes a region.
 fn fence_line(line: &str) -> Option<&str> {
     let indent = line.chars().take_while(|c| *c == ' ').count();
     if indent > 3 {
@@ -2098,6 +2114,13 @@ mod tests {
         assert_eq!(body.items[0].marker, "tests");
     }
 
+    /// The EXACT size of the shared corpus. A deleted case must FAIL, so this
+    /// is a floor that is also a ceiling: bump it whenever a case is added and
+    /// never lower it to make a red suite green. `CORPUS_FLOOR` in
+    /// `.agents/skills/github-pr-lifecycle/scripts/test-reconcile-checklist`
+    /// carries the same number; keep the two in step.
+    const CORPUS_FLOOR: u32 = 38;
+
     /// The SHARED cross-engine verdict corpus
     /// (`.agents/skills/github-pr-lifecycle/scripts/tests/checklist-corpus/`).
     ///
@@ -2149,11 +2172,110 @@ mod tests {
             }
             cases += 1;
         }
-        assert!(cases >= 30, "corpus shrank to {cases} cases");
+        assert_eq!(
+            cases, CORPUS_FLOOR,
+            "corpus is {CORPUS_FLOOR} cases: a deleted case must fail, and an added case must raise CORPUS_FLOOR in this test AND in test-reconcile-checklist"
+        );
         assert!(
             mismatches.is_empty(),
             "the Rust engine disagrees with the shared corpus:\n{}",
             mismatches.join("\n")
+        );
+    }
+
+    /// A form feed is neither leading fence INDENTATION nor a legal closing
+    /// tail (arbsec/orchestraitor#799 F18).
+    ///
+    /// `CommonMark` 0.31 allows 0-3 SPACES before a fence, and a closing fence
+    /// "may be followed only by spaces or tabs, which are ignored." Rust's
+    /// `char::is_ascii_whitespace` admits `\f`, so the earlier implementation
+    /// closed a region the renderer keeps open — the shell and Rust engines
+    /// disagreed. Both halves are pinned here and by corpus cases 37 (a form
+    /// feed after the closer) and 38 (a vertical-tab-led opener).
+    #[test]
+    fn a_form_feed_is_neither_fence_indentation_nor_a_closing_tail() {
+        // A \f-led fence line opens nothing: the marker below is a real item.
+        let opener = parse_checklist("\u{c}```\n- [x] <!-- orc:tests --> real item\n");
+        assert_eq!(opener.marker_count, 1, "a form feed is content, not indent");
+        assert_eq!(opener.items[0].marker, "tests");
+
+        // The closing-tail boundary table: only spaces and tabs are ignored
+        // after the closing run, plus the carriage return of a CRLF line
+        // terminator. Every other character is CONTENT, so the region stays
+        // OPEN and the checked marker behind it is an example (0 items).
+        for (tail, expected) in [
+            ("", 1_u64),
+            ("   ", 1),
+            ("\t", 1),
+            ("\r", 1),
+            ("\u{c}", 0),
+            ("\u{b}", 0),
+        ] {
+            let body = parse_checklist(&format!(
+                "```\n- [x] <!-- orc:issue --> example only\n```{tail}\n- [x] <!-- orc:tests --> behind the closer\n"
+            ));
+            assert_eq!(
+                body.marker_count, expected,
+                "closer tail {tail:?} must yield {expected} marker(s)"
+            );
+        }
+    }
+
+    /// CHARACTERIZATION — arbsec/orchestraitor#809 (deferred out of #799).
+    ///
+    /// The fence scanner is a single-pass LINE scanner: its only state is the
+    /// fence character and its run length. It therefore has no `CommonMark` BLOCK
+    /// CONTEXT, and two bodies report `all_checked: true` while a genuine
+    /// UNCHECKED item is visible in the rendered PR:
+    ///
+    /// 1. an HTML block — `<!--` … `-->` — swallows the fence characters, so
+    ///    the ```` ``` ```` inside it is literal text and opens nothing;
+    /// 2. a fence inside a list item ends at the end of that item, not at the
+    ///    end of the document.
+    ///
+    /// This test pins the CURRENT, INCORRECT verdict so the gap is visible, so
+    /// it cannot be mistaken for intended behaviour, and so the #809 fix has a
+    /// failing test to flip. These bodies are deliberately NOT in the shared
+    /// corpus, which asserts CORRECT semantics.
+    #[test]
+    fn checklist_scanner_has_no_commonmark_block_context_809() {
+        let html_comment = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+
+<!--
+```
+-->
+
+- [ ] <!-- orc:tests --> not tested
+",
+        );
+        assert_eq!(
+            html_comment.marker_count, 1,
+            "#809: the unchecked item inside the HTML block is swallowed"
+        );
+        assert_eq!(html_comment.unchecked_count, 0);
+        assert!(
+            html_comment.all_checked,
+            "#809: all_checked is true although a visible item is unchecked"
+        );
+
+        let list_item = parse_checklist(
+            r"- [x] <!-- orc:issue --> linked
+- Example:
+  ```
+  sample
+
+- [ ] <!-- orc:tests --> not tested
+",
+        );
+        assert_eq!(
+            list_item.marker_count, 1,
+            "#809: the fence is scoped to the list item and ends with it"
+        );
+        assert_eq!(list_item.unchecked_count, 0);
+        assert!(
+            list_item.all_checked,
+            "#809: all_checked is true although a visible item is unchecked"
         );
     }
 

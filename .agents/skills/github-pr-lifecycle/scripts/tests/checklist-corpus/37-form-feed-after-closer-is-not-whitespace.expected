@@ -1,0 +1,5 @@
+# CommonMark 0.31: a closing code fence may be followed only by spaces or tabs, so a form feed
+# after the closer is CONTENT, not fence-tail whitespace: the region stays OPEN and the checked
+# marker behind it is an EXAMPLE, not evidence. (Rust's `is_ascii_whitespace` admits `\f`; the
+# spec does not. Corpus case 35 pins the same rule for a vertical tab.)
+marker_count=0 all_checked=false

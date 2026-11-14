@@ -820,7 +820,11 @@ All notable consumer-visible changes to Orchestraitor are recorded here. The for
   three leading spaces (four or more, or a leading tab, is an indented code
   block where fence characters are literal text), and a backtick fence's info
   string may not contain a backtick — so a line like ```` ```example``` ```` is
-  a closed inline code span, not an opener. The rule stays satisfiable: PRs
+  a closed inline code span, not an opener. A closing fence may be followed only
+  by spaces or tabs (a CRLF line terminator is not content): a form feed or a
+  vertical tab after the closing run is content, so the region stays OPEN and a
+  marker behind such a closer is still inside the fence. The rule stays
+  satisfiable: PRs
   opened by the orchestration delivery lane (`orc worker run --deliver`, `orc
   loop --deliver`) carry the nine managed markers UNCHECKED in their body, ahead
   of the run summary. Documented in [docs/cli/orc-pr.md](docs/cli/orc-pr.md).

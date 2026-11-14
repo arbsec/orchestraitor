@@ -44,6 +44,10 @@
 #       spaces; four spaces or a tab is an indented code block) and INFO-STRING
 #       correct (a backtick fence may not carry a backtick in its info string,
 #       a tilde fence may) — with the inverse (three-space fences) pinned too
+#   (f7) CHARACTERIZATION: the fence scanner has NO CommonMark block context, so
+#       an HTML comment or a list-item fence swallows a real unchecked item and
+#       the gate converges (arbsec/orchestraitor#809 — pins the current, WRONG
+#       verdict so a future fix has a failing test to flip)
 #   (g) the `_lib.sh` fallback checklist equals the repository template
 #       verbatim (drift guard), and the nine lines are always landed UNCHECKED
 #   (h) pr-create injects the markers into a wholesale `--body`, `--body-file`
@@ -487,6 +491,15 @@ assert 'f4: with no reason at all (#800)' '[]' "$(jq -c .reasons <<<"$OUT")"
 # fails CI — the recurring defect this corpus exists to stop
 # (arbsec/orchestraitor#799 F16/F17).
 CORPUS_DIR="$SCRIPT_DIR/tests/checklist-corpus"
+# The EXACT number of cases in the shared corpus. A deleted case must FAIL, so
+# this is a floor that is also a ceiling: bump it whenever a case is added, and
+# never lower it to make a red suite green. A reviewer once deleted
+# `35-vt-after-closer-is-not-whitespace.md`/`.expected` and both engines stayed
+# green on `-ge 30` with a 38-case corpus — the floor tracked nothing.
+# `checklist_corpus_matches_both_engines` in
+# crates/orchestraitor-mcp/src/pr_status.rs carries the same constant; keep the
+# two in step.
+CORPUS_FLOOR=38
 CORPUS_CASES=0
 for corpus_body in "$CORPUS_DIR"/*.md; do
   corpus_slug="$(basename "$corpus_body" .md)"
@@ -501,10 +514,10 @@ for corpus_body in "$CORPUS_DIR"/*.md; do
     "$(jq -r .all_checked <<<"$OUT")"
   CORPUS_CASES=$((CORPUS_CASES+1))
 done
-# Floor the count: a deleted case must FAIL instead of silently narrowing the
+# Exact, not `-ge`: a deleted case must FAIL instead of silently narrowing the
 # contract (the same reasoning as the self-test discovery floor in skills.yml).
-assert 'f5: the corpus carries at least 30 cases' 1 \
-  "$([ "$CORPUS_CASES" -ge 30 ] && echo 1 || echo 0)"
+assert "f5: the corpus carries exactly $CORPUS_FLOOR cases" "$CORPUS_FLOOR" \
+  "$CORPUS_CASES"
 
 # --- (f6) the fence scanner is indentation- and info-string-correct ------------
 # arbsec/orchestraitor#799 F16 (generation-4 review): CommonMark allows at most
@@ -560,6 +573,98 @@ export BODY_FIXTURE="$TMP/files/f17-tilde-info.md"
 run reconcile-checklist 7 --repo test-org/repo --json
 assert 'f6: tilde info strings may carry backticks' 0 \
   "$(jq -r .marker_count <<<"$OUT")"
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# A form feed is not leading INDENTATION either: it is content, so a
+# form-feed-led fence line opens nothing (the same rule corpus case 38 pins for
+# a vertical tab). CommonMark allows 0-3 SPACES before a fence and nothing else.
+printf '\f```\n- [x] <!-- orc:tests --> ff-led fence line opened nothing\n' \
+  > "$TMP/files/f6-ff-led-opener.md"
+export BODY_FIXTURE="$TMP/files/f6-ff-led-opener.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f6: a form-feed-led fence line opens nothing' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f6: and its marker is real evidence' true "$(jq -r .all_checked <<<"$OUT")"
+
+# The CLOSING-tail boundary table, pinned in BOTH engines (the Rust twin is
+# `a_form_feed_is_neither_fence_indentation_nor_a_closing_tail`). CommonMark 0.31
+# allows only spaces and tabs after the closing run, plus the carriage return of
+# a CRLF line terminator, which is not content. Everything else — form feed,
+# vertical tab — is CONTENT and leaves the region OPEN.
+for tail_case in none spaces tab crlf ff vt; do
+  case "$tail_case" in
+    none)   tail='' ;;
+    spaces) tail='   ' ;;
+    tab)    tail=$'\t' ;;
+    crlf)   tail=$'\r' ;;
+    ff)     tail=$'\f' ;;
+    vt)     tail=$'\v' ;;
+  esac
+  printf '```\n- [x] <!-- orc:issue --> example only\n```%s\n- [x] <!-- orc:tests --> real item\n' \
+    "$tail" > "$TMP/files/f6-tail-$tail_case.md"
+  export BODY_FIXTURE="$TMP/files/f6-tail-$tail_case.md"
+  run reconcile-checklist 7 --repo test-org/repo --json
+  case "$tail_case" in
+    ff|vt) want=0 ;;  # content: the closer does not close, the marker is code
+    *)     want=1 ;;  # ignored tail: the region closes, the marker is evidence
+  esac
+  assert "f6: closer tail '$tail_case' -> marker_count $want" "$want" \
+    "$(jq -r .marker_count <<<"$OUT")"
+done
+export BODY_FIXTURE="$TMP/files/no-markers.md"
+
+# --- (f7) CHARACTERIZATION: the fence scanner has no CommonMark BLOCK CONTEXT -
+# arbsec/orchestraitor#809 (deferred out of #799). The scanner is a single-pass
+# line scanner whose only state is `(fence char, run length)`, so it does not
+# know about HTML blocks (`<!--` … `-->`) or container (list-item) containment.
+# Both bodies below therefore report `all_checked: true` while a genuine
+# UNCHECKED item is visible in the rendered PR — the scanner swallows it inside
+# a fence the renderer does not have.
+#
+# These are CHARACTERIZATION tests: they pin the CURRENT, INCORRECT verdict so
+# the gap is visible and cannot be mistaken for intended behaviour, and so the
+# #809 fix has a failing test to flip. They are deliberately NOT in the shared
+# corpus (`tests/checklist-corpus/`), which asserts CORRECT semantics.
+cat > "$TMP/files/html-comment-fence.md" <<'EOF'
+- [x] <!-- orc:issue --> linked
+
+<!--
+```
+-->
+
+- [ ] <!-- orc:tests --> not tested
+EOF
+export BODY_FIXTURE="$TMP/files/html-comment-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f7: a fence inside an HTML comment is miscounted (#809)' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f7: and the swallowed unchecked item reads as all-checked (#809)' true \
+  "$(jq -r .all_checked <<<"$OUT")"
+assert 'f7: with zero unchecked items reported (#809)' 0 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f7: so the gate converges on it today (#809)' 0 "$RC"
+assert 'f7: with no reason at all (#809)' '[]' "$(jq -c .reasons <<<"$OUT")"
+
+cat > "$TMP/files/list-item-fence.md" <<'EOF'
+- [x] <!-- orc:issue --> linked
+- Example:
+  ```
+  sample
+
+- [ ] <!-- orc:tests --> not tested
+EOF
+export BODY_FIXTURE="$TMP/files/list-item-fence.md"
+run reconcile-checklist 7 --repo test-org/repo --json
+assert 'f7: a list-item fence runs past its block (#809)' 1 \
+  "$(jq -r .marker_count <<<"$OUT")"
+assert 'f7: and swallows the unchecked item after it (#809)' true \
+  "$(jq -r .all_checked <<<"$OUT")"
+assert 'f7: with zero unchecked items reported (#809)' 0 \
+  "$(jq -r '.unchecked | length' <<<"$OUT")"
+run convergence-status 7 --repo test-org/repo --json
+assert 'f7: so the gate converges on it today (#809)' 0 "$RC"
+assert 'f7: with no reason at all (#809)' '[]' "$(jq -c .reasons <<<"$OUT")"
 export BODY_FIXTURE="$TMP/files/no-markers.md"
 
 # --- (g) the fallback cannot drift from the template ---------------------------
@@ -874,18 +979,24 @@ An example that DOES close:
 - [ ] not a real item
 ```
 EOF
-# arbsec/orchestraitor#799 F18 (generation-5 review): gawk `[[:space:]]` carries
-# a VERTICAL TAB while Rust `char::is_ascii_whitespace` does not, so the
-# closer's tail class drifted: "```\v" CLOSED the region in the shell gate and
-# left it OPEN to the Rust engine and to GitHub. The merge-lane consequence is
-# here — the guard saw a closed fence and appended markers into one that renders
-# open — while the FF half pins the tail set so the narrowing cannot go too far.
+# arbsec/orchestraitor#799 F18: the closer's tail is ONLY spaces and tabs
+# (CommonMark 0.31), plus the carriage return of a CRLF terminator, which is part
+# of the line ending rather than content. Both a VERTICAL TAB and a FORM FEED are
+# therefore content: the region stays OPEN, exactly as GitHub renders it. The
+# merge-lane consequence is here — a guard that reads such a line as a closer
+# appends the nine markers into a fence that renders open, so they are invisible
+# to every later marker scan. Before the fix `[[:space:]]` carried \v and Rust
+# `is_ascii_whitespace` carried \f, so the two engines disagreed in opposite
+# directions. The CRLF body is the positive control: it still closes.
 { printf '## Summary\n\nAn example whose closer carries a vertical tab:\n\n'
   printf '```markdown\n- [ ] not a real item\n```\013\n'; } \
   > "$TMP/files/vt-tail-fence.md"
 { printf '## Summary\n\nAn example whose closer carries a form feed:\n\n'
   printf '```markdown\n- [ ] not a real item\n```\014\n'; } \
   > "$TMP/files/ff-tail-fence.md"
+{ printf '## Summary\n\nAn example whose closer ends with a CRLF terminator:\n\n'
+  printf '```markdown\r\n- [ ] not a real item\r\n```\r\n'; } \
+  > "$TMP/files/crlf-tail-fence.md"
 
 rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/unclosed-backtick.md"
@@ -910,9 +1021,9 @@ assert 'k: the closed-fence body gains the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 
 # F18: a vertical tab after the closer does NOT close, so the append is refused
-# exactly like an unclosed fence; a form feed after it DOES close, so the same
-# body still appends. Before the fix the VT body passed the guard and the nine
-# markers were appended inside a fence GitHub renders as open.
+# exactly like an unclosed fence. The form feed behaves the same way (CommonMark
+# allows only spaces and tabs there). The CRLF terminator is the positive
+# control: it is a line ending, not content, so that body still appends.
 rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/vt-tail-fence.md"
 assert 'k: a ```<VT> closer is not a closer: the append is refused' 2 "$RC"
@@ -920,10 +1031,17 @@ assert 'k: the VT refusal names the unclosed fence' 1 \
   "$(grep -cF 'unclosed code fence' "$TMP/stderr")"
 assert 'k: the VT refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
 
-rm -f "$TMP/edited-body.md"
+rm -f "$TMP/edited-body.md" "$TMP/edited-argv.txt"
 run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/ff-tail-fence.md"
-assert 'k: a ```<FF> closer IS a closer: the body still appends' 0 "$RC"
-assert 'k: the FF-tailed body gains the nine markers' 9 \
+assert 'k: a ```<FF> closer is not a closer either: refused' 2 "$RC"
+assert 'k: the FF refusal names the unclosed fence' 1 \
+  "$(grep -cF 'unclosed code fence' "$TMP/stderr")"
+assert 'k: the FF refusal never reaches gh' 0 "$(exists "$TMP/edited-argv.txt")"
+
+rm -f "$TMP/edited-body.md"
+run pr-mutate edit 7 --repo test-org/repo --body-file "$TMP/files/crlf-tail-fence.md"
+assert 'k: a ```<CRLF> closer IS a closer: the body still appends' 0 "$RC"
+assert 'k: the CRLF-tailed body gains the nine markers' 9 \
   "$(grep -c -- '- \[ \] <!-- orc:' "$TMP/edited-body.md")"
 
 # `pr-create` shares the helper, so the same refusal applies at creation.
