@@ -91,7 +91,7 @@ jobs:
       # token set.
       - name: Publish coverage to qlty.sh
         if: steps.has-token.outputs.has-token == 'true'
-        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506  # v2.5.0
+        uses: qltysh/qlty-action/coverage@56bee2d751c94b7bd8de22f64c9b5f398048e13f  # v2.8.1
         with:
           token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
           files: lcov.info
